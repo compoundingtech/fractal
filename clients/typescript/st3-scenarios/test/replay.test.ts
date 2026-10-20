@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyWindow, ClientError, St3Client,
   type ActionRequest, type CollectionFrame, type CollectionStream, type CollectionWindow,
@@ -8,12 +9,12 @@ import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownS
 import { applyConversation, isConversational, type Conversation } from '../../st3-views/sessionView.ts'
 
 import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
-import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
+import { createReplay, manualClock, realClock, type ReplayHandle } from '../src/replay/index.ts'
 import { syntheticFirstRunOnboarding } from '../src/worlds/firstRunOnboarding.ts'
 import { genericVariants } from '../src/kit/variants.ts'
 import { loadRecordedWorld } from './recorded-world.ts'
 
-const replays: Replay[] = []
+const replays: ReplayHandle[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
 const base = () => loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
 const scripted = (timeline: SyncEvent[], world = base()): World => world.with({ sync: { ...world.slices.sync, timeline } })
@@ -58,23 +59,153 @@ const errors = (frames: CollectionFrame[]) => frames.filter((frame) => frame.kin
 const screens = (frames: CollectionFrame[]) => frames.filter((frame) => frame.kind === 'screen')
 const event = <T extends SyncEvent>(value: T): T => value
 
+describe('WebSocket task ordering', () => {
+  it('preserves exactly one queued socket close notification during immediate replay teardown', async () => {
+    const h = setup()
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    const closes: { code?: number; reason?: string }[] = []
+    socket.onclose = (event) => closes.push(event)
+    await h.replay.flush()
+    socket.close(1000, 'client closed')
+    h.replay.close()
+    expect(closes).toEqual([])
+    await h.replay.flush()
+    expect(closes).toEqual([{ code: 1000, reason: 'client closed' }])
+    socket.close()
+    h.replay.close()
+    await h.replay.flush()
+    expect(closes).toHaveLength(1)
+  })
+
+  it('keeps a Node process alive for pending deliveries but lets an idle queue exit', () => {
+    const tasksUrl = new URL('../src/replay/tasks.ts', import.meta.url).href
+    const child = spawnSync(process.execPath, ['--experimental-transform-types', '--no-warnings', '--input-type=module', '-e', `
+      import { deliveryTasks } from ${JSON.stringify(tasksUrl)}
+      const deliveries = deliveryTasks()
+      deliveries.enqueue(() => process.stdout.write('delivered\\n'))
+      await deliveries.flush()
+      process.stdout.write('flushed\\n')
+      // Deliberately do not close: an idle queue must not keep the process alive.
+    `], { encoding: 'utf8', timeout: 5_000 })
+    expect(child.error).toBeUndefined()
+    expect(child.status, child.stderr).toBe(0)
+    expect(child.stdout).toBe('delivered\nflushed\n')
+  })
+
+  it('delivers a send reply in a later task, after command-sent bookkeeping and microtasks', async () => {
+    const h = setup()
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    const order: string[] = []
+    socket.onmessage = () => { order.push('reply') }
+    h.clock.advance(0)
+    await h.replay.flush()
+    socket.send(JSON.stringify({ kind: 'subscribe', id: 'agents', collection: 'agents' }))
+    order.push('sent')
+    expect(order).toEqual(['sent'])
+    await Promise.resolve()
+    expect(order).toEqual(['sent'])
+    await h.replay.flush()
+    expect(order).toEqual(['sent', 'reply'])
+  })
+
+  it('delivers with timers and Date frozen, without advancing fake time', async () => {
+    vi.useFakeTimers()
+    try {
+      const world = base()
+      const replay = createReplay(world, { clock: realClock({ start: world.now }) })
+      replays.push(replay)
+      const frames: CollectionFrame[] = []
+      const client = new St3Client({ baseUrl: 'http://scenario.invalid', fetchImpl: replay.fetch })
+      const stream = await client.collectionStream({ socket: replay.socket, onFrame: (frame) => frames.push(frame) })
+      stream.subscribe('agents', 'agents')
+      await replay.flush()
+      expect(frames).toMatchObject([{ kind: 'snapshot', id: 'agents' }])
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each([true, false])('keeps FIFO between a reply and timeline frame at the same clock (reply first: %s)', async (replyFirst) => {
+    const world = scripted([{ _tag: 'error', at_ms: 10, store: 0, message: 'Scenario notice', retryable: true }])
+    const clock = manualClock(world.now)
+    const subscribe = () => socket.send(JSON.stringify({ kind: 'subscribe', id: 'agents', collection: 'agents' }))
+    if (replyFirst) clock.schedule(world.now + 10, subscribe)
+    const replay = createReplay(world, { clock })
+    replays.push(replay)
+    if (!replyFirst) clock.schedule(world.now + 10, subscribe)
+    const socket = replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    const order: string[] = []
+    socket.onmessage = (event) => {
+      const frame: unknown = JSON.parse(String(event.data))
+      if (typeof frame !== 'object' || frame === null || !('kind' in frame)) throw new Error('Missing frame kind')
+      order.push(String(frame.kind))
+      queueMicrotask(() => order.push('microtask'))
+    }
+    clock.advance(0)
+    await replay.flush()
+    clock.advance(10)
+    expect(order).toEqual([])
+    await replay.flush()
+    expect(order).toEqual(replyFirst
+      ? ['snapshot', 'microtask', 'error', 'microtask']
+      : ['error', 'microtask', 'snapshot', 'microtask'])
+  })
+
+  it('opens and closes in tasks, and closing prevents subsequent sends', async () => {
+    const h = setup()
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    const order: string[] = []
+    socket.onopen = () => { order.push('open') }
+    socket.onclose = () => { order.push('close') }
+    socket.onmessage = () => { order.push('message') }
+    h.clock.advance(0)
+    expect(order).toEqual([])
+    await h.replay.flush()
+    expect(order).toEqual(['open'])
+    socket.close()
+    socket.send(JSON.stringify({ kind: 'subscribe', id: 'agents', collection: 'agents' }))
+    expect(order).toEqual(['open'])
+    await h.replay.flush()
+    expect(order).toEqual(['open', 'close'])
+  })
+
+  it('teardown cancels queued frames and opens, but closes existing sockets asynchronously', async () => {
+    const h = setup()
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    const events: string[] = []
+    socket.onmessage = () => { events.push('message') }
+    socket.onclose = () => { events.push('close') }
+    h.clock.advance(0)
+    await h.replay.flush()
+    socket.send(JSON.stringify({ kind: 'subscribe', id: 'agents', collection: 'agents' }))
+    const pending = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    pending.onopen = () => { events.push('open') }
+    h.clock.advance(0)
+    h.replay.close()
+    expect(events).toEqual([])
+    await h.replay.flush()
+    h.clock.advance(100_000)
+    expect(events).toEqual(['close'])
+  })
+})
+
 describe('WebSocket wire aliases', () => {
-  it('preserves protocol-free replay socket opens', () => {
+  it('preserves protocol-free replay socket opens', async () => {
     const h = setup()
     const opened = { value: false }
     const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
     socket.onopen = () => { opened.value = true }
     h.clock.advance(0)
+    await h.replay.flush()
     expect(opened.value).toBe(true)
   })
 
-  it.each(['st3', 'fractal'])('accepts %s collections and conversation protocols', (family) => {
+  it.each(['st3', 'fractal'])('accepts %s collections and conversation protocols', async (family) => {
     for (const surface of ['collections', 'conversation']) {
       const h = setup()
       const opened = { value: false }
       const socket = h.replay.socket(`ws://scenario.invalid/v1/client/${surface}/stream`, [`${family}.client.${surface}.v0`], {})
       socket.onopen = () => { opened.value = true }
       h.clock.advance(0)
+      await h.replay.flush()
       expect(opened.value).toBe(true)
     }
   })
@@ -89,6 +220,7 @@ describe('WebSocket wire aliases', () => {
       const socket = h.replay.socket(url, [`${family}.client.terminal.v0`, ...capabilities], {})
       socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)))
       h.clock.advance(0)
+      await h.replay.flush()
       expect(frames).toContainEqual(expect.objectContaining({ api_version: 'st3.client.v0',
         value: expect.objectContaining({ kind: 'terminal-screen' }) }))
     }
@@ -101,7 +233,7 @@ describe('WebSocket wire aliases', () => {
     ['fractal.client.terminal.v0', 'st3.cap.first', 'fractal.cap.second'],
     ['fractal.client.terminal.v0', 'fractal.cap.'],
     ['fractal.client.terminal.v0', 'unknown.cap.secret'],
-  ].map((protocols) => ({ protocols })))('refuses unknown or ambiguous protocols $protocols', ({ protocols }) => {
+  ].map((protocols) => ({ protocols })))('refuses unknown or ambiguous protocols $protocols', async ({ protocols }) => {
     const h = setup()
     const opened = { value: false }
     const closed: number[] = []
@@ -109,6 +241,7 @@ describe('WebSocket wire aliases', () => {
     socket.onopen = () => { opened.value = true }
     socket.onclose = (event) => closed.push(event.code ?? 0)
     h.clock.advance(0)
+    await h.replay.flush()
     expect(opened.value).toBe(false)
     expect(closed).toEqual([1002])
   })
@@ -123,11 +256,13 @@ describe('collection windows', () => {
     stream.subscribe('missions', 'missions', 200)
     stream.subscribe('work', 'work', 200)
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.frames.map((frame) => frame.kind)).toEqual(['snapshot', 'snapshot', 'snapshot'])
     const windows = new Map<string, CollectionWindow>()
     let read = 0
     for (const at of [0, 20_000]) {
       h.clock.advance(at)
+      await h.replay.flush()
       for (const frame of h.frames.slice(read)) {
         const next = applyWindow(windows.get(frame.id ?? ''), frame)
         if (next !== undefined) windows.set(frame.id ?? '', next)
@@ -147,6 +282,8 @@ describe('collection windows', () => {
     stream.subscribe('small', 'agents', 2)
     stream.subscribe('blocked', 'agents', 200, { status: 'blocked' })
     h.clock.advance(0)
+    await h.replay.flush()
+    await h.replay.flush()
     const windows = new Map<string, CollectionWindow>()
     let read = 0
     const check = () => {
@@ -164,7 +301,7 @@ describe('collection windows', () => {
       }
     }
     check()
-    for (const next of h.world.slices.roster.timeline) { h.clock.advance(h.world.now + next.at_ms - h.clock.now()); check() }
+    for (const next of h.world.slices.roster.timeline) { h.clock.advance(h.world.now + next.at_ms - h.clock.now()); await h.replay.flush(); check() }
     expect(h.frames.some((frame) => frame.kind === 'changes')).toBe(true)
     expect(h.replay.served()).toContain('roster')
   })
@@ -179,7 +316,11 @@ describe('collection windows', () => {
     stream.subscribe('small', 'agents', 1)
     stream.subscribe('none', 'agents', 1, { status: 'never-present' })
     h.clock.advance(0)
+    await h.replay.flush()
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
+    await h.replay.flush()
     const change = h.frames.find((frame) => frame.kind === 'changes')
     expect(change).toMatchObject({ kind: 'changes', id: 'small', removes: [a!.id], order: [c!.id], upserts: [c] })
     expect(h.frames.filter((frame) => frame.id === 'none')).toHaveLength(1)
@@ -191,13 +332,18 @@ describe('collection windows', () => {
     stream.subscribe('first', 'agents', 2)
     stream.subscribe('second', 'agents', 2)
     h.clock.advance(0)
+    await h.replay.flush()
+    await h.replay.flush()
     const first = h.frames[0]
     const second = h.frames[1]
     expect(first?.kind).toBe('snapshot')
     if (first?.kind !== 'snapshot' || second?.kind !== 'snapshot') throw new Error('Missing snapshots')
     expect(first.snapshot).toEqual(second.snapshot)
     h.clock.advance(20_000)
+    await h.replay.flush()
+    await h.replay.flush()
     stream.subscribe('third', 'missions', 20)
+    await h.replay.flush()
     const stores = h.frames.flatMap((frame) => 'snapshot' in frame ? [frame.snapshot.store_index] : [])
     expect(stores).toEqual([...stores].sort((a, b) => a - b))
     expect(stores.at(-1)).toBeGreaterThan(stores[0]!)
@@ -208,7 +354,9 @@ describe('collection windows', () => {
     const stream = await h.connect()
     stream.subscribe('agents', 'agents', 200)
     h.clock.advance(0)
-    if (variant === 'loading') { h.clock.advance(100_000); expect(h.frames).toEqual([]) }
+    await h.replay.flush()
+    await h.replay.flush()
+    if (variant === 'loading') { h.clock.advance(100_000); await h.replay.flush(); expect(h.frames).toEqual([]) }
     else {
       const frame = h.frames[0]
       if (frame?.kind !== 'snapshot') throw new Error('Missing snapshot')
@@ -227,18 +375,22 @@ describe('conversation dispatch and consumer fold', () => {
     const builder = h.world.cast.agents.find((member) => member.key === 'builder')!
     const stream = await h.connect()
     h.clock.advance(4_010)
+    await h.replay.flush()
     stream.subscribeConversation('pending-builder', builder.id)
+    await h.replay.flush()
     expect(h.frames).toEqual([{
       kind: 'conversation', id: 'pending-builder', collection: 'conversation', session_id: builder.session,
       replace: true, items: [], has_more: false,
     }])
     h.clock.advance(1)
+    await h.replay.flush()
     const current = foldSlice(h.world.slices.conversation, 4_011).state.threads.find((thread) => thread.agent === builder.id)!
     expect(current.items.length).toBeGreaterThan(0)
     const updates = h.frames.filter((frame) => frame.kind === 'conversation')
     expect(updates[1]).toMatchObject({ replace: true, items: current.items })
     expect(updates.flatMap((frame) => frame.items.map((item) => item.id))).toEqual(current.items.map((item) => item.id))
     stream.subscribeConversation('present-builder', builder.id)
+    await h.replay.flush()
     expect(h.frames.at(-1)).toMatchObject({
       kind: 'conversation', id: 'present-builder', session_id: current.session_id,
       replace: true, items: current.items.slice(-current.page_size),
@@ -251,9 +403,11 @@ describe('conversation dispatch and consumer fold', () => {
     const member = h.world.cast.agents[0]!
     const stream = await h.connect()
     h.clock.advance(3_000)
+    await h.replay.flush()
     for (const [id, target] of Object.entries({ agent: member.id, session: member.session, short: member.session.replace(/^session\//, '') })) {
       stream.subscribeConversation(id, target)
     }
+    await h.replay.flush()
     expect(h.frames).toEqual(['agent', 'session', 'short'].map((id) => ({
       kind: 'conversation', id, collection: 'conversation', session_id: member.session,
       replace: true, items: [], has_more: false,
@@ -261,8 +415,10 @@ describe('conversation dispatch and consumer fold', () => {
     const page = await h.client.timelineList(member.session)
     expect(page.value).toMatchObject({ kind: 'timeline-page', session_id: member.session, items: [], page: { has_more: false } })
     h.clock.advance(1_999)
+    await h.replay.flush()
     if (source === 'synthetic') expect(h.frames).toHaveLength(3)
     h.clock.advance(1)
+    await h.replay.flush()
     expect(errors(h.frames)).toEqual([])
     const frames = h.frames.filter((frame): frame is Extract<CollectionFrame, { kind: 'conversation' }> => frame.kind === 'conversation' && frame.id === 'agent')
     expect(frames.length).toBeGreaterThan(1)
@@ -278,6 +434,7 @@ describe('conversation dispatch and consumer fold', () => {
     const expected = foldSlice(h.world.slices.conversation, 5_000).state.threads[0]!
     expect(conversation?.entries).toEqual(expected.items.filter(isConversational).sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence))
     h.clock.advance(11_000)
+    await h.replay.flush()
     if (source === 'synthetic') expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === 'agent').length).toBeGreaterThan(frames.length)
   })
 
@@ -292,13 +449,16 @@ describe('conversation dispatch and consumer fold', () => {
     stream.subscribeConversation('session', thread.session_id)
     stream.subscribeConversation('short', thread.session_id.replace(/^session\//, ''))
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.frames).toHaveLength(2)
     h.clock.advance(1_000)
+    await h.replay.flush()
     expect(errors(h.frames)).toMatchObject([
       { id: 'session', code: 'not-found', retryable: false },
       { id: 'short', code: 'not-found', retryable: false },
     ])
     h.clock.advance(1_000)
+    await h.replay.flush()
     expect(h.frames).toHaveLength(4)
   })
 
@@ -306,8 +466,10 @@ describe('conversation dispatch and consumer fold', () => {
     const h = setup(buildWorld(syntheticFirstRunOnboarding, genericVariants, ANCHOR_MS))
     const member = h.world.cast.agents[0]!
     h.clock.advance(3_000)
+    await h.replay.flush()
     for (const advance of [0, 2_000]) {
       h.clock.advance(advance)
+      await h.replay.flush()
       for (const session of [member.session, member.session.replace(/^session\//, '')]) {
         expect((await h.client.timelineList(session)).value.session_id).toBe(member.session)
       }
@@ -328,8 +490,10 @@ describe('conversation dispatch and consumer fold', () => {
     const stream = await h.connect()
     stream.subscribeConversation('page', thread.agent)
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.frames[0]).toMatchObject({ kind: 'conversation', replace: true, items: [], has_more: false })
     h.clock.advance(2_000)
+    await h.replay.flush()
     const frame = h.frames.at(-1)
     expect(frame).toMatchObject({ kind: 'conversation', replace: true, items: items.slice(-2), has_more: true })
     if (frame?.kind !== 'conversation') throw new Error('Missing replacement page')
@@ -345,9 +509,12 @@ describe('conversation dispatch and consumer fold', () => {
     const stream = await h.connect()
     stream.subscribeConversation('future', member.id)
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(3_000)
+    await h.replay.flush()
     stream.subscribeConversation('unknown-agent', 'agent/example-unknown')
     stream.subscribeConversation('unknown-session', 'session/example-unknown')
+    await h.replay.flush()
     expect(errors(h.frames)).toMatchObject([
       { id: 'future', code: 'not-found', retryable: false },
       { id: 'unknown-agent', code: 'not-found', retryable: false },
@@ -355,6 +522,7 @@ describe('conversation dispatch and consumer fold', () => {
     ])
     await expect(h.client.timelineList('session/example-unknown')).rejects.toMatchObject({ response: { code: 'not-found' } })
     h.clock.advance(13_000)
+    await h.replay.flush()
     expect(h.frames).toHaveLength(3)
   })
 
@@ -365,6 +533,7 @@ describe('conversation dispatch and consumer fold', () => {
     stream.subscribeConversation('talk', thread.agent)
     stream.subscribeConversation('session', thread.session_id)
     h.clock.advance(0)
+    await h.replay.flush()
     let conversation: Conversation<TimelineEntry> | undefined
     let read = 0
     const check = () => {
@@ -379,7 +548,7 @@ describe('conversation dispatch and consumer fold', () => {
       expect(conversation?.entries).toEqual(expected)
     }
     check()
-    for (const next of h.world.slices.conversation.timeline) { h.clock.advance(h.world.now + next.at_ms - h.clock.now()); check() }
+    for (const next of h.world.slices.conversation.timeline) { h.clock.advance(h.world.now + next.at_ms - h.clock.now()); await h.replay.flush(); check() }
     expect(h.frames.filter((frame) => frame.kind === 'conversation' && !frame.replace)).toHaveLength(h.world.slices.conversation.timeline.length * 2)
   })
 
@@ -389,8 +558,10 @@ describe('conversation dispatch and consumer fold', () => {
     const stream = await h.connect()
     stream.subscribeConversation('stripped', thread.session_id.replace(/^session\//, ''))
     h.clock.advance(0)
+    await h.replay.flush()
     const live = h.world.slices.conversation.timeline.filter((event) => event._tag === 'entries' && event.agent === thread.agent)
     for (const next of live) h.clock.advance(h.world.now + next.at_ms - h.clock.now())
+    await h.replay.flush()
     const delivered = h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === 'stripped')
     expect(delivered).toHaveLength(1 + live.length)
   })
@@ -406,7 +577,9 @@ describe('conversation dispatch and consumer fold', () => {
     const stream = await h.connect()
     stream.subscribeConversation('talk', thread.agent)
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
     const frame = h.frames.at(-1)
     expect(frame).toMatchObject({ kind: 'conversation', replace: true, session_id: 'session/scenario-replaced', items: items.slice(-2), has_more: true })
     if (frame?.kind !== 'conversation') throw new Error('Missing conversation')
@@ -422,10 +595,12 @@ describe('terminal dispatch', () => {
     const stream = await h.connect()
     h.subscribeTerminal(stream, attachment)
     h.clock.advance(0)
+    await h.replay.flush()
     expect(screens(h.frames)).toHaveLength(1)
     const expected: string[] = ['screen']
     for (const next of h.world.slices.terminal.timeline) {
       h.clock.advance(h.world.now + next.at_ms - h.clock.now())
+      await h.replay.flush()
       if (next._tag === 'screen' && !expected.includes('error')) expected.push('screen')
       else if (next._tag !== 'screen') expected.push('error')
     }
@@ -443,6 +618,7 @@ describe('terminal dispatch', () => {
     const stream = await h.connect()
     stream.subscribeTerminal('absent', 'terminal/scenario-absent', 'scenario:1', 'scenario-absent')
     h.clock.advance(0)
+    await h.replay.flush()
     expect(errors(h.frames)).toMatchObject([{ code: 'not-found', retryable: false }])
   })
 
@@ -453,7 +629,9 @@ describe('terminal dispatch', () => {
     const stream = await h.connect()
     h.subscribeTerminal(stream, attachment)
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(100_000)
+    await h.replay.flush()
     expect(screens(h.frames).length).toBeGreaterThan(1)
     expect(new Set(screens(h.frames).map((frame) => frame.snapshot.store_index))).toEqual(new Set([1]))
     expect(new Set(screens(h.frames).map((frame) => JSON.stringify(frame.snapshot))).size).toBe(1)
@@ -465,10 +643,13 @@ describe('terminal dispatch', () => {
     const stream = await h.connect()
     h.subscribeTerminal(stream, attachment)
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(3_000)
+    await h.replay.flush()
     expect(errors(h.frames).at(-1)).toMatchObject({ code: 'terminal-unavailable', retryable: true })
     h.subscribeTerminal(stream, attachment, 'reuse')
     h.subscribeTerminal(stream, await h.attach(), 'fresh')
+    await h.replay.flush()
     expect(h.frames.slice(-2).map((frame) => frame.kind)).toEqual(['screen', 'screen'])
   })
 
@@ -478,10 +659,13 @@ describe('terminal dispatch', () => {
     const stream = await h.connect()
     h.subscribeTerminal(stream, attachment)
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(3_000)
+    await h.replay.flush()
     expect(errors(h.frames).at(-1)).toMatchObject({ code: 'terminal-ended', retryable: false })
     await expect(h.attach()).rejects.toMatchObject({ status: 409, response: { code: 'terminal-ended', retryable: false } })
     h.subscribeTerminal(stream, attachment, 'ended')
+    await h.replay.flush()
     expect(errors(h.frames).at(-1)?.code).toBe('terminal-ended')
   })
 
@@ -491,15 +675,19 @@ describe('terminal dispatch', () => {
     const stream = await h.connect()
     h.subscribeTerminal(stream, old)
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(3_000)
+    await h.replay.flush()
     expect(errors(h.frames).at(-1)?.code).toBe('stale-fence')
     h.subscribeTerminal(stream, old, 'old')
+    await h.replay.flush()
     expect(errors(h.frames).at(-1)).toMatchObject({ id: 'old', code: 'stale-fence' })
     const fresh = await h.attach()
     expect(fresh.runtime_incarnation).not.toBe(old.runtime_incarnation)
     expect(fresh.stream_capability).not.toBe(old.stream_capability)
     h.subscribeTerminal(stream, fresh, 'new')
     h.clock.advance(500)
+    await h.replay.flush()
     expect(screens(h.frames).at(-1)?.value.runtime_incarnation).toBe(fresh.runtime_incarnation)
   })
 
@@ -513,8 +701,10 @@ describe('terminal dispatch', () => {
       onScreen: (screen) => { decodeUnknownSync(Envelope, 'strict')(screen); received.push(screen) },
       onEnd: (error) => { if (error !== undefined) ending.push(error) } })
     h.clock.advance(0)
+    await h.replay.flush()
     expect(received).toHaveLength(1)
     h.clock.advance(3_000)
+    await h.replay.flush()
     expect(ending[0]).toBeInstanceOf(ClientError)
     expect(ending[0]).toMatchObject({ response: { code: 'terminal-unavailable', retryable: true } })
   })
@@ -527,6 +717,7 @@ describe('terminal dispatch', () => {
       streamCapability: attachment.stream_capability!, incarnation: attachment.runtime_incarnation,
       onScreen: () => {}, onEnd: (error) => { if (error !== undefined) ending.push(error) } })
     h.clock.advance(0)
+    await h.replay.flush()
     expect(ending[0]).toBeInstanceOf(ClientError)
     expect(ending[0]).toMatchObject({ response: { code: 'not-found', retryable: false } })
   })
@@ -541,14 +732,18 @@ describe('sync dispatch', () => {
     socket.onclose = (close) => { expect(close).toEqual({ code: 1006, reason: '' }); calls.push('close') }
     expect(calls).toEqual([])
     h.clock.advance(0)
+    await h.replay.flush()
     expect(calls).toEqual(['error', 'close'])
     h.clock.advance(10)
+    await h.replay.flush()
     await h.connect()
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.endings[0]?.message).toBe('The collections socket failed')
     const stream = await h.connect()
     stream.subscribe('agents', 'agents')
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.frames[0]?.kind).toBe('snapshot')
   })
 
@@ -556,7 +751,9 @@ describe('sync dispatch', () => {
     const h = setup(scripted([{ _tag: 'close', at_ms: 10, store: 0, code: 1012, reason: 'scenario restart' }]))
     await h.connect()
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
     expect(h.endings[0]?.message).toContain('1012 scenario restart')
   })
 
@@ -564,18 +761,25 @@ describe('sync dispatch', () => {
     const h = setup(base().with({ sync: 'reconnected' }))
     await h.connect()
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(4_000)
+    await h.replay.flush()
     await h.connect()
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.endings).toHaveLength(2)
     h.clock.advance(2_999)
+    await h.replay.flush()
     await h.connect()
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.endings).toHaveLength(3)
     h.clock.advance(1)
+    await h.replay.flush()
     const stream = await h.connect()
     stream.subscribe('new', 'agents')
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.frames.at(-1)).toMatchObject({ kind: 'snapshot', id: 'new' })
   })
 
@@ -588,9 +792,11 @@ describe('sync dispatch', () => {
     ]))
     await h.client.agentsList()
     h.clock.advance(10)
+    await h.replay.flush()
     await expect(h.client.agentsList()).rejects.toMatchObject({ status: 503, response: envelope })
     await expect(h.client.agentsList()).rejects.toBeInstanceOf(ClientError)
     h.clock.advance(10)
+    await h.replay.flush()
     expect((await h.client.agentsList()).value.items).toEqual(h.world.slices.roster.state.agents)
   })
 
@@ -604,6 +810,7 @@ describe('sync dispatch', () => {
     expect(response.headers.get('Content-Type')).toBe('text/html')
     expect(await response.text()).toBe('<p>Scenario proxy unavailable</p>')
     h.clock.advance(10)
+    await h.replay.flush()
     expect((await h.client.capabilities()).value.kind).toBe('capabilities')
   })
 
@@ -616,8 +823,10 @@ describe('sync dispatch', () => {
     stream.subscribe('held', 'agents')
     stream.subscribe('free', 'missions')
     h.clock.advance(0)
+    await h.replay.flush()
     expect(h.frames.map((frame) => frame.id)).toEqual(['free'])
     h.clock.advance(20_000)
+    await h.replay.flush()
     const frame = h.frames.find((frame) => frame.id === 'held')
     expect(frame?.kind).toBe('snapshot')
     if (frame?.kind !== 'snapshot') throw new Error('Missing released snapshot')
@@ -630,12 +839,15 @@ describe('sync dispatch', () => {
     const stream = await h.connect()
     stream.subscribe('agents', 'agents')
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
     const frame = h.frames.at(-1)
     expect(frame).toMatchObject({ kind: 'resync', id: 'agents', collection: 'agents', retryable: true })
     if (coded) expect(frame).toMatchObject({ code: 'remote-unavailable', message: 'Scenario member unavailable' })
     else { expect(frame).not.toHaveProperty('code'); expect(frame).not.toHaveProperty('message') }
     h.clock.advance(20_000)
+    await h.replay.flush()
     expect(h.frames.some((frame) => frame.kind === 'changes')).toBe(true)
   })
 
@@ -645,12 +857,15 @@ describe('sync dispatch', () => {
     const stream = await h.connect()
     stream.subscribe('agents', 'agents')
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
     const frame = errors(h.frames).at(-1)
     expect(frame).toMatchObject({ kind: 'error', message: 'Scenario subscription refused', retryable: false })
     if (selected) expect(frame).toMatchObject({ collection: 'agents', id: 'agents', code: 'forbidden' })
     else { expect(frame).not.toHaveProperty('collection'); expect(frame).not.toHaveProperty('code') }
     h.clock.advance(20_000)
+    await h.replay.flush()
     expect(h.frames.some((frame) => frame.kind === 'changes')).toBe(!selected)
   })
 
@@ -661,11 +876,14 @@ describe('sync dispatch', () => {
     ]))
     await h.connect()
     h.clock.advance(0)
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
     expect((await h.client.agentsList()).value.sync).toEqual({ state: 'catching-up', peers })
     expect((await h.client.resourcesList()).value.sync).toEqual({ state: 'catching-up', peers })
     expect(h.frames).toEqual([])
     h.clock.advance(10)
+    await h.replay.flush()
     expect((await h.client.agentsList()).value).not.toHaveProperty('sync')
     expect((await h.client.resourcesList()).value).not.toHaveProperty('sync')
   })
@@ -675,16 +893,19 @@ describe('sync dispatch', () => {
     const stream = await h.connect()
     stream.subscribe('agents', 'agents')
     h.clock.advance(0)
+    await h.replay.flush()
     let replied = false
     const pending = h.client.agentsList().then(() => { replied = true }, (error: unknown) => error)
     await Promise.resolve()
     await Promise.resolve()
     h.clock.advance(100_000)
+    await h.replay.flush()
     expect(replied).toBe(false)
     expect(h.frames).toEqual([])
     h.replay.close()
     expect(await pending).toMatchObject({ name: 'AbortError' })
     h.clock.advance(100_000)
+    await h.replay.flush()
     expect(h.frames).toEqual([])
   })
 })

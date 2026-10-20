@@ -14,6 +14,7 @@ import {
   afterPickRunner,
   buildEnv,
   commonSetupSteps,
+  fullHistoryCheckoutSteps,
   megarepoApplyStep,
   fractalWebJobs,
   isolationVmSteps,
@@ -334,7 +335,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(au
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         { name: 'Test release and PR classification safety', run: 'python3 scripts/release_notes_test.py' },
         {
           name: 'Require a fresh fragment on the effective PR or queue merge',
@@ -407,7 +408,7 @@ fi`,
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: skipIfCovered('typescript-client', [
         // A pull request needs its history: the signing guard lists the commits between the base and the head.
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': "${{ github.event_name == 'pull_request' && '0' || '1' }}", 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         megarepoApplyStep,
         // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
@@ -584,7 +585,7 @@ done`,
       steps: [
         // The tested commit with its whole history: a note's parent is that commit, and the server
         // refuses a push from a shallow repository.
-        { name: 'Check out the tested commit', 'continue-on-error': true, uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, { name: 'Check out the tested commit', 'continue-on-error': true }),
         {
           name: 'Take the signer scripts from the base commit',
           id: 'base',

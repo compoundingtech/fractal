@@ -1,6 +1,6 @@
 import { nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
-import { buildEnv, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { buildEnv, fullHistoryCheckoutSteps, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
 
 // The load jobs, defined once. The daily long lanes run them on main (daily-perf-load, daily-perf-load-hog,
 // daily-perf-load-hog-macos), and the Performance workflow (perf.yml) runs them by manual dispatch on any
@@ -12,7 +12,7 @@ const snapshotPublished = "!cancelled() && steps.cache.outcome == 'success' && s
 
 // The checkout, snapshots, Nix and scratch space every Linux load job starts from.
 const loadSetupSteps = [
-  { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   {
     name: 'Name compatible snapshot recipes',
     env: {
@@ -122,7 +122,7 @@ python3 scripts/ci-perf-cache pack`,
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, SCCACHE_IDLE_TIMEOUT: '0' },
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
           name: 'Isolate test state',

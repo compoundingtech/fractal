@@ -5532,6 +5532,42 @@ fn an_agent_known_only_from_its_own_harness_observations_is_history() {
 }
 
 #[test]
+fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
+    use crate::RetirementsStore;
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let retired = "agent/example-retired/worker";
+    let stopped = "agent/example-stopped/worker";
+    let intent = parse_intent(
+        "version 2\nagent \"example-retired/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\nagent \"example-stopped/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&intent, "retirement-card-declarations").unwrap();
+    let stop = parse_intent("version 2\nstop \"agent/example-stopped/worker\"\n", store.origin()).unwrap();
+    store.apply_internal(&stop, "retirement-card-stop").unwrap();
+    let before = store.index().unwrap();
+    let token = store.selected_desired_token(retired).unwrap().unwrap();
+    store.retire_agent(
+        retired, retired, "Work finished", &token, None, "retirement-card-retire", &[],
+    ).unwrap();
+    let after = store.index().unwrap();
+    for cut in [before, after] {
+        let work = smallclaims::sqlite::work::total();
+        let terminal = crate::store::retirements::retired_subjects_at(
+            &store.readers.get(), &[retired.into(), stopped.into()], cut,
+        ).unwrap();
+        assert_eq!((smallclaims::sqlite::work::total() - work).statements, 1);
+        assert_eq!(terminal.contains(retired), cut == after);
+        assert!(!terminal.contains(stopped));
+        let cards = client_agent_resources_uncached(&store, true, cut).unwrap();
+        let retired_card = cards.iter().find(|card| card["id"] == retired).unwrap();
+        let stopped_card = cards.iter().find(|card| card["id"] == stopped).unwrap();
+        assert_eq!(retired_card["state"] == "retired", cut == after, "{cards:?}");
+        assert_ne!(stopped_card["state"], "retired");
+    }
+}
+
+#[test]
 fn client_work_projection_includes_agentless_mission_steps() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
