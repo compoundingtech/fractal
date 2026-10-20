@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Feature-gated paired phone push target registration and revocation on the pairing issuer",
+  "replay": {"status": "none", "detail": "No graph replay or checkpoint behavior changes. Push tokens are stored outside the graph."},
+  "schema": {"status": "changed", "detail": "When the push-registration feature is enabled, the pairing issuer creates a member-local push-registrations.sqlite3 file with a push_registrations table and expiry index. The graph database schema and its version are unchanged. Disabling the feature leaves the local file in place."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digests change; members do not replicate push tokens."},
+  "compatibility": {"status": "changed", "detail": "Feature-enabled pairing issuers offer optional PUT and DELETE /v1/client/push-registration commands and advertise push-registration only for an active pairing with read.projections scope. Older builds and builds without the feature do not offer these commands. No sender or APNs integration is included."},
+  "downtime": {"status": "none", "detail": "No additional service interruption is required beyond the ordinary restart used to deploy a feature-enabled build; no startup migration of the graph is introduced."},
+  "manual": {"status": "changed", "detail": "Operators choosing this feature must deploy a build with push-registration enabled on the pairing issuer and protect or exclude the member-local token file in host backup policies. Existing pairings are not enrolled automatically; the paired phone registers its target explicitly. No Apple key or sender configuration is part of this change."},
+  "recovery": {"status": "changed", "detail": "A rollback or feature disable stops the registration API without changing the graph. The member-local token file remains and needs separate retention or deletion handling; SQLite secure_delete is best effort and cannot erase host snapshots or backups."}
+}

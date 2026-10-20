@@ -10,6 +10,7 @@ license = "MIT"
 # own tests (so `cargo test -p st3-daemon --lib` runs the test-support tests, as `-p st3 --lib` did).
 # Never enabled by a production build.
 test-support = ["st3-telemetry/test-support", "st3-store/test-support", "st3-delivery/test-support", "st3-missions/test-support", "st3-seats/test-support", "st3-attention/test-support", "st3-evidence/test-support", "st3-github/test-support", "st3-peer/test-support", "st3-reconcile/test-support", "st3-api-core/test-support", "st3-api-mailbox/test-support", "st3-api-client-v0/test-support"]
+push-registration = ["st3-api-core/push-registration", "st3-api-client-v0/push-registration"]
 
 [dependencies]
 anyhow = "1"

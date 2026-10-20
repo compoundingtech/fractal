@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
 test-support = ["st3-reconcile/test-support"]
+push-registration = []
 
 [dependencies]
 st3-reconcile = { path = "../st3-reconcile" }
