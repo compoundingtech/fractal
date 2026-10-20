@@ -82,6 +82,7 @@ describe('foundation contracts', () => {
     expect((await replay.fetch(timelineUrl)).status).toBe(200)
     expect((await replay.fetch(runtimeUrl)).status).toBe(404)
     clock.advance(1_000)
+    await replay.flush()
     expect((await replay.fetch(timelineUrl)).status).toBe(200)
     expect((await replay.fetch(runtimeUrl)).status).toBe(200)
     const action = { id: 'action/foundation-attach', type: 'terminal.attach', idempotency_key: 'foundation-attach',
@@ -92,10 +93,14 @@ describe('foundation contracts', () => {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', ['st3.client.collections.v0'], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'conversation', id: 'conversation', conversation: conversation.agent }))
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'terminal', id: 'terminal', terminal: terminal.terminal, incarnation: terminal.incarnation, capability: attached.value.terminal_attachment.stream_capability }))
+    await replay.flush()
     expect(frames).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'conversation', session_id: conversation.session_id }), expect.objectContaining({ kind: 'screen' })]))
     clock.advance(1_000)
+    await replay.flush()
     expect(foldSlice(world.slices.conversation, 2_000).state.threads).toEqual([])
     expect(foldSlice(world.slices.terminal, 2_000).state.terminals).toEqual([])
     expect(frames).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'error', id: 'conversation', code: 'not-found' }), expect.objectContaining({ kind: 'error', id: 'terminal', code: 'not-found' })]))
@@ -132,8 +137,11 @@ describe('foundation contracts', () => {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', ['st3.client.collections.v0'], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'agents', id: 'agents' }))
+    await replay.flush()
     clock.advance(1_000)
+    await replay.flush()
     expect(frames).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'changes', upserts: [raw] })]))
     const response = await replay.fetch('http://scenario.invalid/v1/client/resources?kind=future-resource')
     const body = await response.json() as { value: { items: { facts: unknown }[] } }
@@ -142,7 +150,7 @@ describe('foundation contracts', () => {
     expect(foldSlice(removed, 2_000).state.resources).toEqual([])
   })
 
-  it.each([2, 'all'] as const)('fails %s socket opens until exhausted or explicitly cleared', (opens) => {
+  it.each([2, 'all'] as const)('fails %s socket opens until exhausted or explicitly cleared', async (opens) => {
     const { replay, clock } = setup([{ _tag: 'open-fail', at_ms: 0, store: 0, opens }, { _tag: 'open-ok', at_ms: 1_000, store: 0 }])
     const outcomes: string[] = []
     for (let index = 0; index < 3; index += 1) {
@@ -151,16 +159,19 @@ describe('foundation contracts', () => {
       socket.onclose = (event) => outcomes.push(`close:${event.code}`)
       socket.onopen = () => outcomes.push('open')
       clock.advance(0)
+      await replay.flush()
     }
     expect(outcomes).toEqual(opens === 2 ? ['error', 'close:1006', 'error', 'close:1006', 'open'] : ['error', 'close:1006', 'error', 'close:1006', 'error', 'close:1006'])
     clock.advance(1_000)
+    await replay.flush()
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', [], {})
     socket.onopen = () => outcomes.push('recovered')
     clock.advance(0)
+    await replay.flush()
     expect(outcomes.at(-1)).toBe('recovered')
   })
 
-  it('keeps socket opens CONNECTING until open-release resumes them', () => {
+  it('keeps socket opens CONNECTING until open-release resumes them', async () => {
     const { replay, clock } = setup([
       { _tag: 'open-hold', at_ms: 0, store: 0 },
       { _tag: 'open-release', at_ms: 1_000, store: 0 },
@@ -172,16 +183,21 @@ describe('foundation contracts', () => {
     socket.onclose = () => outcomes.push('close')
     socket.onmessage = () => outcomes.push('message')
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'agents', id: 'held' }))
+    await replay.flush()
     clock.advance(999)
+    await replay.flush()
     expect(outcomes).toEqual([])
     clock.advance(1)
+    await replay.flush()
     expect(outcomes).toEqual(['open'])
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'agents', id: 'released' }))
+    await replay.flush()
     expect(outcomes).toEqual(['open', 'message'])
   })
 
-  it('does not reopen a pending socket closed before release', () => {
+  it('does not reopen a pending socket closed before release', async () => {
     const { replay, clock } = setup([
       { _tag: 'open-hold', at_ms: 0, store: 0 },
       { _tag: 'open-release', at_ms: 1_000, store: 0 },
@@ -191,21 +207,27 @@ describe('foundation contracts', () => {
     socket.onopen = () => outcomes.push('open')
     socket.onclose = () => outcomes.push('close')
     clock.advance(0)
+    await replay.flush()
     socket.close()
     clock.advance(1_000)
+    await replay.flush()
     expect(outcomes).toEqual(['close'])
   })
 
-  it('repeats the legacy unqualified uncoded error on every resubscribe until cleared', () => {
+  it('repeats the legacy unqualified uncoded error on every resubscribe until cleared', async () => {
     const { replay, clock } = setup([{ _tag: 'error', at_ms: 0, store: 0, message: 'invalid subscription or subscription limit exceeded', retryable: false, repeat: true }, { _tag: 'error-clear', at_ms: 1_000, store: 0 }])
     const frames: unknown[] = []
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', [], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     for (let index = 0; index < 3; index += 1) socket.send(JSON.stringify({ kind: 'subscribe', collection: 'agents', id: `follow-${index}` }))
+    await replay.flush()
     expect(frames).toEqual(Array.from({ length: 3 }, () => ({ kind: 'error', message: 'invalid subscription or subscription limit exceeded', retryable: false })))
     clock.advance(1_000)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'agents', id: 'recovered' }))
+    await replay.flush()
     expect(frames.at(-1)).toEqual(expect.objectContaining({ kind: 'snapshot' }))
   })
 
@@ -218,6 +240,7 @@ describe('foundation contracts', () => {
     expect((await replay.fetch(`${url}?limit=3&cursor=scenario-cursor/2`)).status).toBe(200)
     expect((await replay.fetch(`${url}?limit=2&cursor=scenario-cursor/2`)).status).toBe(410)
     clock.advance(1_000)
+    await replay.flush()
     expect((await replay.fetch(`${url}?limit=2&cursor=scenario-cursor/2`)).status).toBe(200)
   })
 
@@ -237,7 +260,9 @@ describe('foundation contracts', () => {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', [], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'terminal', id: 'terminal', terminal: terminal.terminal, incarnation: terminal.incarnation, capability: body.value.terminal_attachment.stream_capability }))
+    await replay.flush()
     expect(frames).toEqual([expect.objectContaining({ kind: 'screen' })])
   })
 
@@ -313,15 +338,19 @@ describe('foundation contracts', () => {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', [], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'terminal', id: 'held-terminal', terminal: terminal.terminal, incarnation: terminal.incarnation, capability }))
+    await replay.flush()
     expect(frames).toEqual([])
     clock.advance(1_000)
+    await replay.flush()
     expect(frames).toEqual([expect.objectContaining({ kind: 'error', id: 'held-terminal', code: 'not-found', retryable: false })])
     clock.advance(1_000)
+    await replay.flush()
     expect(frames).toHaveLength(1)
   })
 
-  it('dispatches thread record replacement to ready agent and previous-session subscriptions', () => {
+  it('dispatches thread record replacement to ready agent and previous-session subscriptions', async () => {
     const original = base()
     const old = original.slices.conversation.state.threads[0]!
     const replacement = { ...old, session_id: `${old.session_id}-replacement`, items: old.items.slice(0, 2), page_size: 1, has_more: false }
@@ -337,15 +366,20 @@ describe('foundation contracts', () => {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', [], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'conversation', id: 'agent', conversation: old.agent }))
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'conversation', id: 'session', conversation: old.session_id }))
+    await replay.flush()
     frames.length = 0
     clock.advance(1_000)
+    await replay.flush()
     expect(frames).toEqual(['agent', 'session'].map((id) => expect.objectContaining({
       kind: 'conversation', id, session_id: replacement.session_id, replace: true, items: replacement.items.slice(-1), has_more: true,
     })))
     frames.length = 0
     clock.advance(1_000)
+    await replay.flush()
     expect(frames).toEqual(['agent', 'session'].map((id) => expect.objectContaining({
       kind: 'conversation', id, session_id: replacement.session_id, replace: false, items: [delta],
     })))
@@ -367,10 +401,13 @@ describe('foundation contracts', () => {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', [], {})
     socket.onmessage = ({ data }) => frames.push(JSON.parse(String(data)))
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'terminal', id: 'terminal', terminal: terminal.terminal, incarnation: terminal.incarnation, capability }))
+    await replay.flush()
     expect(frames).toHaveLength(1)
     frames.length = 0
     clock.advance(1_000)
+    await replay.flush()
     expect(frames).toEqual([expect.objectContaining(incarnation === 'same'
       ? { kind: 'screen', id: 'terminal', value: screen }
       : { kind: 'error', id: 'terminal', code: 'stale-fence', retryable: false })])

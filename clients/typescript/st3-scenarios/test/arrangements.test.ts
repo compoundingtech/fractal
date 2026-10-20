@@ -83,6 +83,7 @@ describe('read-only sidebar arrangements', () => {
     const other = h.world.cast.people[1]!.id
     stream.subscribeArrangements('wrong-owner', owner, 1, `arrangement/${other}/00000000-0000-7000-8000-000000000000`)
     h.clock.advance(0)
+    await h.replay.flush()
     expect(frames.find((frame) => frame.id === 'wrong-owner')).toMatchObject({
       kind: 'error', code: 'validation-failed', message: 'selected arrangement owner must match person', retryable: false,
     })
@@ -103,6 +104,7 @@ describe('read-only sidebar arrangements', () => {
     stream.subscribeArrangements('other', h.world.cast.people[1]!.id, 1)
     stream.subscribeArrangements('missing', owner, 1, `arrangement/${owner}/00000000-0000-7000-8000-000000000000`)
     h.clock.advance(0)
+    await h.replay.flush()
     for (const id of ['owner', 'exact']) expect(frames.find((frame) => frame.kind === 'snapshot' && frame.id === id)).toMatchObject({ items: [sidebar] })
     expect(frames.find((frame) => frame.kind === 'snapshot' && frame.id === 'missing')).toMatchObject({ items: [] })
     expect(frames.find((frame) => frame.id === 'other')).toMatchObject({
@@ -110,6 +112,7 @@ describe('read-only sidebar arrangements', () => {
       message: 'cross-person arrangements require delegated authority', retryable: false,
     })
     h.clock.advance(20_000)
+    await h.replay.flush()
     expect(frames.some((frame) => frame.kind === 'changes' && ['owner', 'exact', 'other', 'missing'].includes(frame.id ?? ''))).toBe(false)
     expect(h.replay.served()).toContain('roster')
     stream.close()
@@ -140,6 +143,7 @@ describe('read-only sidebar arrangements', () => {
     } })
     stream.subscribeArrangements('denied', owner, 1)
     h.clock.advance(0)
+    await h.replay.flush()
     expect(frames.find((frame) => frame.id === 'denied')).toMatchObject({
       kind: 'error', collection: 'arrangements', code: 'forbidden',
       message: forbidden.response.message, retryable: false,

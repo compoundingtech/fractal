@@ -29,7 +29,7 @@ const mutateItem = (world: World, revision: boolean): World => {
 }
 
 /** Focused metadata tests still use capture-derived slice data and the captured command. */
-const captureMetadataFrames = (proof: RecordedProof, recording: RecordedTransport): JsonObject[] => {
+const captureMetadataFrames = async (proof: RecordedProof, recording: RecordedTransport): Promise<JsonObject[]> => {
   const clock = manualClock(ANCHOR_MS - 100)
   const replay = createReplay({ ...proof.world, recording }, { clock })
   const frames: JsonObject[] = []
@@ -41,10 +41,12 @@ const captureMetadataFrames = (proof: RecordedProof, recording: RecordedTranspor
       frames.push(jsonObject(parsed))
     }
     clock.advance(0)
+    await replay.flush()
     const command = proof.rows.find((row) => row.kind === 'command' && row.value.collection === 'conversation')
     if (command === undefined) throw new Error('Missing captured conversation command')
     socket.send(JSON.stringify(command.value))
     clock.advance(1100)
+    await replay.flush()
     return frames
   } finally { replay.close() }
 }
@@ -54,7 +56,7 @@ describe('recorded transport fidelity', () => {
     await assertFidelity(loadRecordedProof())
   })
 
-  it('orders simultaneous frame boundaries by ordinal even when metadata is reversed', () => {
+  it('orders simultaneous frame boundaries by ordinal even when metadata is reversed', async () => {
     const proof = loadRecordedProof()
     const selected = proof.world.recording?.frames.filter((frame) => frame.kind === 'conversation')
       .filter((frame) => frame.event !== undefined).slice(0, 2)
@@ -65,16 +67,16 @@ describe('recorded transport fidelity', () => {
       if (event === undefined || (event._tag !== 'entries' && event._tag !== 'replace')) throw new Error('Invalid captured event reference')
       return { kind: 'conversation', replace: frame.replace, items: event.items }
     })
-    const frames = captureMetadataFrames(proof, { http: [], frames: selected.map((frame) => ({ ...frame, at_ms: 100 })).reverse() })
+    const frames = await captureMetadataFrames(proof, { http: [], frames: selected.map((frame) => ({ ...frame, at_ms: 100 })).reverse() })
     expect(frames).toHaveLength(2)
     for (const [index, expectedFrame] of expected.entries()) expect(frames[index]).toMatchObject(expectedFrame)
   })
 
-  it('preserves an absent retryable field on an optional recorded error boundary', () => {
+  it('preserves an absent retryable field on an optional recorded error boundary', async () => {
     const proof = loadRecordedProof()
     const source = proof.world.recording?.frames.find((frame) => frame.kind === 'conversation')
     if (source === undefined) throw new Error('Missing captured selector')
-    const frames = captureMetadataFrames(proof, { http: [], frames: [{
+    const frames = await captureMetadataFrames(proof, { http: [], frames: [{
       kind: 'error', ordinal: 100, at_ms: 10, selector: source.selector, message: 'Recorded transport error',
     }] })
     expect(frames).toHaveLength(1)
