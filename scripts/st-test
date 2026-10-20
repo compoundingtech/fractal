@@ -21,8 +21,8 @@ create it.
 evidence-wrap, evidence-sign and evidence-verify come from the accepted base, not from the change under test.
 Commands that call cargo reach the build admission shim on PATH like any other cargo; nothing here knows about
 admission. With --push the signed notes are pushed to REMOTE after they verify, with the identity git uses for REMOTE
-(or EVIDENCE_PUSH_TOKEN if set); whether that identity may create refs/notes/evidence/* is a repository rule that
-has not been confirmed for agent seats.
+(or EVIDENCE_PUSH_TOKEN if set), as refs/tags/evidence/<tree>/<record> and refs/notes/evidence/<tree>/<record> (see
+evidence-wrap); whether that identity may create them is a repository rule that has not been confirmed for agent seats.
 
 It runs `nix develop` and `pnpm install` from the tree under test, on this machine, as this user, with the host's
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md

@@ -123,6 +123,8 @@ def main(argv):
         inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', summary['record']).split()[2]))['predicate']['observed']['inputs']
         assert inputs['workspace_clean'] == 'true' and inputs['untracked_files'] == 'true' and inputs['stage'] == 'tests', inputs
         assert git(repo, 'for-each-ref', f'refs/notes/evidence/{summary["record"]}') == '', '--out must not create a ref in the checkout'
+        assert git(repo, 'for-each-ref', f'refs/notes/evidence/{summary["tree"]}/{summary["record"]}',
+                   f'refs/tags/evidence/{summary["tree"]}/{summary["record"]}') == '', '--out must not create a ref in the checkout'
         # A job that changed a tracked file signs a tree it did not test: refused, however the facts look.
         (repo / 'a').write_text('changed by the code under test\n')
         modified = run([sys.executable, str(WRAP), '--check', 'linux-tests', '--toolchain-sha256', toolchain, '--signer', signer,
@@ -165,17 +167,20 @@ def main(argv):
         lines = log.read_text().splitlines()
         assert not any('secret-token-xyz' in l or header in l for l in lines if not l.startswith('ENV ')), 'token in an argument'
         assert any(header in l for l in lines if l.startswith('ENV ')), 'token reaches git through the environment'
-        assert git(sink, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').startswith(f'refs/notes/evidence/{git(repo, "rev-parse", "HEAD^{tree}")}/')
-        print('passed: --push sends the token through the environment, not an argument, and never prints it')
+        head_tree = git(repo, 'rev-parse', 'HEAD^{tree}')
+        record = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])['record']
+        assert git(sink, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/notes/evidence/', 'refs/tags/') == \
+            f'refs/notes/evidence/{head_tree}/{record} {record}\nrefs/tags/evidence/{head_tree}/{record} {record}'
+        print('passed: --push sends the record as a tag and a note, the token through the environment, not an argument, and never prints it')
 
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1
         git(repo, 'checkout', '--', 'a')
-        before = git(repo, 'for-each-ref', 'refs/notes/evidence/')
+        before = git(repo, 'for-each-ref', 'refs/notes/evidence/', 'refs/tags/')
         touched = wrap(['sh', '-c', 'echo x > new-file'])
         assert touched.returncode == 1 and b'changed while the command ran' in touched.stderr
         (repo / 'new-file').unlink()
-        assert git(repo, 'for-each-ref', 'refs/notes/evidence/') == before, 'a run that changed the tree must leave no note'
+        assert git(repo, 'for-each-ref', 'refs/notes/evidence/', 'refs/tags/') == before, 'a run that changed the tree must leave no note'
         print('passed: a dirty checkout and a run that changes the tree are refused, leaving no note')
 
         # The signer refuses anything it cannot recompute or that is not exactly the request shape.
