@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('r15_proof', str(ROOT / 'scripts/r15-rename-proof'))
@@ -17,6 +18,29 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_staged_npm_authority_requires_declared_path_and_pinned_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            source = 'repos/member/packages/@fixture/widget'
+            (tree / 'pnpm-source-inputs.json').write_text(json.dumps({'sourceInputPaths': [source]}))
+            (tree / 'megarepo.lock').write_text(json.dumps({
+                'members': {'member': {'commit': 'a' * 40}}}))
+            workspace = tree / 'pnpm-workspace.yaml'
+            workspace.write_text(
+                'overrides:\n  "@fixture/widget": "file:.devenv/pnpm-source-inputs/current/' + source + '"\n')
+            with patch.object(proof.subprocess, 'check_output',
+                              return_value=json.dumps({'name': '@fixture/widget'})) as read:
+                self.assertEqual(proof.staged_npm_packages(tree), {'@fixture/widget'})
+                self.assertEqual(read.call_args.args[0][-1],
+                                 'a' * 40 + ':packages/@fixture/widget/package.json')
+            with patch.object(proof.subprocess, 'check_output',
+                              return_value=json.dumps({'name': '@fixture/wrong'})):
+                with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                    proof.staged_npm_packages(tree)
+            (tree / 'pnpm-source-inputs.json').write_text('{"sourceInputPaths":[]}')
+            with self.assertRaisesRegex(ValueError, 'no declared source input'):
+                proof.staged_npm_packages(tree)
+
     def test_embedded_cargo_fixture_keys_resolve_after_script_rewrite(self):
         loader = importlib.machinery.SourceFileLoader(
             'r15_scripts_test', str(ROOT / 'scripts/r15-rename-scripts.py'))

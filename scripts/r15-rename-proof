@@ -380,6 +380,37 @@ def npm_references(text, relative, internal_scopes):
     return sorted(found.items())
 
 
+def staged_npm_packages(tree):
+    """Resolve root-owned staged packages from their immutable member commits."""
+    authority = tree / 'pnpm-source-inputs.json'
+    if not authority.is_file():
+        return set()
+    inputs = set(json.loads(authority.read_text())['sourceInputPaths'])
+    members = json.loads((tree / 'megarepo.lock').read_text())['members']
+    workspace = (tree / 'pnpm-workspace.yaml').read_text()
+    names = set()
+    for match in re.finditer(
+            r'^  "([^"]+)": "file:\.devenv/pnpm-source-inputs/current/(repos/[^"]+)"$',
+            workspace, re.M):
+        name, path = match.groups()
+        if path not in inputs:
+            raise ValueError('staged override has no declared source input: ' + path)
+        source = re.fullmatch(r'repos/([a-z0-9._-]+)/(packages/(?:@[a-z0-9._-]+/)?[a-z0-9._-]+)', path)
+        if source is None:
+            raise ValueError('invalid staged source package path: ' + path)
+        member, package_path = source.groups()
+        commit = members[member]['commit']
+        if not re.fullmatch(r'[0-9a-f]{40}', commit):
+            raise ValueError('staged member commit is not immutable: ' + member)
+        manifest = json.loads(subprocess.check_output(
+            ['git', '-C', str(ROOT / 'repos' / member), 'show',
+             commit + ':' + package_path + '/package.json'], text=True))
+        if manifest['name'] != name:
+            raise ValueError('staged override package identity mismatch: ' + path)
+        names.add(name)
+    return names
+
+
 def npm_resolution_guard(tree, old_packages, baseline_tree=None):
     files = []
     for path in sorted(tree.rglob('*')):
@@ -406,10 +437,11 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
             raise ValueError('workspace pattern has no package manifests: ' + pattern)
         members.update(matches)
     workspace = {manifests[path]['name'] for path in members if 'name' in manifests[path]}
+    staged = staged_npm_packages(tree)
     internal_scopes = {name.split('/')[0] for name in workspace | set(old_packages) if name.startswith('@')}
     isolated = {directory: {data['name']} if 'name' in data else set()
                 for directory, data in manifests.items() if directory not in members}
-    registry = set()
+    registry = set(staged)
     aliases = set()
     errors = []
     checked = 0
@@ -436,7 +468,7 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
                 name, selector = dependency.groups()
                 checked += 1
                 if ((name.split('/')[0] in internal_scopes or selector.startswith('workspace:'))
-                        and name not in workspace):
+                        and name not in workspace | staged):
                     errors.append({'path': path.relative_to(tree).as_posix(), 'reference': name,
                                    'selector': selector, 'reason': 'lock importer has no workspace package'})
         if path.name.startswith('tsconfig') and path.suffix == '.json':
@@ -458,7 +490,7 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
                 elif selector.startswith('workspace:'):
                     target = selector.removeprefix('workspace:')
                     target = npm_package(target) if target.startswith('@') or re.match(r'[a-z].*@', target) else name
-                    if target not in workspace:
+                    if target not in workspace | staged:
                         reason = 'workspace dependency has no package manifest'
                 elif selector.startswith(('file:', 'link:')):
                     target = (directory / selector.split(':', 1)[1]).resolve()
@@ -523,6 +555,7 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
                 errors.append({'path': relative, 'reason': 'historical release fragment removed'})
     return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'text_files': len(files),
             'workspace_names': sorted(workspace), 'registry_names': len(registry),
+            'staged_member_names': sorted(staged),
             'declaration_literals': declarations, 'recorded_payloads': payloads,
             'immutable_release_fragments': historical_fragments,
             'isolated_manifests': len(isolated), 'unresolved': errors}
