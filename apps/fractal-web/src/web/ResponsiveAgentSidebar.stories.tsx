@@ -42,6 +42,7 @@ const ResponsiveSidebarSurface = ({ viewport, scheme = 'dark', shortcut = true, 
     <section aria-label="Agent workspace" data-sidebar-thread="" {...stylex.props(styles.thread)}>
       <ThreadHeader title={rows.find(row => row.ref === selected)!.title} folder="local" now={storyNow} sidebarCollapsed={narrow || collapsed} sidebarToggleRef={opener} onToggleSidebar={toggle} panelOpen={false} drawerOpen={false} onTogglePanel={() => undefined} onToggleDrawer={() => undefined} />
       <article {...stylex.props(styles.article)}><h1 {...stylex.props(styles.heading)}>Review the sidebar</h1><p>Opening navigation does not move this thread. The roster remains readable in a minimum 240px drawer.</p><Aria.Button {...stylex.props(styles.button)}>Reply to this session</Aria.Button></article>
+      <Aria.DialogTrigger><Aria.Button>Open unrelated dialog</Aria.Button><Aria.Modal isDismissable><Aria.Dialog aria-label="Resize cleanup check"><Aria.Button autoFocus slot="close">Close unrelated dialog</Aria.Button></Aria.Dialog></Aria.Modal></Aria.DialogTrigger>
     </section>
     {/* The last raster row belongs to fixed chrome, matching the deployed devbar boundary. */}
     <div aria-hidden="true" data-fixed-chrome-boundary="" {...stylex.props(styles.chromeBoundary)} />
@@ -116,6 +117,58 @@ const assertResizeLifecycle = async (splitter: HTMLElement, root: HTMLElement): 
     }
   }
 }
+/** Unmounting a held dock commits its latest size and cannot steal a later modal's Escape. */
+const dragUnmountPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  const root = canvasElement.querySelector<HTMLElement>('[data-sidebar-layout-story]')!
+  const canvas = within(root), doc = root.ownerDocument
+  const splitter = canvas.getByRole('separator', { name: 'Agent sidebar width' })
+  const before = Number(splitter.getAttribute('aria-valuenow'))
+  const commits = Number(root.dataset.resizeCommits)
+  const add = doc.addEventListener, remove = doc.removeEventListener
+  const captureKeys = new Set<EventListenerOrEventListenerObject>()
+  const capture = (options: boolean | AddEventListenerOptions | EventListenerOptions | undefined) => options === true || typeof options === 'object' && options.capture === true
+  doc.addEventListener = function (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+    if (type === 'keydown' && listener && capture(options)) captureKeys.add(listener)
+    return add.call(this, type, listener, options)
+  }
+  doc.removeEventListener = function (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) {
+    if (type === 'keydown' && listener && capture(options)) captureKeys.delete(listener)
+    return remove.call(this, type, listener, options)
+  }
+  const descriptors = ['setPointerCapture', 'hasPointerCapture', 'releasePointerCapture'].map(key => [key, Object.getOwnPropertyDescriptor(splitter, key)] as const)
+  let held = false
+  Object.defineProperties(splitter, {
+    setPointerCapture: { configurable: true, value: () => { held = true } },
+    hasPointerCapture: { configurable: true, value: () => held },
+    releasePointerCapture: { configurable: true, value: () => { held = false } },
+  })
+  const pointer = (type: string, x: number) => splitter.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, button: 0, clientX: x }))
+  try {
+    pointer('pointerdown', 100); pointer('pointermove', 132)
+    await waitFor(() => expect(splitter).toHaveAttribute('aria-valuenow', String(before + 32)))
+    await expect(captureKeys.size).toBe(1)
+    await userEvent.keyboard('{Control>}b{/Control}')
+    await waitFor(() => expect(canvas.queryByRole('separator')).toBeNull())
+    await expect(held).toBe(false)
+    await expect(captureKeys.size).toBe(0)
+    await expect(Number(root.dataset.resizeCommits)).toBe(commits + 1)
+    await userEvent.click(canvas.getByRole('button', { name: 'Open unrelated dialog' }))
+    await expect(await within(doc.body).findByRole('dialog', { name: 'Resize cleanup check' })).toBeVisible()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(within(doc.body).queryByRole('dialog', { name: 'Resize cleanup check' })).toBeNull())
+    await userEvent.keyboard('{Control>}b{/Control}')
+    await expect(await canvas.findByRole('separator', { name: 'Agent sidebar width' })).toHaveAttribute('aria-valuenow', String(before + 32))
+    await expect(Number(root.dataset.resizeCommits)).toBe(commits + 1)
+    await expect(captureKeys.size).toBe(0)
+  } finally {
+    doc.addEventListener = add; doc.removeEventListener = remove
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor === undefined) Reflect.deleteProperty(splitter, key)
+      else Object.defineProperty(splitter, key, descriptor)
+    }
+  }
+}
+
 const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   await document.fonts.ready
   const root = canvasElement.querySelector<HTMLElement>('[data-sidebar-layout-story]')!
@@ -233,6 +286,7 @@ export const At900: Story = { args: { viewport: 900 }, play: drawerPlay }
 export const At1440: Story = { args: { viewport: 1440 }, play: drawerPlay }
 export const At440Light: Story = { args: { viewport: 440, scheme: 'light' }, play: drawerPlay }
 export const At1440Light: Story = { args: { viewport: 1440, scheme: 'light' }, play: drawerPlay }
+export const DragUnmountCleanup: Story = { args: { viewport: 1440 }, play: dragUnmountPlay }
 const assertFrozenTrack = (track: HTMLElement): void => {
   if (track.hasAttribute('tabindex') || track.hasAttribute('role')) throw new Error('Frozen resize track must not be focusable or interactive')
   if (getComputedStyle(track).cursor === 'col-resize' || getComputedStyle(track).cursor === 'row-resize') throw new Error('Frozen resize track must not advertise resizing')

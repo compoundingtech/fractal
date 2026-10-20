@@ -26,6 +26,9 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
   orientation?: 'vertical' | 'horizontal'
 }) {
   const canResize = Number.isFinite(min) && Number.isFinite(max) && max > min
+  const activeDrag = React.useRef<(() => void) | undefined>(undefined)
+  // Commit the last dragged size before the separator leaves the DOM; no capture listener may outlive it.
+  React.useLayoutEffect(() => () => activeDrag.current?.(), [])
   const save = React.useCallback((next: number) => {
     const clamped = Math.min(max, Math.max(min, Math.round(next)))
     onChange(clamped)
@@ -51,6 +54,7 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
     const finish = (cancelled: boolean) => {
       if (finished) return
       finished = true
+      activeDrag.current = undefined
       if (frame !== undefined) window.cancelAnimationFrame(frame)
       node.removeEventListener('pointermove', move)
       node.removeEventListener('pointerup', up)
@@ -69,6 +73,7 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
       keyEvent.stopPropagation()
       finish(true)
     }
+    activeDrag.current = () => finish(false)
     node.addEventListener('pointermove', move)
     node.addEventListener('pointerup', up)
     node.addEventListener('pointercancel', cancel)
