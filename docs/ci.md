@@ -597,14 +597,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
-  `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
+  `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
   and `.github/repo-settings.json*`.
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
-  `nix develop .#web -c bash scripts/ci-fractal-web` without evaluating the flake when the
+  `nix develop .#web -c bash scripts/ci-fractal-web` without realizing the shell's tools when the
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
@@ -657,20 +657,40 @@ workflow-level path filters. `linux-gate` does not depend on them.
   public cache) and substitute ~1.5 GB for `nix develop .#web`. `scripts/ci-web-shell fill`
   stores `nix print-dev-env .#web` and the shell's complete closure as a local `file://`
   binary cache in the Actions cache entry
-  `fractal-web-shell1-<os>-<hashFiles flake.nix, flake.lock, nix/**/*.nix, scripts/ci-web-shell>`.
-  `run` copies the closure into the store (`--no-check-sigs`) and runs the lanes in the sourced
-  `print-dev-env` script, which is the environment `nix develop -c` builds; the flake is not
-  evaluated (about 36 s including the cache download). The script writes `env.sh` and
-  `shell-path` last, so a partial fill is a miss; a miss, a failed copy or a closure that is
-  incomplete after an eviction makes `run` exec `nix develop .#web -c ...` instead, which only
-  costs time. A change to any keyed file gives a new key, so a pull request that edits one never
-  reads main's entry.
+  `fractal-web-shell3-<os>-<source-and-web-lock-inputs-digest>`.
+  `scripts/ci-web-shell key` combines `hashFiles` of `nix/web-shell.nix`,
+  `nix/web-shell-inputs.json`, `scripts/ci-web-shell` and `scripts/ci-web-shell-inputs.jq`
+  with a canonical jq projection of the declared inputs' transitive lock graph and system.
+  `web-shell-inputs.json` declares the root inputs once; the projection resolves follows,
+  includes each complete `locked` object and edges, and rejects malformed references or cycles.
+  Metadata such as `lastModified` is retained because flake `sourceInfo` exposes it to
+  derivations (including the upstream Genie's build stamp); future locked fields also affect keys.
+  Root Rust inputs and unrelated `flake.nix` edits do not invalidate the entry.
+  `nix eval --offline --json --file flake.nix inputs` reads only literal declarations;
+  the projection hashes web roots and every root referenced by their `follows`, so changed
+  web URLs, follows or flake flags invalidate even with an unchanged lock file.
+  This offline extraction never loads the flake graph, fetches inputs or evaluates IFD.
+  Its elapsed time is logged separately in every key step.
+  Declared follows must match their lock references; a stale follows lock fails closed
+  rather than omitting a newly introduced dependency from the projection.
+  Both publishers and consumers use the same exact key, with no prefix restoration.
+  `run` requires matching `cache-key` metadata and complete identity/environment records,
+  copies the closure into the store (`--no-check-sigs`) and sources `print-dev-env`.
+  Missing/mismatched metadata or a failed copy falls back to `nix develop .#web -c ...`.
+  Protected-main upkeep restores the exact entry and evaluates the current drvPath before
+  saving. A different drvPath for an existing key fails loudly, naming both paths and
+  requiring the missing path/input to be added to the hashed set and the format bumped.
+  A restored entry missing identity/environment metadata fails verification and is treated
+  as a miss for fill; only this explicit miss is recoverable, never a derivation mismatch.
+  Identity drift is checked before completeness, so missing environment metadata cannot
+  turn a recorded derivation mismatch into a recoverable miss.
+  The shell imports no repository source beyond its hashed definition: its upstream
+  Buck capability IFD reads immutable effect-utils/dependency sources covered by the lock
+  projection, not this checkout. Removing that upstream IFD is independent of cache lookup.
   Trust: the restored entry supplies store paths and a shell script that the job executes.
-  Main upkeep's `warm-fractal-web` fills the main-scoped entry. A pull request that misses saves
-  the entry under its own ref, only for `pull_request` events; this is a deliberate exception
-  to "only Main upkeep saves caches". GitHub scopes an entry to its ref, so a pull request's own
-  entry is only ever read by that pull request: no other pull request, merge group or main reads
-  it. Merge groups never save and wait for Main upkeep's entry.
+  Only protected-main upkeep's `warm-fractal-web` fills the main-scoped entry. Pull requests
+  and merge groups restore that exact entry when available and never publish shell copies.
+  A new web identity uses the cold-shell fallback until main upkeep has populated its entry.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
@@ -679,6 +699,12 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
+`scripts/ci-web-shell-test`, run in web execution, uses cheap lock/source fixtures to prove
+Rust-only flake and lock changes preserve the key while web input changes invalidate it.
+It also enforces the shell's declared argument/import/file-read boundary and upkeep's
+same-key derivation invariant. Each fractal-web job starts with one runner identity line containing
+CPU model, available core count, runner name and region when exposed by the environment
+(`unknown` otherwise).
 
 `scripts/web-skip-proof` prints the signed-skip decision for the web checks in the
 selection design's format (`check=… decision=skip|run key=… proof=… inputs_sha256=…
@@ -952,6 +978,30 @@ What only exists or only means something with them:
   `st3::test_support::optimized_build()` (the executable is under `target/release/`).
 - Tests already behind `#[cfg(debug_assertions)]` (`ding/tests.rs`, `empty_authority_guard.rs`)
   run only in the assertions profile.
+
+### Daily long lanes
+
+`daily-long.yml` runs the long lanes once a day on `main` (05:07 UTC, and on dispatch): the
+lanes that need a VM, real sockets across daemon restarts, or an older st3. Today those are
+`isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat`, plus the shared test
+producer they consume. Each runs exactly as Workspace CI runs it, because both workflows build
+the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
+`.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
+no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no
+dependency cache that the warm-up jobs own. Its checks are named `daily-*`, so nothing on `main`
+looks like a required check.
+
+Two `daily-tests` shards run the whole selection the Workspace CI shards run, from the same test
+archive, with `ST_TEST_SCALE=full`. A test that keeps a smaller population, fewer proptest cases or a
+fixed seed on pull requests reads that variable and runs its original size here. Each one says in a
+comment why its invariant holds at the smaller size. Run one locally at full scale with
+`ST_TEST_SCALE=full cargo nextest run ...`.
+
+The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
+step and failed steps to the run summary. On red, it opens or comments on the one open issue
+titled `Daily long-lane run failed`. The workflow is not a required check and changes no pull
+request or merge-group check. A lane leaves the required set only after this run is green and the
+contract test that replaces it per pull request exists; that is a ruleset change, made separately.
 
 ### Compiler-cache measurement
 
@@ -1290,6 +1340,7 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
+| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 

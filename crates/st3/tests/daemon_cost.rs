@@ -226,6 +226,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/conversation-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
+    ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
+    ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
@@ -1705,7 +1709,7 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
 /// Every route `api.rs` and the route families above it declare is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let mut declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let mut declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
     declared.extend(family_routes(include_str!(
         "../../st3-api-mailbox/src/api/mailbox.rs"
     )));
@@ -2007,7 +2011,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_cost_route_inventory_resolves_the_client_read_forward_constant() {
-    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
     assert!(declared.contains("POST /v1/internal/client-read/forward"));
 }
 

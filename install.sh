@@ -1,7 +1,8 @@
 #!/bin/sh
 # Download a verified Small Talk release, install it, and open st.
 set -eu
-base=${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/smalltalk/releases}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+base=${FRACTAL_INSTALL_RELEASE_BASE_URL-${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/smalltalk/releases}}
 tag=
 edge=false
 bin_dir=${HOME:?HOME is required}/.local/bin

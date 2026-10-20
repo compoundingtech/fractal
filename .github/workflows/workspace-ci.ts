@@ -251,8 +251,9 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
-printf 'ST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" >> "$GITHUB_ENV"`,
+printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
   },
   {
     name: 'Prepare provider component fixtures',
@@ -308,6 +309,124 @@ export const testArchiveConsumerSetup = [
 /** Everything a job that runs the workspace tests needs. */
 export const workspacePreparationSteps = [...commonSetupSteps, ...testBuildSteps]
 
+// Namespace offers nested virtualization on linux/amd64. Prove /dev/kvm can create a VM before
+// anything else; QEMU is also forbidden to fall back to emulation (nix/transport-isolation-vm.nix).
+const kvmProbe = `if [ ! -e /dev/kvm ]; then
+  echo "::error::/dev/kvm is missing: this runner profile offers no nested virtualization"
+  exit 1
+fi
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then sudo chmod 0666 /dev/kvm; fi
+python3 - <<'EOF'
+import fcntl, os
+fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+version = fcntl.ioctl(fd, 0xAE00)  # KVM_GET_API_VERSION
+vm = fcntl.ioctl(fd, 0xAE01, 0)  # KVM_CREATE_VM
+assert version == 12, f"unexpected KVM API version {version}"
+os.close(vm)
+print(f"KVM API {version}: created a VM")
+EOF
+printf 'KVM: \\x60%s\\x60, CPU virtualization flag %s, VM creation succeeded\\n\\n| Phase | Elapsed |\\n| --- | --- |\\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"`
+
+/**
+ * The shared test producer (job id `linux-test-build`, which its consumers name in `needs`): compile each
+ * selected target group once and publish this run attempt's exact-source archives.
+ */
+export const testArchiveProducer = {
+  env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
+  outputs: {
+    'artifact-id': '${{ steps.upload.outputs.artifact-id }}',
+    'manifest-sha256': '${{ steps.archive.outputs.manifest-sha256 }}',
+    'producer-attempt': '${{ steps.archive.outputs.producer-attempt }}',
+  },
+  steps: [
+    ...workspacePreparationSteps.slice(0, -2).map((step: any) =>
+      step.id === 'cargo-cache' || step.id === 'nix-cache'
+        ? { ...step, with: { ...step.with, key: step.with.key.replace('${{ github.job }}', 'linux-tests'),
+            'restore-keys': step.with['restore-keys'].replaceAll('${{ github.job }}', 'linux-tests') } }
+        : step),
+    { ...nixDevelopStep({ name: 'Compile and archive each selected target group once',
+      command: ['bash', '-c', 'python3 scripts/ci-build-memory before || echo "::warning::build memory baseline unavailable"; exec python3 scripts/ci-test-archive build'] }), id: 'archive' },
+    { name: 'Report test-build memory after success',
+      env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
+      run: 'python3 scripts/ci-build-memory after',
+      if: "${{ success() && steps.archive.outcome == 'success' }}", 'continue-on-error': true },
+    {
+      name: 'Publish this run attempt’s exact-source test archives', id: 'upload',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: 'linux-test-archives-${{ github.run_attempt }}',
+        path: '${{ runner.temp }}/ci-test-archives', 'if-no-files-found': 'error',
+        'compression-level': 0, 'retention-days': 3 },
+    },
+    ...buildSnapshotSave,
+    { name: 'Report test-build memory after failure',
+      env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
+      run: 'mkdir -p "$RUNNER_TEMP/ci-build-memory"; (free -m || echo "::warning::free unavailable") | tee "$RUNNER_TEMP/ci-build-memory/free.txt"; python3 scripts/ci-build-memory failure',
+      if: "${{ failure() && steps.archive.outcome == 'failure' }}", 'continue-on-error': true },
+    { name: 'Retain test-build memory evidence',
+      if: "${{ always() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}", 'continue-on-error': true,
+      uses: 'actions/upload-artifact@v4', with: { name: 'test-build-memory-${{ github.run_attempt }}',
+        path: '${{ runner.temp }}/ci-build-memory', 'if-no-files-found': 'warn', 'retention-days': 3 } },
+  ],
+}
+
+/**
+ * isolation-vm's work: st2's transport-isolation cascade tests need a real systemd user manager, which the
+ * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
+ * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
+ */
+export const isolationVmSteps = [
+  // The VM's own warm cache also contains its driver; keep that primary entry.
+  ...testArchiveConsumerSetup.map((step: any) => step.id === 'nix-cache' ? nixCacheStep : step),
+  { name: 'Probe KVM', id: 'kvm', run: kvmProbe },
+  {
+    name: 'Build the NixOS VM test driver',
+    id: 'driver',
+    run: `start=$SECONDS
+nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
+printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  {
+    name: 'Run all three systemd-scope tests in the VM',
+    id: 'vmtest',
+    env: {
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      FRACTAL_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
+      FRACTAL_ISOLATION_WORKSPACE: '${{ github.workspace }}',
+      FRACTAL_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
+      FRACTAL_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
+      ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
+      ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
+      ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
+      ST_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
+    },
+    run: `start=$SECONDS
+mkdir -p "$RUNNER_TEMP/vm-out"
+"$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
+jq -r '"| VM boot | \\(.boot_seconds)s |\\n| systemd-scope tests in VM (extract and run) | \\(.test_seconds)s |"' "\${FRACTAL_ISOLATION_TIMINGS-\${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
+printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  // The sekrets gateway needs real Unix users, a login session and a user manager: a second
+  // VM runs it with this st binary (nix/sekrets-vm.nix).
+  {
+    name: 'Build the sekrets VM test driver',
+    id: 'sekrets-driver',
+    run: `start=$SECONDS
+nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
+printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  {
+    name: 'Run the sekrets gateway test in the VM',
+    id: 'sekrets-test',
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    env: { FRACTAL_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}', ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
+    run: `start=$SECONDS
+mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
+"$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
+printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+]
+
 /**
  * The stage jobs of `linux-gate` sign their own result. Every step is fail-soft and runs after the
  * stage's logs are retained, so signing can never change a stage's outcome. The signer scripts come
@@ -337,12 +456,18 @@ export const evidenceStageJob = (name: string) =>
  * not run (for example because the job was covered by a trusted note) makes no note.
  */
 export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
+/**
+ * A lane that is skipped whenever its paths are untouched (fractal-web), so it has no evidence gate of its own and a
+ * run that did not execute it makes no note for it. It is signed shard by shard (scripts/ci-evidence-signing STEP_INPUTS).
+ */
+export const evidenceLaneNames = ['fractal-web'] as const
 export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 
 // The evidence gate(s) that can cover a job's work. A job that took such a skip must not sign a note for a run in
 // which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
 // job's log or step outcomes say. Every gate named here must be in that job's `needs`.
 export const gateSkipExpression = (name: string): string => {
+  if ((evidenceLaneNames as readonly string[]).includes(name)) return 'false'
   const gates = name === 'mail-redelivery-canaries'
     ? ['linux-gate', 'mail-redelivery-canaries']
     : (evidenceStepNames as readonly string[]).includes(name) ? [name] : ['linux-gate']
@@ -351,7 +476,7 @@ export const gateSkipExpression = (name: string): string => {
 
 const signingCore = (
   name: string,
-  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean },
+  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean; artifact?: string },
 ): unknown[] => {
   const soft = { if: 'always()', 'continue-on-error': true } as const
   // Without a toolchain override the wrapper asks nix for the dev shell derivation; jobs without a
@@ -416,7 +541,7 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
       ...soft,
       name: 'Retain the signed note',
       uses: 'actions/upload-artifact@v4',
-      with: { name: `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+      with: { name: facts.artifact ?? `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
     },
   ]
 }
@@ -427,15 +552,23 @@ export const evidenceStageSteps = (name: string, stage: string): unknown[] =>
     : []
 
 /** Signing steps for a job made of steps: `command` names what they stand for, `steps` maps step ids to outcomes. */
-export const evidenceStepSteps = (name: string, command: string[], stepIds: string[]): unknown[] =>
+export const evidenceStepSteps = (
+  name: string,
+  command: string[],
+  stepIds: string[],
+  /** `inputs`: extra named inputs for the note (values may be expressions); `artifact`: a distinct name per matrix shard. */
+  options: { inputs?: Record<string, string>; artifact?: string } = {},
+): unknown[] =>
   signingCore(name, {
     helper: 'step-facts',
     env: {
       STEP_CHECK: name,
       STEP_COMMAND: JSON.stringify(command),
       STEP_OUTCOMES: '{' + stepIds.map((id) => `"${id}":"\${{ steps.${id}.outcome }}"`).join(',') + '}',
+      ...(options.inputs ? { STEP_INPUTS: '{' + Object.entries(options.inputs).map(([key, value]) => `"${key}":"${value}"`).join(',') + '}' } : {}),
     },
     toolchain: true,
+    artifact: options.artifact,
   })
 
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
@@ -528,14 +661,35 @@ export const fractalWebStoreCache = {
 } as const
 
 /**
- * The web lane's devShell closure and `print-dev-env` script (scripts/ci-web-shell), so the job
- * neither fetches and evaluates the flake's inputs nor builds the shell's local tools. The key names
- * every file `.#web` is built from; main upkeep fills it and a pull request that misses fills its own.
+ * The web lane's complete devShell closure and `print-dev-env` script. Hash its isolated
+ * definition and declared transitive lock inputs; only upkeep evaluates/verifies its derivation.
+ * No prefix restore: a different identity is always a miss. Only protected-main upkeep fills it.
  */
-export const fractalWebShellEnv = { CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell' } as const
+export const fractalWebShellEnv = {
+  CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell',
+  CI_WEB_SHELL_KEY: '${{ steps.web-shell-key.outputs.key }}',
+} as const
 export const fractalWebShellCache = {
   path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
-  key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}",
+  key: '${{ steps.web-shell-key.outputs.key }}',
+} as const
+
+export const fractalWebShellKeyStep = {
+  name: 'Identify the web shell inputs',
+  id: 'web-shell-key',
+  shell: 'bash',
+  env: {
+    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}",
+  },
+  run: 'bash scripts/ci-web-shell key',
+} as const
+
+export const fractalWebRunnerStep = {
+  name: 'Identify runner hardware',
+  shell: 'bash',
+  env: { CI_RUNNER_NAME: '${{ runner.name }}' },
+  run: `cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+printf 'Runner: name=%s region=%s cpu=%s cores=%s\\n' "$CI_RUNNER_NAME" "\${RUNNER_REGION:-\${AWS_REGION:-\${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"`,
 } as const
 
 const embeddedPython = (script: string) =>
@@ -563,6 +717,7 @@ export const fractalWebJobs = {
       'kit-inputs': '${{ steps.detect.outputs.kit-inputs }}',
     },
     steps: [
+      fractalWebRunnerStep,
       {
         name: 'Detect web-relevant changes',
         id: 'detect',
@@ -587,14 +742,21 @@ export const fractalWebJobs = {
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
+    // Signs its own shard's result in shadow (the evidence-signing environment is for the merge queue, main and
+    // same-repository pull requests only); the steps after the run are fail-soft.
+    ...evidenceStepJob(),
     defaults: { run: { shell: 'bash' } },
     steps: [
+      fractalWebRunnerStep,
       { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+      { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },
+      fractalWebShellKeyStep,
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
       { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
       {
         name: 'Run the fractal-web lanes and dependency license check',
+        id: 'run',
         shell: 'bash',
         // Falls back to `nix develop .#web` when the closure is not cached.
         run: 'bash scripts/ci-web-shell run bash scripts/ci-fractal-web',
@@ -628,11 +790,17 @@ export const fractalWebJobs = {
           'if-no-files-found': 'ignore',
         },
       },
-      // Only a pull request can read what it saves; merge groups wait for main upkeep's entry.
-      ...[
-        { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
-        { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
-      ].map((step) => ({ ...step, 'continue-on-error': true, if: "${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}" })),
+      // One note per shard: the test sets it ran and which shard of how many are recorded, so a later policy can
+      // require the whole set. The note says only that this shard's run step ended as it did.
+      ...evidenceStepSteps('fractal-web', ['bash', 'scripts/ci-fractal-web'], ['run'], {
+        artifact: 'evidence-note-fractal-web-shard-${{ matrix.shard }}',
+        inputs: {
+          kit_shard: '${{ matrix.shard }}',
+          kit_shard_count: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
+          kit_play_set: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
+          app_test_set: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
+        },
+      }),
     ],
   },
   'fractal-web': {
@@ -644,6 +812,7 @@ export const fractalWebJobs = {
     'timeout-minutes': 1,
     permissions: { contents: 'read' },
     steps: [
+      fractalWebRunnerStep,
       {
         name: 'Require detection and, for web changes, execution',
         env: {

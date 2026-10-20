@@ -30,10 +30,10 @@ use std::collections::BTreeSet;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use smallclaims::fifo::{Kind, Queue};
-pub use st3_api::api::client_v0::*;
-pub use st3_api::api::client_v0::{ClientSession, CollectionSubscribe, EXACT_AGENT_SELECTOR_CAPABILITY, EventsQuery, Fence, LOCAL_PERSON_HEADER, NATIVE_PAGE_CURSOR_PREFIX, TIMELINE_PAGE_BYTE_BUDGET, acting_party, administrative_get, agent_todo_value, assistant_mission_list_cards_with};
-pub use st3_api::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
-pub use st3_api::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
+pub use st3_api_core::api::client_v0::*;
+pub use st3_api_core::api::client_v0::{ClientSession, CollectionSubscribe, EXACT_AGENT_SELECTOR_CAPABILITY, EventsQuery, Fence, LOCAL_PERSON_HEADER, NATIVE_PAGE_CURSOR_PREFIX, TIMELINE_PAGE_BYTE_BUDGET, acting_party, administrative_get, agent_todo_value, assistant_mission_list_cards_with};
+pub use st3_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
+pub use st3_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
 pub mod collection_ivm;
@@ -165,6 +165,10 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversations", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
@@ -17433,7 +17437,7 @@ mission "example/zero-run" state="ready" {
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let native = conversation_blocks::read(&source, &session, &session_id).unwrap();
         let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
-        let messages = native_session_messages(&state, &snapshot, &session_id, managed.as_ref()).unwrap();
+        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
         assert_eq!(native[0]["sequence"], messages[1]["sequence"]);
         assert_eq!(native[0]["timestamp"], messages[1]["timestamp"]);
         let expected = vec![messages[0].clone(), native[1].clone(),
@@ -21087,6 +21091,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
         };

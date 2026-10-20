@@ -1954,7 +1954,7 @@ def wire_crate(args, top_mods):
     dev_section = daemon_text.split("[dev-dependencies]")[1]
     lines = {m.group(1): ln for ln in section.split("\n") if (m := re.match(r"^([A-Za-z0-9_-]+)\s*=", ln))}
     devlines = {m.group(1): ln for ln in dev_section.split("\n") if (m := re.match(r"^([A-Za-z0-9_-]+)\s*=", ln))}
-    skip = {"st3-github", "st3-peer", "st3-reconcile", "st3-api", lower}
+    skip = {"st3-github", "st3-peer", "st3-reconcile", "st3-api-core", lower}
     out = ["[package]", f'name = "{crate}"', 'version = "0.1.0"', 'edition = "2024"',
            f'description = "{args.description}"', 'license = "MIT"', "", "[features]",
            "# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.",
@@ -2249,7 +2249,7 @@ def fix_once(diags, roots, traits):
         t = Path(f).read_text()
         add = []
         crate_name = f.split("/")[1] if f.startswith("crates/") else ""
-        chain = {"st3-store", "st3-github", "st3-peer", "st3-reconcile", "st3-api", "st3-daemon"} | {r.split("/")[1] for r in roots if r.startswith("crates/")}
+        chain = {"st3-store", "st3-github", "st3-peer", "st3-reconcile", "st3-api-core", "st3-api-mailbox", "st3-api-client-v0", "st3-daemon"} | {r.split("/")[1] for r in roots if r.startswith("crates/")}
         root, dev_only = ("crate", False) if crate_name in chain else _daemon_root(crate_name)
         for leaf in sorted({u.split("::")[-1] for u in uses}):
             if re.search(r"\buse [^;]*\b" + leaf + r"\b", t):
