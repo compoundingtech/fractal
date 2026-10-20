@@ -173,6 +173,9 @@ export const scenarioStoryCheck = <TArgs extends Args>(
 ): ScenarioStoryCheckResult => {
   const storyParameter: ScenarioStoryParameter | undefined = story.parameters?.scenario
   const metaParameter: ScenarioStoryParameter | undefined = meta.parameters?.scenario
+  if (storyParameter !== undefined && metaParameter !== undefined && storyParameter._tag !== metaParameter._tag) {
+    throw new Error('a story must not change scenario mode from meta; declare the mode per story or split the meta')
+  }
   const parameter = storyParameter?._tag === 'slices' && metaParameter?._tag === 'slices'
     ? { ...metaParameter, ...storyParameter }
     : storyParameter ?? metaParameter

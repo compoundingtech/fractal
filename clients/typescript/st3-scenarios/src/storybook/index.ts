@@ -37,7 +37,7 @@ export const validateScenarioDeclaration = (
   if (parameter._tag !== 'contract-fixture' && parameter._tag !== 'primitive') throw new Error('parameters.scenario requires a valid _tag')
   if (typeof parameter.reason !== 'string' || parameter.reason.trim().length === 0) throw new Error(`scenario ${parameter._tag} requires a reason`)
   if ('slices' in parameter || 'world' in parameter || 'invariant' in parameter || 'tracker' in parameter || 'window' in parameter) {
-    throw new Error(`scenario ${parameter._tag} cannot declare slices or scenario configuration`)
+    throw new Error(`scenario ${parameter._tag} cannot declare slices or scenario configuration; a story must not change scenario mode from meta; declare the mode per story or split the meta`)
   }
   const scenarioArgs = Object.keys(defaultVariants).filter((key) => key in args)
   if (scenarioArgs.length > 0) throw new Error(`scenario ${parameter._tag} cannot supply scenario args: ${scenarioArgs.join(', ')}`)

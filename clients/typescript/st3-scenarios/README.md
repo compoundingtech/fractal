@@ -67,6 +67,12 @@ scenario args or catalog loaders and cannot read `useScenarioSlice`; missing dec
 the story check. Contract-fixture stories must convert when scenario data can express them.
 The check reports exempt stories with reasons; consumers pin their count. Arbitrary fixture
 imports and closure data cannot be detected by the kit and require review.
+Declare the mode on the meta for all its stories, or declare it per story. A story must never
+change the mode inherited from its meta, including switching between exemption modes.
+For mixed-mode modules, remove the meta's scenario declaration and declare each story's mode,
+or split the meta. Same-mode slice configuration overrides remain supported. Storybook merges
+parameters recursively, so changing a slice meta to an exemption retains forbidden slice
+configuration; both the checker and runtime validator explain this mode-change error.
 
 The preview entry contains only toolbar/control metadata. Its async loaders import worlds and
 recordings only for `slices` stories; install both loaders and decorator. The small static

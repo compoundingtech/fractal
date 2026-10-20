@@ -1033,6 +1033,13 @@ Every story declares exactly one scenario mode, inherited from its meta or decla
 component props seam cannot yet express. Such a story must convert to `slices` once scenario
 data can express it. `primitive` covers data-independent visual or interaction primitives.
 Both exemptions require a nonempty, specific reason; they are not alternate domain-data sources.
+Declare the mode per meta or per story; a story must not change its meta's mode, even between
+`primitive` and `contract-fixture`. Mixed-mode modules must declare every story's mode without
+a meta-level scenario declaration, or split the meta. Same-mode slice configuration overrides
+are allowed. The checker compares the meta and story declarations before composing them and
+rejects differing modes with: “a story must not change scenario mode from meta; declare the mode
+per story or split the meta”. Storybook recursively merges parameters; an exemption that retains
+slice configuration is still rejected by the runtime validator, with the same mode-change cause.
 
 The consumption check enforces both directions: a missing or invalid declaration fails; a slice
 story must consume its declared slices, and an exempt story must not declare slices or scenario

@@ -236,6 +236,40 @@ describe('Storybook scenario binding', () => {
     expect(() => scenarioStoryCheck({ render: () => <p>Fixed</p>, parameters: { scenario: { slices: [] } } }, {})).toThrow('requires a valid _tag')
   })
 
+  it.each(['contract-fixture', 'primitive'] as const)('rejects changing between slices and %s modes in either direction', (_tag) => {
+    const render = () => <p>Fixed</p>
+    const slices = { _tag: 'slices', slices: ['roster'] } as const
+    const exemption = { _tag, reason: 'Isolated visual contract' }
+    const message = 'a story must not change scenario mode from meta; declare the mode per story or split the meta'
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: exemption } }, {
+      parameters: { scenario: slices },
+    })).toThrow(message)
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: slices } }, {
+      parameters: { scenario: exemption },
+    })).toThrow(message)
+  })
+
+  it('rejects changing exemption modes between meta and story', () => {
+    const render = () => <p>Fixed</p>
+    for (const [metaMode, storyMode] of [['primitive', 'contract-fixture'], ['contract-fixture', 'primitive']] as const) {
+      expect(() => scenarioStoryCheck({ render, parameters: {
+        scenario: { _tag: storyMode, reason: 'Story contract' },
+      } }, { parameters: {
+        scenario: { _tag: metaMode, reason: 'Meta contract' },
+      } })).toThrow('a story must not change scenario mode from meta; declare the mode per story or split the meta')
+    }
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('explains recursively merged slices under a %s runtime exemption', (_tag) => {
+    const Composed = composeStory({
+      render: () => <p>Fixed</p>,
+      parameters: { scenario: { _tag, reason: 'Isolated visual contract' } },
+    }, {
+      parameters: { scenario: { _tag: 'slices', slices: ['roster'] } },
+    }, { decorators: [withScenario] })
+    expect(() => renderToStaticMarkup(<Composed />)).toThrow('cannot declare slices or scenario configuration; a story must not change scenario mode from meta; declare the mode per story or split the meta')
+  })
+
   it.each(['contract-fixture', 'primitive'] as const)('reports the reasoned %s exemption without scenario checks', (_tag) => {
     const exemption = { _tag, reason: 'Isolated visual contract, not scenario data' }
     const result = scenarioStoryCheck({ render: () => <p>Fixture</p>, parameters: { scenario: exemption } }, {}, { scenario: 'not-a-world' })
