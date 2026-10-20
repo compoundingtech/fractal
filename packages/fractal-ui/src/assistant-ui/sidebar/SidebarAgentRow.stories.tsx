@@ -451,9 +451,24 @@ export const LayoutCWidths: Story = {
     await expect(expanded!.querySelector('[data-row-field="last-activity"]')).not.toBeNull()
     // Expanded rows move every metric to line two; the time column keeps only the hover quick Open host.
     await expect(expanded!.querySelector('[data-row-column="time"] [data-row-field]')).toBeNull()
-    await userEvent.hover(expanded!)
-    await expect(await within(expanded!).findByRole('button', { name: 'Open Sample session' })).toBeInTheDocument()
-    await userEvent.unhover(expanded!)
+    // Both densities retain a usable quick-open target, including rows with no reported metrics.
+    for (const row of [compact!, compactUnknown!, expanded!, expandedUnknown!]) {
+      await userEvent.hover(row)
+      const button = await within(row).findByRole('button', { name: /^Open / })
+      const assertHitBox = async () => {
+        const rect = button.getBoundingClientRect()
+        await expect(rect.width).toBeGreaterThanOrEqual(24)
+        await expect(rect.height).toBeGreaterThanOrEqual(24)
+      }
+      await assertHitBox()
+      // Negative control: the collapsed absolute-only host must fail this geometry proof.
+      const host = row.querySelector<HTMLElement>('[data-row-column="time"]')!
+      host.style.minHeight = '0'
+      host.style.height = '2px'
+      try { await expect(assertHitBox()).rejects.toThrow() }
+      finally { host.style.removeProperty('min-height'); host.style.removeProperty('height') }
+      await userEvent.unhover(row)
+    }
     await expect(rowDescription(within(expanded!).getByRole('button', { name: /^Sample session/ }))).toContain('24h API-equivalent spend including subagents: $1.84')
     // Unreported windows and occupancy are omitted, never rendered as a placeholder or zero.
     const unknownMetrics = expandedUnknown!.querySelector('[data-row-column="metrics"]')!
