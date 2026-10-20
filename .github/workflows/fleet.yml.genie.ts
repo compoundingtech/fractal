@@ -449,7 +449,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 1, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         ...nixEvidenceSteps(check),
       ],
