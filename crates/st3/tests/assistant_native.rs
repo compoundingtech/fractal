@@ -16,8 +16,8 @@ use st3_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantM
     PersonStepParameters};
 use tower::ServiceExt as _;
 
-const OWNER: &str = "person/ada";
-const AGENT: &str = "agent/native.worker";
+const OWNER: &str = "person/robin";
+const AGENT: &str = "agent/example-worker.local";
 const POLICY: &str = "custom.client.assistant.v1.policy";
 
 
@@ -52,7 +52,7 @@ impl Harness {
         let store = Arc::new(Store::open(&root.path().join("store.sqlite"), "assistant-native").unwrap());
         store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69").unwrap();
         store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
-        let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
+        let source = format!("version 2\nagent \"example-worker.local\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
         store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
         // There is no daemon task in this harness. Register its production publication
         // surfaces; pair() explicitly refreshes them before reading the summary.
@@ -81,9 +81,13 @@ impl Harness {
     }
 
     async fn pair(&self) -> AssistantPairedSession {
+        self.pair_principal(AssistantPrincipal::Chatgpt).await
+    }
+
+    async fn pair_principal(&self, principal: AssistantPrincipal) -> AssistantPairedSession {
         let begin = AssistantPairingBegin {
-            api_version: st3_client::API_VERSION.into(), device_name: "Native ChatGPT test".into(),
-            assistant_id: AssistantPrincipal::Chatgpt, scopes: scopes(), expires_in_seconds: Some(3600),
+            api_version: st3_client::API_VERSION.into(), device_name: "Native assistant test".into(),
+            assistant_id: principal.clone(), scopes: scopes(), expires_in_seconds: Some(3600),
             disclosure_consent: true, consent_evidence: "Isolated integration disclosure consent".into(),
             minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow),
         };
@@ -98,7 +102,7 @@ impl Harness {
         assert_eq!(status, StatusCode::OK, "{value}");
         let paired: AssistantPairedSession = serde_json::from_value(value["value"].clone()).unwrap();
         assert_eq!(paired.grant.issuer, OWNER);
-        assert_eq!(paired.principal, AssistantPrincipal::Chatgpt);
+        assert_eq!(paired.principal, principal);
         assert_eq!(paired.grant.minimal_read_mode, AssistantMinimalReadMode::CallerBoundAllow);
         if self.state.store.published_attention_list().is_none() {
             let (status, unavailable) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
@@ -474,9 +478,10 @@ async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_re
 
 #[tokio::test]
 async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation() {
-    use st3::store::assistant_write::{AssistantWriteAuthorization, authorize};
+    use st3::store::assistant_write::{AssistantWriteAuthorization, authorize_grant};
+    for principal in [AssistantPrincipal::Chatgpt, AssistantPrincipal::Mcp] {
     let h = Harness::new();
-    let paired = h.pair().await;
+    let paired = h.pair_principal(principal.clone()).await;
     let grant = h.policy(&paired, scopes()).await;
     let authorization = AssistantWriteAuthorization {
         grant_subject: grant_subject(&paired), actor: paired.session_actor.clone(), owner: OWNER.into(),
@@ -485,30 +490,34 @@ async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation(
     };
     let mut connection = rusqlite::Connection::open(h.root.path().join("store.sqlite")).unwrap();
     let transaction = connection.transaction().unwrap();
-    authorize(&transaction, "assistant-native", &authorization).unwrap();
+    authorize_grant(&transaction, "assistant-native", &authorization).unwrap();
     let mut wrong_actor = authorization.clone();
     wrong_actor.actor = "assistant/chatgpt/session/another-key".into();
-    assert!(authorize(&transaction, "assistant-native", &wrong_actor).is_err());
-    assert!(authorize(&transaction, "another-member", &authorization).is_err());
+    assert!(authorize_grant(&transaction, "assistant-native", &wrong_actor).is_err());
+    assert!(authorize_grant(&transaction, "another-member", &authorization).is_err());
+    let mut wrong_principal = authorization.clone();
+    let other = if principal == AssistantPrincipal::Mcp { "assistant/chatgpt" } else { "assistant/mcp" };
+    wrong_principal.actor = format!("{other}/session/{}", paired.grant.id);
+    assert!(authorize_grant(&transaction, "assistant-native", &wrong_principal).is_err());
     let mut missing_scope = authorization.clone();
     missing_scope.scope = "write.assistant.unknown".into();
-    assert!(authorize(&transaction, "assistant-native", &missing_scope).is_err());
-    for recipient in ["agent/does-not-exist", "daemon/runtime", OWNER] {
+    assert!(authorize_grant(&transaction, "assistant-native", &missing_scope).is_err());
+    for recipient in ["agent/example-missing", "daemon/runtime", OWNER] {
         let invalid_recipient = AssistantWriteAuthorization { recipient: Some(recipient.into()), ..authorization.clone() };
-        assert!(authorize(&transaction, "assistant-native", &invalid_recipient).is_err(), "{recipient}");
+        assert!(authorize_grant(&transaction, "assistant-native", &invalid_recipient).is_err(), "{recipient}");
     }
     transaction.rollback().unwrap();
     h.policy(&paired, scopes()).await;
     let transaction = connection.transaction().unwrap();
-    assert!(authorize(&transaction, "assistant-native", &authorization).is_err(), "Authentication captured before a policy change cannot authorize the writer transaction");
+    assert!(authorize_grant(&transaction, "assistant-native", &authorization).is_err(), "Authentication captured before a policy change cannot authorize the writer transaction");
     transaction.rollback().unwrap();
     let current = h.policy(&paired, scopes()).await;
     let current = AssistantWriteAuthorization { policy_revision: current.policy_revision, ..authorization };
     h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
     let transaction = connection.transaction().unwrap();
-    assert!(authorize(&transaction, "assistant-native", &current).is_err(), "Revocation must be visible at the mutation transaction, not just HTTP ingress");
+    assert!(authorize_grant(&transaction, "assistant-native", &current).is_err(), "Revocation must be visible at the mutation transaction, not just HTTP ingress");
     transaction.rollback().unwrap();
-    let expired = h.pair().await;
+    let expired = h.pair_principal(principal).await;
     let grant = h.policy(&expired, scopes()).await;
     let expired_authorization = AssistantWriteAuthorization {
         grant_subject: grant_subject(&expired), actor: expired.session_actor.clone(), owner: OWNER.into(),
@@ -517,7 +526,8 @@ async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation(
     };
     h.expire(&expired);
     let transaction = connection.transaction().unwrap();
-    assert!(authorize(&transaction, "assistant-native", &expired_authorization).is_err());
+    assert!(authorize_grant(&transaction, "assistant-native", &expired_authorization).is_err());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -605,7 +615,7 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
 #[tokio::test]
 async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
     let h = Harness::new();
-    let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"authored-review\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to \"person/ada\"; goal \"Review release\"; }} }}", h.root.path());
+    let source = format!("version 2\nagent \"example-worker.local\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"authored-review\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to \"person/robin\"; goal \"Review release\"; }} }}", h.root.path());
     h.state.store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "authored-review").unwrap();
     let run = h.state.store.create_mission_run(&st3::model::MissionRunRequest {
         mission: "authored-review".into(), revision: None, workspace: h.root.path().to_string_lossy().into_owned(),
@@ -630,10 +640,122 @@ async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
 async fn assistant_message_recipient_must_be_a_currently_declared_agent() {
     let h = Harness::new();
     let paired = h.pair().await;
-    for (index, recipient) in ["agent/does-not-exist", "daemon/runtime", "person/ada"].iter().enumerate() {
+    for (index, recipient) in ["agent/example-missing", "daemon/runtime", "person/robin"].iter().enumerate() {
         let message = h.message(recipient, &format!("invalid-recipient-{index}")).await;
         let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
         assert!(!status.is_success(), "{recipient}: {denied}");
         assert!(h.state.store.messages(Some(recipient), true).unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn mcp_grant_reads_sends_and_answers_with_its_own_principal_then_revokes() {
+    let h = Harness::new();
+    let ask = h.ask("mcp-answer", "Choose through MCP");
+    let paired = h.pair_principal(AssistantPrincipal::Mcp).await;
+    assert_eq!(paired.grant.principal, AssistantPrincipal::Mcp);
+    assert!(paired.session_actor.starts_with("assistant/mcp/session/"));
+    for projection in ["summary", "attention", "agents", "missions"] {
+        let (status, value) = h.assistant(&paired, "GET",
+            &format!("/v1/client/assistant/{projection}"), &()).await;
+        assert_eq!(status, StatusCode::OK, "{projection}: {value}");
+    }
+    let message = h.message(AGENT, "mcp-send").await;
+    let (status, result) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let subject = result["value"]["affected_ids"].as_array().unwrap().iter()
+        .filter_map(Value::as_str).find(|id| id.starts_with("message/")).unwrap();
+    let claim = h.state.store.latest_claim(subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("assistant/mcp"));
+    assert_eq!(claim.body["fields"]["from"], "assistant/mcp");
+    assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
+    assert_eq!(claim.body["fields"]["assistant_grant_id"], paired.grant.id);
+    assert_eq!(claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(claim.body["fields"]["assistant_session_actor"], paired.session_actor);
+    let stored = h.state.store.message(subject).unwrap().unwrap();
+    let projected = serde_json::to_value(&stored).unwrap();
+    assert_eq!(projected["from"], "assistant/mcp");
+    assert_eq!(projected["sender_class"], "external-assistant");
+    assert_eq!(projected["assistant_grant_id"], paired.grant.id);
+    let metadata = stored.assistant_metadata().unwrap();
+    let notification = st_drivers::ding::st3_notification_with_metadata(
+        &stored.subject, &stored.from, &stored.to, stored.title.as_deref(), &stored.content,
+        &"0".repeat(64), st_drivers::ding::NotificationMetadata {
+            attachments: &[], assistant: Some(&metadata),
+        },
+    );
+    assert!(notification.contains("from=\"assistant/mcp\""));
+    assert!(notification.contains(st_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
+    assert!(!notification.contains(st_drivers::ding::PERSON_REPLY_INSTRUCTION));
+    let answer = h.answer(&ask, "yes", "mcp-answer").await;
+    let (status, result) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let durable = h.state.store.step_run(&ask).unwrap().unwrap();
+    assert_eq!(durable.person_answers[0].respondent, "assistant/mcp");
+    assert_eq!(durable.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(durable.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
+    let claim = h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("assistant/mcp"));
+    h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
+    for projection in ["summary", "attention", "agents", "missions"] {
+        let (status, denial) = h.assistant(&paired, "GET",
+            &format!("/v1/client/assistant/{projection}"), &()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denial}");
+    }
+    let message = h.message(AGENT, "mcp-revoked-send").await;
+    let (status, denial) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denial}");
+}
+
+#[tokio::test]
+async fn mcp_principal_cannot_be_forged_or_override_a_chatgpt_grant() {
+    let h = Harness::new();
+    for principal in [AssistantPrincipal::Chatgpt, AssistantPrincipal::Mcp] {
+        let paired = h.pair_principal(principal.clone()).await;
+        let expected = match principal {
+            AssistantPrincipal::Chatgpt => "assistant/chatgpt",
+            AssistantPrincipal::Mcp => "assistant/mcp",
+        };
+        assert!(paired.session_actor.starts_with(&format!("{expected}/session/")));
+        for field in ["principal", "from", "actor", "assistant_session_actor"] {
+            let mut message = serde_json::to_value(h.message(AGENT,
+                &format!("principal-forgery-{principal:?}-{field}")).await).unwrap();
+            message["parameters"][field] = json!(if principal == AssistantPrincipal::Mcp {
+                "assistant/chatgpt"
+            } else {
+                "assistant/mcp"
+            });
+            let (status, denial) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{denial}");
+        }
+    }
+    let (status, denial) = request(&h.local, "POST", "/v1/messages", None, Some(OWNER),
+        &json!({"idempotency_key":"mcp-native-forged","from":"assistant/mcp","to":AGENT,"content":"forged"})).await;
+    assert!(!status.is_success(), "{denial}");
+    let (status, denial) = request(&h.local, "POST", "/v1/claims", None, Some(OWNER),
+        &json!({"subject":"message/mcp-forged","kind":"message.sent","actor":"assistant/mcp",
+            "fields":{"from":"assistant/mcp","to":AGENT,"content":"forged","status":"sent"}})).await;
+    assert!(!status.is_success(), "{denial}");
+    assert_eq!(denial["code"], "assistant-send-refused");
+    assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn read_only_mcp_grant_cannot_send_or_answer_and_appends_no_mutation() {
+    let h = Harness::new();
+    let ask = h.ask("mcp-read-only-answer", "Read only must not answer");
+    let paired = h.pair_principal(AssistantPrincipal::Mcp).await;
+    h.policy(&paired, scopes().into_iter().filter(|scope|
+        *scope != AssistantScope::Messages && *scope != AssistantScope::Answers).collect()).await;
+    let message = h.message(AGENT, "mcp-read-only-send").await;
+    let answer = h.answer(&ask, "yes", "mcp-read-only-answer").await;
+    let before = h.state.store.index().unwrap();
+    for action in [message, answer] {
+        let (status, denial) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &action).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denial}");
+        assert_eq!(h.state.store.index().unwrap(), before, "Denied read-only writes must not append claims");
+    }
+    assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+    assert!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.is_empty());
+    assert!(h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().is_none());
 }

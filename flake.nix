@@ -670,18 +670,23 @@
           pname = "st-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          cargoBuildFlags = [ "-p" "st-chatgpt" "--bins" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
           meta = {
-            description = "Standalone Small Talk ChatGPT MCP adapter";
+            description = "Standalone Small Talk ChatGPT and local stdio MCP adapters";
             homepage = "https://github.com/compoundingtech/smalltalk";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-chatgpt";
           };
         };
+
+        # Both entrypoints share one crate and build; only nix run's default differs.
+        stMcp = stChatgpt.overrideAttrs (old: {
+          meta = old.meta // { mainProgram = "st-mcp"; };
+        });
 
         stFabricAdapter = pkgs.rustPlatform.buildRustPackage {
           pname = "st-fabric-adapter";
@@ -997,6 +1002,7 @@
         packages.st3 = st3;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
+        packages.st-mcp = stMcp;
         packages.st-fabric-adapter = stFabricAdapter;
         packages.st3-migrate = st3;
         packages.small-talk = st3;

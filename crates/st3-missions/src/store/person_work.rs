@@ -196,7 +196,7 @@ fn send_answer_tx(
     let body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
         "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
     if let Some(authorization) = authorization {
-        append_claim_tx_with_assistant_answer(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
+        append_claim_tx_with_assistant_answer(tx, origin, &subject, "message.sent", Some(authorization.principal()), &body,
             &[], None, Some(authorization)).map_err(claim_append_error)?;
         return Ok(());
     }
@@ -377,7 +377,7 @@ impl PersonWorkStore for Store {
             }
             // Checked after authority and fences below; a replay compares against it first.
             let resolved = resolve_answer(ask.as_ref(), input, cancel);
-            let response_actor = if authorization.is_some() { "assistant/chatgpt" } else { input.actor.as_str() };
+            let response_actor = authorization.map_or(input.actor.as_str(), |authorization| authorization.principal());
             let kind = if cancel { "work.person-cancelled" } else { "work.person-done" };
             if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-hce55d0ab3402 owner=st3_missions::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
                 actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2

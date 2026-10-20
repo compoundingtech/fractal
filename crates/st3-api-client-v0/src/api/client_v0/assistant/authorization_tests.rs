@@ -22,10 +22,14 @@ fn signing_key() -> Ed25519KeyPair {
 }
 
 async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
+    fixture_principal(scopes, pin_trust, PRINCIPAL).await
+}
+
+async fn fixture_principal(scopes: &[&str], pin_trust: bool, principal: &str) -> Fixture {
     let root=tempfile::tempdir().unwrap();
     let state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
-        "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":scopes,
+        "device_name":"assistant","assistant_id":principal,"scopes":scopes,
         "disclosure_consent":true,"consent_evidence":"axe:igubz7"})).unwrap();
     let Json(challenge)=begin(state.clone(),ClientSession::local(Some(OWNER)).unwrap(),request).await.unwrap();
     let device_key=signing_key();
@@ -58,7 +62,8 @@ impl Fixture {
     fn payload(&self, route: &str, query: &str) -> ReadPayload {
         let uri=format!("/v1/client/assistant/{route}{query}").parse::<axum::http::Uri>().unwrap();
         let parameters=parameters(&uri).unwrap();
-        ReadPayload {issuer:"scg/approval-host".into(),identity:"chatgpt".into(),assistant_id:PRINCIPAL.into(),
+        let principal = self.session().authority_actor;
+        ReadPayload {issuer:"scg/approval-host".into(),identity:principal.strip_prefix("assistant/").unwrap().into(),assistant_id:principal,
             grant_id:self.grant.clone(),policy_revision:self.revision,key_id:"approval-key/test".into(),
             approval_id:"approval/test".into(),execution_id:"execution/test".into(),projection:route.into(),
             max_response_bytes:parameters.get("max_response_bytes").map(|value| value.parse().unwrap()).unwrap_or(DEFAULT_RESPONSE_BYTES),
@@ -126,6 +131,30 @@ async fn assistant_all_six_reads_require_proof_even_on_native_router() {
             assert_eq!(status,StatusCode::FORBIDDEN,"{path} {value}");
             assert!(value.get("value").is_none());
         }
+    }
+}
+
+#[tokio::test]
+async fn proof_principal_and_identity_must_match_the_persisted_grant() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        let fixture = fixture_principal(SCOPES, true, principal).await;
+        let payload = fixture.payload("summary", "");
+        let parameters = payload.parameters.clone();
+        for identity_only in [false, true] {
+            let mut forged = payload.clone();
+            let other = if principal == MCP_PRINCIPAL { PRINCIPAL } else { MCP_PRINCIPAL };
+            if identity_only {
+                forged.identity = other.strip_prefix("assistant/").unwrap().into();
+            } else {
+                forged.assistant_id = other.into();
+            }
+            let authorization = ReadAuthorization { signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                fixture.attestor.sign(signing_bytes(&forged).unwrap().as_bytes()).as_ref()), payload:forged };
+            assert!(verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).is_err());
+        }
+        let authorization = ReadAuthorization { signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            fixture.attestor.sign(signing_bytes(&payload).unwrap().as_bytes()).as_ref()), payload };
+        verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).unwrap();
     }
 }
 

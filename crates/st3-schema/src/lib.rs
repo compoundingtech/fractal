@@ -457,7 +457,7 @@ impl Registry {
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
-                spec.pattern,
+                markdown_cell(&spec.pattern),
                 if spec.client_writable { "yes" } else { "no" },
                 markdown_cell(&spec.description)
             ));

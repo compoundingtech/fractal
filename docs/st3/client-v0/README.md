@@ -101,13 +101,21 @@ Revoking or expiring the pairing removes it. st does not send pushes yet.
 ### Person ask respondents
 
 Work `person_answers[].respondent` uses `SenderRef`: `agent/...`, `assistant/...`,
-`person/...`, or `step/...`. An assistant answer identifies `assistant/chatgpt` as
-the respondent, never the grant's owning person. Optional `sender_class`,
+`person/...`, or `step/...`. An assistant answer identifies its grant principal,
+`assistant/chatgpt` or `assistant/mcp`, as the respondent, never the grant's owning person. Optional `sender_class`,
 `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor` carry
 server-owned provenance separately; `assistant_owner` is a concrete `PersonId`.
 These fields do not confer person authority or replace an agent's `acted_for`
 delegation proof. `ActorRef`, `ParticipantRef`, and recipient contracts remain
 narrower; accepting an assistant respondent does not make assistants recipients.
+
+The [external-assistant operator guide](../external-assistants.md) covers explicit
+owner pairing, scoped writes, protected profiles, stdio MCP client configuration,
+and revocation. Both principals use `external-assistant` provenance and the same
+assistant-only routes; neither is a person or recipient. Historical grants that
+omit their stored principal remain ChatGPT grants. MCP pairing is an explicit
+choice, not a reinterpretation of a ChatGPT profile. Older servers that do not
+recognize `assistant/mcp` reject it; clients must not retry as a person or ChatGPT.
 
 ### Mission run timing
 

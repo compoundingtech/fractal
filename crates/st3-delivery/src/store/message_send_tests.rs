@@ -440,40 +440,42 @@ fn assistant_provenance_generic_signed_and_transaction_appends_refuse_forgery() 
 
 #[test]
 fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admission() {
+    for principal in ["assistant/chatgpt", "assistant/mcp"] {
     let store = Store::open_memory("node").unwrap();
     store.apply(&crate::graph::parse_test_intent(
-        "version 2\nagent \"eval.recipient\" { workspace \"/tmp/st-test\"; command \"true\"; restart always; }", "node").unwrap(),
-        &BTreeMap::from([("agent/eval.recipient".to_string(), Vec::new())]), "assistant-recipient").unwrap();
+        "version 2\nagent \"example-recipient.local\" { workspace \"/tmp/st-test\"; command \"true\"; restart always; }", "node").unwrap(),
+        &BTreeMap::from([("agent/example-recipient.local".to_string(), Vec::new())]), "assistant-recipient").unwrap();
     let grant_subject = "custom/client/assistant-v1-native-fixture";
     let grant_id = "assistant-grant/native-fixture";
-    let session_actor = format!("assistant/chatgpt/session/{grant_id}");
+    let session_actor = format!("{principal}/session/{grant_id}");
     store.append_claim(&ClaimInput {
         subject: grant_subject.into(), kind: "custom.client.assistant.v1.granted".into(),
-        actor: Some("person/eval".into()),
+        actor: Some("person/robin".into()),
         fields: serde_json::from_value(json!({
-            "principal":"assistant/chatgpt", "session_actor":session_actor,
-            "issuer":"person/eval", "disclosure_consent":true, "policy_revision":1,
+            "principal":principal, "session_actor":session_actor,
+            "issuer":"person/robin", "disclosure_consent":true, "policy_revision":1,
             "expires_at_unix_ms":now_ms() as u64 + 60_000,
-            "scopes":["write.assistant.messages"], "recipient_allowlist":["agent/eval.recipient"],
+            "scopes":["write.assistant.messages"], "recipient_allowlist":["agent/example-recipient.local"],
             "grant_id":grant_id
         })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
     let authorization = assistant_write::AssistantWriteAuthorization {
         grant_subject: grant_subject.into(), actor: session_actor.clone(),
-        owner: "person/eval".into(), policy_revision: 1, scope: "write.assistant.messages".into(),
-        recipient: Some("agent/eval.recipient".into()),
+        owner: "person/robin".into(), policy_revision: 1, scope: "write.assistant.messages".into(),
+        recipient: Some("agent/example-recipient.local".into()),
     };
     let mut input = request();
-    input.actor = Some("assistant/chatgpt".into());
-    input.fields.insert("from".into(), json!("assistant/chatgpt"));
+    input.actor = Some(principal.into());
+    input.fields.insert("from".into(), json!(principal));
+    input.fields.insert("to".into(), json!("agent/example-recipient.local"));
     input.fields.insert("sender_class".into(), json!("external-assistant"));
     input.fields.insert("assistant_grant_id".into(), json!("assistant-grant/caller-forged"));
     let (claim, appended) = store.append_assistant_claim_outcome(&input, &authorization).unwrap();
     assert!(appended);
-    assert_eq!(claim.actor.as_deref(), Some("assistant/chatgpt"));
-    assert_eq!(claim.body["fields"]["from"], "assistant/chatgpt");
-    assert_eq!(claim.body["fields"]["assistant_owner"], "person/eval");
+    assert_eq!(claim.actor.as_deref(), Some(principal));
+    assert_eq!(claim.body["fields"]["from"], principal);
+    assert_eq!(claim.body["fields"]["assistant_owner"], "person/robin");
     assert_eq!(claim.body["fields"]["assistant_session_actor"], session_actor);
     assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
     assert_eq!(claim.body["fields"]["assistant_grant_id"], grant_id);
@@ -485,6 +487,7 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
     assert_eq!(classify_replicated_claim_with_registry(&forged, st3_schema::registry()).err().unwrap().code,
         "assistant-send-refused");
     let mut wrong_actor = input;
-    wrong_actor.actor = Some("person/intruder".into());
+    wrong_actor.actor = Some("person/other".into());
     assert_eq!(store.append_assistant_claim_outcome(&wrong_actor, &authorization).unwrap_err().code, "forbidden");
+    }
 }

@@ -254,6 +254,33 @@ fn generated_models_decode_every_stream_fixture() {
 }
 
 #[test]
+fn mcp_pairing_and_read_proofs_preserve_their_principal() {
+    let paired: Envelope<PairedSession> = decode("assistant-mcp-pairing.json");
+    let PairedSession::Assistant(session) = paired.value else {
+        panic!("MCP session decoded as person");
+    };
+    assert_eq!(session.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.issuer, "person/robin");
+    assert_eq!(
+        session.session_actor,
+        format!("assistant/mcp/session/{}", session.grant.id)
+    );
+    assert_eq!(session.session_actor, session.grant.session_actor);
+    assert!(serde_json::from_slice::<Envelope<PersonPairedSession>>(
+        &fixture("assistant-mcp-pairing.json")
+    ).is_err());
+
+    let mut proof: serde_json::Value = decode("assistant-read-authorization.json");
+    proof["payload"]["issuer"] = serde_json::json!("person/robin");
+    proof["payload"]["identity"] = serde_json::json!("mcp");
+    proof["payload"]["assistant_id"] = serde_json::json!("assistant/mcp");
+    let proof: ScgReadAuthorization = serde_json::from_value(proof).unwrap();
+    assert_eq!(proof.payload.identity, ScgReadIdentity::Mcp);
+    assert_eq!(proof.payload.assistant_id, AssistantPrincipal::Mcp);
+}
+
+#[test]
 fn assistant_pairing_is_disjoint_from_person_delegation() {
     let begin: PairingBegin = decode("assistant-pairing-begin.json");
     let PairingBegin::Assistant(request) = begin else { panic!("assistant request decoded as person"); };

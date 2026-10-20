@@ -7,6 +7,7 @@ fn disconnected_adapter() -> Adapter {
     Adapter {
         client: reqwest::Client::builder().unix_socket("/nonexistent/st-chatgpt-tests/st3-client.sock").build().unwrap(),
         bearer: "test-only-not-a-daemon-credential".into(),
+        profile: Profile::ChatGpt,
     }
 }
 
@@ -25,7 +26,7 @@ fn discovery_has_exactly_eleven_closed_tools_and_correct_hints() {
         ("st_conversation_read", true, false, false),
         ("st_message_send", false, false, true),
     ];
-    let tools = tool_definitions();
+    let tools = tool_definitions(Profile::ChatGpt);
     assert_eq!(tools.len(), expected.len());
     for (tool, (name, read, destructive, open_world)) in tools.iter().zip(expected) {
         let published = serde_json::to_value(tool).unwrap();
@@ -56,7 +57,7 @@ fn writes_publish_typed_closed_fences() {
 
 #[test]
 fn writes_publish_action_identity_constraints() {
-    for tool in tool_definitions().iter().filter(|tool| matches!(tool.name.as_ref(), "st_alert_answer" | "st_message_send")) {
+    for tool in tool_definitions(Profile::ChatGpt).iter().filter(|tool| matches!(tool.name.as_ref(), "st_alert_answer" | "st_message_send")) {
         let published = serde_json::to_value(tool).unwrap();
         let properties = &published["inputSchema"]["properties"];
         assert_eq!(properties["action_id"]["pattern"], "^action/");
@@ -71,8 +72,8 @@ fn writes_publish_action_identity_constraints() {
 
 fn send_arguments() -> Value {
     json!({"action_id":"action/test", "idempotency_key":"test-key-12345678",
-        "fence":{"snapshot_id":"snapshot/test", "subject_revisions":{"agent/recipient":"claim/test"}},
-        "to":"agent/recipient", "title":"Hello", "content":"Exact content"})
+        "fence":{"snapshot_id":"snapshot/test", "subject_revisions":{"agent/example-recipient":"claim/test"}},
+        "to":"agent/example-recipient", "title":"Hello", "content":"Exact content"})
 }
 
 #[test]
@@ -82,7 +83,7 @@ fn validation_accepts_every_published_tool_contract() {
         assert!(validate_arguments(name, &json!({"limit":1,"cursor":"opaque","max_response_bytes":16384})).is_ok());
     }
     assert!(validate_arguments("st_alert_get", &json!({"alert_id":"attention/test"})).is_ok());
-    assert!(validate_arguments("st_conversation_read", &json!({"agent_id":"agent/a","session_id":"session/a",
+    assert!(validate_arguments("st_conversation_read", &json!({"agent_id":"agent/example-reader","session_id":"session/a",
         "reference":"opaque","revision":"claim/a","start":0,"end":1,"max_response_bytes":1})).is_ok());
     assert!(validate_arguments("st_message_send", &send_arguments()).is_ok());
     assert!(validate_arguments("st_alert_answer", &json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
@@ -95,13 +96,13 @@ fn agent_selector_is_additive_discoverable_and_exact() {
     let contract = schema("st_agents_list");
     assert_eq!(contract["required"], json!([]));
     assert_eq!(contract["properties"]["agent_id"]["maxLength"], 256);
-    assert!(validate_arguments("st_agents_list", &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
-    for invalid in ["chief-of-staff", "agent/", "person/operator", "agent/private prose"] {
+    assert!(validate_arguments("st_agents_list", &json!({"agent_id":"agent/example-reader"})).is_ok());
+    for invalid in ["example-reader", "agent/", "person/robin", "agent/example-invalid prose"] {
         assert_eq!(validate_arguments("st_agents_list", &json!({"agent_id":invalid}))
             .unwrap_err()["code"], "invalid-arguments");
     }
     assert!(validate_arguments("st_agents_list", &json!({"agent_id":false})).is_err());
-    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/chief-of-staff"})).is_err());
+    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/example-reader"})).is_err());
 }
 
 fn write_arguments(name: &str) -> Value {
@@ -182,7 +183,7 @@ fn validation_rejects_open_or_untyped_nested_fences() {
     for fence in [json!(null), json!({}), json!({"snapshot_id":7}),
         json!({"snapshot_id":"s","shell":"ignored?"}),
         json!({"snapshot_id":"s","subject_revisions":[]}),
-        json!({"snapshot_id":"s","subject_revisions":{"agent/a":42}})] {
+        json!({"snapshot_id":"s","subject_revisions":{"agent/example-reader":42}})] {
         let mut args = send_arguments();
         args["fence"] = fence;
         assert_eq!(validate_arguments("st_message_send", &args).unwrap_err()["code"], "invalid-arguments");
@@ -199,10 +200,10 @@ fn validation_rejects_open_or_untyped_nested_fences() {
 fn bounded_read_cases() -> Vec<(&'static str, &'static str, Value)> {
     vec![
         ("st_conversations_list", "conversations", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
-        ("st_conversation_detail", "conversation-detail", json!({"agent_id":"agent/a","max_response_bytes":16384})),
-        ("st_conversation_timeline", "conversation-timeline", json!({"agent_id":"agent/a","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
-        ("st_conversation_search", "conversation-search", json!({"text":"hello +&? café","agent_id":"agent/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
-        ("st_conversation_read", "conversation-content", json!({"agent_id":"agent/a","session_id":"session/a","reference":"content/a +&?","revision":"revision/a","start":0,"end":12,"max_response_bytes":16384})),
+        ("st_conversation_detail", "conversation-detail", json!({"agent_id":"agent/example-reader","max_response_bytes":16384})),
+        ("st_conversation_timeline", "conversation-timeline", json!({"agent_id":"agent/example-reader","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
+        ("st_conversation_search", "conversation-search", json!({"text":"hello +&? café","agent_id":"agent/example-reader","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
+        ("st_conversation_read", "conversation-content", json!({"agent_id":"agent/example-reader","session_id":"session/a","reference":"content/a +&?","revision":"revision/a","start":0,"end":12,"max_response_bytes":16384})),
     ]
 }
 
@@ -220,10 +221,10 @@ fn bounded_reads_validate_exact_fields_required_selectors_and_budgets() {
             ("max_response_bytes", json!(0)),
             ("max_response_bytes", json!(16385)),
             ("max_response_bytes", json!("4096")),
-            ("person", json!("person/operator")),
+            ("person", json!("person/robin")),
             ("environment", json!(true)),
             ("sender", json!("assistant/chatgpt")),
-            ("recipient", json!("agent/a")),
+            ("recipient", json!("agent/example-recipient")),
         ] {
             let mut invalid = args.clone();
             invalid[key] = value;
@@ -236,7 +237,7 @@ fn bounded_reads_validate_exact_fields_required_selectors_and_budgets() {
         }
     }
     assert!(validate_arguments("st_conversations_list", &json!({})).is_ok());
-    assert!(validate_arguments("st_conversation_timeline", &json!({"agent_id":"agent/a"})).is_ok());
+    assert!(validate_arguments("st_conversation_timeline", &json!({"agent_id":"agent/example-reader"})).is_ok());
     assert!(validate_arguments("st_conversation_search", &json!({"text":"hello"})).is_ok());
 }
 
@@ -268,6 +269,7 @@ async fn bounded_reads_dispatch_exact_get_routes_queries_and_bearer_and_preserve
     let adapter = Adapter {
         client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
         bearer: "test-only-read-credential".into(),
+        profile: Profile::ChatGpt,
     };
     for (name, route, args) in bounded_read_cases() {
         assert_eq!(call(&adapter, name, &args).await.unwrap(), expected, "{name}");
@@ -295,6 +297,7 @@ async fn bounded_read_budget_denials_remain_incomplete_errors() {
     let adapter = Adapter {
         client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
         bearer: "test-only-read-credential".into(),
+        profile: Profile::ChatGpt,
     };
     let result = call(&adapter, "st_conversations_list", &json!({"max_response_bytes":1})).await;
     server.abort();
@@ -333,6 +336,7 @@ async fn alert_answer_maps_to_work_done_and_returns_direct_action_result_unchang
     let adapter = Adapter {
         client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
         bearer: "test-only-answer-credential".into(),
+        profile: Profile::ChatGpt,
     };
     let arguments = json!({
         "action_id":"action/answer", "idempotency_key":"answer-key-0000001",
@@ -434,7 +438,7 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
         }));
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
     let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(),
-        bearer: "BEARER_SECRET_SENTINEL".into() };
+        bearer: "BEARER_SECRET_SENTINEL".into(), profile: Profile::ChatGpt };
     assert_eq!(call(&adapter, "st_alerts_list", &json!({"cursor":"CURSOR_SECRET_SENTINEL"})).await.unwrap()["request_id"], id);
     let mut args = send_arguments();
     args["content"] = json!("ARGUMENT_CONTENT_SENTINEL");
@@ -476,7 +480,7 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
             (StatusCode::PAYLOAD_TOO_LARGE, r#"{"code":"response-budget-exceeded","message":"BUDGET_CONTENT_SENTINEL"}"#)
         }));
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
-    let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(), bearer: "test".into() };
+    let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(), bearer: "test".into(), profile: Profile::ChatGpt };
     assert_eq!(call(&adapter, "st_alerts_list", &json!({})).await.unwrap_err()["code"], "invalid-daemon-response");
     assert_eq!(call(&adapter, "st_missions_list", &json!({})).await.unwrap_err()["code"], "incomplete");
     assert_eq!(call(&disconnected_adapter(), "st_alerts_list", &json!({})).await.unwrap_err()["code"], "unavailable");
@@ -497,4 +501,233 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
     assert!(text.contains("outcome=\"cancelled\""), "{text}");
     assert!(!text.contains("SENTINEL"), "{text}");
     server.abort();
+}
+
+#[test]
+fn profiles_pin_server_identity_and_legacy_discovery_bytes() {
+    assert_eq!(Profile::ChatGpt.server_name(), "st-chatgpt");
+    assert_eq!(Profile::ChatGpt.assistant_principal(), "assistant/chatgpt");
+    assert_eq!(Profile::Mcp.server_name(), "st");
+    assert_eq!(Profile::Mcp.assistant_principal(), "assistant/mcp");
+    let legacy: Vec<Value> = TOOLS.iter().map(|(name, description, read)| {
+        // This is the exact pre-profile tools/list serialization contract.
+        json!({"name":name,"description":description,"inputSchema":schema(name),
+            "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer",
+                "idempotentHint":true,"openWorldHint":*name=="st_message_send"}})
+    }).collect();
+    let actual = serde_json::to_value(tool_definitions(Profile::ChatGpt)).unwrap();
+    assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&legacy).unwrap());
+    let mcp = serde_json::to_value(tool_definitions(Profile::Mcp)).unwrap();
+    for (old, new) in actual.as_array().unwrap().iter().zip(mcp.as_array().unwrap()) {
+        assert!(old.get("outputSchema").is_none());
+        assert_eq!(old["name"], new["name"]);
+        assert_eq!(old["inputSchema"], new["inputSchema"]);
+        assert_eq!(old["annotations"], new["annotations"]);
+        assert!(!new["description"].as_str().unwrap().contains("ChatGPT"));
+    }
+}
+
+#[test]
+fn all_eleven_mcp_output_schemas_pin_envelopes_and_value_contracts() {
+    let expected = [
+        ("st_alerts_list", Some("page"), vec!["kind","items","page"]),
+        ("st_alert_get", None, vec!["id","episode","kind","title","detail","request"]),
+        ("st_alert_answer", Some("action-result"), vec!["kind","action_id","status"]),
+        ("st_missions_list", Some("page"), vec!["kind","items","page"]),
+        ("st_agents_list", Some("page"), vec!["kind","items","page"]),
+        ("st_conversations_list", Some("page"), vec!["kind","items","page"]),
+        ("st_conversation_detail", Some("conversation-detail"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
+        ("st_conversation_timeline", Some("conversation-timeline"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
+        ("st_conversation_search", Some("conversation-search"), vec!["kind","items","page"]),
+        ("st_conversation_read", Some("assistant-conversation-content"), vec!["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]),
+        ("st_message_send", Some("action-result"), vec!["kind","action_id","status"]),
+    ];
+    let tools = tool_definitions(Profile::Mcp);
+    assert_eq!(tools.len(), expected.len());
+    for (tool, (name, kind, required)) in tools.into_iter().zip(expected) {
+        let tool = serde_json::to_value(tool).unwrap();
+        assert_eq!(tool["name"], name);
+        let output = &tool["outputSchema"];
+        assert_eq!(output["type"], "object");
+        assert_eq!(output["title"], format!("{name} result"));
+        let branches = output["oneOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["required"], json!(["api_version","request_id","snapshot","value"]));
+        assert_eq!(branches[0]["properties"]["api_version"], json!({"const":"st3.client.v0"}));
+        assert_eq!(branches[0]["properties"]["request_id"], json!({"type":"string"}));
+        let value = &branches[0]["properties"]["value"];
+        assert_eq!(value["type"], "object");
+        assert_eq!(value["required"], json!(required));
+        if let Some(kind) = kind { assert_eq!(value["properties"]["kind"], json!({"const":kind})); }
+        assert_eq!(branches[1], json!({"type":"object","properties":{
+            "code":{"enum":["unknown-tool","invalid-arguments","unavailable","invalid-daemon-response","incomplete","daemon-denied"]},
+            "message":{"type":"string"},"http_status":{"type":"integer"},"daemon":{}
+        },"required":["code"],"additionalProperties":false}));
+        if value["properties"].get("page").is_some() {
+            assert_eq!(value["properties"]["items"], json!({"type":"array","items":{"type":"object"}}));
+            assert_eq!(value["properties"]["page"]["required"], json!(["limit","has_more","next_cursor"]));
+        }
+    }
+}
+
+#[test]
+fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
+    for (value, error) in [
+        (json!({"api_version":"st3.client.v0","request_id":"request/example",
+            "snapshot":{"id":"snapshot/example","host_id":"host/example","store_index":1},
+            "value":{"kind":"page","items":[],"page":{"limit":1,"has_more":false,"next_cursor":null}}}), false),
+        (json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}), true),
+        (json!({"code":"incomplete","http_status":413,"daemon":{"code":"response-budget-exceeded"}}), true),
+        (json!({"code":"daemon-denied","http_status":403,"daemon":{"code":"forbidden"}}), true),
+        (json!({"code":"unavailable","message":"The paired st daemon is unavailable."}), true),
+        (json!({"code":"invalid-daemon-response"}), true),
+        (json!({"code":"unknown-tool"}), true),
+    ] {
+        let legacy = serde_json::to_value(tool_result(Profile::ChatGpt, value.clone(), error)).unwrap();
+        // Pin the wire fields independently of rmcp's result constructors.
+        let mut expected = json!({"resultType":"complete","content":[{"type":"text","text":value.to_string()}],"isError":error});
+        assert_eq!(serde_json::to_vec(&legacy).unwrap(), serde_json::to_vec(&expected).unwrap());
+        assert!(legacy.get("structuredContent").is_none());
+        let mcp = serde_json::to_value(tool_result(Profile::Mcp, value.clone(), error)).unwrap();
+        expected["structuredContent"] = value.clone();
+        assert_eq!(mcp, expected);
+        assert_eq!(mcp["isError"], error);
+        assert_eq!(mcp["content"][0]["text"], value.to_string());
+        assert_eq!(mcp["structuredContent"], value);
+    }
+}
+
+#[tokio::test]
+async fn mcp_dispatches_all_eleven_tools_over_only_the_existing_gateway_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("st3-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let envelope = json!({"api_version":"st3.client.v0","request_id":"request/example",
+        "snapshot":{"id":"snapshot/example","host_id":"host/example","store_index":1},
+        "value":{"kind":"page","items":[],"page":{"limit":1,"has_more":false,"next_cursor":null}}});
+    let response = envelope.clone();
+    let (sent, mut received) = tokio::sync::mpsc::channel(1);
+    let gateway = Router::new().fallback(
+        move |method: axum::http::Method, uri: axum::http::Uri,
+              headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let sent = sent.clone();
+            let response = response.clone();
+            async move {
+                sent.send((method, uri, headers, body)).await.unwrap();
+                axum::Json(response)
+            }
+        });
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let adapter = Adapter { client:reqwest::Client::builder().unix_socket(socket).build().unwrap(),
+        bearer:"test-only-mcp-credential".into(), profile:Profile::Mcp };
+    let cases = [
+        ("st_alerts_list","attention-rich",json!({})),
+        ("st_alert_get","attention-content",json!({"alert_id":"alert/example"})),
+        ("st_alert_answer","propose",json!({"action_id":"action/example-answer","idempotency_key":"example-answer-key",
+            "fence":{"snapshot_id":"snapshot/example"},"alert_id":"alert/example","episode":"claim/example","option":"yes","summary":"Approved"})),
+        ("st_missions_list","missions-rich",json!({})),
+        ("st_agents_list","agents-rich",json!({"agent_id":"agent/example-reader"})),
+        ("st_conversations_list","conversations",json!({})),
+        ("st_conversation_detail","conversation-detail",json!({"agent_id":"agent/example-reader"})),
+        ("st_conversation_timeline","conversation-timeline",json!({"agent_id":"agent/example-reader","session_id":"session/example"})),
+        ("st_conversation_search","conversation-search",json!({"text":"example"})),
+        ("st_conversation_read","conversation-content",json!({"agent_id":"agent/example-reader","session_id":"session/example",
+            "reference":"content/example","revision":"revision/example","start":0,"end":1})),
+        ("st_message_send","propose",json!({"action_id":"action/example-message","idempotency_key":"example-message-key",
+            "fence":{"snapshot_id":"snapshot/example"},"to":"agent/example-recipient","title":"Example","content":"Exact example"})),
+    ];
+    for (name, route, args) in cases {
+        let result = call(&adapter, name, &args).await.unwrap();
+        assert_eq!(result, envelope);
+        let published = serde_json::to_value(tool_result(Profile::Mcp, result, false)).unwrap();
+        assert_eq!(published["structuredContent"], envelope);
+        assert_eq!(published["content"][0]["text"], envelope.to_string());
+        let (method, uri, headers, body) = received.recv().await.unwrap();
+        assert_eq!(uri.path(), format!("/v1/client/assistant/{route}"));
+        assert_eq!(headers["authorization"], "Bearer test-only-mcp-credential");
+        if route == "propose" {
+            assert_eq!(method, axum::http::Method::POST);
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["type"], if name == "st_alert_answer" {"work.done"} else {"message.send"});
+            assert_eq!(body["id"], args["action_id"]);
+            assert_eq!(body["idempotency_key"], args["idempotency_key"]);
+            assert_eq!(body["fence"], args["fence"]);
+            assert!(body.get("principal").is_none());
+        } else {
+            assert_eq!(method, axum::http::Method::GET);
+            assert!(body.is_empty());
+        }
+    }
+    server.abort();
+}
+
+#[test]
+fn mcp_uses_the_same_bounded_raw_token_file_and_gateway_socket_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let credential = dir.path().join("credential");
+    std::fs::write(&credential, "test-only-mcp-token\n").unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let adapter = Adapter::with_profile(&dir.path().join("st3-client.sock"), &credential, Profile::Mcp).unwrap();
+    assert_eq!(adapter.profile, Profile::Mcp);
+    assert_eq!(adapter.bearer, "test-only-mcp-token");
+    assert!(Adapter::with_profile(&dir.path().join("st3.sock"), &credential, Profile::Mcp).is_err());
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(Adapter::with_profile(&dir.path().join("st3-client.sock"), &credential, Profile::Mcp).is_err());
+}
+
+#[tokio::test]
+async fn both_profiles_preserve_gateway_write_denials_without_claiming_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("st3-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    // Scope authorization belongs to the daemon, not the adapter. This gateway
+    // response exercises pass-through, not issuance or real grant admission.
+    let denial = json!({"code":"forbidden","message":"missing required scope"});
+    let response = denial.clone();
+    let (sent, mut received) = tokio::sync::mpsc::channel(1);
+    let gateway = Router::new().route("/v1/client/assistant/propose", axum::routing::post(
+        move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            let response = response.clone();
+            async move {
+                sent.send((headers, body)).await.unwrap();
+                (StatusCode::FORBIDDEN, axum::Json(response))
+            }
+        },
+    ));
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    for profile in [Profile::ChatGpt, Profile::Mcp] {
+        let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket.as_path()).build().unwrap(),
+            bearer: "test-only-read-credential".into(), profile };
+        for name in ["st_alert_answer", "st_message_send"] {
+            let arguments = write_arguments(name);
+            let error = call(&adapter, name, &arguments).await.unwrap_err();
+            assert_eq!(error, json!({"code":"daemon-denied","http_status":403,"daemon":denial}));
+            let published = serde_json::to_value(tool_result(profile, error.clone(), true)).unwrap();
+            assert_eq!(published["isError"], true);
+            assert_eq!(published["content"][0]["text"], error.to_string());
+            if profile == Profile::Mcp { assert_eq!(published["structuredContent"], error); }
+            else { assert!(published.get("structuredContent").is_none()); }
+            let (headers, body) = received.recv().await.unwrap();
+            assert_eq!(headers["authorization"], "Bearer test-only-read-credential");
+            assert!(body.get("principal").is_none());
+            assert!(body.get("scopes").is_none());
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_telemetry_has_no_chatgpt_wording() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+        .with_writer(logs.clone()).finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    let mut adapter = disconnected_adapter();
+    adapter.profile = Profile::Mcp;
+    assert_eq!(adapter.get_info().server_info.name, "st");
+    assert_eq!(call(&adapter, "unknown", &json!({})).await.unwrap_err()["code"], "unknown-tool");
+    let text = logs.text();
+    assert!(text.contains("MCP tool call finished"), "{text}");
+    assert!(!text.contains("ChatGPT"), "{text}");
 }

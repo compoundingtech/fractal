@@ -24,6 +24,7 @@
     { "file": "assistant-pairing-begin.json", "definition": "PairingBegin" },
     { "file": "assistant-pairing-challenge.json", "definition": "Envelope" },
     { "file": "assistant-pairing.json", "definition": "Envelope" },
+    { "file": "assistant-mcp-pairing.json", "definition": "Envelope" },
     { "file": "assistant-grant-policy.json", "definition": "AssistantGrantPolicy" },
     { "file": "assistant-read-trust.json", "definition": "AssistantReadTrustRequest" },
     { "file": "assistant-read-authorization.json", "definition": "ScgReadAuthorization" },

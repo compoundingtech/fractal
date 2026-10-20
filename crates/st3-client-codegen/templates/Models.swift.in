@@ -746,7 +746,7 @@ public enum PairedSession: Codable, Sendable {
     private enum KindKeys: String, CodingKey { case kind }
 }
 public struct PersonPairedSession: Codable, Sendable { public let kind: String; public let deviceID: String; public let personID: String; public let sessionActor: String; public let credential: String; public let scopes: [String]; public let expiresAt: String; public let deviceKeyChain: [String]?; public let deviceKeyProofs: [JSONValue]?; public let personRootKeyProof: JSONValue?; enum CodingKeys: String, CodingKey { case kind, deviceID = "device_id", personID = "person_id", sessionActor = "session_actor", credential, scopes, expiresAt = "expires_at", deviceKeyChain = "device_key_chain", deviceKeyProofs = "device_key_proofs", personRootKeyProof = "person_root_key_proof" } }
-public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt" }
+public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt"; case mcp = "assistant/mcp" }
 public enum AssistantSenderClass: String, Codable, Sendable { case externalAssistant = "external-assistant" }
 public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
@@ -835,7 +835,7 @@ public enum AssistantContentRequest: Codable, Sendable, Equatable {
     }
 }
 public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content", conversations, conversationDetail = "conversation-detail", conversationTimeline = "conversation-timeline", conversationSearch = "conversation-search" }
-public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt }
+public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt, mcp }
 /// Signed by the pinned attestor (Ed25519) over UTF-8 `st3.scg-read.v1\n` + canonical JSON of this payload.
 public struct ScgReadAuthorizationPayload: Codable, Sendable, Equatable {
     public let issuer, grantID, keyID, approvalID, executionID, requestDigest, nonce: String

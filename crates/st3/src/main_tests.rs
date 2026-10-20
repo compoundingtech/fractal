@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn assistant_pairing_principal_defaults_to_chatgpt_and_accepts_mcp() {
+    for (flag, expected) in [
+        (None, AssistantPrincipal::Chatgpt),
+        (Some("assistant/chatgpt"), AssistantPrincipal::Chatgpt),
+        (Some("assistant/mcp"), AssistantPrincipal::Mcp),
+    ] {
+        let cli = Cli::try_parse_from(
+            ["st", "devices", "--as", "person/robin", "pair", "--assistant"]
+                .into_iter().chain(flag),
+        ).unwrap();
+        assert!(matches!(cli.command, Command::Devices {
+            command: DevicesCommand::Pair { assistant: Some(principal), .. }, ..
+        } if principal == expected));
+    }
+    assert!(Cli::try_parse_from([
+        "st", "devices", "--as", "person/robin", "pair", "--assistant", "assistant/forged",
+    ]).is_err());
+}
+
+#[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
     assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([

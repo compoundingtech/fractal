@@ -6,16 +6,58 @@ use rmcp::transport::streamable_http_server::{StreamableHttpService, StreamableH
 use serde_json::{Value, json};
 use std::{io::{self, Read}, path::Path, os::unix::fs::{OpenOptionsExt, MetadataExt}};
 
+pub mod cli;
+
+/// Wire-compatible adapter profiles. Authority always comes from the paired
+/// credential's daemon grant, never from this local presentation setting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Profile {
+    server_name: &'static str,
+    assistant_principal: &'static str,
+    tool_descriptions: &'static [(&'static str, &'static str)],
+    structured_output: bool,
+}
+impl Profile {
+    // Keep profile selection spelled consistently with the original variants.
+    #[allow(non_upper_case_globals)]
+    pub const ChatGpt: Self = Self {
+        server_name: "st-chatgpt",
+        assistant_principal: "assistant/chatgpt",
+        tool_descriptions: &[],
+        structured_output: false,
+    };
+    #[allow(non_upper_case_globals)]
+    pub const Mcp: Self = Self {
+        server_name: "st",
+        assistant_principal: "assistant/mcp",
+        tool_descriptions: &[
+            ("st_message_send", "Send one exact message to an existing agent under write.assistant.messages and the paired assistant/mcp grant. Obtain human confirmation before calling. Person recipients are refused."),
+            ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers and the paired assistant/mcp grant using the alert's current episode and fence. Obtain human confirmation before calling."),
+        ],
+        structured_output: true,
+    };
+    pub const fn server_name(self) -> &'static str { self.server_name }
+    pub const fn assistant_principal(self) -> &'static str { self.assistant_principal }
+    const fn structured_output(self) -> bool { self.structured_output }
+    fn description(self, name: &str, legacy: &'static str) -> &'static str {
+        self.tool_descriptions.iter().find(|(tool, _)| *tool == name)
+            .map_or(legacy, |(_, description)| *description)
+    }
+}
+
 #[derive(Clone)]
-pub struct Adapter { client: reqwest::Client, bearer: String }
+pub struct Adapter { client: reqwest::Client, bearer: String, profile: Profile }
 impl Adapter {
     pub fn new(socket: &Path, credential_file: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_profile(socket, credential_file, Profile::ChatGpt)
+    }
+    pub fn with_profile(socket: &Path, credential_file: &Path, profile: Profile) -> Result<Self, Box<dyn std::error::Error>> {
         if socket.file_name().and_then(|name| name.to_str()) != Some("st3-client.sock") {
             return Err("only the paired gateway st3-client.sock is permitted".into());
         }
         let bearer = read_credential(credential_file)?;
         let client = reqwest::Client::builder().unix_socket(socket).build()?;
-        Ok(Self { client, bearer })
+        Ok(Self { client, bearer, profile })
     }
 }
 
@@ -162,16 +204,85 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     }
     Ok(())
 }
-fn tool_definitions() -> Vec<Tool> {
-    TOOLS.iter().map(|(name,description,read)| serde_json::from_value(json!({
-        "name":name,"description":description,"inputSchema":schema(name),
-        "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer","idempotentHint":true,"openWorldHint":*name=="st_message_send"}
-    })).expect("static tool definition")).collect()
+fn tool_definitions(profile: Profile) -> Vec<Tool> {
+    TOOLS.iter().map(|(name,description,read)| {
+        let mut definition = json!({
+            "name":name,"description":profile.description(name, description),"inputSchema":schema(name),
+            "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer","idempotentHint":true,"openWorldHint":*name=="st_message_send"}
+        });
+        if profile.structured_output() { definition["outputSchema"] = output_schema(name); }
+        serde_json::from_value(definition).expect("static tool definition")
+    }).collect()
+}
+
+/// Describe the gateway envelope, retaining its provenance rather than wrapping it
+/// in a second success envelope. Item records remain extensible daemon contracts.
+fn output_schema(name: &str) -> Value {
+    let page = json!({"type":"object","properties":{
+        "limit":{"type":["integer","null"]},"has_more":{"type":"boolean"},
+        "next_cursor":{"type":["string","null"]},"cursor_expires_at":{"type":["string","null"]}
+    },"required":["limit","has_more","next_cursor"]});
+    let value = match name {
+        "st_alert_get" => json!({"type":"object","properties":{
+            "id":{"type":["string","null"]},"episode":{"type":["string","null"]},
+            "kind":{"type":["string","null"]},"title":{},"detail":{},"request":{}
+        },"required":["id","episode","kind","title","detail","request"]}),
+        "st_alert_answer" | "st_message_send" => json!({"type":"object","properties":{
+            "kind":{"const":"action-result"},"action_id":{"type":"string"},
+            "operation_id":{"type":"string"},"status":{"type":"string"},
+            "affected_ids":{"type":"array","items":{"type":"string"}},"snapshot_id":{"type":"string"}
+        },"required":["kind","action_id","status"]}),
+        "st_conversation_read" => json!({"type":"object","properties":{
+            "kind":{"const":"assistant-conversation-content"},"agent_id":{"type":"string"},
+            "session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},
+            "start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0},
+            "text":{"type":"string"},"returned_bytes":{"type":"integer","minimum":0},
+            "truncated":{"type":"boolean"},"next_range":{"type":["object","null"]}
+        },"required":["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]}),
+        _ => {
+            let mut result = json!({"type":"object","properties":{
+                "kind":{"type":"string"},"items":{"type":"array","items":{"type":"object"}},"page":page
+            },"required":["kind","items","page"]});
+            if matches!(name, "st_conversation_detail" | "st_conversation_timeline") {
+                result["properties"]["kind"] = json!({"const":if name == "st_conversation_detail" {"conversation-detail"} else {"conversation-timeline"}});
+                for key in ["agent_id", "session_id", "current_session_id"] {
+                    result["properties"][key] = json!({"type":"string"});
+                    result["required"].as_array_mut().expect("array").push(json!(key));
+                }
+            }
+            else {
+                result["properties"]["kind"] = json!({"const":if name == "st_conversation_search" {"conversation-search"} else {"page"}});
+            }
+            result
+        }
+    };
+    json!({"type":"object","title":format!("{name} result"),"oneOf":[
+        {"type":"object","properties":{
+            "api_version":{"const":"st3.client.v0"},"request_id":{"type":"string"},
+            "snapshot":{"type":"object","properties":{"id":{"type":"string"},"host_id":{"type":"string"},"store_index":{"type":"integer","minimum":0}}},
+            "value":value
+        },"required":["api_version","request_id","snapshot","value"]},
+        {"type":"object","properties":{
+            "code":{"enum":["unknown-tool","invalid-arguments","unavailable","invalid-daemon-response","incomplete","daemon-denied"]},
+            "message":{"type":"string"},"http_status":{"type":"integer"},"daemon":{}
+        },"required":["code"],"additionalProperties":false}
+    ]})
+}
+
+fn tool_result(profile: Profile, value: Value, error: bool) -> CallToolResult {
+    if profile.structured_output() {
+        // MCP 2025-11-25 tools/structured-content SHOULD also serialize the
+        // JSON in a TextContent block for older clients. rmcp 3.5.1's structured
+        // constructors implement that exact mirror for success and errors.
+        if error { CallToolResult::structured_error(value) } else { CallToolResult::structured(value) }
+    } else if error { CallToolResult::error(vec![ContentBlock::text(value.to_string())]) }
+    else { CallToolResult::success(vec![ContentBlock::text(value.to_string())]) }
 }
 /// Only closed tool names and locally selected codes enter telemetry. A dropped
 /// dispatch future emits cancellation too, without retaining any tool arguments.
 struct CallObservation {
     tool: &'static str,
+    profile: Profile,
     started: std::time::Instant,
     outcome: &'static str,
     code: &'static str,
@@ -179,8 +290,9 @@ struct CallObservation {
     response_bytes: Option<u64>,
 }
 impl CallObservation {
-    fn new(name: &str) -> Self {
+    fn new(name: &str, profile: Profile) -> Self {
         Self {
+            profile,
             tool: TOOLS.iter().find(|(tool, _, _)| *tool == name)
                 .map_or("unknown", |(tool, _, _)| *tool),
             started: std::time::Instant::now(),
@@ -212,11 +324,11 @@ impl Drop for CallObservation {
             daemon_request_id = self.request_id.as_deref(),
             duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
             response_bytes = self.response_bytes,
-            "ChatGPT tool call finished");
+            "{}", if self.profile.structured_output() { "MCP tool call finished" } else { "ChatGPT tool call finished" });
     }
 }
 async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value> {
-    let mut observation = CallObservation::new(name);
+    let mut observation = CallObservation::new(name, adapter.profile);
     let result = dispatch(adapter, name, args, &mut observation).await;
     observation.outcome = if result.is_ok() { "success" } else { "error" };
     observation.code = match &result {
@@ -265,22 +377,24 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
     let bytes = response.bytes().await.map_err(|_|json!({"code":"invalid-daemon-response"}))?;
     observation.response_bytes = Some(bytes.len() as u64);
     let value: Value = serde_json::from_slice(&bytes).map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    if adapter.profile.structured_output() && !value.is_object() {
+        return Err(json!({"code":"invalid-daemon-response"}));
+    }
     observation.response(&value);
     if status.is_success() {Ok(value)} else {Err(json!({"code":if status.as_u16()==413 {"incomplete"} else {"daemon-denied"},"http_status":status.as_u16(),"daemon":value}))}
 }
 impl ServerHandler for Adapter {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("st-chatgpt",env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(self.profile.server_name(),env!("CARGO_PKG_VERSION")))
     }
     async fn list_tools(&self, _:Option<PaginatedRequestParams>, _:RequestContext<RoleServer>) -> Result<ListToolsResult,ErrorData> {
-        Ok(ListToolsResult { tools: tool_definitions(), ..Default::default() })
+        Ok(ListToolsResult { tools: tool_definitions(self.profile), ..Default::default() })
     }
     async fn call_tool(&self, request:CallToolRequestParams, _:RequestContext<RoleServer>) -> Result<CallToolResponse,ErrorData> {
         let args=request.arguments.map(Value::Object).unwrap_or_else(||json!({}));
         let (value,error)=match call(self,&request.name,&args).await {Ok(v)=>(v,false),Err(v)=>(v,true)};
-        let result=if error {CallToolResult::error(vec![ContentBlock::text(value.to_string())])}
-            else {CallToolResult::success(vec![ContentBlock::text(value.to_string())])};
+        let result=tool_result(self.profile,value,error);
         Ok(result.into())
     }
 }

@@ -3544,7 +3544,7 @@ pub struct PersonAnswerRecord {
     pub ask: String,
     pub status: String,
     pub summary: String,
-    /// The answering principal, including `assistant/chatgpt` for assistant responses.
+    /// The answering principal, including `assistant/chatgpt` or `assistant/mcp`.
     pub respondent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
@@ -3951,6 +3951,16 @@ pub struct PersonPairedSession {
 pub enum AssistantPrincipal {
     #[serde(rename = "assistant/chatgpt")]
     Chatgpt,
+    #[serde(rename = "assistant/mcp")]
+    Mcp,
+}
+impl AssistantPrincipal {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chatgpt => "assistant/chatgpt",
+            Self::Mcp => "assistant/mcp",
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum AssistantSenderClass {
@@ -4172,6 +4182,8 @@ pub enum AssistantProjection {
 pub enum ScgReadIdentity {
     #[serde(rename = "chatgpt")]
     Chatgpt,
+    #[serde(rename = "mcp")]
+    Mcp,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "summary": "Add the local stdio st-mcp adapter with an isolated assistant/mcp principal and eleven scoped tools",
+  "replay": {
+    "status": "none",
+    "detail": "No full or partial store replay is introduced by this change. Historical assistant grants without a stored principal continue to resolve to assistant/chatgpt; MCP grants must be explicitly issued and preserve their principal through pairing, policy, revocation, messages and answers."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from d0cb42fb60921357e168f55bc2e295c9b8a874e6fb064166a5f42337a3830eb5 to 0f64b75a05ce4d6973fbdd6ef8b74f08b698cf59de98de70310dec1c029584ea. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Assistant subject admission now recognizes assistant/mcp while preserving exact grant-principal attribution. The schema registry digest changes with the subject pattern, but checkpoint RULES_VERSION remains 19 -> 19 and rules_digest remains 70a3bb7af2d2273fcd0f910de867afe7d1e4ce1b3740254661145490ecff83b2. Coordinate member upgrades before issuing MCP grants or replicating MCP actions: older members do not recognize the new principal and must not be treated as compatible merely because storage and checkpoint rules numbers are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Existing ChatGPT entrypoint, person pairing and legacy ChatGPT grants remain supported. st-mcp is stdio-only, uses a separate assistant/mcp profile and exposes eleven typed tools with outputSchema and structuredContent plus text mirrors. Older daemons reject MCP subjects with invalid-claim-subject and replicated MCP messages with assistant-send-refused; a custom grant record may persist but an older assistant session still rejects any principal other than assistant/chatgpt. Do not fall back to person credentials or relabel MCP as ChatGPT. Mixed-version deployment and Claude Code/Codex interoperability have not been exercised in this change."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "Daemon binary replacement and local MCP client startup are required for new access. No extra replay or SQL migration is introduced, but restart-to-API and restart-to-health timing have not been measured; do not infer an interruption bound."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade participating members before MCP issuance. Until R1 (#3324, verified keyed issuer admission) is verified, production assistant grants must have read scopes only (Q32 freeze). The configured owning person explicitly pairs assistant/mcp with named scopes and recorded disclosure consent, completes into a separate owner-only JSON profile, extracts the selected member's session.credential into a protected token file, and configures st-mcp with the paired gateway socket and token path. Existing ChatGPT profiles are not migrated or reinterpreted. See docs/st3/external-assistants.md for exact CLI, protected file permissions, Claude Code/Codex configuration, recipient policy and grant revocation. Live issuance remains subject to the documented activation gates."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Revoke the exact MCP grant through the trusted-local owner CLI and stop the adapter to withdraw future access; deleting a profile alone does not revoke authority or retract committed effects. There is no SQL migration to undo, but reinstalling an older binary does not make MCP history readable or admissible: older daemons reject the new subjects/principal. Roll forward to an MCP-capable build for stores or members containing MCP grants/actions. Expired or revoked grants require fresh explicit pairing, never revival or substitution with person/ChatGPT authority."
+  },
+  "commits": ["d359ece1b39ea2f56406e787390f12ced7f3f61a"]
+}

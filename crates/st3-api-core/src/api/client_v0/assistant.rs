@@ -8,6 +8,12 @@ pub mod native;
 pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
 
 pub const PRINCIPAL: &str = "assistant/chatgpt";
+pub const MCP_PRINCIPAL: &str = "assistant/mcp";
+
+pub fn principal(source: &Value) -> Result<&str, ApiError> {
+    crate::store::assistant_write::principal(source)
+        .ok_or_else(|| forbidden("invalid assistant principal"))
+}
 pub const BEGUN: &str = "custom.client.assistant.v1.begun";
 pub const GRANTED: &str = "custom.client.assistant.v1.granted";
 pub const POLICY: &str = "custom.client.assistant.v1.policy";
@@ -64,9 +70,11 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
     let mut random = [0_u8; 12];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     let mut referenced = Vec::new();
+    let mut audit_principal = actor.split_once("/session/").map(|(principal, _)| principal.to_owned());
     if let Some(subject) = grant_id.and_then(|id| subject(id).ok()) {
         for kind in [BEGUN, GRANTED, POLICY, REVOKED] {
             if let Some(claim) = latest(state, &subject, kind)? {
+                audit_principal = Some(principal(fields(&claim)?)?.to_owned());
                 referenced.push(claim.id);
             }
         }
@@ -75,7 +83,7 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
         subject: format!("custom/client/assistant-audit-v1-{}", hex::encode(random)),
         kind: "custom.client.assistant.v1.audit".into(), actor: Some(actor.into()),
         fields: serde_json::from_value(json!({"version":1,"operation":operation,
-            "issuer":state.owning_person,"principal":PRINCIPAL,"actor":actor,"transport":transport,
+            "issuer":state.owning_person,"principal":audit_principal.as_deref().unwrap_or(PRINCIPAL),"actor":actor,"transport":transport,
             "grant_id":grant_id,"timestamp":client_timestamp(client_now_ms()),
             "outcome":if result.is_ok() {"accepted"} else {"denied"},
             "denial_code":result.as_ref().err().map(|error| error.code.as_str()),
@@ -92,7 +100,7 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
     let policy = effective(state, granted)?;
     let source = fields(&policy)?;
     let mut value = json!({"kind":"assistant-grant","id":source["grant_id"],
-        "principal":PRINCIPAL,"sender_class":"external-assistant","issuer":source["issuer"],
+        "principal":principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
         "expires_at":client_timestamp(source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0)),
         "revoked":latest(state, &granted.subject, REVOKED)?.is_some()});
     for name in ["session_actor","device_id","key_id","scopes","policy_revision",
@@ -120,13 +128,21 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     -> Result<ClientSession, ApiError> {
     let policy = effective(state, granted)?;
     let source = fields(&policy)?;
+    let principal = principal(source)?;
+    let granted_fields = fields(granted)?;
+    if self::principal(granted_fields)? != principal
+        || ["grant_id", "session_actor", "issuer"].iter().any(|key| source[*key] != granted_fields[*key])
+        || source["session_actor"].as_str().and_then(|actor| actor.strip_prefix(principal))
+            .and_then(|suffix| suffix.strip_prefix("/session/")) != source["grant_id"].as_str() {
+        return Err(forbidden("assistant grant principal and session are inconsistent"));
+    }
     if granted.origin != state.store.origin() || policy.origin != granted.origin
         || granted.actor.as_deref() != Some(owning_person(state)?) || policy.actor.as_deref() != Some(owning_person(state)?) {
         return Err(forbidden("assistant requests require the authoritative grant issuer"));
     }
     if latest(state, &granted.subject, REVOKED)?.is_some()
         || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms()
-        || source["principal"] != PRINCIPAL || source["issuer"] != owning_person(state)?
+        || source["issuer"] != owning_person(state)?
         || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow")) || source["disclosure_consent"] != true {
         return Err(forbidden("assistant grant was revoked, expired, or has invalid policy"));
     }
@@ -134,7 +150,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         .iter().map(|value| value.as_str().filter(|scope| SCOPES.contains(scope)).map(str::to_owned))
         .collect::<Option<BTreeSet<_>>>().ok_or_else(|| forbidden("assistant scopes invalid"))?;
     Ok(ClientSession { actor: source["session_actor"].as_str()
-        .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
+        .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: principal.into(),
         pairing_grant: Some(granted.subject.clone()),
         // An assistant grant is not a device pairing: it never registers push tokens.
         pairing_issued_here: false,
@@ -174,7 +190,7 @@ pub fn device_resources(state: &AppState, snapshot: &ClientSnapshot) -> Result<V
         let state = if revoked {"revoked"} else if expires <= client_snapshot_time(snapshot) {"expired"} else {"active"};
         Ok(json!({"id":source["device_id"],"kind":"device","revision":claim.id,
             "updated_at":client_timestamp(claim.accepted_at_unix_ms),"name":source["device_name"],
-            "principal":PRINCIPAL,"sender_class":"external-assistant","grant_kind":"assistant",
+            "principal":principal(source)?,"sender_class":"external-assistant","grant_kind":"assistant",
             "grant_id":source["grant_id"],"session_actor":source["session_actor"],"state":state,
             "scopes":source["scopes"],"expires_at":client_timestamp(expires),
             "policy_revision":source["policy_revision"],"minimal_read_mode":source["minimal_read_mode"],

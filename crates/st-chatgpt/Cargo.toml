@@ -3,6 +3,7 @@ name = "st-chatgpt"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+default-run = "st-chatgpt"
 
 [dependencies]
 axum = { version = "0.8", features = ["json"] }

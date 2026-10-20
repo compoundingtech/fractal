@@ -1422,7 +1422,7 @@ export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["a
 export type AssistantMinimalReadMode = typeof AssistantMinimalReadMode.Type
 export type AssistantMinimalReadModeEncoded = typeof AssistantMinimalReadMode.Encoded
 
-export const AssistantPrincipal = /*#__PURE__*/ (() => Schema.Literals(["assistant/chatgpt"]).annotate({ identifier: "AssistantPrincipal" }))()
+export const AssistantPrincipal = /*#__PURE__*/ (() => Schema.Literals(["assistant/chatgpt","assistant/mcp"]).annotate({ identifier: "AssistantPrincipal" }))()
 export type AssistantPrincipal = typeof AssistantPrincipal.Type
 export type AssistantPrincipalEncoded = typeof AssistantPrincipal.Encoded
 
@@ -1485,7 +1485,7 @@ export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
   "revoked": Schema.Boolean,
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
   "sender_class": AssistantSenderClass,
-  "session_actor": Schema.String.check(Schema.isPattern(new RegExp("^assistant/chatgpt/session/.+$", "u")))
+  "session_actor": Schema.String.check(Schema.isPattern(new RegExp("^assistant/(?:chatgpt|mcp)/session/.+$", "u")))
 }).annotate({ identifier: "AssistantGrant" }))()
 export type AssistantGrant = typeof AssistantGrant.Type
 export type AssistantGrantEncoded = typeof AssistantGrant.Encoded
@@ -1558,7 +1558,7 @@ export const AssistantPairedSession = /*#__PURE__*/ (() => Schema.Struct({
   "principal": AssistantPrincipal,
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
   "sender_class": AssistantSenderClass,
-  "session_actor": Schema.String.check(Schema.isPattern(new RegExp("^assistant/chatgpt/session/.+$", "u")))
+  "session_actor": Schema.String.check(Schema.isPattern(new RegExp("^assistant/(?:chatgpt|mcp)/session/.+$", "u")))
 }).annotate({ identifier: "AssistantPairedSession" }))()
 export type AssistantPairedSession = typeof AssistantPairedSession.Type
 export type AssistantPairedSessionEncoded = typeof AssistantPairedSession.Encoded
@@ -2804,7 +2804,7 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** Server-owned grant-bound assistant session audit actor, separate from the answering principal. */
   "assistant_session_actor": optionalKey(Schema.String).annotate({ description: "Server-owned grant-bound assistant session audit actor, separate from the answering principal." }),
   "evidence": optionalKey(Schema.Array(Id)),
-  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. */
+  /** The actual answering principal, including assistant/chatgpt or assistant/mcp for an assistant response; never replaced by its grant owner. */
   "respondent": SenderRef,
   /** External assistant attribution when the response was submitted through an assistant grant. */
   "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
@@ -4138,7 +4138,7 @@ export const ScgReadAuthorizationPayload = /*#__PURE__*/ (() => Schema.Struct({
   "execution_id": Schema.String.check(Schema.isMinLength(1)),
   "expires_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "grant_id": Id,
-  "identity": Schema.Literal("chatgpt"),
+  "identity": Schema.Literals(["chatgpt","mcp"]),
   "issuer": PersonId,
   "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
   "max_response_bytes": AssistantResponseBytes,

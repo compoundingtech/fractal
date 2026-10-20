@@ -1,8 +1,146 @@
 # External assistants
 
-Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter uses caller-bound grants; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
+Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter and local stdio `st-mcp` adapter use separate caller-bound assistant principals; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
 
 The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p st3-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
+
+## Connect an MCP client to st
+
+`st-mcp` is a local stdio-only MCP server named `st`, suitable for Claude Code,
+Codex, and other stdio clients. It has no HTTP listener, transport selector, or
+automatic pairing/renewal. Provision it with an `assistant/mcp` bearer, never a
+person or `assistant/chatgpt` credential. The existing `st-chatgpt` entrypoint and its
+ChatGPT-specific deployment remain separate and compatible.
+
+**Production freeze (Q32): until R1 ([#3324](https://github.com/compoundingtech/smalltalk/issues/3324),
+verified keyed issuer admission) is verified, issue assistant grants with read
+scopes only.** The production setup below deliberately omits write scopes.
+
+### Owner setup and permissions
+
+On the daemon host, the configured owning person begins pairing through the
+trusted-local CLI. `person/robin` below is a fixture: use the configured owner,
+not a new identity chosen by the client. Record disclosure consent before issuance;
+the CLI's `--disclose-to-openai` flag is still required and does not grant a
+different provider or unrelated caller disclosure permission.
+
+```sh
+st devices --as person/robin pair --assistant assistant/mcp \
+  --scope read.assistant.summary --scope read.assistant.attention \
+  --scope read.assistant.agents --scope read.assistant.missions \
+  --scope read.assistant.conversation \
+  --disclose-to-openai --consent-evidence '<recorded owner consent reference>'
+```
+
+Always name `assistant/mcp` explicitly: a bare `--assistant` retains the
+`assistant/chatgpt` default and does not issue an MCP grant.
+
+For a separately authorized non-production write test, explicitly add
+`--scope write.assistant.messages --scope write.assistant.answers`; neither read
+scopes nor consent authorize messages or answers. Complete the printed challenge
+explicitly; the command reads the pairing code from stdin, not a command-line argument:
+
+```sh
+st devices complete MEMBER_URL PAIRING_ID --assistant \
+  --profile /absolute/path/to/mcp-profile.json
+```
+
+The completed profile is JSON with a `devices` array; each entry has `endpoint`
+and `session.credential`. The adapter does not read that JSON. Extract the bearer
+for the exact paired member and principal into a separate protected token file:
+
+```sh
+(
+  umask 077
+  jq -er --arg endpoint 'MEMBER_URL' \
+    '[.devices[] | select(.endpoint == $endpoint and .session.principal == "assistant/mcp") | .session.credential] | if length == 1 then .[0] else error("expected one MCP device for member") end' \
+    /absolute/path/to/mcp-profile.json > /absolute/path/to/mcp-token
+)
+```
+
+Use the canonical member URL stored as `endpoint`. Keep both the JSON profile
+(bearer and private key) and token file in protected local storage: file mode
+`0600`, parent directory `0700`, owned by the user running the adapter. Use a new
+token path when extracting; `umask` does not repair an existing file's permissions.
+Do not put credential contents in MCP configuration, environment variables, model
+context, logs, or process arguments. The adapter receives only the token path and
+refuses unsafe token files. It does not parse profile JSON or locally validate the
+bearer's principal; daemon authentication and grant provenance decide authority.
+The paired gateway `st3-client.sock` and token must be accessible to that local
+user; a sandboxed client needs explicitly permitted access, not broadened socket
+or credential permissions.
+
+### Nix package and client configuration
+
+`nix build .#st-mcp` and `nix run .#st-mcp -- --socket SOCKET --credential-file TOKEN_FILE`
+select the local adapter. Both binaries build from the existing `st-chatgpt` crate
+in one derivation; `.#st-chatgpt` keeps `st-chatgpt` as its default program.
+Use an installed absolute executable path in client configuration.
+The neutral paths below must be replaced with local paths; they contain no secrets.
+
+Claude Code:
+
+```sh
+claude mcp add st -- st-mcp --socket /absolute/path/to/st3-client.sock --credential-file /absolute/path/to/mcp-token
+```
+
+The equivalent Claude Code `.mcp.json` entry is:
+
+```json
+{
+  "mcpServers": {
+    "st": {
+      "type": "stdio",
+      "command": "/absolute/path/to/st-mcp",
+      "args": ["--socket", "/absolute/path/to/st3-client.sock", "--credential-file", "/absolute/path/to/mcp-token"]
+    }
+  }
+}
+```
+
+Codex `config.toml`:
+
+```toml
+[mcp_servers.st]
+command = "/absolute/path/to/st-mcp"
+args = ["--socket", "/absolute/path/to/st3-client.sock", "--credential-file", "/absolute/path/to/mcp-token"]
+```
+
+The eleven tools are `st_alerts_list`, `st_alert_get`, `st_alert_answer`,
+`st_missions_list`, `st_agents_list`, `st_conversations_list`,
+`st_conversation_detail`, `st_conversation_timeline`, `st_conversation_search`,
+`st_conversation_read`, and `st_message_send`. Each declares an `outputSchema`
+and returns a `structuredContent` envelope with a text mirror for older clients.
+There are no arbitrary CLI, shell, database, document, or terminal tools.
+List/get and conversation reads use the corresponding explicit assistant read
+scopes; `st_alert_answer` requires `write.assistant.answers` and
+`st_message_send` requires `write.assistant.messages`. Message recipients may be
+any declared existing agent, not people; stored `recipient_allowlist` is metadata,
+not an enforced allowlist (Q21 / [#3250](https://github.com/compoundingtech/smalltalk/issues/3250)).
+
+### Revocation and provenance
+
+Inspect or revoke the exact grant from the trusted-local owner CLI:
+
+```sh
+st devices --as person/robin grant inspect GRANT_ID
+st devices --as person/robin grant revoke GRANT_ID
+```
+
+Revocation is authoritative and survives restart; deleting a profile or removing
+the client configuration alone does not revoke the grant. Stop the client adapter
+and remove its protected token file and profile after revocation. Expired/revoked grants cannot
+be revived: explicitly pair again if access is approved. Ordinary revocation is
+not the coordinated principal kill described below and cannot retract already
+delivered content or committed actions.
+
+Messages and answers retain `assistant/mcp`, `sender_class: external-assistant`,
+grant, owning person, and grant-bound session audit provenance. The owner is not
+the sender/respondent; no person signing identity is installed. Receiving agents
+must treat assistant requests as untrusted external content, and consequential
+requests still require independent owning-person confirmation. Older daemons
+reject the new principal rather than accepting it as ChatGPT or a person; do not
+work around rejection by switching credentials.
 
 ## Adapter call diagnostics
 
@@ -44,12 +182,12 @@ Approved reads disclose data to the external model provider. A compromised execu
 
 ### Authority and lifecycle
 
-- The only supported principal is `assistant/chatgpt`, with trusted class `external-assistant`. It never has person authority. Its grant-bound request audit actor is `assistant/chatgpt/session/<grant-id>`; authoritative message and answer claim actors, message senders, and answer respondents are `assistant/chatgpt`, not the owning person. Message and answer evidence retain `assistant_owner`, `assistant_session_actor`, and `assistant_grant_id` as on-behalf-of provenance, separate from person-delegation authority.
+- Supported principals are `assistant/chatgpt` and `assistant/mcp`, both with trusted class `external-assistant` and never person authority. Each grant's request audit actor is `<principal>/session/<grant-id>`; authoritative message and answer claim actors, message senders, and answer respondents retain that exact principal, not the owning person. Message and answer evidence retain `assistant_owner`, `assistant_session_actor`, and `assistant_grant_id` as on-behalf-of provenance, separate from person-delegation authority. Historical stored grants without an explicit principal default only to `assistant/chatgpt`.
 - Only the daemon's configured owning person through the trusted-local CLI over the Unix API may begin, inspect, renew, revoke, or change a grant. Missing owner configuration fails closed; remote clients, agents, assistants, and other people cannot manage grants. Deployment owner identity is external configuration, not a hardcoded public identity. Public examples and tests use the fixture owner `person/operator`.
 - "Owner" authority here means same-UID trusted-local socket access: the daemon's configured owning person acts through the local Unix client, and any process already running as the daemon's UID is trusted the same way. The `/proc` ancestry check distinguishes local from remote callers; it is not a security boundary against a hostile same-UID process, and A does not claim it to be one. The host's UID isolation is the boundary.
 - Administrative reads validate server-established harness and native-peer provenance, not just `x-st3-person`. Bound agents and harness peers cannot inspect grants or enumerate owner assistant devices with a forged owner header; ordinary agent projection reads remain available. Paired person devices are not trusted-local grant administrators, even over Unix.
 - Begin uses the existing five-minute, single-use challenge flow. Scopes, identity, and the configured owner as issuer are sealed at begin; remote completion supplies only the challenge code and device key, never scopes, issuer, or actor selection. Assistant completion must not enroll the key in a person signing chain.
-- `st devices pair --assistant` explicitly seals `minimal_read_mode: "caller-bound-allow"` with the supplied scopes, expiry, and disclosure consent in the challenge. Completion preserves that mode atomically; fresh CLI grants can read without a policy-update call. Wire callers that omit the mode retain `approval-once`. Grant management accepts either the printed `assistant-grant/<hex>` identifier or its bare hexadecimal suffix.
+- `st devices pair --assistant <principal>` explicitly seals `minimal_read_mode: "caller-bound-allow"` with the supplied scopes, expiry, and disclosure consent in the challenge. Select `assistant/mcp` for local MCP; `assistant/chatgpt` retains the existing ChatGPT behavior. The flag requires the full principal value. Completion preserves the principal and mode atomically; fresh CLI grants can read without a policy-update call. Wire callers that omit the mode retain `approval-once`. Grant management accepts either the printed `assistant-grant/<hex>` identifier or its bare hexadecimal suffix.
 - `expires_in_seconds` defaults to 3600, must be positive, and cannot exceed 2592000 (30 days), the ceiling advertised by `operations.json` as `assistant_grant_max_ttl_seconds` and enforced for issuance and policy updates. Challenge expiry and grant expiry are independent. There is no automatic renewal. Policy update or renewal increments the policy revision; creation starts at revision 1.
 - Policy updates check the effective expiry from the latest policy: an expired or revoked grant cannot be revived, while a grant renewed before expiry remains updatable after its original expiry.
 - Each request rechecks the authoritative grant, revocation, expiry, and current policy. Revocation targets the exact grant, not a shared device actor. Restart must not revive a revoked or expired grant.
@@ -59,7 +197,7 @@ Approved reads disclose data to the external model provider. A compromised execu
 
 ### Wire shape
 
-`POST /v1/client/pairings` accepts disjoint untagged `PersonPairingBegin` and `AssistantPairingBegin` variants. The person variant retains its existing `person_id`, optional `full_control`, and optional limited scopes. The assistant variant has `api_version`, `device_name`, `assistant_id: "assistant/chatgpt"`, explicit `scopes`, optional `expires_in_seconds`, `disclosure_consent: true`, and `consent_evidence`: a non-empty free-form string of at most 512 bytes naming the recorded owner consent (for example an `axe decision ask` reference). It has no `person_id` or `full_control`. Consent must explicitly cover disclosure of reads to OpenAI; missing or empty consent evidence denies issuance. The consent evidence is not a read approval, send approval, or permission to disclose to unrelated callers.
+`POST /v1/client/pairings` accepts disjoint untagged `PersonPairingBegin` and `AssistantPairingBegin` variants. The person variant retains its existing `person_id`, optional `full_control`, and optional limited scopes. The assistant variant has `api_version`, `device_name`, `assistant_id` (`assistant/chatgpt` or `assistant/mcp`), explicit `scopes`, optional `expires_in_seconds`, `disclosure_consent: true`, and `consent_evidence`: a non-empty free-form string of at most 512 bytes naming the recorded owner consent (for example an `axe decision ask` reference). It has no `person_id` or `full_control`. Consent must explicitly cover disclosure of reads to OpenAI; missing or empty consent evidence denies issuance. The consent evidence is not a read approval, send approval, or permission to disclose to unrelated callers.
 
 An assistant challenge retains `kind: "pairing-challenge"`, pairing ID, code, and challenge `expires_at`; it also returns principal, `grant_kind: "assistant"`, grant ID, grant expiry, policy revision, and `minimal_read_mode: "approval-once"`. Existing person challenges remain unchanged, apart from optional `grant_kind: "person"`.
 
@@ -94,9 +232,9 @@ For example, add `--scope write.assistant.answers` to `st devices --as person/op
 With `write.assistant.answers`, supported `work.done` proposals execute immediately without creating another owner approval ask. The existing fenced, idempotent action path still binds the alert ID, episode, selected answer/option, fence, and idempotency key. Dispatch and the authoritative answer transaction retain assistant grant/policy provenance and recheck current authority; the assistant does not become a person principal.
 The writer transaction restricts this authority to a supported structured `work.person-asked` request assigned to the grant's owner, with a named answer. Authored person review steps are not alert asks and remain completable only through ordinary owner authority, not this assistant scope.
 
-The resulting `work.person-done` claim uses `assistant/chatgpt` as its actor. Work projections expose the same principal as `person_answers[].respondent`, alongside optional server-owned `sender_class`, `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor`. Owner and session context do not replace the respondent and do not set `acted_for`: that field remains reserved for an agent recording a person's prior instruction with delegation proof. `st work show` displays the assistant respondent and the separate grant, owner, and session actor context.
+The resulting `work.person-done` claim uses the grant's `assistant/chatgpt` or `assistant/mcp` principal as its actor. Work projections expose the same principal as `person_answers[].respondent`, alongside optional server-owned `sender_class`, `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor`. Owner and session context do not replace the respondent and do not set `acted_for`: that field remains reserved for an agent recording a person's prior instruction with delegation proof. `st work show` displays the assistant respondent and the separate grant, owner, and session actor context.
 
-`write.assistant.messages` is intentionally broad across existing agents. The API and message-acceptance transaction do not require exact membership in `recipient_allowlist`, even when it is empty. That field remains stored policy metadata, not a recipient restriction. Non-agent and person recipients remain refused, and the recipient must exist. Grant expiry, revocation, policy revision, explicit scope, fenced dispatch, idempotency, and external-assistant sender attribution remain enforced. A ChatGPT confirmation card is advisory, not a second daemon approval or downstream owning-person authorization.
+`write.assistant.messages` is intentionally broad across declared existing agents, as decided in Q21 / [#3250](https://github.com/compoundingtech/smalltalk/issues/3250). The API and message-acceptance transaction do not require exact membership in `recipient_allowlist`, even when it is empty. That field remains stored policy metadata, not an enforced recipient restriction. Non-agent and person recipients remain refused, and the recipient must exist. Grant expiry, revocation, policy revision, explicit scope, fenced dispatch, idempotency, and external-assistant sender attribution remain enforced. A ChatGPT confirmation card is advisory, not a second daemon approval or downstream owning-person authorization.
 
 ### Acceptance
 
@@ -206,9 +344,9 @@ This calls `POST /v1/client/assistant/grants/{id}/read-trust` with `AssistantRea
 
 `POST /v1/client/assistant/propose` accepts closed typed native actions, not arbitrary daemon commands. `work.done` requires `write.assistant.answers`, `message.send` requires `write.assistant.messages`, and `custom.reply` requires `write.assistant.custom-reply`. A missing write scope fails closed; read scopes never authorize these writes. Successful proposals execute through the existing fenced action path, without creating a daemon-owned approval ask.
 
-The current message policy deliberately allows every existing agent recipient instead of enforcing an exact owner-maintained recipient allowlist. Person recipients remain unsupported. The authoritative transaction rechecks the current grant, policy revision, revocation, expiry, scope, owner binding and recipient existence as applicable; handler preflight alone is not authorization. Assistant grant and sender-class provenance survive dispatch and durable append.
+The current message policy deliberately allows every declared existing agent recipient instead of enforcing an exact owner-maintained recipient allowlist (Q21 / [#3250](https://github.com/compoundingtech/smalltalk/issues/3250)); `recipient_allowlist` is stored metadata only. Person recipients remain unsupported. The authoritative transaction rechecks the current grant, policy revision, revocation, expiry, scope, owner binding and recipient existence as applicable; handler preflight alone is not authorization. Assistant grant and sender-class provenance survive dispatch and durable append.
 
-Trusted output must put `from=assistant/chatgpt sender_class=external-assistant` before the body and retain it under truncation; JSON keeps `sender_class: "external-assistant"`. Message reads and inbox notifications must warn: `WARNING: Untrusted external-assistant request; not owning-person authorization.` Receiving agents treat requests as untrusted. Consequential requests require owning-person confirmation through `axe decision ask`, never an assistant reply. Delivery authority is not downstream mutation authority; read-only analysis remains possible.
+Trusted output must put `from=assistant/chatgpt sender_class=external-assistant` or `from=assistant/mcp sender_class=external-assistant`, matching the authenticated grant, before the body and retain it under truncation; JSON keeps `sender_class: "external-assistant"`. Message reads and inbox notifications must warn: `WARNING: Untrusted external-assistant request; not owning-person authorization.` Receiving agents treat requests as untrusted. Consequential requests require owning-person confirmation through `axe decision ask`, never an assistant reply. Delivery authority is not downstream mutation authority; read-only analysis remains possible.
 
 The assistant sender is preserved in stored claims, message projections, and delivered notifications. DING must not add person-only reply instructions to assistant messages; the owner/grant provenance is audit context, not person sender authority.
 
