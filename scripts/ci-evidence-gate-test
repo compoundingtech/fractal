@@ -1538,6 +1538,24 @@ class WorkflowStructure(unittest.TestCase):
                                                                    'GITHUB_OUTPUT': '/nonexistent/dir/out'}, capture_output=True)
             self.assertNotEqual(failing.returncode, 0)
 
+    def test_a_job_whose_guard_lists_commits_checks_out_the_history_for_pull_requests(self):
+        """The signing guard runs `git log base..head` on a pull request; a shallow checkout has no such range, the
+        guard refuses, and the job's lane reads as not run although it ran."""
+        checked = 0
+        for name, block in self.blocks().items():
+            if 'May this job use the signing key?' not in block:
+                continue
+            checkout = re.search(r'uses: actions/checkout@v4\n\s+with:\n((?:\s+.*\n)+?)(?=\s+- |\Z)', block + '\n')
+            if checkout is None:
+                continue  # the aggregate note job fetches what it needs itself
+            depth = re.search(r'fetch-depth: (.*)', checkout.group(1))
+            self.assertIsNotNone(depth, f'{name} checks out without saying how much history')
+            self.assertIn(depth.group(1).strip().strip('"\''), ('0', "${{ github.event_name == 'pull_request' && '0' || '1' }}"), name)
+            checked += 1
+        self.assertGreaterEqual(checked, 5)
+        # A bare 0 is falsy in an expression, so `cond && 0 || 1` is always 1; the depths must be strings.
+        self.assertNotRegex((ROOT / '.github/workflows/fleet.yml').read_text(), r"&& 0 \|\| 1")
+
     def test_every_signing_step_learns_when_its_gate_skipped_and_the_aggregate_sees_every_gate(self):
         blocks = self.blocks()
         signed = 0
@@ -1552,6 +1570,11 @@ class WorkflowStructure(unittest.TestCase):
                 signed += 1
                 env = re.search(r'^          GATE_SKIP: (.*)$', chunk, re.M)
                 self.assertIsNotNone(env, f'{name} signs without being told when its gate skipped')
+                if name == 'fractal-web-execution':
+                    # A lane with no gate: its paths decide whether it runs, nothing ever skips it on a prior note.
+                    self.assertIn(env.group(1).strip(), ('false', '"false"', "'false'"), name)
+                    self.assertNotIn('needs.', env.group(1), name)
+                    continue
                 referenced = set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', env.group(1)))
                 self.assertTrue(referenced, name)
                 # Every gate it reads must be one of its needs, and the check's own gate must be among them.
@@ -1600,7 +1623,7 @@ class WorkflowStructure(unittest.TestCase):
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
         names = [line.strip()[2:] for line in needs.splitlines()]
-        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith('evidence-gate-'))
+        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith(('evidence-gate-', 'fractal-web-')))
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], derived)
         self.assertEqual(GATE_ARGV, derived)

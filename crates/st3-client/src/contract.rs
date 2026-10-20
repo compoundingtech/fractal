@@ -129,6 +129,10 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("assistant.attention", "/v1/client/assistant/attention"),
     ("assistant.missions", "/v1/client/assistant/missions"),
     ("assistant.agents", "/v1/client/assistant/agents"),
+    ("assistant.conversations", "/v1/client/assistant/conversations"),
+    ("assistant.conversation-detail", "/v1/client/assistant/conversation-detail"),
+    ("assistant.conversation-timeline", "/v1/client/assistant/conversation-timeline"),
+    ("assistant.conversation-search", "/v1/client/assistant/conversation-search"),
     ("assistant.conversation-content", "/v1/client/assistant/conversation-content"),
     ("assistant.terminal-content", "/v1/client/assistant/terminal-content"),
 ];

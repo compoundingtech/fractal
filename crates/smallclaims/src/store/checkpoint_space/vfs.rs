@@ -176,7 +176,7 @@ impl ProofVfs {
             self_test_hits: AtomicUsize::new(0),
             copy_phase: AtomicBool::new(true),
             vacuum_phase: AtomicBool::new(false),
-            copy_limit: Mutex::new(guard.copy_bound),
+            copy_limit: Mutex::new(guard.clone_cap),
             journal_pages: AtomicUsize::new(usize::try_from(guard.initial_journal_pages)?),
             sector_size: AtomicUsize::new(65536),
             #[cfg(test)]
@@ -447,7 +447,10 @@ impl Data {
                     end.saturating_sub(self.guard.snapshot_logical)
                 )
             } else {
-                format!("C_clone={}", self.guard.copy_bound)
+                format!(
+                    "C_clone={} admitted_copy={}",
+                    self.guard.clone_cap, self.guard.copy_bound
+                )
             };
             return self.refuse(format!(
                 "checkpoint copy exceeds guarded C: eof={end} C={copy_limit} {terms}"
@@ -1006,6 +1009,7 @@ mod tests {
             granule: 4096,
             temp_granule: 4096,
             copy_bound: u128::MAX,
+            clone_cap: u128::MAX,
             vacuum_cap: u128::MAX,
             vacuum_tree_pages: 0,
             vacuum_pointer_pages: 0,
