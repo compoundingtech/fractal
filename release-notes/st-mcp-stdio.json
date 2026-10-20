@@ -27,7 +27,7 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Revoke the exact MCP grant through the trusted-local owner CLI and stop the adapter to withdraw future access; deleting a profile alone does not revoke authority or retract committed effects. There is no SQL migration to undo, but reinstalling an older binary does not make MCP history readable or admissible: older daemons reject the new subjects/principal. Roll forward to an MCP-capable build for stores or members containing MCP grants/actions. Expired or revoked grants require fresh explicit pairing, never revival or substitution with person/ChatGPT authority."
+    "detail": "Revoke the exact MCP grant through the trusted-local owner CLI and stop the adapter to withdraw future access; deleting a profile alone does not revoke authority or retract committed effects. There is no SQL migration to undo, but reinstalling an older binary does not make MCP history readable or admissible: older daemons reject the new subjects/principal. Roll forward to an MCP-capable build for stores or members containing MCP grants/actions. Expired or revoked grants require fresh explicit pairing, never revival or substitution with person or ChatGPT authority."
   },
   "commits": ["d359ece1b39ea2f56406e787390f12ced7f3f61a"]
 }
