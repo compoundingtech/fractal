@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve lifecycle fences in batched identity-aware reads",
+  "replay": { "status": "none", "detail": "No persisted fact or hash contract changes. The canonical rename-request hash tag is new to this branch and is not present on origin/main." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "changed", "detail": "Desired reads check pending and invalid lifecycle records even for agents without naming heads. Mission specification, definition and run-header batches preserve naming-head and pending-record refusals for original names and aliases, including missions without runs. These checks remain inside the existing batched SQL statements." },
+  "compatibility": { "status": "none", "detail": "No additional compatibility requirements." },
+  "downtime": { "status": "none", "detail": "No downtime is required." },
+  "manual": { "status": "none", "detail": "No manual migration is required." },
+  "recovery": { "status": "changed", "detail": "Incomplete or conflicting lifecycle evidence returns lifecycle-unavailable instead of exposing a declaration through an unfenced read." }
+}

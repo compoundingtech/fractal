@@ -25,6 +25,38 @@ fn request(from: &str, to: &str, key: &str) -> RenameRequest {
 }
 
 #[test]
+fn desired_reads_fence_pending_lifecycle_without_a_naming_head() {
+    for state in ["unknown", "invalid"] {
+        for kind in ["agent.retired", "intent.desired", "agent.renamed"] {
+            for declared in [false, true] {
+            let store = Store::open_memory("example").unwrap();
+            if declared { declare(&store, ORIGINAL); }
+            let connection = store.connection.write();
+            let heads: u64 = connection.query_row(
+                "SELECT COUNT(*) FROM identity_heads WHERE identity=?1", [ORIGINAL], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(heads, 0);
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h8f564527f357 owner=st3_store::store::identities_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
+                 VALUES('record/pending','example-peer',1,'pending',0,'{}',?1,?2,?3,'1')",
+                params![state, ORIGINAL, kind],
+            ).unwrap();
+            let expected = if state == "invalid" { "conflict" } else { "pending-replication" };
+            let error = current_desired_row(&connection, ORIGINAL).err().unwrap();
+            let error = error.downcast_ref::<St3Error>().unwrap();
+            assert_eq!(error.code, "lifecycle-unavailable");
+            assert_eq!(error.details["reason"], expected);
+            drop(connection);
+            let error = store.selected_desired_tokens(&[ORIGINAL]).unwrap_err();
+            let error = error.downcast_ref::<St3Error>().unwrap();
+            assert_eq!(error.code, "lifecycle-unavailable");
+            assert_eq!(error.details["reason"], expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn replicated_rename_request_digest_survives_canonical_json_field_order() {
     for kind in [IdentityKind::Agent, IdentityKind::Mission] {
         let input = request(ORIGINAL, RENAMED, "canonical-request");

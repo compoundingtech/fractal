@@ -4399,13 +4399,21 @@ impl MissionsStore for Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
-        let sql = MISSION_RUN_HEADER_SELECT.replace(
-            "ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
-            "WHERE mission_runs.mission_id IN (
-                 SELECT CASE WHEN names.identity IS NULL THEN requested.value
-                     ELSE substr(names.identity,9) END FROM json_each(?1) requested
-                 LEFT JOIN identity_names names ON names.name='mission/'||requested.value)
-             ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
+        let sql = format!(
+            "WITH requested AS (
+                 SELECT DISTINCT COALESCE(names.identity,'mission/'||input.value) AS identity
+                 FROM json_each(?1) input LEFT JOIN identity_names names ON names.name='mission/'||input.value
+             ) {}",
+            MISSION_RUN_HEADER_SELECT.replace(
+                "FROM mission_runs JOIN run_generations",
+                ", requested.identity, COALESCE(h.unavailable,
+                     (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
+                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
+                 FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
+                 LEFT JOIN mission_runs ON mission_runs.mission_id=substr(requested.identity,9)
+                 LEFT JOIN run_generations",
+            ),
         );
         let ids = ids
             .iter()
@@ -4413,9 +4421,24 @@ impl MissionsStore for Store {
             .collect::<Vec<_>>();
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h580d8608ff7c owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ &sql)?
-            .query_map([serde_json::to_string(&ids)?], mission_run_header_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+            .query_map([serde_json::to_string(&ids)?], |row| {
+                let identity = row.get::<_, String>(19)?;
+                let blocked = row.get::<_, Option<String>>(20)?;
+                let header = if blocked.is_none() && row.get_ref(0)?.data_type() != rusqlite::types::Type::Null {
+                    Some(mission_run_header_from_row(row)?)
+                } else {
+                    None
+                };
+                Ok((identity, blocked, header))
+            })?
+            .filter_map(|row| match row {
+                Err(error) => Some(Err(error.into())),
+                Ok((identity, Some(reason), _)) => Some(Err(
+                    st3_store::store::identities::unavailable(&identity, &reason).into(),
+                )),
+                Ok((_, None, header)) => header.map(Ok),
+            })
+            .collect()
     }
 
     fn mission_run_states(&self) -> Result<BTreeMap<String, MissionRunStateMoment>> {

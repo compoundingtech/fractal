@@ -105,6 +105,58 @@ mission "capacity" state="ready" {
 }
 
 #[test]
+fn batched_mission_reads_preserve_alias_lifecycle_fences() {
+    use st3_store::store::identities::{IdentityKind, IdentityStore as _, RenameRequest};
+    for fence in ["head-conflict", "unknown", "invalid"] {
+        let store = Store::open_memory("example").unwrap();
+        let mission = publish_mission(
+            &store,
+            "version 2\nmission \"example-before\" state=\"ready\" { goal \"Keep continuity.\"; step \"work\" { agentless } }",
+            "example-mission",
+        );
+        store.rename_identity(IdentityKind::Mission, &RenameRequest {
+            from: "mission/example-before".into(), to: "mission/example-after".into(),
+            actor: "person/robin".into(), reason: "Clarify responsibility".into(),
+            expected_naming_revision: None, expected_declaration: None,
+            idempotency_key: "example-rename".into(),
+        }, &[]).unwrap();
+        for id in ["example-before", "mission/example-before", "example-after", "mission/example-after"] {
+            assert_eq!(store.mission_spec(id, Some(&mission.revision)).unwrap().unwrap(), mission);
+            assert_eq!(store.mission_definitions_for_ids(&[id.into()]).unwrap().len(), 1);
+            assert!(store.mission_run_headers_for_missions(&[id.into()]).unwrap().is_empty());
+        }
+        let connection = store.connection.write();
+        if fence == "head-conflict" {
+            // The naming fold exposes a losing partition reservation through this head.
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-hc707a8ad70dc owner=st3_missions::store::run_capacity_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE identity_heads SET unavailable='conflict' WHERE identity='mission/example-before'", [],
+            ).unwrap();
+        } else {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h207736d22c9c owner=st3_missions::store::run_capacity_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
+                 VALUES('record/pending','example-peer',1,'pending',0,'{}',?1,'mission/example-before','mission.renamed','1')",
+                [fence],
+            ).unwrap();
+        }
+        drop(connection);
+        let expected = if fence == "unknown" { "pending-replication" } else { "conflict" };
+        for id in ["example-before", "mission/example-before", "example-after", "mission/example-after"] {
+            for error in [
+                store.mission_spec(id, None).unwrap_err(),
+                store.mission_spec(id, Some(&mission.revision)).unwrap_err(),
+                store.mission_definitions_for_ids(&[id.into()]).unwrap_err(),
+                store.mission_run_headers_for_missions(&[id.into()]).unwrap_err(),
+            ] {
+                let error = error.downcast_ref::<St3Error>().unwrap();
+                assert_eq!(error.code, "lifecycle-unavailable", "{id}: {fence}");
+                assert_eq!(error.details["subject"], "mission/example-before");
+                assert_eq!(error.details["reason"], expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn mission_rename_keeps_revision_generation_and_schedule_occurrence() {
     use st3_store::store::identities::{IdentityKind, IdentityStore as _, RenameRequest};
     let store = Store::open_memory("example").unwrap();

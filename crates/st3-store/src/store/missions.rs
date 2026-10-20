@@ -97,29 +97,25 @@ impl Store {
     ) -> Result<Option<MissionSpec>> {
         smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
         let connection = self.readers.get();
-        // Stored run metadata already contains physical mission keys. Resolve any public
-        // spelling in the revision query rather than adding a separate lookup per run.
         let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
-        let body = if let Some(revision) = revision {
-            connection
-                .query_row(
-                    "SELECT body FROM mission_revisions WHERE mission_id=COALESCE((SELECT substr(identity,9) FROM identity_names WHERE name='mission/'||?1),?1) AND revision=?2",
-                    params![mission_id, revision],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-        } else {
-            connection
-                .query_row(
-                    "SELECT r.body FROM mission_definitions d JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision WHERE d.mission_id=COALESCE((SELECT substr(identity,9) FROM identity_names WHERE name='mission/'||?1),?1)",
-                    [mission_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-        };
-        body.map(|body| serde_json::from_str(&body))
-            .transpose()
-            .map_err(Into::into)
+        let (body, identity, blocked): (Option<String>, String, Option<String>) = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h0988d0e7d489 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+                 SELECT COALESCE((SELECT identity FROM identity_names WHERE name='mission/'||?1),'mission/'||?1) AS identity
+             )
+             SELECT r.body, requested.identity, COALESCE(h.unavailable,
+                 (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                  FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
+                  AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
+             FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
+             LEFT JOIN mission_definitions d ON d.mission_id=substr(requested.identity,9)
+             LEFT JOIN mission_revisions r ON r.mission_id=substr(requested.identity,9)
+                 AND r.revision=COALESCE(?2,d.revision)",
+            params![mission_id, revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if let Some(reason) = blocked {
+            return Err(identities::unavailable(&identity, &reason).into());
+        }
+        body.map(|body| serde_json::from_str(&body)).transpose().map_err(Into::into)
     }
 
     /// Name steps for display in one read: each step's mission, run, path, title, first goal,
@@ -142,22 +138,37 @@ impl Store {
         let connection = self.readers.get();
         let bare: Vec<_> = ids.iter().map(|id| id.strip_prefix("mission/").unwrap_or(id)).collect();
         let mut statement = connection.prepare(
-            "SELECT r.body, c.accepted_at_unix_ms FROM json_each(?1) requested
-             LEFT JOIN identity_names names ON names.name='mission/'||requested.value
-             JOIN mission_definitions d ON d.mission_id=CASE WHEN names.identity IS NULL
-                 THEN requested.value ELSE substr(names.identity,9) END
-             JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision
-             JOIN claims c ON c.id=d.claim_id"
+            /* sqlite-large-value: allow-for-now lv-hb9049ed33321 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+                 SELECT DISTINCT COALESCE(names.identity,'mission/'||input.value) AS identity
+                 FROM json_each(?1) input LEFT JOIN identity_names names ON names.name='mission/'||input.value
+             )
+             SELECT r.body, c.accepted_at_unix_ms, requested.identity, COALESCE(h.unavailable,
+                 (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                  FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
+                  AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
+             FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
+             LEFT JOIN mission_definitions d ON d.mission_id=substr(requested.identity,9)
+             LEFT JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision
+             LEFT JOIN claims c ON c.id=d.claim_id"
         )?;
         statement
             .query_map([serde_json::to_string(&bare)?], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
             })?
-            .map(|row| {
-                let (body, accepted) = row?;
-                Ok(MissionDefinitionView {
-                    mission: serde_json::from_str(&body)?,
-                    updated_at_unix_ms: accepted.parse()?,
+            .filter_map(|row| {
+                let (body, accepted, identity, blocked) = match row {
+                    Ok(row) => row,
+                    Err(error) => return Some(Err(error.into())),
+                };
+                if let Some(reason) = blocked {
+                    return Some(Err(identities::unavailable(&identity, &reason).into()));
+                }
+                body.map(|body| {
+                    Ok(MissionDefinitionView {
+                        mission: serde_json::from_str(&body)?,
+                        updated_at_unix_ms: accepted.context("mission definition has no publication time")?.parse()?,
+                    })
                 })
             })
             .collect()
