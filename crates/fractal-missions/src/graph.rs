@@ -447,7 +447,7 @@ version 2
         assert_eq!(
             mechanical(3),
             (
-                r#""$ST3_BIN" gate cargo-test log_diet --package fractal --ref origin/main"#,
+                r#""$ST3_BIN" gate cargo-test log_diet --package st3 --ref origin/main"#,
                 "node-a",
                 "repo",
                 3_600_000

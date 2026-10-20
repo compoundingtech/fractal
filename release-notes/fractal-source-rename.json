@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Rename Rust crates and client packages to Fractal source identities",
+  "summary": "Rename Rust crates and client packages to Fractal source identities; preserve historical upgrade classifications",
   "replay": {"status": "none", "detail": "The rename changes source identities only. Stored claims and projections do not change."},
   "schema": {"status": "none", "detail": "Schema versions, serialized constants and hash domains stay unchanged."},
   "rules": {"status": "none", "detail": "Checkpoint rules, claim kinds and signed history stay unchanged."},

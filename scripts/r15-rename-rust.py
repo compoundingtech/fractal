@@ -68,6 +68,55 @@ DIRECTORIES = {old: new for old, new in PACKAGES.items()
                if (ROOT / "crates" / new).is_dir()}
 SOURCE_PATH = re.compile(r"(?P<base>crates/|\.\./)(?P<name>" + "|".join(map(re.escape, sorted(DIRECTORIES, key=len, reverse=True))) + r")(?=/|[\"'\s`\\]|$)")
 
+# Match comments before strings so quotation marks in prose do not hide code.
+# Raw Rust strings may contain ordinary quotes and arbitrary hash delimiters.
+RUST_TEXT = re.compile(
+    r'(?P<comment>//[^\n]*|/\*.*?\*/)'
+    r'|(?:br|r)(?P<hashes>#{0,255})".*?"(?P=hashes)'
+    r'|b?"(?:\\.|[^"\\])*"',
+    re.DOTALL,
+)
+
+
+def rust_names(text, package_selectors=False):
+    text = SELF_ALIAS.sub(lambda m: "fractal_" + m[1], text)
+    text = IDENTIFIER_TOKEN.sub(lambda m: IDENTIFIERS[m[1]], text)
+    text = IMPORT_TOKEN.sub(lambda m: m[1] + " " + IDENTIFIERS[m[2]], text)
+    if package_selectors:
+        text = re.sub(r"(?P<flag>(?:-p|--package)\s+)(?P<name>" +
+                      "|".join(map(re.escape, sorted(PACKAGES, key=len, reverse=True))) +
+                      r")(?![\w-])", lambda m: m["flag"] + PACKAGES[m["name"]], text)
+    return text
+
+
+def rust_source_names(text):
+    parts = []
+    end = 0
+    for match in RUST_TEXT.finditer(text):
+        parts.append(rust_names(text[end:match.start()]))
+        token = match.group()
+        parts.append(rust_names(token, package_selectors=True)
+                     if match["comment"] is not None else token)
+        end = match.end()
+    parts.append(rust_names(text[end:]))
+    return "".join(parts)
+
+
+# Canonicalize runtime fixtures damaged by earlier unlexed substitutions.
+# These are transcript/prompt/DSL examples, not source package selections.
+RUNTIME_FIXTURES = {
+    "crates/fractal-conversation-ui/src/conversation.rs": (
+        ("$ cargo test -p fractal-tui", "$ cargo test -p stui"),
+    ),
+    "crates/fractal-missions/src/graph.rs": (
+        ("gate cargo-test log_diet --package fractal --ref origin/main",
+         "gate cargo-test log_diet --package st3 --ref origin/main"),
+    ),
+    "crates/fractal-migrate/src/main.rs": (
+        ("use fractal_legacy_runner message", "use st2 message"),
+        ("use fractal_daemon conversations", "use st3 conversations"),
+    ),
+}
 
 def source_paths(text):
     text = SOURCE_PATH.sub(lambda m: m["base"] + DIRECTORIES[m["name"]], text)
@@ -122,9 +171,7 @@ def rust(p):
     if p.relative_to(ROOT).as_posix() == "crates/fractal-schema/src/lib.rs":
         text = text.replace("This file is generated from `st3-schema`", "This file is generated from `fractal-schema`")
     text = source_paths(text)
-    text = SELF_ALIAS.sub(lambda m: "fractal_" + m[1], text)
-    text = IDENTIFIER_TOKEN.sub(lambda m: IDENTIFIERS[m[1]], text)
-    text = IMPORT_TOKEN.sub(lambda m: m[1] + " " + IDENTIFIERS[m[2]], text)
+    text = rust_source_names(text)
     # Explicit tracing targets are runtime identities, not Rust imports.
     for old in ("st3::http", "st3::relay_diagnostic", "st_chatgpt::call"):
         new = IDENTIFIER_TOKEN.sub(lambda m: IDENTIFIERS[m[1]], old)
@@ -135,10 +182,8 @@ def rust(p):
     for root in ("exports", "fixture"):
         text = text.replace(root + "::fractal_legacy_runner::resource_provider",
                             root + "::st2::resource_provider")
-    # Package selection in source comments/examples is not an executable rename.
-    text = re.sub(r"(?P<flag>(?:-p|--package)\s+)(?P<name>" +
-                  "|".join(map(re.escape, sorted(PACKAGES, key=len, reverse=True))) +
-                  r")(?![\w-])", lambda m: m["flag"] + PACKAGES[m["name"]], text)
+    for old, new in RUNTIME_FIXTURES.get(p.relative_to(ROOT).as_posix(), ()):
+        text = text.replace(old, new)
     return text
 
 
@@ -157,6 +202,9 @@ for p in FILES:
     relative = p.relative_to(ROOT).as_posix()
     if p in MANIFESTS:
         result = manifest(p, MANIFESTS[p])
+    elif relative == "docs/st3/action-coverage.json":
+        # Test evidence is a source-tree reference, not a wire/runtime fixture.
+        result = source_paths(p.read_text())
     elif p.suffix == ".rs":
         if (relative.startswith(("scripts/", "crates/fractal-client-codegen/", "vendor/"))
                 or "/vendor/" in relative

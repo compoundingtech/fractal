@@ -321,7 +321,7 @@ def npm_references(text, relative, internal_scopes):
     return sorted(found.items())
 
 
-def npm_resolution_guard(tree, old_packages):
+def npm_resolution_guard(tree, old_packages, baseline_tree=None):
     files = []
     for path in sorted(tree.rglob('*')):
         if path.is_symlink() or not path.is_file():
@@ -356,6 +356,7 @@ def npm_resolution_guard(tree, old_packages):
     checked = 0
     declarations = 0
     payloads = 0
+    historical_fragments = 0
     # Reuse the repository's fail-closed pnpm-v9 registry projection, including
     # transitive packages, rather than guessing registry names from source imports.
     loader = importlib.machinery.SourceFileLoader('r15_npm_lock', str(ROOT / 'scripts/ci-fractal-web-licenses'))
@@ -419,6 +420,16 @@ def npm_resolution_guard(tree, old_packages):
                                    'reference': name, 'selector': selector, 'reason': reason})
     for path, text in files:
         relative = path.relative_to(tree).as_posix()
+        if baseline_tree is not None and relative.startswith('release-notes/') and path.suffix == '.json':
+            baseline = baseline_tree / relative
+            if baseline.is_file():
+                if path.read_bytes() != baseline.read_bytes():
+                    errors.append({'path': relative, 'reason': 'historical release fragment changed'})
+                else:
+                    historical_fragments += 1
+                # Historical notes describe the packages at their immutable source.
+                # New fragments still pass through the live-reference checks below.
+                continue
         if path.name == 'pnpm-lock.yaml':
             continue  # Structured lock authorities/importers were validated above.
         if npm_recorded_payload(text, path.suffix):
@@ -446,9 +457,15 @@ def npm_resolution_guard(tree, old_packages):
             if package not in allowed:
                 errors.append({'path': relative, 'line': text.count('\n', 0, position) + 1,
                                'reference': reference, 'package': package, 'reason': 'unresolved npm package'})
+    if baseline_tree is not None:
+        for baseline in (baseline_tree / 'release-notes').glob('*.json'):
+            relative = baseline.relative_to(baseline_tree).as_posix()
+            if not (tree / relative).is_file():
+                errors.append({'path': relative, 'reason': 'historical release fragment removed'})
     return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'text_files': len(files),
             'workspace_names': sorted(workspace), 'registry_names': len(registry),
             'declaration_literals': declarations, 'recorded_payloads': payloads,
+            'immutable_release_fragments': historical_fragments,
             'isolated_manifests': len(isolated), 'unresolved': errors}
 
 
@@ -601,7 +618,7 @@ def main():
             tree.mkdir()
             snapshot(revision, tree)
         guards = {}
-        guards['npm_references'] = npm_resolution_guard(trees[1], packages)
+        guards['npm_references'] = npm_resolution_guard(trees[1], packages, trees[0])
         differences.extend({'category': 'npm_reference_resolution', **error}
                            for error in guards['npm_references']['unresolved'])
         guards['head_symlinks'] = symlink_guard(trees[1])

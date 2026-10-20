@@ -40,7 +40,7 @@ SOURCE_SUFFIXES = {
     '.css', '.scss', '.sass', '.less', '.html', '.htm', '.vue', '.svelte',
     '.astro', '.mdx',
 }
-EXCLUDED_ROOTS = {'scripts', 'docs', '.st', 'nix', 'buck2', '.github', 'repos'}
+EXCLUDED_ROOTS = {'scripts', 'docs', '.st', 'nix', 'buck2', '.github', 'repos', 'release-notes'}
 
 
 def selected(path: Path) -> bool:
@@ -56,9 +56,9 @@ def selected(path: Path) -> bool:
     if path.name == 'package.json':
         return not path.with_name('package.json.genie.ts').exists()
     if path.suffix in {'.json', '.jsonc'}:
-        # Configuration and release documentation contain source references.
-        # Serialized recordings/fixtures are data, not rewrite inputs.
-        return relative.parts[0] == 'release-notes' or 'config' in path.stem
+        # Source configuration is live; recorded data and immutable release
+        # classifications retain the identities at their historical source.
+        return 'config' in path.stem
     return path.suffix in SOURCE_SUFFIXES
 
 
@@ -89,6 +89,21 @@ def rewrite(text: str, path: Path) -> str:
         text = text.replace('cargo run -p st3-client-codegen', 'cargo run -p fractal-client-codegen --bin st3-client-codegen')
     return text
 
+
+# Repair only this script's earlier rewrites of immutable historical fragments.
+# A fragment with unrelated changes is not silently overwritten.
+historical_base = 'e9a9167884ea56ae22ed0605bdf284610b6fa9fb'
+historical_notes = subprocess.check_output(
+    ['git', 'ls-tree', '-r', '--name-only', historical_base, '--', 'release-notes'],
+    cwd=ROOT).decode().splitlines()
+for name in historical_notes:
+    path = ROOT / name
+    if not path.is_file():
+        continue
+    before = subprocess.check_output(['git', 'show', historical_base + ':' + name], cwd=ROOT).decode()
+    current = path.read_text()
+    if current != before and current == rewrite(before, path):
+        path.write_text(before)
 
 paths = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
 changed = 0

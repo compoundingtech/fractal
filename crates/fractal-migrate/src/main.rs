@@ -1943,10 +1943,10 @@ agent "worker" {
     #[test]
     fn eval_prompt_rewrite_removes_st2_channel_language() {
         let translated = rewrite_eval_prompt(
-            "In a hermetic st2 eval, use fractal_legacy_runner message and wait for an st2 channel message.",
+            "In a hermetic st2 eval, use st2 message and wait for an st2 channel message.",
         );
         assert!(translated.starts_with(
-            "In a hermetic st3 eval, use fractal_daemon conversations and end the turn and stay idle."
+            "In a hermetic st3 eval, use st3 conversations and end the turn and stay idle."
         ));
         assert!(translated.contains("Do not run a blocking wait, trace, poll, or sleep command."));
         assert!(!translated.contains("st2"));

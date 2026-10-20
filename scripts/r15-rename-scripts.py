@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce R15 script source/package rewrites after the pure directory moves.
+"""Reproduce R15 script and reviewed policy source/package rewrites after directory moves.
 
 Run from any directory: python3 scripts/r15-rename-scripts.py
 Historical source readers are deliberately left for the final hand-edit layer.
@@ -13,6 +13,12 @@ SOURCE_TOOLS = {
     'crate-cut-test', 'st_boundary.py', 'check-st-boundary-test',
 }
 HISTORICAL = {'release_notes.py', 'profile-mailbox-wakes'}
+# These policies declare source inputs and probes for the script-backed lanes.
+# Keep their paths aligned with the reviewed list in evidence-verify-test.
+POLICY_PATHS = (
+    '.st/evidence-skip-policy.json',
+    '.st/required-lanes.json',
+)
 
 
 def package(name):
@@ -134,7 +140,9 @@ def rewrite(relative, source):
 
 
 def main():
-    for path in sorted((ROOT / 'scripts').rglob('*')):
+    paths = sorted((ROOT / 'scripts').rglob('*'))
+    paths.extend(ROOT / relative for relative in POLICY_PATHS)
+    for path in paths:
         if not path.is_file() or '__pycache__' in path.parts:
             continue
         if path.name.startswith('r15-rename-'):
@@ -143,7 +151,7 @@ def main():
             source = path.read_text()
         except UnicodeError:
             continue
-        updated = rewrite(path.relative_to(ROOT / 'scripts'), source)
+        updated = rewrite(path.relative_to(ROOT), source)
         if updated != source:
             path.write_text(updated)
             print(path.relative_to(ROOT))

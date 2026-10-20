@@ -33,15 +33,40 @@ class RenameProof(unittest.TestCase):
             exec(compile(ast.Module(body=[selected], type_ignores=[]), '<client-selection>', 'exec'), namespace)
             for relative in ('apps/web/app.css', 'apps/web/index.html', 'apps/web/vite.config.ts',
                              'apps/web/tailwind.config.json', 'apps/web/tsconfig.json',
-                             'apps/web/tsconfig.jsonc', 'apps/ios/scripts/fixture.py',
-                             'release-notes/source-package.json'):
+                             'apps/web/tsconfig.jsonc', 'apps/ios/scripts/fixture.py'):
                 with self.subTest(path=relative):
                     self.assertTrue(namespace['selected'](tree / relative))
             for relative in ('clients/typescript/fractal-scenarios/recordings/session.normalized.json',
                              'clients/typescript/fractal-scenarios/recordings/session.recording.jsonl',
-                             'fixtures/scenarios/session.json'):
+                             'fixtures/scenarios/session.json',
+                             'release-notes/source-package.json'):
                 with self.subTest(path=relative):
                     self.assertFalse(namespace['selected'](tree / relative))
+
+    def test_rust_rewrite_changes_source_names_not_prompt_or_transcript_strings(self):
+        source = ast.parse((ROOT / 'scripts/r15-rename-rust.py').read_text())
+        namespace = {
+            're': __import__('re'),
+            'PACKAGES': {'st3': 'fractal', 'st2': 'fractal-legacy-runner', 'stui': 'fractal-tui'},
+            'IDENTIFIERS': {'st3': 'fractal_daemon', 'st2': 'fractal_legacy_runner'},
+        }
+        names = {'SELF_ALIAS', 'IDENTIFIER_TOKEN', 'IMPORT_TOKEN', 'RUST_TEXT'}
+        for node in source.body:
+            if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in names) or (
+                    isinstance(node, ast.FunctionDef) and node.name in {'rust_names', 'rust_source_names'}):
+                exec(compile(ast.Module(body=[node], type_ignores=[]), '<rust-rewrite>', 'exec'), namespace)
+        rewrite = namespace['rust_source_names']
+        source = '''use st3::Client;
+// cargo test -p stui
+let prompt = "use st2 message and use st3 conversations";
+let transcript = r##"$ cargo test -p stui"##;
+let bytes = br#"use st3 conversations"#;
+'''
+        expected = source.replace('use st3::', 'use fractal_daemon::').replace(
+            '// cargo test -p stui', '// cargo test -p fractal-tui')
+        self.assertEqual(rewrite(source), expected)
+        self.assertEqual(rewrite(expected), expected)
 
     def test_rust_lexing_keeps_raw_values_and_ignores_comments_and_lifetimes(self):
         source = '''// "ignored"
@@ -362,6 +387,31 @@ let socket = "/state/st3.sock";
                 with self.subTest(mutation=mutation):
                     source.write_text(mutation)
                     self.assertEqual(proof.npm_resolution_guard(tree, {})['result'], 'FAIL')
+
+    def test_npm_historical_release_fragments_are_immutable_not_live_consumers(self):
+        old = {'@smalltalk/fractal-ui': '@fractal/ui'}
+        with tempfile.TemporaryDirectory() as directory:
+            base, tree = Path(directory) / 'base', Path(directory) / 'head'
+            for root in (base, tree):
+                (root / 'release-notes').mkdir(parents=True)
+                (root / 'release-notes/history.json').write_text(
+                    json.dumps({'summary': 'Adopt `@smalltalk/fractal-ui`.'}))
+            (tree / 'package.json').write_text(json.dumps({'name': '@fractal/ui'}))
+            result = proof.npm_resolution_guard(tree, old, base)
+            self.assertEqual(result['result'], 'PASS')
+            self.assertEqual(result['immutable_release_fragments'], 1)
+            historical = tree / 'release-notes/history.json'
+            historical.write_text(json.dumps({'summary': 'Adopt `@fractal/ui`.'}))
+            result = proof.npm_resolution_guard(tree, old, base)
+            self.assertEqual(result['result'], 'FAIL')
+            self.assertEqual(result['unresolved'][0]['reason'], 'historical release fragment changed')
+            historical.unlink()
+            result = proof.npm_resolution_guard(tree, old, base)
+            self.assertEqual(result['unresolved'][0]['reason'], 'historical release fragment removed')
+            historical.write_bytes((base / 'release-notes/history.json').read_bytes())
+            (tree / 'release-notes/new.json').write_text(
+                json.dumps({'summary': 'Adopt `@smalltalk/fractal-ui`.'}))
+            self.assertEqual(proof.npm_resolution_guard(tree, old, base)['result'], 'FAIL')
 
 
 if __name__ == '__main__':
