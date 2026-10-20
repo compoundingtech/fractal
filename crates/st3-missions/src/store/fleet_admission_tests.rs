@@ -183,6 +183,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     assert!(store.runtime_authority(subject).unwrap().unwrap().actual.is_some());
     changes.borrow_and_update();
     store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h7f624abd90cf owner=st3_missions::store::fleet_admission_tests TODO=chunk-or-reference-variable-columns */
         "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
     ).unwrap();
@@ -190,6 +191,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     assert!(changes.has_changed().unwrap(), "coverage failure must immediately wake readers");
     changes.borrow_and_update();
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h3eee87cb9c9b owner=st3_missions::store::fleet_admission_tests TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id],
     ).unwrap();
     assert!(changes.has_changed().unwrap(), "WITHOUT ROWID repair must wake despite disabled publication");
@@ -200,6 +202,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     assert!(changes.has_changed().unwrap(), "disabled coverage needs conservative resolution wakes");
     changes.borrow_and_update();
     store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h0b633c2fede3 owner=st3_missions::store::fleet_admission_tests TODO=chunk-or-reference-variable-columns */
         "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
     ).unwrap();
@@ -231,6 +234,7 @@ fn terminal_authority_operation_conflict_wakes_without_subject_claim_changes() {
     // A cross-subject idempotency collision repairs this shared operation projection.
     // Reproduce just that repair: no new terminal claim or graph-index advance.
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hdfd751863d9a owner=st3_missions::store::fleet_admission_tests TODO=prepare-body-and-predecessor-values */
         "UPDATE operations SET state='conflict' WHERE id IN
          (SELECT json_extract(body, '$._operation.id') FROM claims WHERE subject=?1)", [subject],
     ).unwrap();

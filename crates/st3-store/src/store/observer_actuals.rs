@@ -276,7 +276,7 @@ impl WriterObserver for Actuals {
                         "SELECT subject FROM claims WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) LIMIT ?2"
                     };
                     let batch_subjects = (|| -> rusqlite::Result<Vec<String>> {
-                        connection.prepare_cached(sql)?
+                        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h856fd3ad7ada owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql)?
                             .query_map(params![rowid, PENDING_LIMIT + 1], |row| row.get(0))?.collect()
                     })();
                     match batch_subjects {
@@ -297,7 +297,7 @@ impl WriterObserver for Actuals {
                     "replica_records" => "SELECT COALESCE(claims.subject, replica_records.subject_hint) FROM replica_records LEFT JOIN claims ON claims.id=replica_records.claim_id WHERE replica_records.rowid=?1",
                     _ => "SELECT subject FROM claims WHERE id=(SELECT id FROM projection_digest_repaired_claims WHERE rowid=?1)",
                 };
-                match connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h856fd3ad7ada owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql).and_then(|mut statement|
+                match connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h21e59b956a60 owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql).and_then(|mut statement|
                     statement.query_row(/* sqlite-large-value: allow-for-now lv-h76495336e10a owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, String>(0)).optional()) {
                     Ok(Some(subject)) => {
                         if table == "replica_records" {
