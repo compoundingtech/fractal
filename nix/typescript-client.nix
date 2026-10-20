@@ -6,8 +6,8 @@
 # uses the hoisted linker, so they are plain directories with relative links). The check restores them
 # over the source and runs the same script, unchanged.
 #
-# Refreshing the hash: the installation derivation is named after the lockfile's hash, so a changed
-# `pnpm-lock.yaml` builds a new one, and that build fails with the new hash until it is entered in
+# Refreshing the hash: the installation derivation is named after the lockfile's hash and the effect-utils revision, so a
+# changed `pnpm-lock.yaml` or effect-utils pin builds a new one, and that build fails with the new hash until it is entered in
 # `nix/typescript-client-deps.hash`. `scripts/nix-typescript-client-deps-hash` does the whole refresh.
 { effect-utils, system, self, version }:
 let
@@ -16,7 +16,11 @@ let
   # pnpm 12.7.0 and Node 24 from effect-utils' own nixpkgs, as the web shell (`nix/web-shell.nix`) has them.
   pnpm = effect-utils.lib.mkPnpm { inherit pkgs; };
   node = pkgs.nodejs_24;
+  # A fixed-output path is named by its name and hash, not by its builder inputs. The lockfile records the staged
+  # `@overeng/*` sources by path only, so both the lockfile and the effect-utils revision go into the name: a bump of
+  # either builds a new installation instead of reusing a stale one from a store or cache.
   lockHash = builtins.substring 0 12 (builtins.hashFile "sha256" ../pnpm-lock.yaml);
+  sourcesHash = builtins.substring 0 12 (builtins.hashString "sha256" effect-utils.narHash);
   manifests = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
@@ -33,7 +37,7 @@ let
       ../packages/fractal-ui/package.json
     ];
   };
-  installation = pkgs.runCommand "typescript-client-installation-${lockHash}" {
+  installation = pkgs.runCommand "typescript-client-installation-${lockHash}-${sourcesHash}" {
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
     outputHash = lib.removeSuffix "\n" (builtins.readFile ./typescript-client-deps.hash);
