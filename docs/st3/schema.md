@@ -4,7 +4,7 @@ This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `b0615c71ded03b34c11349eacf89e30b660ed25713207561b92eaa301abcf3ae`
+Storage digest: `a1ed0d4405efa92df65e46aaf7c62ee8780aed26ab7d27a4ed5fe53ebb335ca6`
 
 ## Subject families
 
@@ -338,6 +338,16 @@ the checkpoint tables: reading the ledger before local-mode activation stops tho
 would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
+
+## Writer heads
+
+`writer_heads` keeps each writer's highest batch (sequence, hash). A trigger raises it on every
+batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
+newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
+maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
+and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
+this table existed), and the writer floor; the chain's previous hash is the higher of the newest
+batch and the stored head.
 
 ## Local message selectors
 

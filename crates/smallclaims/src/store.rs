@@ -86,6 +86,7 @@ pub mod projection_digest;
 pub mod retired;
 pub mod runtime;
 pub mod transport_observation_index;
+pub mod writer_heads;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 
@@ -988,6 +989,9 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1ef8ba031b42 owner=smallclaims::store TODO=trace-statement-and-value-representation */ writer_heads::SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
             idempotency::initialize(connection)
         })?;
@@ -1857,13 +1861,17 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
     Ok(transaction.last_insert_rowid() as u64)
 }
 
-/// The next sequence for a local batch: one past the writer's highest batch, and past the
-/// writer floor this store took when it joined under a name the fleet had used before.
+/// The next sequence for a local batch: one past the writer's highest batch, including one a
+/// trim has deleted (`writer_heads`, or an envelope tombstone from before that ledger), and past
+/// the writer floor this store took when it joined under a name the fleet had used before.
 pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Result<u64> {
     transaction
         .prepare_cached(
             "SELECT MAX(
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
+                 COALESCE((SELECT sequence FROM writer_heads WHERE writer=?1), 0),
+                 COALESCE((SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1), 0),
+                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0),
                  COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
              ) + 1",
         )?
@@ -1871,10 +1879,16 @@ pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Res
         .map_err(Into::into)
 }
 
+/// The hash of the writer's highest batch, including one a trim has deleted.
 pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Result<Option<String>> {
     transaction
         .prepare_cached(
-            "SELECT hash FROM batches WHERE origin=?1 ORDER BY replica_sequence DESC LIMIT 1",
+            "SELECT hash FROM (
+                 SELECT replica_sequence AS sequence, hash FROM
+                     (SELECT replica_sequence, hash FROM batches WHERE origin=?1
+                      ORDER BY replica_sequence DESC LIMIT 1)
+                 UNION ALL SELECT sequence, hash FROM writer_heads WHERE writer=?1
+             ) ORDER BY sequence DESC LIMIT 1",
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-ha390580f8e24 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
         .optional()

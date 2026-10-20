@@ -41,6 +41,15 @@ unfinished = [dict(jobs[1], completed_at=None)]
 assert report.rows({'isolation-vm': 'daily-isolation-vm'}, needs, unfinished)[0]['seconds'] == 480, 'a job without completed_at ends at its last step'
 print('passed: rows, order, durations and red lanes')
 
+# The generated report covers every lane it waits for, the cost check included.
+workflow = (ROOT / '.github/workflows/daily-long.yml').read_text()
+reporter = workflow.split('\n  daily-report:\n', 1)[1]
+needed = reporter.split('    needs:\n', 1)[1].split('\n    if:', 1)[0].split('\n')
+declared = json.loads(reporter.split("LANES: '", 1)[1].split("'\n", 1)[0])
+assert [line.removeprefix('      - ') for line in needed] == list(declared), (needed, declared)
+assert declared.get('perf-cost') == 'daily-perf-cost' and '\n  perf-cost:\n    name: daily-perf-cost\n' in workflow, declared
+print('passed: the report covers every lane it needs, including daily-perf-cost')
+
 
 def run(needs, issues, jobs_exit=0):
     with tempfile.TemporaryDirectory() as scratch:

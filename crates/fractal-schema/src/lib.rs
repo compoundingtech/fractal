@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha214767a3528 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-he3cd20e000a3 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -101,6 +101,16 @@ the checkpoint tables: reading the ledger before local-mode activation stops tho
 would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
+
+## Writer heads
+
+`writer_heads` keeps each writer's highest batch (sequence, hash). A trigger raises it on every
+batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
+newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
+maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
+and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
+this table existed), and the writer floor; the chain's previous hash is the higher of the newest
+batch and the stored head.
 "#;
 
 pub fn storage_digest() -> String {
@@ -327,7 +337,7 @@ impl std::error::Error for ValidationError {}
 
 /// Local SQLite projection notes. They are documentation only: the projection is
 /// not part of the serialized registry, so it cannot change the registry digest.
-const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-h63ee7b740f4a owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
+const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-h0943c80569cd owner=st3_schema TODO=stage-generation-and-keyed-reclamation */ r#"
 ## Local message selectors
 
 The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
