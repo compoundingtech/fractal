@@ -741,7 +741,9 @@ remain screen-derived adapters, not evidence of a captured runtime GET.
 
 ## Replay (D8)
 
-`createReplay(world, { clock })` returns a transport for the real data layer:
+`createReplay(world, { clock })` returns a `ReplayHandle` transport for the real data layer.
+`ReplayHandle` extends the structural `Replay` transport interface with `flush()` for test
+synchronization. Consumers that supply their own `Replay` transport need not implement it:
 
 ```ts
 const replay = createReplay(loadWorld('fleet-mid-refactor'), { clock: realClock() })
@@ -791,8 +793,23 @@ replay.actions  // actions the client submitted, in order, for test assertions
   committed/generated boundary. The `huge` scripted consumer starts with the newest 50 entries
   and requests older pages, including beyond the committed 1,600-entry window. Native file
   readers have only the committed pages; the full logical history is available through replay.
-- **Clocks:** `realClock()` schedules with timers; `manualClock()` exposes `advance(ms)` for unit
-  tests. Replay never waits on its own; it runs only what the clock releases.
+- **Clocks and socket tasks:** `realClock()` schedules timeline work with timers;
+  `manualClock()` exposes `advance(ms)` for tests. The clock releases timeline events;
+  opens and socket callbacks are delivered as later tasks, never reentrantly from `send()` or
+  `close()`. Replies and timeline frames share one FIFO MessageChannel task queue, with one
+  event per task (not a microtask). Playwright's `clock.install` does not fake MessageChannel,
+  so delivery works while its timers and Date are paused. Where supported (Node/Bun), idle
+  ports are unref'd; pending work refs the receiving port until the queue becomes idle.
+  Replay teardown closes both ports.
+  Opening becomes effective in the open task before `onopen`; closing immediately prevents
+  further sends and queues `onclose`. The typed socket seam does not expose `readyState`.
+  `replay.close()` cancels pending opens, frames and timeline work, then delivers close
+  notifications asynchronously and disposes the ports. Already-queued close notifications
+  survive teardown and are delivered exactly once, including `socket.close(); replay.close()`.
+- **Test synchronization:** after `clock.advance(ms)` or a subscribe/send, await
+  `replay.flush()` before asserting socket output. It waits until the delivery queue is idle,
+  including replies queued by handlers, but neither advances the clock nor releases future
+  timeline events. Awaiting only a microtask is insufficient.
 
 ### Store versions
 

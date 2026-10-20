@@ -1,4 +1,4 @@
-import { linuxActionlintConfig } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
@@ -34,7 +34,7 @@ export default githubWorkflow(auditCaches({
         TAG: '${{ inputs.tag }}',
       },
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0 } },
+        ...fullHistoryCheckoutSteps(),
         {
           name: 'Publish the verified archives of main when it changed',
           run: 'scripts/release-smalltalk-daily ${TAG:+--tag "$TAG"}',

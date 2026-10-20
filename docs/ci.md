@@ -7,10 +7,10 @@ exact commit that lands on `main`; its successful checks stay attached to that S
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
 (which pull requests and the queue do not run; the daily long lanes run it too), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
-disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
-public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
-older pushes must not keep consuming runners after their source is superseded. Manual dispatch,
-scheduled Performance controls and merge-group runs retain independent `github.run_id` groups.
+disabled. PR updates cancel obsolete runs for that PR in Workspace CI and the
+public-content guard. Main upkeep and public checks keep only the latest main push;
+older pushes must not keep consuming runners after their source is superseded. Manual dispatch
+(Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
@@ -98,10 +98,12 @@ preempting active jobs or reserving capacity. PR picking, Namespace shapes/affin
 and required checks are retained. Already queued runs retain
 the labels from their workflow revision.
 
-Performance runs on every main push, nightly schedule and manual dispatch; it does not
-start a load test for merge groups.
-Ready PR runs start for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load
-workload and its workflow, or an explicit `ci-perf` label. The metadata-only admission job
+Performance (`perf.yml`) runs only by manual dispatch, on any ref; the [daily long
+lanes](#daily-long-lanes) run its load jobs on `main` once a day. It never starts for merge groups,
+and it starts for no pull request: PR triggers were removed to reduce queue demand. Its admission
+job still decides for a pull request as before, should PR triggers return: ready PR runs would start
+for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load workload and its
+workflow, or an explicit `ci-perf` label. The metadata-only admission job
 checks the PR head before and after its bounded changed-file inventory, including rename
 sources. Only an explicit successful `run=false` skips the optional workload; malformed
 metadata, head drift or failed admission retain coverage. Unrelated label events cannot
@@ -991,7 +993,9 @@ What only exists or only means something with them:
 lanes that need a VM, real sockets across daemon restarts, or an older st3. Today those are
 `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat`, plus the shared test
 producer they consume. It also runs the cost check as `daily-perf-cost` (see
-[Performance gate](#performance-gate)) as Main upkeep runs it. The others run exactly as Workspace CI runs them, because both workflows build
+[Performance gate](#performance-gate)) as Main upkeep runs it, and the load tests as
+`daily-perf-load`, `daily-perf-load-hog` and `daily-perf-load-hog-macos` from the job definitions
+the Performance workflow dispatches (`.github/workflows/perf-load.ts`). The others run exactly as Workspace CI runs them, because both workflows build
 the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
 `.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
 no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no
@@ -1097,9 +1101,12 @@ with `opt-level = 1` only to generate the stores faster.
   8,007,288 steps for a store ten times larger) and the foreign-key columns #1103 indexed (a trim's
   work per deleted row grew 7.3 times, its full-scan steps 9.3 times).
 
-`perf-load` runs `daemon_load::` in a release build, in its own `Performance` workflow
-(`perf.yml`): on relevant `main` pushes and pull requests, nightly on `main`, and on dispatch.
-It always uses Namespace, including when Workspace CI picks ci1. It serves a store the size of a busy host's (scale 1, about 240,000 claims) to the
+`perf-load` runs `daemon_load::` in a release build once a day on `main` as `daily-perf-load` in the
+[daily long lanes](#daily-long-lanes), whose report shows its time and failures and whose issue
+reports a red run, and on any ref by dispatching the `Performance` workflow (`perf.yml`). Both
+build the jobs from `.github/workflows/perf-load.ts`. It ran on every `main` push with
+cancel-in-progress until 2026-10-20: in the 36 hours before, newer pushes cancelled 88 of 99 push
+runs and the other 11 failed, a red nobody saw. It always uses Namespace, including when Workspace CI picks ci1. It serves a store the size of a busy host's (scale 1, about 240,000 claims) to the
 request mix and rates that host's daemon reported in its busiest five-minute window (30 requests a
 second: harness events, mailbox pages, claims, desired state, delivery holds, replication rounds,
 renewals, status and work reads, and a person's reads), with the reconciler running and 30
@@ -1115,8 +1122,10 @@ main's last five reports and the corresponding slack below. The relative factor 
 route p99 and average daemon CPU; every absolute budget still applies independently, including
 the 300 ms roster budgets and 2-core CPU ceiling. The wider relative tolerance accommodates
 variation on shared runners; a passing historical comparison does not establish a paired effect
-or attribute a difference to runner noise. Each run downloads the newest five real reports from successful
-main runs' `perf-load-logs` artifacts. PR runs never supply baselines. Relative latency comparisons start once five
+or attribute a difference to runner noise. Each run downloads the newest five real reports from
+`main` runs' `perf-load-logs` artifacts whose load passed: the daily lanes' `daily-perf-load` job
+(the job's own conclusion, so a red unrelated lane does not discard it) and Performance's earlier
+`main` runs, newest first. PR runs never supply baselines. Relative latency comparisons start once five
 main reports exist; until then every path still checks its absolute p99 budget and every request
 error fails. CPU compares as soon as one main report exists, because it averages the whole run.
 Relative latency tolerates 5 ms of noise, or 50 ms when either path has fewer than 50 samples:
@@ -1131,7 +1140,7 @@ stands for one. Targets describe and never gate: the budgets and main's baseline
 
 Performance uses the small `.#perf` Nix shell and the opt-in `perf_load` test target (feature
 `perf-load`), which imports the same `daemon_load` and `daemon_bench` modules without compiling
-all integration fixtures. Completed main and PR runs retain seven-day build snapshots containing
+all integration fixtures. Completed main (daily) and PR runs retain seven-day build snapshots containing
 Cargo outputs, registry/git sources, a local sccache, and a signed Nix binary cache including the
 small shell closure. The build recipe includes the lockfiles, shell, manifests and Cargo config.
 Generated-store snapshots have a separate exact generator/schema key. Publication requires a
@@ -1194,8 +1203,8 @@ not past it at the start, at its lowest 5-second sample or at the end.
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
 every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
-`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
-`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+`GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
 not, until `ST_LOAD_HOG_STRICT=1`.
 
@@ -1205,15 +1214,18 @@ ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo 
 nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
 ```
 
-The Performance workflow runs it as the `perf-load-hog` job, with `continue-on-error` and its table
-in the step summary and the `perf-load-hog-logs` artifact. It runs on pushes to main and manual
-dispatch, not on pull requests: it takes a second performance runner for up to 45 minutes. It is
-no required check until its numbers are stable. "Without the hog" is
+The daily long lanes run it on `main` as `daily-perf-load-hog`, with its table in the step summary
+and the `perf-load-hog-logs` artifact; a failed request or a hog that never loaded the machine turns
+the lane red and reaches the daily issue, while a missed target only reports. The Performance
+workflow runs it as `perf-load-hog` by manual dispatch, with `continue-on-error`. It never runs on
+pull requests: it takes a second performance runner for up to 45 minutes. It is no required check
+until its numbers are stable. "Without the hog" is
 the host's load as it was: on a shared host that is not an idle machine, and the report gives the
 load average. Keep a Mac's load average under 10 outside the test window.
 
-`perf-load-hog-macos` runs the same stage on a macOS runner under `taskpolicy -b`, by manual dispatch
-only, and keeps the compiled test binary in the `perf-load-hog-macos` artifact. A Mac of the fleet
+`perf-load-hog-macos` runs the same stage on a macOS runner under `taskpolicy -b`, once a day on `main`
+as `daily-perf-load-hog-macos` and by dispatching Performance, and keeps the compiled test binary in
+the `perf-load-hog-macos` artifact. A Mac of the fleet
 runs that binary (`ST_LOAD_GATE=1 ST_LOAD_HOG=1 ./perf_load-macos-arm64 a_seat_priority_hog --nocapture`);
 nothing is built on a Mac.
 
@@ -1240,7 +1252,7 @@ the machine.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
 2-core ceiling for the daemon, with no baseline to compare. Main's relative gate (twice the worst
-of its last five reports) runs on the PR in Performance. Put on the PR the report table the run
+of its last five reports) runs when you dispatch Performance on the branch. Put on the PR the report table the run
 printed, the branch and commit, and one line saying it ran alone in the slot. For a change meant to
 make a path cheaper, put main's table beside it. Intake reviews that evidence and the merge queue
 checks the change; the slot gates nothing.
@@ -1327,9 +1339,10 @@ Apply the fifth live ruleset check after this workflow has passed on main.
 ## Generated files and existing workflows
 
 All workflow YAML and `.github/repo-settings.json` are generated from neighboring `.genie.ts`
-files. The `effect-utils` flake input supplies the generator library and CLI. The small, separate
-`genie` shell creates `repos/effect-utils` as a symlink to the exact input's Nix store path;
-`repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
+files. The `effect-utils` flake input supplies the genie CLI and the `effect-utils` member in
+`megarepo.lock` supplies the generator library: run `mr apply` first, which links
+`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/st-test` run the same command; the small,
+separate `genie` shell only warns when it is missing). `repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
 shell is not changed to depend on genie, so generation does not build its PTY/collector tools.
 
 ```sh
@@ -1450,11 +1463,11 @@ for the distinction between build concurrency and merge batch size.
 
 ## Superseded merge groups
 
-Push concurrency in Main upkeep, Performance and the public guard is scoped to protected main.
-In Performance and the public guard a new main push cancels obsolete automatic work. Main upkeep
-never cancels a started run: main pushes share one group, GitHub keeps only the newest pending
-run, so a burst of merges coalesces into one more upkeep that probes and fills the current
-main's exact cache entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
+Push concurrency in Main upkeep and the public guard is scoped to protected main.
+In the public guard a new main push cancels obsolete automatic work. Main upkeep never cancels a
+started run: main pushes share one group, GitHub keeps only the newest pending run, so a burst of
+merges coalesces into one more upkeep that probes and fills the current main's exact cache
+entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
 replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
 immutable workflow revisions can remain queued: before cancelling a backlog entry, compare its
 event, source and PR state with current main or the PR's latest head, retain its original timing

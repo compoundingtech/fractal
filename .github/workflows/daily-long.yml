@@ -38,8 +38,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -211,8 +224,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -381,8 +407,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -539,8 +578,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -697,8 +749,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -847,8 +912,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -987,8 +1065,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1056,7 +1147,7 @@ jobs:
         with:
           path: "${{ runner.temp }}/st-bench"
           key: "perf-cost-stores-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
-        id: cache-10
+        id: cache-11
       - name: Run the cost check
         shell: bash
         run: nix develop -c bash scripts/ci-perf cost
@@ -1111,9 +1202,284 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-10.outcome }}","hit":"${{ steps.cache-10.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
+          CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-11.outcome }}","hit":"${{ steps.cache-11.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
     if: github.ref == 'refs/heads/main'
+  perf-load:
+    name: daily-perf-load
+    if: github.ref == 'refs/heads/main'
+    runs-on:
+      [
+        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_IDLE_TIMEOUT: "0"
+      PERF_PR_NUMBER: ${{ github.event.pull_request.number }}
+      PERF_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Name compatible snapshot recipes
+        env:
+          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/st3/Cargo.toml', 'crates/st3-daemon/Cargo.toml', '.cargo/config.toml') }}"
+          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+        run: printf "PERF_BUILD_SNAPSHOT=%s\nPERF_STORES_SNAPSHOT=%s\n" "$PERF_BUILD_SNAPSHOT" "$PERF_STORES_SNAPSHOT" >> "$GITHUB_ENV"
+      - name: Restore compatible build, Nix, stores and main baseline snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-perf-cache restore
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test state and keep the compiler cache
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home"/{.config,.cache,.local/state} "$RUNNER_TEMP/cargo-home"/{registry,git} "$RUNNER_TEMP/perf-sccache"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\nSCCACHE_DIR=%s\nSCCACHE_CACHE_SIZE=1G\n' "$RUNNER_TEMP/cargo-home" "$RUNNER_TEMP/st-ci-cache" "$RUNNER_TEMP/perf-sccache" >> "$GITHUB_ENV"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        run: bash scripts/ci-nix-cache use
+      - name: Prepare fast scratch space for a new store recipe
+        run: if [ ! -s "$RUNNER_TEMP/st-bench/generated-1.sqlite3" ]; then sudo mount -o remount,size=10G /dev/shm; fi
+      - name: Run the release load test
+        shell: bash
+        run: "nix develop '.#perf' -c bash scripts/ci-perf load"
+        id: load
+      - id: cache
+        name: Save build and Nix snapshots
+        if: "!cancelled() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (steps.load.outcome == 'success' || steps.load.outcome == 'failure')"
+        run: |
+          if ! python3 scripts/ci-perf-cache check-report; then exit 0; fi
+          nix print-dev-env .#perf --profile "$RUNNER_TEMP/perf-shell" > /dev/null
+          nix develop .#perf -c env TMPDIR="$RUNNER_TEMP" sccache --show-stats || echo "::warning::sccache statistics unavailable; retaining the successful build"
+          CI_PERF_SHELL_ROOT="$RUNNER_TEMP/perf-shell" bash scripts/ci-nix-cache save
+          python3 scripts/ci-perf-cache pack
+      - name: Retain the build and Nix cache
+        if: "!cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.publish == 'true'"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PERF_BUILD_SNAPSHOT }}
+          path: "${{ runner.temp }}/perf-snapshots/build.tar.zst"
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+      - name: Retain the generated stores
+        if: "!cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.publish == 'true'"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PERF_STORES_SNAPSHOT }}
+          path: "${{ runner.temp }}/perf-snapshots/stores.tar.zst"
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+      - name: Retain the load report, log and timing
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-load-logs
+          path: "${{ runner.temp }}/perf/"
+          retention-days: 30
+          if-no-files-found: ignore
+          overwrite: true
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Restores and publishes its own build and store snapshots as Performance artifacts (scripts/ci-perf-cache), outside the dependency-cache pool.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  perf-load-hog:
+    name: daily-perf-load-hog
+    if: github.ref == 'refs/heads/main'
+    runs-on:
+      [
+        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
+        "namespace-features:github.run-id=${{ github.run_id }}",
+      ]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_IDLE_TIMEOUT: "0"
+      PERF_PR_NUMBER: ${{ github.event.pull_request.number }}
+      PERF_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Name compatible snapshot recipes
+        env:
+          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/st3/Cargo.toml', 'crates/st3-daemon/Cargo.toml', '.cargo/config.toml') }}"
+          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+        run: printf "PERF_BUILD_SNAPSHOT=%s\nPERF_STORES_SNAPSHOT=%s\n" "$PERF_BUILD_SNAPSHOT" "$PERF_STORES_SNAPSHOT" >> "$GITHUB_ENV"
+      - name: Restore compatible build, Nix, stores and main baseline snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-perf-cache restore
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test state and keep the compiler cache
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home"/{.config,.cache,.local/state} "$RUNNER_TEMP/cargo-home"/{registry,git} "$RUNNER_TEMP/perf-sccache"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\nSCCACHE_DIR=%s\nSCCACHE_CACHE_SIZE=1G\n' "$RUNNER_TEMP/cargo-home" "$RUNNER_TEMP/st-ci-cache" "$RUNNER_TEMP/perf-sccache" >> "$GITHUB_ENV"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        run: bash scripts/ci-nix-cache use
+      - name: Prepare fast scratch space for a new store recipe
+        run: if [ ! -s "$RUNNER_TEMP/st-bench/generated-1.sqlite3" ]; then sudo mount -o remount,size=10G /dev/shm; fi
+      - name: Run the release load test beside a seat-priority hog
+        shell: bash
+        run: "nix develop '.#perf' -c bash scripts/ci-perf load-hog"
+        id: load
+      - name: Retain the hog load report, log and timing
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-load-hog-logs
+          path: "${{ runner.temp }}/perf/"
+          retention-days: 30
+          if-no-files-found: ignore
+          overwrite: true
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Restores the build and store snapshots perf-load publishes (scripts/ci-perf-cache); it saves none.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  perf-load-hog-macos:
+    name: daily-perf-load-hog-macos
+    if: github.ref == 'refs/heads/main'
+    runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_IDLE_TIMEOUT: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test state
+        run: |
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home"/{.config,.cache,.local/state}
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Run the release load test beside a seat-priority hog
+        shell: bash
+        run: "nix develop '.#perf' -c bash scripts/ci-perf load-hog"
+      - name: Keep the compiled test binary
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/perf"
+          binary=$(find target/release/deps -maxdepth 1 -type f -name 'perf_load-*' ! -name '*.d' -perm -u+x | head -n 1)
+          [ -n "$binary" ] && cp "$binary" "$RUNNER_TEMP/perf/perf_load-macos-arm64" || echo "no perf_load binary was built"
+      - name: Retain the macOS hog report, log and test binary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-load-hog-macos
+          path: "${{ runner.temp }}/perf/"
+          retention-days: 30
+          if-no-files-found: ignore
+          overwrite: true
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Builds cold on a macOS runner and keeps no cache.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   daily-report:
     name: daily-report
     needs:
@@ -1124,6 +1490,9 @@ jobs:
       - daily-tests
       - daily-tests-shard-2
       - perf-cost
+      - perf-load
+      - perf-load-hog
+      - perf-load-hog-macos
     if: ${{ always() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1140,7 +1509,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TITLE: Daily long-lane run failed
-          LANES: '{"linux-test-build":"daily-test-build","isolation-vm":"daily-isolation-vm","mail-redelivery-canaries":"daily-mail-redelivery-canaries","linux-fleet-compat":"daily-fleet-compat","daily-tests":"daily-tests","daily-tests-shard-2":"daily-tests-shard-2","perf-cost":"daily-perf-cost"}'
+          LANES: '{"linux-test-build":"daily-test-build","isolation-vm":"daily-isolation-vm","mail-redelivery-canaries":"daily-mail-redelivery-canaries","linux-fleet-compat":"daily-fleet-compat","daily-tests":"daily-tests","daily-tests-shard-2":"daily-tests-shard-2","perf-cost":"daily-perf-cost","perf-load":"daily-perf-load","perf-load-hog":"daily-perf-load-hog","perf-load-hog-macos":"daily-perf-load-hog-macos"}'
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: python3 scripts/ci-daily-long-report
       - name: Report job cache coverage

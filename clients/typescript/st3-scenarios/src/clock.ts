@@ -1,6 +1,6 @@
 /**
- * Clocks drive replay and the React provider; nothing in the kit waits on its own.
- * `manualClock` releases work only through `advance`, so unit tests are deterministic.
+ * Clocks drive replay timelines and the React provider.
+ * `manualClock` releases timeline work only through `advance`; socket delivery uses tasks.
  */
 export interface Clock {
   /** Epoch milliseconds. */
