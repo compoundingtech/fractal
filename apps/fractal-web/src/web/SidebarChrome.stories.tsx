@@ -100,7 +100,6 @@ export const At256: Story = { args: { width: 256 }, play: chromePlay }
 export const At320: Story = { args: { width: 320 }, play: chromePlay }
 export const Light: Story = { args: { initialScheme: 'light' }, play: chromePlay }
 export const NarrowDrawer: Story = { args: { width: 240, viewport: 440 }, play: chromePlay }
-export const AllStates: Story = { render: () => <div>{[256, 320].map(width => <SidebarChromeSurface key={width} width={width} viewport={900} />)}<SidebarChromeSurface viewport={1440} /></div> }
 
 const styles = stylex.create({
   root: { display: 'flex', height: 480, maxWidth: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

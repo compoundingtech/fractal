@@ -214,7 +214,8 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
     return
   }
   await expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull()
-  await expect(thread.getBoundingClientRect().width).toBe(viewport)
+  // The specimen is capped by its browser host; navigation must never consume thread width.
+  await expect(thread.getBoundingClientRect().width).toBe(root.getBoundingClientRect().width)
   const opener = canvas.getByRole('button', { name: 'Expand sidebar' })
   await expect(opener.querySelector('[title]')).toBeNull()
   // Match the kit chrome plays: the first pointer movement enters the header before its control.

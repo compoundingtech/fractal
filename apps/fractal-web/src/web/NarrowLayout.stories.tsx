@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import { decodeResourceRows, openAgent } from '@st3/sdk/effect'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
@@ -17,9 +18,14 @@ const source = {
 }
 const storyAgent = 'agent/build-host-a/workbench-shell'
 
-const NarrowLayoutStory = (_: { readonly scheme: 'dark' | 'light' }) => {
+const decodeStaleSource = {
+  ...source,
+  agents: Atom.make(observed({ value: fixtureProjections.agents.map(openAgent), freshness: 'stale' })),
+  rosterDecode: Atom.make({ decodeStale: true, undecodable: decodeResourceRows([{ kind: 'agent', id: 'agent/review/broken', runtime_ids: 'not-a-list' }]).undecodable }),
+}
+const NarrowLayoutStory = ({ decodeStale }: { readonly scheme: 'dark' | 'light'; readonly decodeStale: boolean }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
-  return <DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>
+  return <DataSourceProvider source={decodeStale ? decodeStaleSource : source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>
 }
 
 /** Below 900 px the thread is the only thing on screen; one Agent details button opens the agent's actions and Details as a sheet. Wider windows keep the inline panel. */
@@ -27,7 +33,7 @@ const meta = {
   title: 'Fractal/Narrow layout',
   component: NarrowLayoutStory,
   parameters: { layout: 'fullscreen' },
-  args: { scheme: 'dark' },
+  args: { scheme: 'dark', decodeStale: false },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   // The workspace keeps its scheme, agent and panes in persisted UI state; every story starts from the same state.
   // A storage event makes the already-loaded persistence merge it, as it does for another tab's write.
@@ -85,6 +91,28 @@ export const Drawers: Story = { play: async ({ canvasElement }) => {
 } }
 export const DrawersLight: Story = { ...Drawers, args: { scheme: 'light' } }
 
+/** Decode evidence stays between the retained roster and footer in either real sidebar host. */
+export const DecodeStaleSidebarHosts: Story = {
+  tags: ['critical'],
+  args: { decodeStale: true },
+  play: async ({ canvasElement }) => {
+    const { canvas, narrow } = await workspace(canvasElement)
+    if (narrow) await userEvent.click(canvas.getByRole('button', { name: 'Expand sidebar' }))
+    const host = narrow
+      ? await canvas.findByRole('dialog', { name: 'Agents' })
+      : canvas.getByRole('complementary', { name: 'Agents' })
+    const notice = host.querySelector<HTMLElement>('[data-wf-roster-decode]')!
+    await expect(notice).toBeVisible()
+    await expect(notice).toHaveAttribute('data-wf-roster-decode', 'stale')
+    await expect(host.querySelector('[data-wf-roster-stale]')).toHaveAttribute('data-wf-roster-stale', 'decode')
+    const roster = within(host).getByRole('navigation', { name: 'Agent roster' })
+    const footer = host.querySelector('footer')!
+    await expect(roster.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await expect(notice.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await expect(within(notice).getByRole('status')).toHaveTextContent('this view is older than the daemon')
+  },
+}
+
 const openDetailsSheet = async (canvasElement: HTMLElement) => {
   const { canvas, header } = await workspace(canvasElement)
   const opener = header.getByRole('button', { name: 'Agent details' })
@@ -116,6 +144,7 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
 } }
 /** A real 1100px workspace freezes Changes when the dock opens, without unmounting its split component. */
 export const ChangesRangeFreezeCleanup: Story = {
+  tags: ['critical'],
   parameters: { viewport: { options: { changes1100: { name: 'Changes resize regression', styles: { width: '1100px', height: '900px' }, type: 'desktop' } } } },
   globals: { viewport: { value: 'changes1100', isRotated: false } },
   play: async ({ canvasElement }) => {

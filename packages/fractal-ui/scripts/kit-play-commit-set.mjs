@@ -29,6 +29,7 @@ export const BOTH_WIDTHS = [
   'fractal-ui-transcript-composer--host-width',
   'fractal-ui-transcript-composer--reading-column',
   'fractal-ui-workbench--all-states',
+  'fractal-narrow-layout--decode-stale-sidebar-hosts',
 ]
 
 const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
@@ -40,6 +41,8 @@ export const FULL_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
   ['fractal-ui-composer--footer-width-budget-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+  // The workspace uses viewport media queries and freezes Changes only at this intermediate width.
+  ['fractal-narrow-layout--changes-range-freeze-cleanup', [['dark', 1100], ['light', 1100]]],
 ])
 
 // Validate against the complete index before selecting tags or shards, so stale policy cannot
@@ -67,7 +70,7 @@ export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWid
   }
   const mergeOnly = new Set(mergeOnlyIds), bothWidths = new Set(bothWidthsIds)
   const ids = criticalIds.filter(id => !mergeOnly.has(id) && overrides.get(id)?.length !== 0)
-  const cases = ids.flatMap(id => (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)]).map(([scheme, width]) => ({ id, scheme, width })))
+  const cases = ids.flatMap(id => (overrides.get(id) ?? (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)])).map(([scheme, width]) => ({ id, scheme, width })))
   return { ids, cases, omittedStories: criticalIds.filter(id => mergeOnly.has(id) || overrides.get(id)?.length === 0), omittedCases: criticalIds.length * 4 - cases.length }
 }
 
