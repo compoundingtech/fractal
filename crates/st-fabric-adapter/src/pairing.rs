@@ -38,12 +38,10 @@ struct Journal {
 fn owner(fleet: &str) -> String {
     format!("st/fleet/{fleet}")
 }
+// Both the immutable permit and reciprocal policy are client-only. Static operator
+// terminal grants belong to Fabric configuration, never to this adapter owner.
 fn grants(fleet: &str) -> Value {
-    json!([
-        format!("st3/fleet/{fleet}"),
-        format!("st3/pty/{fleet}"),
-        "st3-client-v0"
-    ])
+    json!([format!("st3/fleet/{fleet}"), "st3-client-v0"])
 }
 fn digest(payload: &[u8]) -> String {
     blake3::hash(payload).to_hex().to_string()

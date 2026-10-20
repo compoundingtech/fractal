@@ -248,8 +248,10 @@ peer or a second identity. The restricted `fabric/pair/1` exchange carries the
 existing signed, sealed st admission. It grants no ordinary service access.
 The sponsor verifies the request's signed Fabric NodeID against the authenticated
 pending identity and its admitted member key against signed st membership before
-atomic confirmation. The immutable permit grants exactly `st3/fleet/FLEET_ID`,
-`st3/pty/FLEET_ID`, and `st3-client-v0`, under owner `st/fleet/FLEET_ID`.
+atomic confirmation. The immutable permit and reciprocal policy grant exactly
+`st3/fleet/FLEET_ID` and `st3-client-v0`, under owner `st/fleet/FLEET_ID`.
+Terminal access (`st3/pty/FLEET_ID`) requires an explicit operator grant in
+static Fabric policy, which the adapter never edits.
 The joiner verifies the sponsor's signed response and pinned endpoint before its
 adapter installs reciprocal access. The st daemon carries admission data only;
 all Fabric permit, confirmation, and policy calls belong to the adapter.

@@ -61,12 +61,17 @@ fn receive(ack: Option<u64>) -> Value {
     local_request(request)
 }
 
+#[test]
+fn permit_and_reciprocal_policy_grants_are_client_only() {
+    assert_eq!(grants("fleet"), json!(["st3/fleet/fleet", "st3-client-v0"]));
+}
+
 #[tokio::test]
 async fn issue_only_reserves_immutable_policy_without_runtime_grants() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("fabric.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let expected = json!({"operation":"issue","owner":"st/fleet/fleet","creation_id":"creation","deadline":600,"policy":{"grants":["st3/fleet/fleet","st3/pty/fleet","st3-client-v0"],"name":"joining","direction":"normal"}});
+    let expected = json!({"operation":"issue","owner":"st/fleet/fleet","creation_id":"creation","deadline":600,"policy":{"grants":["st3/fleet/fleet","st3-client-v0"],"name":"joining","direction":"normal"}});
     let reply = json!({"type":"pairing","reply":{"error":null,"status":{"state":"issued"},"secret":"one-shot"}});
     let server = tokio::spawn(fabric(
         listener,
