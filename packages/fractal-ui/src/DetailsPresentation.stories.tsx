@@ -701,7 +701,7 @@ function assertDesktopClose(panel:HTMLElement){
 /** The deployed phone boundary: the real NarrowSheet titled Agent details, whose X is the only close, with the inspector as its body. */
 function ProductionPhoneSheet({scheme,children}:{readonly scheme:Args['scheme'];readonly children:(close:()=>void)=>React.ReactNode}){
   const [open,setOpen]=React.useState(false)
-  return <div role="main" aria-label="Production phone inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:390,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
+  return <div role="main" aria-label="Production phone inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]),styles.canvas)} style={{width:390,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
     <ThemePortal><NarrowLayoutContext.Provider value={true}>
       <Button onPress={()=>setOpen(true)} {...stylex.props(styles.control)}>Agent details</Button>
       <NarrowSheet label="Agent details" isOpen={open} onOpenChange={setOpen} width={400}>{children(()=>setOpen(false))}</NarrowSheet>
