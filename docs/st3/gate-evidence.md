@@ -76,6 +76,14 @@ what that tree's own records cost, however many trees have records. A test pins 
 `for-each-ref` listings during one verification return at most the tree's own records). The cost of the
 whole namespace is paid only by `scripts/evidence-gc`, which also keeps its size bounded (see below).
 
+**Tags, read first.** Every reader also reads `refs/tags/evidence/<tree>/<record>` and
+`refs/tags/evidence/input/<check>/<key>/<record>` (lightweight tags naming the same signed commit), in the same
+listing or fetch as the notes, one prefix per tree or key in each namespace; a record under both names counts
+once. Nothing writes tags yet. Records move there because a ruleset can protect tags and not notes, and the
+readers must be on main before any producer writes one (`doc/fleet/factory/skip-ci-plan`, the hard
+precondition). A tree id is hex, so `input/` never collides with a tree's prefix; both live under `evidence/`,
+which the tag release workflow ignores and full-history checkouts leave out.
+
 **The first layout** was `refs/notes/evidence/<record-id>` (one object id under the prefix). The
 verifier still reads it, with a pattern that matches only names exactly one object id long, so it never
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those

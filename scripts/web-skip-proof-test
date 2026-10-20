@@ -93,3 +93,17 @@ with tempfile.TemporaryDirectory() as scratch:
     assert lines["fractal-web-kit"]["decision"] == "skip" and lines["fractal-web-kit"]["proof"] == "b" * 40 and lines["fractal-web-kit"]["reason"] == "match", lines
     assert lines["fractal-web"]["decision"] == "run" and lines["fractal-web"]["reason"] == "no-record", lines
     print("passed: a declared check skips only on the verifier's signed record; an undeclared one runs")
+
+    # --fetch brings the head tree's records and each keyed check's input-indexed records from origin, as tags or notes, and nothing else.
+    clone = Path(scratch) / "clone"
+    subprocess.run(["git", "clone", "-q", "--no-tags", str(repo), str(clone)], check=True, capture_output=True, env=clean)
+    tree = git(repo, "rev-parse", f"{declared}^{{tree}}")
+    wanted = [f"refs/tags/evidence/{tree}/{declared}", f"refs/notes/evidence/{tree}/{base}", f"refs/tags/evidence/input/fractal-web-kit/{'a' * 40}/{rust}"]
+    for ref, target in zip(wanted, (declared, base, rust)):
+        git(repo, "update-ref", ref, target)
+    git(repo, "update-ref", f"refs/tags/evidence/{'c' * 40}/{base}", base)  # another tree's record
+    git(repo, "update-ref", "refs/tags/v1", base)
+    run(clone, "--fetch", "--base", declared, "--head", declared)
+    fetched = git(clone, "for-each-ref", "--format=%(refname)", "refs/tags/", "refs/notes/").split()
+    assert sorted(fetched) == sorted(wanted), fetched
+    print("passed: --fetch brings this tree's records and the keyed input records, as tags or notes, and no other ref")
