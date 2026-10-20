@@ -46,6 +46,8 @@ pub mod summary;
 #[cfg(test)]
 mod agents_window_tests;
 #[cfg(test)]
+mod push_tests;
+#[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
 mod conversation_follow_tests;
@@ -1809,6 +1811,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let mut roster = state.store.subscribe_agent_roster();
     let mut views = state.store.subscribe_collection_views();
     let mut presence_changes = super::client_presence::subscribe();
+    let mut push_changes = super::client_push::subscribe();
     let mut native_watch: Option<inventory::NativeWatch> = None;
     let mut native_watch_pending: Option<tokio::task::JoinHandle<Result<inventory::NativeWatch, ApiError>>> = None;
     let windows = collection_windows::Windows::attach(&state.store);
@@ -2181,6 +2184,13 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
                 if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
                 reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "clients").map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
+            result = push_changes.recv(), if !command_waiting => {
+                if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
+                if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "devices").map(|(id, _)| id.clone()));
                 if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
                 refresh.extend(reread_due.iter().cloned());
             }
@@ -2642,6 +2652,7 @@ pub async fn publication_definition(
 
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
+    "write.client-diagnostics",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -9130,7 +9141,7 @@ mod tests {
             let error = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
                 Extension(session), Query(ClientListQuery::default())).await.unwrap_err();
             let response = super::super::response_body::Context {
-                state, client_request: true, observation_report: false,
+                state, client_request: true, local_only_response: false,
                 request_id: "request/runtime-readiness".into(), client_snapshot: None,
                 server: None, roster: false,
             }.wrap(error.into_response()).await.unwrap();
@@ -12234,6 +12245,33 @@ mission "differential" state="ready" {
 
     fn test_state(root: &Path) -> AppState {
         test_state_named(root, "terminal-test")
+    }
+
+    #[tokio::test]
+    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = super::super::router(state.clone());
+        for full_control in [false, true] {
+            let response = app.clone().oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"api_version":CLIENT_API_VERSION,"device_name":"Test phone","person_id":"person/ada","full_control":full_control}).to_string()))
+                .unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let pairing_id = body["value"]["pairing_id"].as_str().unwrap();
+            let begun = state.store.claims_for_kind_at(
+                "custom.client.pairing-begun", None, true, 10,
+            ).unwrap();
+            let begun = begun.claims.iter().find(|claim|
+                claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
+            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
+                .contains(&json!("write.client-diagnostics")));
+        }
     }
 
     #[test]
@@ -21224,6 +21262,7 @@ mission "example/zero-run" state="ready" {
             actor: "person/alex/session/device-one".into(),
             authority_actor: "person/alex".into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport: "paired",
