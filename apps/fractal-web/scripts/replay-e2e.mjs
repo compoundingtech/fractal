@@ -161,7 +161,6 @@ try {
     assert(groups.every(key => key === 'wf/unfiled'), `Unexpected folder rows: ${JSON.stringify(groups)}`)
   }
   // Use the adopted recording's frame boundaries for the empty-to-populated transcript proof.
-  const replayStartedAt = await page.evaluate(() => Date.now())
   const advanceReplayTo = async (offset) => {
     const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
@@ -170,9 +169,11 @@ try {
   const paneResponse = page.waitForResponse(response =>
     new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
+  await roster.waitFor({ state: 'visible' })
+  const replayStartedAt = await page.evaluate(() => Date.now())
+  assert.equal(replayStartedAt, epoch.getTime() + 1000, 'Shell must mount at the installed pause time without clock advancement')
   // Open replay sockets and publish the initial RAF batch, still well before the +2s frame.
   await page.clock.runFor(100)
-  await roster.waitFor({ state: 'visible' })
   assert.equal(await agent.count(), 0, 'before +2s: Sprout Builder must not exist')
   assert.equal(await page.getByText(sentence, { exact: true }).count(), 0, 'before timed conversation: sentence must not exist')
   await noFolders()
@@ -198,9 +199,18 @@ try {
     'Empty transcript must be observed before the recorded thread-creation boundary')
   assert.equal(await transcript.getByText(sentence, { exact: true }).count(), 0,
     'The recorded sentence must be absent from the observed empty transcript')
-  await advanceReplayTo(sentenceArrives.at_ms + 32)
-  await transcript.getByText(sentence, { exact: true }).waitFor({ state: 'visible' })
-  console.log(`PASS timed replay: Sprout Builder (+2s) → observed empty transcript (before +${threadCreated.at_ms}ms) → recorded sentence (+${sentenceArrives.at_ms}ms)`)
+  await advanceReplayTo(sentenceArrives.at_ms - 1)
+  assert.equal(await transcript.getByText(sentence, { exact: true }).count(), 0,
+    `Recorded sentence must remain absent at +${sentenceArrives.at_ms - 1}ms`)
+  await advanceReplayTo(sentenceArrives.at_ms)
+  // Flush only the queued transport delivery and at most two 16ms SDK/React RAF batches.
+  while (!await transcript.getByText(sentence, { exact: true }).isVisible()) {
+    const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
+    assert(elapsed < sentenceArrives.at_ms + 32, 'Recorded sentence must render within two RAF batches of its frame')
+    await page.clock.runFor(1)
+  }
+  const frameFlushMs = await page.evaluate(start => Date.now() - start, replayStartedAt) - sentenceArrives.at_ms
+  console.log(`PASS timed replay: Sprout Builder (+2s) → observed empty transcript (before +${threadCreated.at_ms}ms) → sentence absent (+${sentenceArrives.at_ms - 1}ms), present (+${sentenceArrives.at_ms}ms; ${frameFlushMs}ms frame flush)`)
   await page.reload()
   await page.clock.runFor(100)
   await roster.waitFor({ state: 'visible' })
