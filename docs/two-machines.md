@@ -94,8 +94,11 @@ and adapter state; the defaults are `$XDG_RUNTIME_DIR/st3.sock`,
 use only one adapter per state directory.
 
 The adapter reads the local [membership and leave-state contract](st3/replication.md).
-It grants exactly `st3/fleet/<fleet-id>`, `st3/pty/<fleet-id>`, and `st3-client-v0`
-to verified current Fabric members under owner `st/fleet/<fleet-id>`. A receiver
+It grants exactly `st3/fleet/<fleet-id>` (the replication carrier) and `st3-client-v0`
+(client API access) to verified current Fabric members under owner `st/fleet/<fleet-id>`.
+It never grants the terminal protocol `st3/pty/<fleet-id>`: remote terminal access over
+Fabric stays an explicit operator grant in static policy, which the adapter does not
+edit. A receiver
 retains only a leaving member's replication carrier until the persisted 120-second
 receipt deadline, never terminal or client grants. Confirmed, removed, or expired
 remote members lose this owner's records. The leaving machine's own final carrier
