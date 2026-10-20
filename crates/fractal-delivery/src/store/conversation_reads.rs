@@ -41,6 +41,18 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
+// Seek once per distinct agent rather than grouping or collecting the whole owner set.
+const ASSISTANT_OWNER_IDS_PAGE: &str = "WITH RECURSIVE names(subject) AS (
+    SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
+            WHERE subject>COALESCE(?2,'agent.') AND subject>='agent/' AND subject<'agent0'
+              AND store_index<=?1 ORDER BY subject LIMIT 1)
+    UNION ALL
+    SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
+            WHERE subject>names.subject AND subject<'agent0' AND store_index<=?1
+            ORDER BY subject LIMIT 1)
+    FROM names WHERE subject IS NOT NULL LIMIT ?3
+) SELECT subject FROM names WHERE subject IS NOT NULL";
+
 /// SQL text is fixed by the schema registry, not by the conversation or its history.
 static IDENTITY_FIELD_READS: std::sync::LazyLock<[String; 2]> = std::sync::LazyLock::new(|| {
     ["runtime_id", "incarnation_id"].map(|field| {
@@ -89,6 +101,21 @@ fn conversation_owner_from_connection(
 }
 
 pub trait ConversationReadsStore {
+    /// Read one immutable canonical message's text without copying an oversized payload.
+    /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
+    fn conversation_message_text_bounded(
+            &self,
+            id: &str,
+            max_bytes: usize,
+        ) -> Result<Option<(usize, Option<String>)>>;
+    /// Lexicographic agent discovery at a claim frontier, including one lookahead entry.
+    /// Only selected subjects are folded; no whole-map cache is built or copied.
+    fn assistant_conversation_owners_page(
+            &self,
+            after: Option<&str>,
+            limit: usize,
+            through: u64,
+        ) -> Result<Vec<(String, Owner)>>;
     fn conversation_local_position(&self) -> Result<u64>;
     /// Whether a fixed graph/local frontier contains a relevant change. No payload leaves SQL,
     /// and no retained snapshot spans native reads, display preparation, or a long-poll wait.
@@ -145,6 +172,20 @@ pub trait ConversationReadsStore {
 
 impl ConversationReadsStore for Store {
 
+    /// Read one immutable canonical message's text without copying an oversized payload.
+    /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
+    fn conversation_message_text_bounded(&self, id: &str, max_bytes: usize) -> Result<Option<(usize, Option<String>)>> {
+        self.readers.get().prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-hf04a4cb414e1 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */
+            "WITH message AS (SELECT CASE WHEN json_type(body,'$.fields') IS NULL
+                THEN json_extract(body,'$.content') ELSE json_extract(body,'$.fields.content') END AS text
+                FROM claims WHERE id=?1 AND kind='message.sent')
+             SELECT length(CAST(text AS BLOB)), CASE WHEN length(CAST(text AS BLOB))<=?2 THEN text END
+             FROM message WHERE typeof(text)='text'",
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-h19f57aa0a64e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![id, max_bytes], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(Into::into)
+    }
+
+    /// Resolve one conversation identity without constructing the owner collection.
     fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
@@ -273,6 +314,31 @@ impl ConversationReadsStore for Store {
             cache.pop_front();
         }
         Ok(owners)
+    }
+
+    /// Lexicographic agent discovery at a claim frontier, including one lookahead entry.
+    /// Only selected subjects are folded; no whole-map cache is built or copied.
+    fn assistant_conversation_owners_page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+        through: u64,
+    ) -> Result<Vec<(String, Owner)>> {
+        selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h55d772135256 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ ASSISTANT_OWNER_IDS_PAGE)?
+            .query_map(params![through, after, limit.saturating_add(1)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|subject| {
+                let owner = conversation_owner_from_connection(&connection, &subject, through)?;
+                Ok(owner.map(|owner| (owner.subject.clone(), owner)))
+            })
+            .filter_map(Result::transpose)
+            .collect()
     }
 
     fn conversation_messages_at(
@@ -680,6 +746,30 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
             }
             assert!(store.conversation_owner_at("agent/alex", store.index().unwrap()).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn assistant_owner_id_selection_is_bounded_before_identity_projection() {
+        let store = Store::open_memory("node").unwrap();
+        let mut costs = Vec::new();
+        store.connection.batched(|tx| -> Result<()> {
+            for number in 0..1000 {
+                append_claim_tx(tx, "node", &format!("agent/{number:05}"), "runtime.observed",
+                    None, &json!({"fields":{"runtime_id":"pty"}}), &[], None)?;
+                if number == 9 || number == 999 {
+                    let mut query = tx.prepare_cached(ASSISTANT_OWNER_IDS_PAGE)?;
+                    query.reset_status(rusqlite::StatementStatus::VmStep);
+                    let ids = query.query_map(params![i64::MAX, Option::<&str>::None, 4],
+                        |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    assert_eq!(ids.len(), 4);
+                    costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
+                }
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(costs[0] > 0 && costs[1] <= costs[0] * 2,
+            "bounded seeks must not scan every owner: {costs:?}");
     }
 
     #[test]

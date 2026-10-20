@@ -518,6 +518,11 @@ export type ArrangementTombstoneRegister = {
   value: true;
 };
 
+export type AssistantAgentDetailRequest = {
+  agent_id: AgentId;
+  max_response_bytes?: AssistantResponseBytes;
+};
+
 export type AssistantAgentItem = {
   current_mission_id: string | null;
   current_run_id: string | null;
@@ -613,6 +618,22 @@ export type AssistantConversationContentRequest = {
   revision: Revision;
   session_id: Id;
   start: number;
+};
+
+export type AssistantConversationSearchRequest = {
+  agent_id?: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+  text: string;
+};
+
+export type AssistantConversationTimelineRequest = {
+  agent_id: AgentId;
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+  session_id?: Id;
 };
 
 export type AssistantGrant = {
@@ -715,7 +736,18 @@ export type AssistantPairingBegin = {
 
 export type AssistantPrincipal = "assistant/chatgpt";
 
-export type AssistantProjection = "summary" | "attention" | "missions" | "agents" | "conversation-content" | "terminal-content";
+export type AssistantProjection = 
+  "summary"
+  | "attention"
+  | "missions"
+  | "agents"
+  | "conversation-content"
+  | "terminal-content"
+  | "conversations"
+  | "conversation-detail"
+  | "conversation-timeline"
+  | "conversation-search"
+;
 
 export type AssistantReadTrust = {
   attestor_public_key: Ed25519PublicKey;
@@ -3174,6 +3206,8 @@ export type UsageSummary = {
   output_tokens: number;
   total_tokens: number;
 };
+
+export type Value = unknown;
 
 export type Visualization = {
   constraints: Array<string>;

@@ -424,6 +424,12 @@ lower-case names with nonempty string values (a shard number, a test set). It ca
 one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
 (`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
 
+The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue. Each
+`fractal-web-execution` shard signs its own result (check `fractal-web`, artifact `evidence-note-fractal-web-shard-N`) and
+records `kit_shard`, `kit_shard_count`, `kit_play_set` and `app_test_set`, so a pull request's per-commit set can never be
+mistaken for the merge queue's full one, and a later policy can require every shard. A run that did not execute the lane
+makes no note and the shadow report reads `n/a`. The lane has no skip policy yet: its notes are evidence only.
+
 ### Shadow verification
 
 After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,

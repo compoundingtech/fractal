@@ -603,7 +603,7 @@ async fn reads_without_a_configured_owner_are_forbidden() {
 
 /// A managed Codex agent whose transcript holds one long assistant answer: secrets,
 /// injected text and multi-byte characters past the 8 KiB reference threshold.
-fn managed_conversation(root: &std::path::Path, text: &str) -> (AppState, String, String, String) {
+pub(super) fn managed_conversation(root: &std::path::Path, text: &str) -> (AppState, String, String, String) {
     managed_record(root, json!({
         "type":"message", "role":"assistant", "id":"answer",
         "content":[{"type":"output_text","text":text}],
@@ -652,11 +652,13 @@ fn managed_record(root: &std::path::Path, payload: Value) -> (AppState, String, 
     let session_id = super::super::super::managed_session_id(owner, incarnation);
     let mut session = ClientSession::local(Some(OWNER)).unwrap();
     session.conversation_blocks = true;
+    session.assistant_content_handles = true;
     let timeline = super::super::super::timeline_value(
         &state, &new_client_snapshot(&state), &session, &session_id, &ClientListQuery::default(),
     ).unwrap().0;
-    let (reference, revision) = timeline["items"].as_array().unwrap().iter().find_map(|item| {
-        if item["type"] == "message" { return None; }
+    let timeline_items = timeline["items"].as_array().unwrap();
+    let (reference, revision) = timeline_items.iter().filter(|item| item["type"] != "message")
+        .chain(timeline_items.iter().filter(|item| item["type"] == "message")).find_map(|item| {
         let reference = item["body"]["blocks"].as_array()?.iter()
             .find_map(|block| block["continuation"]["ref"].as_str())?;
         Some((reference.to_owned(), item["revision"].to_string()))
@@ -671,6 +673,7 @@ async fn conversation_content_returns_one_exact_unicode_range_and_refuses_wrong_
     // Past the 8 KiB reference threshold, inside the 16 KiB read ceiling.
     let text = format!("{prefix}{SECRET} {INJECTION} {}", "padding ".repeat(1_100));
     let (state, session_id, reference, revision) = managed_conversation(root.path(), &text);
+    let reference = super::conversation_reads::bind_reference(&reference, "test-grant:1").unwrap();
     macro_rules! query {
         ($start:expr, $end:expr, $revision:expr) => {
             [
@@ -741,7 +744,7 @@ async fn conversation_content_returns_one_exact_unicode_range_and_refuses_wrong_
     let tampered = format!("{}{replacement}", &reference[..reference.len() - 1]);
     forged[2] = ("reference", tampered.as_str());
     assert_eq!(read(&state, "conversation-content", &forged, MAX_RESPONSE_BYTES)
-        .await.unwrap_err().code, "conversation-content-invalidated");
+        .await.unwrap_err().code, "stale-fence");
 }
 
 #[tokio::test]
@@ -749,6 +752,7 @@ async fn conversation_content_refuses_a_native_record_larger_than_its_bounded_re
     let root = tempfile::tempdir().unwrap();
     let text = format!("{SECRET} {}", "x".repeat(MAX_RESPONSE_BYTES));
     let (state, session_id, reference, revision) = managed_conversation(root.path(), &text);
+    let reference = super::conversation_reads::bind_reference(&reference, "test-grant:1").unwrap();
     let error = read(&state, "conversation-content", &[
         ("agent_id", "agent/reads-codex"), ("session_id", session_id.as_str()),
         ("reference", reference.as_str()), ("revision", revision.as_str()), ("start", "0"), ("end", "16"),
@@ -771,6 +775,7 @@ async fn conversation_content_refuses_attachments_and_structured_payloads_withou
     ] {
         let root = tempfile::tempdir().unwrap();
         let (state, session_id, reference, revision) = managed_record(root.path(), payload);
+        let reference = super::conversation_reads::bind_reference(&reference, "test-grant:1").unwrap();
         let before = state.store.index().unwrap();
         let error = read(&state, "conversation-content", &[
             ("agent_id", "agent/reads-codex"), ("session_id", session_id.as_str()),

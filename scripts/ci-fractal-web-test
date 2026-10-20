@@ -70,6 +70,8 @@ web_inputs = (
     "megarepo.kdl",
     "megarepo.lock",
     "flake.lock",
+    "scripts/ci-web-shell",
+    "scripts/ci-web-shell-test",
 )
 non_web_inputs = (
     "crates/fractal-client/src/lib.rs",
