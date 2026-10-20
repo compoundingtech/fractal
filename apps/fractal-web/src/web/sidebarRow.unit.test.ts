@@ -3,9 +3,8 @@ import { sidebarRow } from './sidebarRow.ts'
 import type { Agent } from '../data/source.ts'
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 import * as Option from 'effect/Option'
-import type { MissionRunSummary } from '@smalltalk/st3-client/schema'
-import * as Vitest from '@effect/vitest'
-import { Effect, Schema } from 'effect'
+import type { Attention, MissionRunSummary } from '@smalltalk/st3-client/schema'
+import fc from 'fast-check'
 const agent: Agent = { ref:'agent/fixture/readonly', terminal:'', name:'Reported name', lifecycle: {_tag:'Unknown'}, host:'build-1', connected:true, activity:'idle', status:'idle', usage: {_tag:'Unknown'}, checkout: {_tag:'Unknown'}, workspace: {_tag:'Unknown'}, startedAt: {_tag:'Unknown'}, endedAt: {_tag:'Unknown'}, blockedOn: {_tag:'Unknown'}, ask: {_tag:'Unknown'}, lastActivityAt: {_tag:'Unknown'} }
 const row = (change: Partial<Agent> = {}, stale = false) => sidebarRow({agent:{...agent,...change},stale})
 describe('controlled native sidebar observations', () => {
@@ -87,7 +86,7 @@ describe('controlled native sidebar observations', () => {
 
 describe('retained mission row context', () => {
   const mission = fixtureMissions[0]!
-  const work = { id: 'work/current', missionId: mission.id, runId: 'mission-run/build-1/run', path: 'review', state: 'claimed', title: 'Review changes' }
+  const work = { id: 'work/current', missionId: mission.id, runId: 'mission-run/build-1/run', path: 'review', state: 'claimed', title: 'Review changes' } as const
   const seat = { ...agent, mission: mission.id, currentWork: [work] }
   const run: MissionRunSummary = {
     id: work.runId, requester: 'agent/build-1', status: 'running', phase: 'working',
@@ -108,8 +107,8 @@ describe('retained mission row context', () => {
   })
 
   it('does not borrow progress from a different generation', () => {
-    expect(project([{ ...hydrated, run_generations: { [run.id]: 'generation/current' },
-      run_details: [{ ...run, generation_id: 'generation/previous' }] }]))
+    expect(project([{ ...hydrated, run_generations: { [run.id]: 'run-generation/current' },
+      run_details: [{ ...run, generation_id: 'run-generation/previous' }] }]))
       .toMatchObject({ progress: { _tag: 'Unknown' } })
   })
 
@@ -125,8 +124,8 @@ describe('retained mission row context', () => {
   })
 
   it('shows actual attention question without manufacturing a q handle and follows updates', () => {
-    const card = { ...fixtureAttention[0]!, attention_kind: 'agent-request' as const, state: 'open' as const,
-      actions: ['work.done' as const], conversation_id: agent.ref, detail: 'Ship this change?', update: undefined }
+    const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
+      actions: ['work.done'], conversation_id: 'agent/fixture/readonly', detail: 'Ship this change?', update: undefined }
     expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Waiting', question: 'Ship this change?' } })
     const waiting = project([hydrated], [card])
     if (waiting?._tag === 'Mission') expect(waiting.step).not.toHaveProperty('handle')
@@ -138,7 +137,7 @@ describe('retained mission row context', () => {
       .toMatchObject({ progress: { _tag: 'Known', done: 3, total: 5 } })
   })
   it('does not attach another agent question just because it shares the mission run', () => {
-    const card = { ...fixtureAttention[0]!, attention_kind: 'agent-request' as const, state: 'open' as const,
+    const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
       actions: ['work.done' as const], conversation_id: 'agent/another', conversation_ids: [],
       requester_id: 'agent/another', source_id: 'agent/another', step_run_id: undefined,
       blocked: undefined, mission_run_id: work.runId, detail: 'Someone else must decide', update: undefined }
@@ -157,9 +156,8 @@ describe('retained mission row context', () => {
   })
 })
 
-Vitest.scopedLive.prop('queued mission projection preserves first occurrence order for arbitrary bounded windows',
-  [Schema.Array(Schema.Literals(['current', 'alpha', 'beta']))],
-  ([names]) => Effect.sync(() => {
+it('queued mission projection preserves first occurrence order for arbitrary bounded windows', () => {
+  fc.assert(fc.property(fc.array(fc.constantFrom('current', 'alpha', 'beta')), names => {
     const currentWork = [{ id: 'work/build-1/current', missionId: 'mission/build-1/current',
       runId: 'mission-run/build-1/current', path: 'work', state: 'claimed' }]
     const upcomingWork = names.map(name => ({ ...currentWork[0]!, missionId: `mission/build-1/${name}` }))
@@ -167,5 +165,5 @@ Vitest.scopedLive.prop('queued mission projection preserves first occurrence ord
     expect(context?._tag).toBe('Mission')
     if (context?._tag !== 'Mission') return
     expect(context.queued.map(mission => mission.slug)).toEqual([...new Set(names.filter(name => name !== 'current'))])
-  }),
-)
+  }))
+})

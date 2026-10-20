@@ -26,7 +26,7 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
     runs.find(run => run.generation_id === mission?.run_generations[run.id])
   const question = attention.find(card => isWaitingForAnswer(card) &&
     ((work !== undefined && (card.step_run_id === work.id || card.blocked?.step_run_id === work.id || card.source_id === work.id)) ||
-      card.conversation_id === agent.ref || card.conversation_ids?.includes(agent.ref) ||
+      card.conversation_id === agent.ref || card.conversation_ids?.some(id => id === agent.ref) ||
       card.requester_id === agent.ref || card.source_id === agent.ref) &&
     (card.detail.trim().length > 0 || card.title.trim().length > 0))
   const queued = new Map<string, { readonly id: string; readonly slug: string }>()

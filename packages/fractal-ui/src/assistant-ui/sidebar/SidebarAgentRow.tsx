@@ -74,6 +74,13 @@ export function sidebarRowDescription(row: Row): string {
   if (row.pullRequest !== undefined) parts.push(`Pull request: #${row.pullRequest.number}, ${row.pullRequest.title}, ${row.pullRequest.state}, ${row.pullRequest.ref}`)
   if (row.terminal !== undefined) parts.push(`Terminal: ${row.terminal}`)
   if (row.mission !== undefined) parts.push(`Mission: ${row.mission}`)
+  if (row.missionContext?._tag === 'Mission') {
+    const { progress, step, queued } = row.missionContext
+    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    if (step._tag === 'Step') parts.push(`Step: ${step.name}`)
+    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.slug).join(', ')}`)
+  }
   if (row.childrenKnown !== false) parts.push(`Subagents: ${row.children.length}`)
   parts.push(`ID: ${row.ref}`)
   return `${parts.join('. ')}.`
@@ -99,6 +106,12 @@ export function AgentRowDetails({ row, ...clock }: { readonly row: Row } & Sideb
     {row.pullRequest !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Pull request</dt><dd {...stylex.props(styles.detailValue)}>#{row.pullRequest.number}: {row.pullRequest.title}; {row.pullRequest.state}; {row.pullRequest.ref}</dd></>}
     {row.terminal !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Terminal</dt><dd {...stylex.props(styles.detailValue)}>{row.terminal}</dd></>}
     {row.mission !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Mission</dt><dd {...stylex.props(styles.detailValue)}>{row.mission}</dd></>}
+    {row.missionContext?._tag === 'Mission' && <>
+      {row.missionContext.progress._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Steps</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.progress.done} of {row.missionContext.progress.total}</dd></>}
+      {row.missionContext.step._tag === 'Step' && <><dt {...stylex.props(styles.detailLabel)}>Step</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.name}</dd></>}
+      {row.missionContext.step._tag === 'Waiting' && <><dt {...stylex.props(styles.detailLabel)}>Waiting for you</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.handle === undefined ? '' : `${row.missionContext.step.handle} `}{row.missionContext.step.question}</dd></>}
+      {row.missionContext.queued.length > 0 && <><dt {...stylex.props(styles.detailLabel)}>Queued missions</dt><dd {...stylex.props(styles.detailValue)}><ul>{row.missionContext.queued.map(mission => <li key={mission.id}>{mission.slug}</li>)}</ul></dd></>}
+    </>}
     {row.subagent !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Subagent ID</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.id}</dd>
       {row.subagent.subagent_type !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Kind</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.subagent_type}</dd></>}
       {row.subagent.work_id !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Work</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.work_id}</dd></>}

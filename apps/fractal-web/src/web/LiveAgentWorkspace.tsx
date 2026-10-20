@@ -24,7 +24,7 @@ import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/ass
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents, useAgentAttention, useAttention } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents, useAgentAttention } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
@@ -337,10 +337,6 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const rosterObservedAt = useAgentsLastObservedAt()
   const frozenAt = stale ? rosterObservedAt : undefined
   const folderSource = useDataSource()
-  const sidebarMissionsFeed = useAtomValue(folderSource.missions)
-  const sidebarAttentionFeed = useAttention()
-  const sidebarMissions = sidebarMissionsFeed._tag === 'Observed' ? sidebarMissionsFeed.value : undefined
-  const sidebarAttentionCards = sidebarAttentionFeed._tag === 'Observed' ? sidebarAttentionFeed.value : undefined
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
   const machineMemory = useMachineMemory()
@@ -405,14 +401,14 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const previousAccessibleNames = React.useRef<ReadonlyMap<string, string> | undefined>(undefined)
   const accessibleNames = React.useMemo(() => {
     const next = new Map(agents.flatMap(agent => [
-      [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale, needsMe: needsYou.has(agent.ref), missions: sidebarMissions, attention: sidebarAttentionCards }))] as const,
+      [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale, needsMe: needsYou.has(agent.ref) }))] as const,
       ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale }))] as const),
     ]))
     const previous = previousAccessibleNames.current
     if (previous !== undefined && next.size === previous.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
     previousAccessibleNames.current = next
     return next
-  }, [agents, stale, needsYou, sidebarMissions, sidebarAttentionCards])
+  }, [agents, stale, needsYou])
   const selectLatest = React.useRef(select)
   selectLatest.current = select
   // SDK FollowSpec.Conversation forwards agent or session refs unchanged to subscribeConversation.

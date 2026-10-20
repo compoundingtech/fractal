@@ -1,18 +1,16 @@
 /**
  * RM1 agent rows with mission context on line 2: `[mission pill] · step`. Designed cases cover all five mission hues, a
  * mission shared across project folders, a long slug, a question waiting on you with and without a decision handle,
- * unknown progress, an unknown step, rows without a mission and missions queued behind the current one. The scenario
- * roster below them projects the selected world's agents (current work and upcoming work) the way the app does.
+ * unknown progress, an unknown step, rows without a mission and missions queued behind the current one. A separate
+ * scenario story projects the catalog roster without introducing any of these fixed contract cases.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useScenarioSlice, type WireSlice } from '@smalltalk/st3-scenarios/react'
-import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { MilestoneAgentRow } from './MilestoneAgentRow'
 import { missionHues } from './SidebarMissionLine'
-import { statuses, type AgentStatus, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
+import { statuses, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
 import { geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
@@ -48,46 +46,8 @@ const folders: readonly { readonly label: string; readonly rows: readonly Row[] 
   ] },
 ]
 
-type WireAgent = WireSlice<'roster'>['state']['agents'][number]
-const agentStatus = (state: WireAgent['state']): AgentStatus => {
-  switch (state) {
-    case 'running': return 'working'
-    case 'waiting': return 'waiting'
-    case 'desired': case 'starting': return 'pending'
-    case 'down': return 'offline'
-    case 'stopped': case 'failed': return 'ended'
-    case 'suspended': return 'suspended'
-    case 'retired': return 'retired'
-    default: return 'unobserved'
-  }
-}
-const lastSegment = (id: string) => id.slice(id.lastIndexOf('/') + 1)
-/**
- * The roster slice as the app projects mission context: the first current work's mission (slug = last id segment, step =
- * work title or path); upcoming work deduplicated by mission, first occurrence first, excluding the current mission. The
- * roster carries no run summary or attention, so progress stays Unknown and the step is never Waiting.
- */
-const scenarioRows = ({ loading, state }: WireSlice<'roster'>): readonly Row[] => {
-  if (loading) return []
-  const hosts = new Map(state.machines.map(machine => [machine.host_id, machine.name]))
-  const rank = new Map(state.order.map((id, index) => [id, index]))
-  return [...state.agents].sort((a, b) => (rank.get(a.id) ?? state.order.length) - (rank.get(b.id) ?? state.order.length)).map((agent): Row => {
-    const status = agentStatus(agent.state)
-    const current = (agent.current_work ?? [])[0]
-    const queued = new Map<string, { readonly id: string; readonly slug: string }>()
-    for (const work of agent.upcoming_work ?? []) if (work.mission_id !== current?.mission_id && !queued.has(work.mission_id)) queued.set(work.mission_id, { id: work.mission_id, slug: lastSegment(work.mission_id) })
-    const missionContext: SidebarMissionContext = current === undefined ? { _tag: 'None' }
-      : { _tag: 'Mission', id: current.mission_id, slug: lastSegment(current.mission_id), progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: current.title || current.path }, queued: [...queued.values()] }
-    return {
-      ...base, ref: agent.id, id: agent.id, title: agent.name, status, statusLabel: statuses[status].label, lastTurn: { _tag: 'Unknown' },
-      host: agent.host_id == null ? 'Unknown host' : hosts.get(agent.host_id) ?? agent.host_id,
-      ...(current === undefined ? {} : { mission: current.mission_id }), missionContext,
-    }
-  })
-}
 
 function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; readonly phone?: boolean }) {
-  const roster = useScenarioSlice('roster', scenarioRows)
   return <main data-testid="mission-rows" data-scheme={scheme} {...stylex.props(styles.root, phone && styles.phoneFrame, scheme === 'light' && lightTheme)}>
     <NarrowLayoutContext.Provider value={phone}><ThemePortal>
       <span aria-hidden="true" data-tone-probe="" {...stylex.props(styles.toneProbe)} />
@@ -97,26 +57,22 @@ function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; 
           {folder.rows.map(item => <MilestoneAgentRow key={item.ref} row={item} now={storyNow} />)}
         </section>)}
       </div>
-      <section aria-label="Scenario roster" data-host="scenario" {...stylex.props(styles.column, phone && styles.phoneColumn)}>
-        <h3 {...stylex.props(styles.heading)}>Scenario roster</h3>
-        {roster.map(item => <MilestoneAgentRow key={item.ref} row={item} now={storyNow} />)}
-      </section>
     </ThemePortal></NarrowLayoutContext.Provider>
   </main>
 }
 
-/** Scenario slice variants chosen through Storybook controls (`scenarioArgTypes`). */
-type Args = React.ComponentProps<typeof MissionRowsStory> & { roster?: string }
+
+type Args = React.ComponentProps<typeof MissionRowsStory>
 const meta = {
   title: 'Fractal UI/Sidebar/Mission row',
   component: MissionRowsStory,
   parameters: {
-    layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['roster'] },
+    layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Fixed mission rows verify all five hues, exact pill geometry, truncation, optional progress and question-handle states unavailable together in a catalog roster.' },
     a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } },
     docs: { description: { component: 'Line 2 of the RM1 row with mission context: `[mission pill] · step`. The pill is the row’s only box (16px, fully rounded, at most 56% of line 2); five stable mission hues reach only the glyph and a 14% wash. A waiting question shows its decision handle as amber text; rows without a mission read `status · host`; queued missions open from "+N" in a popover.' } },
   },
   args: { scheme: 'dark' },
-  argTypes: { ...scenarioArgTypes(['roster']), scheme: { options: ['dark', 'light'], control: 'radio' }, phone: { control: 'boolean' } },
+  argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phone: { control: 'boolean' } },
 } satisfies Meta<Args>
 export default meta
 type Story = StoryObj<Args>
@@ -132,7 +88,7 @@ const probe = (canvasElement: HTMLElement) => getComputedStyle(canvasElement.que
 /** Geometry and content shared by the desktop and phone stories. */
 const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const pills = await waitFor(() => { const found = [...canvasElement.querySelectorAll<HTMLElement>('[data-box="pill"]')]; expect(found.length).toBeGreaterThanOrEqual(7); return found })
-  // Every pill (designed and scenario rows) starts at line 2's first pixel, so all share one x; each is 16px and fully rounded.
+  // Every pill starts at line 2's first pixel, so all share one x; each is 16px and fully rounded.
   const x = pills[0]!.getBoundingClientRect().left
   for (const pill of pills) {
     const box = pill.getBoundingClientRect()
@@ -263,7 +219,7 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await waitFor(() => expect(queuedDialog()).toBeVisible())
 }
 
-export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', play: queuedPlay }
+export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed +1 and +2 mission queues prove popover geometry, keyboard focus, Escape and hover-free disclosure; catalog queues vary with work.' } }, play: queuedPlay }
 export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued missions · "+N" popover · light', args: { scheme: 'light' } }
 
 /** 390px phone: the same pill geometry; "+N" keeps a 44 × 44 hit area and opens from a touch press. */
@@ -283,8 +239,9 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   })
 }
 
-export const Phone: Story = { tags: ['critical'], name: 'Phone · mission pill and "+N" touch target', args: { scheme: 'dark', phone: true }, play: phonePlay }
+export const Phone: Story = { tags: ['critical'], name: 'Phone · mission pill and "+N" touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px row matrix proves pill alignment, truncation and 44px queued-mission touch targets across every optional field case.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
 export const PhoneLight: Story = { ...Phone, name: 'Phone · mission pill and "+N" touch target · light', args: { scheme: 'light', phone: true } }
+
 
 const styles = stylex.create({
   root: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl, minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },

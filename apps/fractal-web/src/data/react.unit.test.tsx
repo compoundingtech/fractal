@@ -282,7 +282,7 @@ describe('sidebar retained mission feed plumbing', () => {
       registry.set(missions, observed({ value: [{ ...mission, title: 'Actual published title' }] }))
       render()
       expect(context).toMatchObject({ slug: mission.id.split('/').at(-1) })
-      const run = { ...mission.run_details![0]!, id: 'mission-run/build-1/run', generation_id: undefined,
+      const run = { ...mission.run_details![0]!, id: 'mission-run/build-1/run' as const, generation_id: undefined,
         progress: { done: 1, total: 4 } }
       const hydrated = { ...mission, run_generations: {}, run_details: [run] }
       registry.set(missions, observed({ value: [hydrated] }))
