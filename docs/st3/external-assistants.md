@@ -12,10 +12,13 @@ automatic pairing/renewal. Provision it with an `assistant/mcp` bearer, never a
 person or `assistant/chatgpt` credential. The existing `st-chatgpt` entrypoint and its
 ChatGPT-specific deployment remain separate and compatible.
 
-The complete ChatGPT `tools/list` result serialization is pinned byte-for-byte by
+The complete ChatGPT `tools/list` result is pinned as identical JSON (tool order,
+names, descriptions, schemas, annotations) by
 `crates/st-chatgpt/src/testdata/chatgpt-tools-list.json`, captured from main commit
 `bed66fbea69fae546ce2a5f7d6df942ae335ce47`. The compatibility test reads this immutable
 fixture rather than rebuilding its expected tool definitions from current schemas.
+JSON object key order is ignored because it depends on the build's
+`serde_json/preserve_order` feature.
 
 **Production freeze (Q32): until R1 ([#3324](https://github.com/compoundingtech/smalltalk/issues/3324),
 verified keyed issuer admission) is verified, issue assistant grants with read

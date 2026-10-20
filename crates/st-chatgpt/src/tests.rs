@@ -521,18 +521,19 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
 }
 
 #[test]
-fn chatgpt_discovery_bytes_match_main_golden() {
+fn chatgpt_discovery_matches_main_golden() {
     // Captured by serializing Adapter::list_tools's complete rmcp ListToolsResult
     // on origin/main bed66fbea69fae546ce2a5f7d6df942ae335ce47, not regenerated
-    // from this branch's TOOLS/schema(). Keep these bytes immutable.
+    // from this branch's TOOLS/schema(). Keep this file immutable. Compared as JSON
+    // values because object key order depends on serde_json's preserve_order
+    // feature, which smallclaims enables under workspace feature unification only.
     let result = ListToolsResult {
         tools: tool_definitions(Profile::ChatGpt),
         ..Default::default()
     };
-    assert_eq!(
-        serde_json::to_vec(&result).unwrap().as_slice(),
-        include_bytes!("testdata/chatgpt-tools-list.json").as_slice(),
-    );
+    let golden: Value =
+        serde_json::from_slice(include_bytes!("testdata/chatgpt-tools-list.json")).unwrap();
+    assert_eq!(serde_json::to_value(&result).unwrap(), golden);
 }
 
 #[test]
