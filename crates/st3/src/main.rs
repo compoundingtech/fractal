@@ -694,6 +694,13 @@ fn leave_confirmation(
     {
         return Ok(Some(peer.peer.clone()));
     }
+    leave_receipt_confirmation(removed)
+}
+
+/// Only the worker's authenticated receipt ACK permits post-leave cleanup.
+fn leave_receipt_confirmation(
+    removed: Option<&st3::config::FleetRemoval>,
+) -> Result<Option<String>> {
     match removed {
         Some(removal) if removal.code == "member-left" => Ok(Some(removal.reported_by.clone())),
         Some(removal) => anyhow::bail!(
@@ -738,13 +745,19 @@ async fn wait_for_leave_confirmation(
     state_dir: &Path,
     stage: &str,
     seconds: u64,
+    require_leave_receipt: bool,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
     loop {
         let status: ReplicationStatus = client.get("/v1/replication/status").await?;
         let file = st3::config::FleetFile::load(state_dir)?;
         let removed = file.as_ref().and_then(|file| file.removed.as_ref());
-        if let Some(member) = leave_confirmation(&status, removed)? {
+        let confirmation = if require_leave_receipt {
+            leave_receipt_confirmation(removed)?
+        } else {
+            leave_confirmation(&status, removed)?
+        };
+        if let Some(member) = confirmation {
             return Ok(member);
         }
         anyhow::ensure!(
@@ -801,6 +814,7 @@ async fn fleet_leave(
             &config.state_dir,
             "before writing the leave",
             wait_seconds,
+            false,
         )
         .await?;
         let claim: ClaimRecord = client
@@ -817,6 +831,7 @@ async fn fleet_leave(
                 &config.state_dir,
                 "after writing the leave",
                 wait_seconds,
+                true,
             )
             .await?,
         );

@@ -11,6 +11,52 @@ use axum::http::Request;
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn fleet_leave_state_local_only_is_read_only_and_worker_absence_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = None;
+    let before = state.store.index().unwrap();
+    let (status, snapshot) = get_request(router(state.clone()), "/v1/internal/fleet/leave-state").await;
+    assert_eq!(status, StatusCode::OK, "{snapshot}");
+    assert!(snapshot["fleet_id"].is_null());
+    assert!(snapshot["own_member_key"].is_null());
+    assert_eq!(snapshot["members"], json!([]));
+    assert_eq!(state.store.index().unwrap(), before);
+    assert!(!state.state_dir.join("fleet/leave-carriers.json").exists());
+    state.fleet_id = Some("fleet-test".into());
+    let (status, _) = get_request(router(state), "/v1/internal/fleet/leave-state").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_incarnation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("fleet-test".into());
+    let fleet = smallclaims::sync::FleetContext::legacy(Default::default());
+    let directory = state.state_dir.join("fleet");
+    std::fs::create_dir_all(&directory).unwrap();
+    let listener = tokio::net::UnixListener::bind(
+        smallclaims::sync::leave_state_socket(&state.state_dir),
+    ).unwrap();
+    let app = Router::new().route("/v1/internal/fleet/leave-state", get(move || {
+        let fleet = fleet.clone();
+        async move { Json(fleet.leave_snapshot(Some("fleet-test".into())).await) }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let before = state.store.index().unwrap();
+    let (status, snapshot) = get_request(router(state.clone()), "/v1/internal/fleet/leave-state").await;
+    assert_eq!(status, StatusCode::OK, "{snapshot}");
+    assert_eq!(snapshot["fleet_id"], "fleet-test");
+    assert_eq!(snapshot["membership"]["members"], json!([]));
+    assert_eq!(state.store.index().unwrap(), before);
+    state.fleet_id = Some("other-fleet".into());
+    let (status, _) = get_request(router(state), "/v1/internal/fleet/leave-state").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    server.abort();
+}
+
+#[tokio::test]
 async fn child_session_detail_resolves_readable_transcript_outside_session_inventory() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");

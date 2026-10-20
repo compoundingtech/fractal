@@ -703,6 +703,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
+        .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
         .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
