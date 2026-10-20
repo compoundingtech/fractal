@@ -2293,9 +2293,11 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let server_socket = socket.clone();
-    let app = router(state(root.path()));
+    let state = state(root.path());
+    let store = state.store.clone();
+    let app = router(state);
     let server = tokio::spawn(async move {
-        serve_unix_with_ancestor(&server_socket, None, app, true, slow_ancestor).await
+        serve_unix_with_ancestor(&server_socket, None, app, Some(store), slow_ancestor).await
     });
     while !socket.exists() {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2324,7 +2326,7 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn bound_unix_socket_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
+async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
     use http_body_util::{BodyExt as _, Full};
 
     fn ancestor(_pid: u32) -> Option<String> {
@@ -2347,12 +2349,22 @@ async fn bound_unix_socket_accepts_renamed_actor_and_header_but_refuses_foreign_
         })).await;
         assert_eq!(status, StatusCode::OK, "{renamed}");
     }
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_calls = calls.clone();
+    let app = Router::new().route(
+        "/v1/agents/native-session",
+        post(move |Json(body): Json<Value>| async move {
+            handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(body)
+        }),
+    );
+    let store = state.store.clone();
     let socket = root.path().join("bound.sock");
     let served_socket = socket.clone();
     let (ready, serving) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         serve_unix_with_ancestor_ready(
-            &served_socket, None, app, true, ancestor,
+            &served_socket, None, app, Some(store), ancestor,
             || { let _ = ready.send(()); },
         ).await.unwrap();
     });
@@ -2377,10 +2389,11 @@ async fn bound_unix_socket_accepts_renamed_actor_and_header_but_refuses_foreign_
             let bytes = response.into_body().collect().await.unwrap().to_bytes();
             let body: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(status, StatusCode::OK, "{actor}, {header}: {body}");
-            assert_eq!(body["actor"], old);
-            assert_eq!(body["subject"], old);
+            assert_eq!(body["actor"], actor);
+            assert_eq!(body["subject"], current);
         }
     }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     for foreign in ["agent/example-bound-other", "agent/example-bound-foreign", "person/other"] {
         for field in ["actor", "requester", "header"] {
             let before = state.store.index().unwrap();
@@ -2401,6 +2414,7 @@ async fn bound_unix_socket_accepts_renamed_actor_and_header_but_refuses_foreign_
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{foreign}, {field}: {refusal}");
             assert_eq!(refusal["code"], "foreign-agent-actor");
             assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         }
     }
     server.abort();
@@ -3168,7 +3182,8 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let state = state(root.path());
     let declarations = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, &state.node).unwrap();
     state.store.apply_internal(&declarations, "workflow-registration-fixture").unwrap();
-    let app = router(state.clone());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
     let request = apply_request(&state, PERFORMANCE_REGISTRATION, "agent/foreign", "forged-workflow-register");
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/intent/apply")
         .header("content-type", "application/json").extension(BoundAgent("agent/own".into()))

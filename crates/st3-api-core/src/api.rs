@@ -822,7 +822,6 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             (state.clone(), transport),
             response_envelope,
         ))
-        .layer(from_fn_with_state(state.clone(), guard_bound_actor))
         .with_state(state)
 }
 
@@ -5771,11 +5770,11 @@ pub async fn serve_unix_with_ready(
     app: Router,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(socket, None, app, false, harness_ancestor, ready).await
+    serve_unix_with_ancestor_ready(socket, None, app, None, harness_ancestor, ready).await
 }
 
 pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
-    serve_unix_inner(socket, app, false).await
+    serve_unix_with_ancestor(socket, None, app, None, harness_ancestor).await
 }
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
@@ -5915,12 +5914,15 @@ pub fn start_agent_roster(state: &AppState) {
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
 /// its parents. `state_socket` gives clients without the daemon's runtime environment a stable
 /// address for the same listener. Test servers and the paired gateway use the unbound listener.
+/// Every bound router is guarded at the serving boundary using `store`, including routers not
+/// built by `router_for_transport`. Historical and current agent names share one actor identity.
 pub async fn serve_unix_bound(
     socket: &Path,
     state_socket: &Path,
     app: Router,
+    store: Arc<Store>,
 ) -> anyhow::Result<()> {
-    serve_unix_bound_with_ready(socket, state_socket, app, || {}).await
+    serve_unix_bound_with_ready(socket, state_socket, app, store, || {}).await
 }
 
 /// Readiness is published only once the initialized local API can accept requests.
@@ -5928,43 +5930,42 @@ pub async fn serve_unix_bound_with_ready(
     socket: &Path,
     state_socket: &Path,
     app: Router,
+    store: Arc<Store>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(
         socket,
         Some(state_socket),
         app,
-        true,
+        Some(store),
         harness_ancestor,
         ready,
     )
     .await
 }
 
-async fn serve_unix_inner(socket: &Path, app: Router, bind_harness: bool) -> anyhow::Result<()> {
-    serve_unix_with_ancestor(socket, None, app, bind_harness, harness_ancestor).await
-}
-
+/// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
+/// authorization; `None` serves an unbound listener without consulting `ancestor`.
 pub async fn serve_unix_with_ancestor(
     socket: &Path,
     state_socket: Option<&Path>,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ancestor: fn(u32) -> Option<String>,
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(socket, state_socket, app, bind_harness, ancestor, || {}).await
+    serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
 
 async fn serve_unix_with_ancestor_ready(
     socket: &Path,
     state_socket: Option<&Path>,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, ancestor, ready).await
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -6042,20 +6043,22 @@ pub async fn reserve_unix_socket(
 }
 
 /// Only a fully initialized router may turn the reservation into a listener.
+/// `Some(store)` binds local harness ancestry and guards every router before route effects;
+/// `None` selects the unbound listener used by the paired gateway.
 pub async fn serve_reserved_unix_with_ready(
     reserved: ReservedUnixSocket,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, harness_ancestor, ready)
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, harness_ancestor, ready)
         .await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
@@ -6063,6 +6066,13 @@ async fn serve_reserved_unix_with_ancestor_ready(
         socket,
         reservation: _reservation,
     } = reserved;
+    // Binding and its Store-aware authorization are one serving-boundary capability.
+    // Install it here so directly constructed routers cannot bypass the guard.
+    let bind_harness = bound_store.is_some();
+    let app = match bound_store {
+        Some(store) => app.layer(from_fn_with_state(store, guard_bound_actor)),
+        None => app,
+    };
     let listener = socket.listen(1024)?;
     // Only st3-fixture initializes this process-local state. Disable host ancestry while
     // retaining native-driver identification, which mailbox subscriptions require.
@@ -6397,16 +6407,16 @@ fn record_legacy_poll(
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
-// The transport supplies only the immutable ancestry binding. Resolve authored names here,
-// where the router's store is available, before any route or admission effect runs.
+// The serving boundary supplies the immutable ancestry binding and its identity store before
+// any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(
-    State(state): State<AppState>,
+    State(store): State<Arc<Store>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
     let client_request = request.uri().path().starts_with("/v1/client/");
-    match guard_bound_request(request, bound_agent.as_deref(), &state.store).await {
+    match guard_bound_request(request, bound_agent.as_deref(), &store).await {
         Ok(request) => next.run(request).await,
         Err(error) if client_request => {
             let status = error.status;

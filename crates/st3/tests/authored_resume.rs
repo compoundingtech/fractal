@@ -120,6 +120,7 @@ agent "garden/worker" {{
     };
     let listener_socket = socket.clone();
     let state_socket = root.path().join("state.sock");
+    let bound_store = state.store.clone();
     let server = tokio::spawn(async move {
         // This binding/history fixture has a synthetic runtime and no physical PTY.
         // Exercise its already-admitted channel protocol; native authority has separate
@@ -128,6 +129,7 @@ agent "garden/worker" {{
             &listener_socket,
             &state_socket,
             st3::test_support::admitted_mailbox_protocol_router(state),
+            bound_store,
         ).await
     });
     for _ in 0..100 {

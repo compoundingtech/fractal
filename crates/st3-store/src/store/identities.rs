@@ -340,7 +340,7 @@ fn occupied(connection: &Connection, kind: IdentityKind, source: &ResolvedIdenti
     if let Some(identity) = reserved {
         if identity == source.identity {
             return Err(St3Error::new("identity-cycle", "historical names cannot become canonical again")
-                .with_detail("from", &source.canonical_id).with_detail("to", target).with_detail("path", json!([source.canonical_id,target])));
+                .with_detail("from", source.canonical_id.as_str()).with_detail("to", target).with_detail("path", json!([source.canonical_id,target])));
         }
         return Err(St3Error::new("identity-occupied", format!("name `{target}` is already reserved"))
             .with_detail("target", target).with_detail("kind", kind.label()).with_detail("identity", identity));

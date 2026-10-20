@@ -298,7 +298,8 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        st3::api::serve_unix_bound(&server_socket, &server_socket, st3::api::router(state))
+        let store = state.store.clone();
+        st3::api::serve_unix_bound(&server_socket, &server_socket, st3::api::router(state), store)
             .await
             .unwrap();
     });

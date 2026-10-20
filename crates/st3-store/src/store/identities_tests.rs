@@ -330,9 +330,9 @@ proptest! {
         declare(&store, ORIGINAL);
         let mut names = vec![ORIGINAL.to_owned()];
         for index in 0..length {
-            let current = names.last().unwrap().clone();
+            let current = names.last().unwrap();
             let next = format!("agent/example-chain-{index}");
-            store.rename_identity(IdentityKind::Agent, &request(&current, &next, &format!("chain-{index}")), &[]).unwrap();
+            store.rename_identity(IdentityKind::Agent, &request(current, &next, &format!("chain-{index}")), &[]).unwrap();
             names.push(next);
             for name in &names {
                 let resolved = store.resolve_identity(IdentityKind::Agent, name).unwrap();

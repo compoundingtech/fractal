@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Rename admission checks source lifecycle, owner locality, target reservation, kind, optional declaration and naming revisions, and the fleet registry. Retired identities cannot be revived. Authority and physical runtime custody remain bound to the immutable storage identity, not the canonical spelling. Locally authored arrangement placements and planning candidates normalize aliases before signing or revision validation. Bound local-agent sockets accept alias spellings only when they resolve to the same ancestry-bound identity."
+    "detail": "Rename admission checks source lifecycle, owner locality, target reservation, kind, optional declaration and naming revisions, and the fleet registry. Retired identities cannot be revived. Authority and physical runtime custody remain bound to the immutable storage identity, not the canonical spelling. Locally authored arrangement placements and planning candidates normalize aliases before signing or revision validation. Every bound Unix serving boundary, including custom routers, accepts actor and local-person aliases only when they resolve to the same ancestry-bound identity."
   },
   "compatibility": {
     "status": "changed",

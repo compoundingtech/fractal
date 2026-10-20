@@ -6277,10 +6277,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         st3::api::serve_reserved_unix_with_ready(
             local_reserved,
             router(state.clone()),
-            true,
+            Some(state.store.clone()),
             ready
         ),
-        st3::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), false, ready),
+        st3::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), None, ready),
     )?;
     telemetry.shutdown();
     Ok(())
