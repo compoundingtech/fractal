@@ -45,6 +45,30 @@ interface ScenarioContextValue {
 
 const ScenarioContext = React.createContext<ScenarioContextValue | undefined>(undefined)
 
+interface ScenarioReadRestrictionValue {
+  readonly reason: string
+  readonly onViolation: (error: Error) => void
+}
+
+const ScenarioReadRestriction = React.createContext<ScenarioReadRestrictionValue | undefined>(undefined)
+
+/** Keeps restrictions and check-scoped evidence intact through nested providers/boundaries. */
+export const ScenarioReadBoundary = ({ reason, onViolation, children }: {
+  readonly reason: string
+  readonly onViolation?: (error: Error) => void
+  readonly children?: React.ReactNode
+}): React.ReactElement => {
+  const parent = React.useContext(ScenarioReadRestriction)
+  const value = {
+    reason,
+    onViolation: (error: Error) => {
+      parent?.onViolation(error)
+      onViolation?.(error)
+    },
+  }
+  return React.createElement(ScenarioReadRestriction.Provider, { value }, children)
+}
+
 export const ScenarioProvider = ({ world, clock: suppliedClock, tracker: suppliedTracker, children }: ScenarioProviderProps): React.ReactElement => {
   const clock = React.useMemo(() => suppliedClock ?? manualClock(world.now), [suppliedClock, world.now])
   const tracker = React.useMemo(() => suppliedTracker !== undefined && 'record' in suppliedTracker
@@ -67,6 +91,12 @@ export function useScenarioSlice<TKind extends SliceKind>(kind: TKind): WireSlic
 export function useScenarioSlice<TKind extends SliceKind, TResult>(kind: TKind, project: (slice: WireSlice<TKind>) => TResult): TResult
 export function useScenarioSlice<TKind extends SliceKind, TResult>(kind: TKind, project?: (slice: WireSlice<TKind>) => TResult): WireSlice<TKind> | TResult {
   const context = React.useContext(ScenarioContext)
+  const restriction = React.useContext(ScenarioReadRestriction)
+  if (restriction !== undefined) {
+    const error = new Error(`useScenarioSlice is forbidden under ${restriction.reason}`)
+    restriction.onViolation(error)
+    throw error
+  }
   if (context === undefined) throw new Error('useScenarioSlice requires ScenarioProvider')
   const { world, atMs, tracker } = context
   tracker.record(kind)

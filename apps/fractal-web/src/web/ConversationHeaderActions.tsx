@@ -32,6 +32,8 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
   const conversation = useConversation(agentRef)
   const sync = useConversationSync(agentRef)
   const retainedFailure = conversation._tag === 'Observed' && conversation.value.items.length > 0 && sync?.status._tag === 'Failed'
+  // A recovered failure must not leave the details open, or the next failure reopens them unasked.
+  React.useEffect(() => { if (!retainedFailure) setSyncDetailsOpen(false) }, [retainedFailure])
   const changeResourcesOpen = (open: boolean) => {
     if (open) markStart('resources_panel', { key: agentRef })
     else cancelMeasure('resources_panel')

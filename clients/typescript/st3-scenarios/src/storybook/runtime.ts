@@ -1,8 +1,8 @@
 import * as React from 'react'
 import type { Decorator } from '@storybook/react'
 import { DEFAULT_WORLD, loadWorld, type Clock, type World, type WorldOverrides } from '../index.ts'
-import { ScenarioProvider, type ReadTracker, type ServedSlices } from '../react/index.ts'
-import type { ScenarioParameter } from './index.ts'
+import { ScenarioProvider, ScenarioReadBoundary, type ReadTracker, type ServedSlices } from '../react/index.ts'
+import { validateScenarioDeclaration, type ScenarioParameter, type ScenarioStoryParameter } from './index.ts'
 
 export const resolveScenarioWorld = (parameter: ScenarioParameter, globals: Readonly<Record<string, unknown>>, args: Readonly<Record<string, unknown>>): World => {
   const selected = parameter.world ?? globals.scenario ?? DEFAULT_WORLD
@@ -18,8 +18,10 @@ export const resolveScenarioWorld = (parameter: ScenarioParameter, globals: Read
 }
 
 export const withScenario: Decorator = (Story, context) => {
-  const parameter: ScenarioParameter | undefined = context.parameters.scenario
-  if (parameter === undefined) return React.createElement(Story)
+  const parameter: ScenarioStoryParameter | undefined = context.parameters.scenario
+  if (parameter === undefined) return React.createElement(ScenarioReadBoundary, { reason: 'no parameters.scenario declaration' }, React.createElement(Story))
+  validateScenarioDeclaration(parameter, context.args)
+  if (parameter._tag !== 'slices') return React.createElement(ScenarioReadBoundary, { reason: `scenario ${parameter._tag} exemption` }, React.createElement(Story))
   const world = resolveScenarioWorld(parameter, context.globals, context.args)
   const tracker: ReadTracker | ServedSlices | undefined = context.parameters.scenarioReadTracker ?? parameter.tracker
   const clock: Clock | undefined = context.parameters.scenarioClock

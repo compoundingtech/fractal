@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { WorldDefinition } from '../kit/world.ts'
 import { syntheticFleetMidRefactor } from './fleetMidRefactor.ts'
 
@@ -27,3 +28,5 @@ export const replicationDiverged: WorldDefinition = {
     }
   },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

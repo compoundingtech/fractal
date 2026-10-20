@@ -97,7 +97,24 @@ with tempfile.TemporaryDirectory() as directory:
     tree_refs = git(remote, 'for-each-ref', '--format=%(refname)', f'refs/notes/evidence/{tree}').splitlines()
     assert len(tree_refs) == 2 and all(r.startswith(f'refs/notes/evidence/{tree}/') for r in tree_refs), tree_refs  # a tree's records are one prefix
     assert sorted(a['ref'] for a in out['accepted']) == sorted(tree_refs), 'the output names the ref each record is filed under'
-    print('passed: signed full notes (a failing stage too) are published; a rogue signer and an unlisted check are refused by name')
+    tags = git(remote, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/tags/').splitlines()
+    assert sorted(tags) == sorted(f'refs/tags/evidence/{tree}/{a["record"]} {a["record"]}' for a in out['accepted']), tags
+    assert all(a['tag'] == f'refs/tags/evidence/{tree}/{a["record"]}' for a in out['accepted']), out
+    print('passed: signed full notes (a failing stage too) are published as a tag and a note naming the same record; '
+          'a rogue signer and an unlisted check are refused by name')
+
+    # A gate on a base that reads tags finds the record with only the tags fetched; one on an older base, which reads only
+    # notes, finds it with only the notes.
+    passing = next(a['record'] for a in out['accepted'] if a['check'] == 'linux-tests')
+    for space in ('tags', 'notes'):
+        reader = tmp / f'reader-{space}'
+        subprocess.run(['git', 'init', '-q', '--bare', str(reader)], check=True, env=ENV)
+        git(reader, 'fetch', '-q', '--no-tags', str(remote), f'+refs/{space}/evidence/*:refs/{space}/evidence/*')
+        assert all(line.startswith(f'refs/{space}/evidence/') for line in git(reader, 'for-each-ref', '--format=%(refname)').splitlines())
+        verified = subprocess.run([sys.executable, str(ROOT / 'scripts/evidence-verify'), '--repo', str(reader), '--tree', tree,
+                                   '--check', 'linux-tests', '--keys', str(keys)], capture_output=True, text=True, env=ENV)
+        assert verified.returncode == 0 and json.loads(verified.stdout)['record'] == passing, (space, verified.stdout, verified.stderr)
+    print('passed: the record verifies from the tags alone and from the notes alone')
 
     # The push token travels in the environment, never in an argument.
     import base64
@@ -119,6 +136,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     again, again_out = publish('--remote', 'sink')
     assert again_out['pushed'] and len(git(remote, 'for-each-ref', 'refs/notes/evidence/').splitlines()) == 2, 'a replay publishes nothing new'
+    assert len(git(remote, 'for-each-ref', 'refs/tags/').splitlines()) == 2, 'a replay publishes nothing new'
     print('passed: publishing the same notes again is idempotent')
 
     # A note about another commit is refused.
@@ -158,13 +176,27 @@ with tempfile.TemporaryDirectory() as directory:
     refs = git(remote2, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence-input/').splitlines()
     records = [a['record'] for a in out['accepted']]
     assert sorted(refs) == sorted(f'refs/notes/evidence-input/linux-tests/{key}/{r}' for r in records), refs
-    for ref in refs:
+    input_tags = git(remote2, 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/input/').splitlines()
+    assert sorted(input_tags) == sorted(f'refs/tags/evidence/input/linux-tests/{key}/{r}' for r in records), input_tags
+    for ref in refs + input_tags:
         assert git(remote2, 'rev-parse', ref) == ref.rsplit('/', 1)[1], 'each index ref points at the record it is named for'
-    print('passed: a record with source_inputs is indexed under its check and key, one ref per record, pass and fail alike')
+    print('passed: a record with source_inputs is indexed under its check and key, as a tag and a note, one ref per record, pass and fail alike')
     done, out = publish('--remote', 'sink', cwd=publisher2, notes=plain)
-    assert done.returncode == 0 and 'input_ref' not in out['accepted'][0]
+    assert done.returncode == 0 and 'input_ref' not in out['accepted'][0] and 'input_tag' not in out['accepted'][0]
     assert len(git(remote2, 'for-each-ref', 'refs/notes/evidence-input/').splitlines()) == 2, 'a record without a key adds no index ref'
-    print('passed: a record without source_inputs is published under refs/notes/evidence only')
+    assert len(git(remote2, 'for-each-ref', 'refs/tags/evidence/input/').splitlines()) == 2, 'a record without a key adds no index tag'
+    print('passed: a record without source_inputs is published under its tree only')
+
+    # A name already taken by another object refuses the record: neither name is created or pushed.
+    squat_notes = tmp / 'squat-notes'
+    note('linux-clippy', out=squat_notes, tag='squat')
+    record = json.loads(next(squat_notes.rglob('*.json')).read_text())['record']
+    git(publisher2, 'update-ref', f'refs/tags/evidence/{tree}/{record}', commit)
+    done, out = publish('--remote', 'sink', cwd=publisher2, notes=squat_notes)
+    assert done.returncode == 1 and 'never replaced' in out['refused'][0]['reason'] and not out['accepted'], out
+    assert git(publisher2, 'for-each-ref', f'refs/notes/evidence/{tree}/{record}') == '', 'a refused record gets neither name'
+    assert git(remote2, 'for-each-ref', f'refs/tags/evidence/{tree}/{record}', f'refs/notes/evidence/{tree}/{record}') == ''
+    print('passed: a record whose tag is taken by another object is refused, and neither name is created or pushed')
     bad = tmp / 'badkey'
     note('linux-tests', out=bad, more={'source_inputs': 'not-a-tree-id'}, tag='bad')
     done, out = publish('--remote', 'sink', cwd=publisher2, notes=bad)

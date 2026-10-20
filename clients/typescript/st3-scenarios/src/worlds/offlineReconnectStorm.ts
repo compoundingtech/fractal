@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { child } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { entry, revise, thread, turn } from '../kit/factories/turn.ts'
@@ -73,3 +74,5 @@ export const syntheticOfflineReconnectStorm: WorldDefinition = {
 }
 
 export const offlineReconnectStorm: WorldDefinition = adoptNarrativeRecording(syntheticOfflineReconnectStorm)
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

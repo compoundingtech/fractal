@@ -45,8 +45,10 @@ export const assertRecordingFidelity = async (proof: RecordedProof, expected: re
       sockets.set(id, socket)
     }
     clock.advance(0)
+    await replay.flush()
     for (const row of [...rows].sort((a, b) => a.receive_ms - b.receive_ms || a.ordinal - b.ordinal)) {
       clock.advance(ANCHOR_MS + row.receive_ms - clock.now())
+      await replay.flush()
       if (row.kind === 'command') {
         if (row.socket_id === null) throw new Error('Command missing socket id')
         const socket = sockets.get(row.socket_id)
@@ -64,6 +66,7 @@ export const assertRecordingFidelity = async (proof: RecordedProof, expected: re
         const body: unknown = await response.json()
         responses.set(row.ordinal, { ...row.value, status: response.status, body: jsonObject(body) })
       }
+      await replay.flush()
     }
     expect(frames).toHaveLength(frameRows.length)
     const actual = expected.map((row): RecordingRow => {

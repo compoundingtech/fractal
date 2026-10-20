@@ -106,6 +106,9 @@ stable binary in `fractal/store/bin`. PTY and socket paths beneath the legacy ro
 are translated independently, so `st3/pty` becomes `fractal/pty`. The migration's
 `st3 -> fractal` directory symlinks keep old binary and socket paths accessible.
 External `binary.path` ownership remains unchanged.
+The host migrator renames the entire `st3` root, not just the configured daemon
+store. It reads node/fleet identity and acquires the post-stop daemon lock from
+the configured nested store, preserving sibling PTY directories in the same move.
 The target refuses to run without the exact state-migration marker followed by
 a newline in **both** `~/.config/fractal/.fractal-migration-completed` and
 `~/.local/state/fractal/.fractal-migration-completed`, while either legacy
