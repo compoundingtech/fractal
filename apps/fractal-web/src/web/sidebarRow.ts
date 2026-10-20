@@ -1,7 +1,47 @@
-import type { SidebarAgentRowData, SidebarAgentStatus } from '@smalltalk/fractal-ui/assistant-ui'
+import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@smalltalk/fractal-ui/assistant-ui'
 import { statuses } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import type { Agent } from '../data/source.ts'
 import type { AgentSubagent } from '../data/source.ts'
+import type { Attention, Mission } from '@smalltalk/st3-client/schema'
+import * as Option from 'effect/Option'
+import { isWaitingForAnswer } from '../data/attention.ts'
+
+const missionSlug = (id: string): string => id.split('/').at(-1) ?? id
+
+/** Join retained feeds only: no per-seat read, queue-size estimate, or synthetic decision handle. */
+export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: {
+  readonly agent: Agent
+  readonly missions?: readonly Mission[]
+  readonly attention?: readonly Attention[]
+}): SidebarMissionContext => {
+  const work = agent.currentWork?.[0]
+  const id = work?.missionId ?? agent.mission
+  if (id === undefined) return { _tag: 'None' }
+  const mission = missions.find(mission => mission.id === id)
+  const runs = mission?.run_details?.filter(run => run.id === work?.runId) ?? []
+  // WorkLabel has no generation field. A matching step is strongest evidence; otherwise
+  // require the summary's generation to agree with the mission's current run generation.
+  const run = runs.find(run => run.current_steps.some(step => step.id === work?.id) ||
+    Option.getOrUndefined(run.steps)?.some(step => step.id === work?.id)) ??
+    runs.find(run => run.generation_id === mission?.run_generations[run.id])
+  const question = attention.find(card => isWaitingForAnswer(card) &&
+    ((work !== undefined && (card.step_run_id === work.id || card.blocked?.step_run_id === work.id || card.source_id === work.id)) ||
+      card.conversation_id === agent.ref || card.conversation_ids?.includes(agent.ref) ||
+      card.requester_id === agent.ref || card.source_id === agent.ref) &&
+    (card.detail.trim().length > 0 || card.title.trim().length > 0))
+  const queued = new Map<string, { readonly id: string; readonly slug: string }>()
+  for (const upcoming of agent.upcomingWork ?? []) {
+    if (upcoming.missionId === id || queued.has(upcoming.missionId)) continue
+    queued.set(upcoming.missionId, { id: upcoming.missionId, slug: missionSlug(upcoming.missionId) })
+  }
+  return {
+    _tag: 'Mission', id, slug: missionSlug(id),
+    progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
+    step: question !== undefined ? { _tag: 'Waiting', question: question.detail.trim() || question.title } :
+      work === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: work.title || work.path },
+    queued: [...queued.values()],
+  }
+}
 
 /** Harness IDs are only unique within their parent seat; never use them as graph subjects. */
 export const subagentRowId = ({ parent, id }: { readonly parent: string; readonly id: string }): string =>
@@ -21,8 +61,9 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
 })
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
-export const sidebarRow = ({ agent, stale, needsMe }: {
+export const sidebarRow = ({ agent, stale, needsMe, missions, attention }: {
   readonly agent: Agent; readonly stale: boolean; readonly needsMe?: boolean
+  readonly missions?: readonly Mission[]; readonly attention?: readonly Attention[]
 }): SidebarAgentRowData => {
   const status: SidebarAgentStatus = agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
@@ -41,6 +82,7 @@ export const sidebarRow = ({ agent, stale, needsMe }: {
     statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
     freshness: stale ? 'stale' : 'live', description: agent.description, harness: agent.harness,
     terminal: agent.terminal || undefined, mission: agent.mission, lastActivityAt, statusSince,
+    missionContext: sidebarMissionContext({ agent, missions, attention }),
     needsMe,
     childrenKnown: agent.subagents !== undefined,
     children: agent.subagents?.map(child => sidebarSubagentRow({ parent: agent, child, stale })) ?? [],

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { sidebarRow } from './sidebarRow.ts'
 import type { Agent } from '../data/source.ts'
+import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
+import * as Option from 'effect/Option'
+import type { MissionRunSummary } from '@smalltalk/st3-client/schema'
+import * as Vitest from '@effect/vitest'
+import { Effect, Schema } from 'effect'
 const agent: Agent = { ref:'agent/fixture/readonly', terminal:'', name:'Reported name', lifecycle: {_tag:'Unknown'}, host:'build-1', connected:true, activity:'idle', status:'idle', usage: {_tag:'Unknown'}, checkout: {_tag:'Unknown'}, workspace: {_tag:'Unknown'}, startedAt: {_tag:'Unknown'}, endedAt: {_tag:'Unknown'}, blockedOn: {_tag:'Unknown'}, ask: {_tag:'Unknown'}, lastActivityAt: {_tag:'Unknown'} }
 const row = (change: Partial<Agent> = {}, stale = false) => sidebarRow({agent:{...agent,...change},stale})
 describe('controlled native sidebar observations', () => {
@@ -79,3 +84,88 @@ describe('controlled native sidebar observations', () => {
     expect(row({ subagents: [] }).childrenKnown).toBe(true)
   })
 })
+
+describe('retained mission row context', () => {
+  const mission = fixtureMissions[0]!
+  const work = { id: 'work/current', missionId: mission.id, runId: 'mission-run/build-1/run', path: 'review', state: 'claimed', title: 'Review changes' }
+  const seat = { ...agent, mission: mission.id, currentWork: [work] }
+  const run: MissionRunSummary = {
+    id: work.runId, requester: 'agent/build-1', status: 'running', phase: 'working',
+    state_since: mission.updated_at, progress: { done: 2, total: 5 }, current_steps: [],
+    after: Option.none(), blocker: Option.none(), deadline: Option.none(),
+    last_progress: Option.none(), outcome: Option.none(), steps: Option.none(), must_act: 'agent',
+  }
+  const hydrated = { ...mission, run_details: [run], run_generations: {} }
+  const project = (missions = [hydrated], attention: typeof fixtureAttention = []) =>
+    sidebarRow({ agent: seat, stale: false, missions, attention }).missionContext
+
+  it('joins exact run progress and preserves the observed step title', () => {
+    expect(project()).toMatchObject({ _tag: 'Mission', id: mission.id, slug: mission.id.split('/').at(-1),
+      progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Review changes' } })
+    expect(project([])).toMatchObject({ progress: { _tag: 'Unknown' } })
+    expect(project([{ ...hydrated, run_details: [{ ...run, id: 'mission-run/build-1/other' }] }]))
+      .toMatchObject({ progress: { _tag: 'Unknown' } })
+  })
+
+  it('does not borrow progress from a different generation', () => {
+    expect(project([{ ...hydrated, run_generations: { [run.id]: 'generation/current' },
+      run_details: [{ ...run, generation_id: 'generation/previous' }] }]))
+      .toMatchObject({ progress: { _tag: 'Unknown' } })
+  })
+
+  it('uses only the slug and step path when titles are unavailable', () => {
+    expect(sidebarRow({ agent: { ...seat, description: 'Not a mission title', currentWork: [{ ...work, title: undefined }] },
+      stale: false }).missionContext).toMatchObject({
+      slug: mission.id.split('/').at(-1), step: { _tag: 'Step', name: 'review' },
+    })
+    expect(project([{ ...hydrated, title: 'A title is not the mission slug' }])).toMatchObject({
+      slug: mission.id.split('/').at(-1),
+    })
+    expect(row().missionContext).toEqual({ _tag: 'None' })
+  })
+
+  it('shows actual attention question without manufacturing a q handle and follows updates', () => {
+    const card = { ...fixtureAttention[0]!, attention_kind: 'agent-request' as const, state: 'open' as const,
+      actions: ['work.done' as const], conversation_id: agent.ref, detail: 'Ship this change?', update: undefined }
+    expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Waiting', question: 'Ship this change?' } })
+    const waiting = project([hydrated], [card])
+    if (waiting?._tag === 'Mission') expect(waiting.step).not.toHaveProperty('handle')
+    expect(project([hydrated], [{ ...card, detail: 'Use the updated plan?' }]))
+      .toMatchObject({ step: { _tag: 'Waiting', question: 'Use the updated plan?' } })
+    expect(project([hydrated], [{ ...card, state: 'resolved' }]))
+      .toMatchObject({ step: { _tag: 'Step', name: work.title } })
+    expect(project([{ ...hydrated, run_details: [{ ...run, progress: { done: 3, total: 5 } }] }]))
+      .toMatchObject({ progress: { _tag: 'Known', done: 3, total: 5 } })
+  })
+  it('does not attach another agent question just because it shares the mission run', () => {
+    const card = { ...fixtureAttention[0]!, attention_kind: 'agent-request' as const, state: 'open' as const,
+      actions: ['work.done' as const], conversation_id: 'agent/another', conversation_ids: [],
+      requester_id: 'agent/another', source_id: 'agent/another', step_run_id: undefined,
+      blocked: undefined, mission_run_id: work.runId, detail: 'Someone else must decide', update: undefined }
+    expect(project([hydrated], [card])).toMatchObject({ step: { _tag: 'Step', name: work.title } })
+  })
+
+
+  it('deduplicates only observed upcoming missions and excludes the active mission', () => {
+    const other = { ...work, missionId: 'mission/build-2/next', runId: 'mission-run/build-2/next' }
+    for (const repetitions of [0, 1, 2, 5]) {
+      expect(sidebarRow({ agent: { ...seat, upcomingWork: [work, ...Array.from({ length: repetitions }, () => other)] },
+        stale: false }).missionContext).toMatchObject({
+        queued: repetitions === 0 ? [] : [{ id: other.missionId, slug: 'next' }],
+      })
+    }
+  })
+})
+
+Vitest.scopedLive.prop('queued mission projection preserves first occurrence order for arbitrary bounded windows',
+  [Schema.Array(Schema.Literals(['current', 'alpha', 'beta']))],
+  ([names]) => Effect.sync(() => {
+    const currentWork = [{ id: 'work/build-1/current', missionId: 'mission/build-1/current',
+      runId: 'mission-run/build-1/current', path: 'work', state: 'claimed' }]
+    const upcomingWork = names.map(name => ({ ...currentWork[0]!, missionId: `mission/build-1/${name}` }))
+    const context = sidebarRow({ agent: { ...agent, currentWork, upcomingWork }, stale: false }).missionContext
+    expect(context?._tag).toBe('Mission')
+    if (context?._tag !== 'Mission') return
+    expect(context.queued.map(mission => mission.slug)).toEqual([...new Set(names.filter(name => name !== 'current'))])
+  }),
+)

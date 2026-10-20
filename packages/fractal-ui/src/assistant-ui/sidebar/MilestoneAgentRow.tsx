@@ -4,15 +4,12 @@ import * as stylex from '@stylexjs/stylex'
 import { Popover } from 'react-aria-components'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import { usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import type { SidebarActions, SidebarAgentRow as Row } from './model'
 import { AgentHoverCard, AgentRowActions, Highlight } from './SidebarAgentRow'
+import { SidebarMissionLine } from './SidebarMissionLine'
 import { SidebarStatus } from './SidebarStatus'
 import { SidebarTime } from './SidebarTime'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
-import { SidebarDuration } from './SidebarDuration'
-
-const spendCount = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', notation: 'compact', maximumSignificantDigits: 2 })
-const tokenCount = Intl.NumberFormat('en', { notation: 'compact', maximumSignificantDigits: 2 })
 
 export interface MilestoneAgentRowProps {
   readonly row: Row
@@ -50,7 +47,9 @@ export const openAgentRowMenu = (element: Element): boolean => {
 
 /**
  * RM1 SR-2 two-line row, 48px. Line 1: status glyph · title · last turn · attention · (chevron), each trailing column a
- * fixed width so every time ends on one edge. Line 2: status word · host · spend and tokens · duration.
+ * fixed width so every time ends on one edge. Line 2: `[mission pill] · step` while the agent works on a mission (see
+ * `SidebarMissionLine`), otherwise `status · host`; spend and duration live in the hover card and reported details.
+ * A row whose mission question waits on you drops the "!": its decision handle and status glyph carry the attention.
  * Activation belongs to the hosting tree item, so the row is never a button. Desktop pointer hover shows the kit hover
  * card with no timers: the CSS entrance delay supplies hover intent. The shared action trigger overlays line 2 on
  * desktop; narrow rows reserve an always-visible touch-sized action column.
@@ -60,14 +59,9 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const anchor = React.useRef<HTMLDivElement>(null)
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
-  const fields: React.ReactNode[] = [<span key="status" data-row-field="status-label">{row.statusLabel}</span>, <span key="host" data-row-field="host">{row.host}</span>]
-  if (row.usage._tag === 'Known') {
-    const { usd, tokens, scope } = row.usage
-    fields.push(<span key="spend" data-row-field="spend" aria-label={`${usageScopeLabel(scope)}: ${usd === undefined ? '' : `$${usd}, `}${tokens} tokens`}>{usd === undefined ? `${tokenCount.format(tokens)} tokens` : `${spendCount.format(usd)} · ${tokenCount.format(tokens)}`}</span>)
-  }
-  if (row.duration._tag === 'Known') fields.push(<span key="duration" data-row-field="duration"><SidebarDuration duration={row.duration} /></span>)
+  const mission = row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
   const signal = row.needsMe
-    ? <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
+    ? mission?.step._tag === 'Waiting' ? null : <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-narrow={narrow || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
@@ -80,7 +74,12 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="time" {...stylex.props(styles.time, frozen && styles.frozenInk)}>{row.lastTurn._tag === 'Known' && <span data-row-field="last-turn"><SidebarTime at={row.lastTurn.at} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>}</span>
     <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>
     {chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
-    <span data-row-column="line2" {...stylex.props(styles.line2, narrow && styles.narrowLine2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
+    {/* A "+N" control on line 2 ends before the last column, where the desktop action trigger overlays the row. */}
+    <span data-row-column="line2" {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, (narrow || (mission?.queued.length ?? 0) > 0) && styles.line2BeforeMenu)}>
+      {mission !== undefined
+        ? <SidebarMissionLine mission={mission} frozen={frozen} />
+        : <><span data-row-field="status-label">{row.statusLabel}</span><span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
+    </span>
     <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
       menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible]} />
     {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
@@ -98,7 +97,6 @@ const styles = stylex.create({
   withChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon}` },
   narrowRow: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.touchTarget}` },
   narrowWithChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon} ${g.touchTarget}` },
-  narrowLine2: { gridColumn: '2 / -2' },
   active: { backgroundColor: surface.rowActive },
   // Sidebar rows ring keyboard focus in neutral fgMuted, never the accent, so focus does not read as selection.
   focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
@@ -112,6 +110,10 @@ const styles = stylex.create({
   frozenInk: { color: ink.fgSoft },
   chevronSlot: { gridColumn: '5', gridRow: '1', display: 'flex', justifyContent: 'center' },
   line2: { gridColumn: '2 / -1', gridRow: '2', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
+  // The pill sits at line 2's first pixel; its slots truncate, so the line itself does not clip the "+N" touch target.
+  line2Mission: { display: 'flex', alignItems: 'center', overflow: 'visible' },
+  // Phone rows give the action trigger its own column; a "+N" row also stops short of the desktop trigger's overlay.
+  line2BeforeMenu: { gridColumn: '2 / -2' },
   sep: { paddingInline: s.xs, color: ink.fgMuted },
   // The card mounts on pointer enter; the delayed entrance is the 150ms hover intent, so a pass across rows never flashes cards.
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationDelay: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },

@@ -14,7 +14,7 @@ export { AgentRowActions, type AgentRowActionsProps } from './sidebar/SidebarAge
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'
-export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, SidebarMissionContext, SidebarMissionProgress, SidebarMissionStep, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export { ShowMenu, ShowMenuItem } from './sidebar/SidebarShowMenu.tsx'
 export type { ShowMenuEntry, ShowMenuGroup, ShowMenuProps } from './sidebar/SidebarShowMenu.tsx'
 export { DeclarationPanel } from './declaration/DeclarationPanel.tsx'
