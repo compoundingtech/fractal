@@ -759,6 +759,17 @@ replay.actions  // actions the client submitted, in order, for test assertions
 - **Windows:** the first reply to a collection subscription is a `snapshot` with the slice state
   filtered by the subscription's filters, in display order, cut to its `limit` (1–200), at the
   current store version.
+- **Recorded subscriptions:** explicit recording proofs retain the captured subscribe commands,
+  socket identities and clock offsets. Reissuing a captured command at its captured offset on
+  its captured socket follows the recorded wire boundaries, without a second initial snapshot
+  or timeline dispatch. Command matching compares every field recursively, ignoring object key
+  order but preserving array order and window/cursor values. Other subscriptions read the
+  folded state immediately and follow slice
+  events, just like synthetic worlds. A known running agent without a thread receives an empty
+  `replace: true` conversation snapshot; later entries append, while authoritative replacement
+  events retain their replacement semantics. Opening an existing thread returns its current page,
+  not an earlier captured window. Catalog narrative worlds adopt recorded slices without
+  captured transport metadata and always use this folded-state behavior.
 - **HTTP:** `fetch` answers `GET` reads from the same state, paging by cursor within the advertised
   bounds. `terminal.attach` returns the terminal's current incarnation and a capability that the
   socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted

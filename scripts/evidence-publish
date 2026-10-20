@@ -11,7 +11,7 @@ only if all of these hold, and otherwise skips it with the reason:
     and names the principal the statement claims;
   * the statement is about THIS checkout's commit and tree, and about one of the allowed checks;
   * the tier is full.
-It creates refs/notes/evidence/<record> (never replacing one) and pushes the accepted ones in one
+It creates refs/notes/evidence/<tree>/<record> (never replacing one) and pushes the accepted ones in one
 push. EVIDENCE_PUSH_TOKEN, if set, is sent as an authorization header and never printed. At most
 --limit (default 40) records are accepted in one run.
 
@@ -109,13 +109,13 @@ def main(argv):
             continue
         try:
             record, check, key = accept(summary_path, args.keys, allowed, commit, tree)
-            ref = NOTES + record
+            ref = f'{NOTES}{tree}/{record}'  # under the tree it is about: a tree's records are one prefix
             existing = git('for-each-ref', '--format=%(objectname)', ref).stdout.decode().strip()
             if existing and existing != record:
                 raise Refused(f'{ref} already names {existing}; evidence refs are never replaced')
             if not existing:
                 git('update-ref', ref, record, '0' * len(record))
-            entry = {'record': record, 'check': check}
+            entry = {'record': record, 'check': check, 'ref': ref}  # the ref the record is filed under: refs/notes/evidence/<tree>/<record>
             if key:
                 # An index by input key, one ref per record: a newer record never replaces an older one, so a newer
                 # failure with the same key can be found next to an older pass. The ref name repeats the record.
@@ -130,7 +130,7 @@ def main(argv):
         header = None
         if token:
             header = 'Authorization: Basic ' + base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        refspecs = [f'{NOTES}{a["record"]}:{NOTES}{a["record"]}' for a in result['accepted']]
+        refspecs = [f'{NOTES}{tree}/{a["record"]}:{NOTES}{tree}/{a["record"]}' for a in result['accepted']]
         refspecs += [f'{a["input_ref"]}:{a["input_ref"]}' for a in result['accepted'] if a.get('input_ref')]
         pushed = git('push', '--quiet', args.remote, *refspecs,
                      check=False, header=header)

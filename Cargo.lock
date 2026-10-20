@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libc",
  "pty-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "indexmap",
  "libc",
@@ -3388,7 +3388,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -4588,6 +4588,22 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite 0.30.0",
  "wat",
+]
+
+[[package]]
+name = "st-fabric-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

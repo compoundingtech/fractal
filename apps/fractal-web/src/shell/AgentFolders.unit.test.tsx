@@ -43,6 +43,7 @@ vi.mock('../folders/client.ts', async (importOriginal) => ({
 }))
 
 import { fixtureSource } from '../data/fixtureSource.ts'
+import { openAgent } from '@st3/sdk/effect'
 import { fleetFromAgents } from '../data/projections.ts'
 import { DataSourceProvider, useSubjectList } from '../data/react.tsx'
 import type { DataSource } from '../data/source.ts'
@@ -198,7 +199,7 @@ describe('AgentFolders row styling', () => {
   })
 
   it('reveals a saved-collapsed folder for a facet-only search without highlighting facet text', async () => {
-    const placed = fleetFromAgents(fixtureProjections.agents).agents[0]!
+    const placed = fleetFromAgents(fixtureProjections.agents.map(openAgent)).agents[0]!
     const tree = mountTree({ query: `state:${placed.state}`, collapsed: ['product'] })
     try {
       await vi.waitFor(() =>

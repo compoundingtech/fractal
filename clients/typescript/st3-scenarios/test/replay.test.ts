@@ -12,6 +12,7 @@ import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent
 import { createReplay, manualClock, realClock, type ReplayHandle } from '../src/replay/index.ts'
 import { syntheticFirstRunOnboarding } from '../src/worlds/firstRunOnboarding.ts'
 import { genericVariants } from '../src/kit/variants.ts'
+import { loadRecordedWorld } from './recorded-world.ts'
 
 const replays: ReplayHandle[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
@@ -247,6 +248,33 @@ describe('WebSocket wire aliases', () => {
 })
 
 describe('collection windows', () => {
+  it('serves uncaptured roster and details subscriptions in a recorded world and follows their changes', async () => {
+    const world = base()
+    const h = setup({ ...world, recording: { frames: [], http: [] } })
+    const stream = await h.connect()
+    stream.subscribe('agents', 'agents', 200)
+    stream.subscribe('missions', 'missions', 200)
+    stream.subscribe('work', 'work', 200)
+    h.clock.advance(0)
+    await h.replay.flush()
+    expect(h.frames.map((frame) => frame.kind)).toEqual(['snapshot', 'snapshot', 'snapshot'])
+    const windows = new Map<string, CollectionWindow>()
+    let read = 0
+    for (const at of [0, 20_000]) {
+      h.clock.advance(at)
+      await h.replay.flush()
+      for (const frame of h.frames.slice(read)) {
+        const next = applyWindow(windows.get(frame.id ?? ''), frame)
+        if (next !== undefined) windows.set(frame.id ?? '', next)
+      }
+      read = h.frames.length
+      expect(windows.get('agents')?.items).toEqual(foldSlice(world.slices.roster, at).state.agents)
+      expect(windows.get('missions')?.items).toEqual(foldSlice(world.slices.details, at).state.missions)
+      expect(windows.get('work')?.items).toEqual(foldSlice(world.slices.details, at).state.work)
+    }
+    expect(h.frames.some((frame) => frame.kind === 'changes')).toBe(true)
+  })
+
   it('dispatches changes and applyWindow equals the roster fold at each clock step', async () => {
     const h = setup()
     const stream = await h.connect()
@@ -254,6 +282,7 @@ describe('collection windows', () => {
     stream.subscribe('small', 'agents', 2)
     stream.subscribe('blocked', 'agents', 200, { status: 'blocked' })
     h.clock.advance(0)
+    await h.replay.flush()
     await h.replay.flush()
     const windows = new Map<string, CollectionWindow>()
     let read = 0
@@ -288,7 +317,9 @@ describe('collection windows', () => {
     stream.subscribe('none', 'agents', 1, { status: 'never-present' })
     h.clock.advance(0)
     await h.replay.flush()
+    await h.replay.flush()
     h.clock.advance(10)
+    await h.replay.flush()
     await h.replay.flush()
     const change = h.frames.find((frame) => frame.kind === 'changes')
     expect(change).toMatchObject({ kind: 'changes', id: 'small', removes: [a!.id], order: [c!.id], upserts: [c] })
@@ -302,12 +333,14 @@ describe('collection windows', () => {
     stream.subscribe('second', 'agents', 2)
     h.clock.advance(0)
     await h.replay.flush()
+    await h.replay.flush()
     const first = h.frames[0]
     const second = h.frames[1]
     expect(first?.kind).toBe('snapshot')
     if (first?.kind !== 'snapshot' || second?.kind !== 'snapshot') throw new Error('Missing snapshots')
     expect(first.snapshot).toEqual(second.snapshot)
     h.clock.advance(20_000)
+    await h.replay.flush()
     await h.replay.flush()
     stream.subscribe('third', 'missions', 20)
     await h.replay.flush()
@@ -322,6 +355,7 @@ describe('collection windows', () => {
     stream.subscribe('agents', 'agents', 200)
     h.clock.advance(0)
     await h.replay.flush()
+    await h.replay.flush()
     if (variant === 'loading') { h.clock.advance(100_000); await h.replay.flush(); expect(h.frames).toEqual([]) }
     else {
       const frame = h.frames[0]
@@ -332,6 +366,38 @@ describe('collection windows', () => {
 })
 
 describe('conversation dispatch and consumer fold', () => {
+  it.each(['catalog', 'recorded-transport'] as const)('snapshots Builder immediately before and after the recorded onboarding thread appears (%s)', async (source) => {
+    // Match the web replay's non-anchor ISO start, with a pane opened after the roster arrives.
+    const world = loadWorld('first-run-onboarding', { now: '2026-10-20T12:00:00.000Z' })
+    const h = setup(source === 'catalog' ? world : {
+      ...world, recording: loadRecordedWorld('first-run-onboarding', world.now).world.recording,
+    })
+    const builder = h.world.cast.agents.find((member) => member.key === 'builder')!
+    const stream = await h.connect()
+    h.clock.advance(4_010)
+    await h.replay.flush()
+    stream.subscribeConversation('pending-builder', builder.id)
+    await h.replay.flush()
+    expect(h.frames).toEqual([{
+      kind: 'conversation', id: 'pending-builder', collection: 'conversation', session_id: builder.session,
+      replace: true, items: [], has_more: false,
+    }])
+    h.clock.advance(1)
+    await h.replay.flush()
+    const current = foldSlice(h.world.slices.conversation, 4_011).state.threads.find((thread) => thread.agent === builder.id)!
+    expect(current.items.length).toBeGreaterThan(0)
+    const updates = h.frames.filter((frame) => frame.kind === 'conversation')
+    expect(updates[1]).toMatchObject({ replace: true, items: current.items })
+    expect(updates.flatMap((frame) => frame.items.map((item) => item.id))).toEqual(current.items.map((item) => item.id))
+    stream.subscribeConversation('present-builder', builder.id)
+    await h.replay.flush()
+    expect(h.frames.at(-1)).toMatchObject({
+      kind: 'conversation', id: 'present-builder', session_id: current.session_id,
+      replace: true, items: current.items.slice(-current.page_size),
+      has_more: current.has_more || current.items.length > current.page_size,
+    })
+  })
+
   it.each(['recorded', 'synthetic'] as const)('follows a known running agent before its first thread (%s), by agent or current session', async (source) => {
     const h = setup(source === 'recorded' ? loadWorld('first-run-onboarding', { now: ANCHOR_MS }) : buildWorld(syntheticFirstRunOnboarding, genericVariants, ANCHOR_MS))
     const member = h.world.cast.agents[0]!

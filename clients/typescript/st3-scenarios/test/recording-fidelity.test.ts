@@ -29,9 +29,17 @@ const mutateItem = (world: World, revision: boolean): World => {
 }
 
 /** Focused metadata tests still use capture-derived slice data and the captured command. */
-const captureMetadataFrames = async (proof: RecordedProof, recording: RecordedTransport): Promise<JsonObject[]> => {
+const captureMetadataFrames = async (proof: RecordedProof, recording: RecordedTransport, options: {
+  fields?: JsonObject
+  send?: (command: JsonObject) => JsonObject
+} = {}): Promise<JsonObject[]> => {
   const clock = manualClock(ANCHOR_MS - 100)
-  const replay = createReplay({ ...proof.world, recording }, { clock })
+  const command = proof.rows.find((row) => row.kind === 'command' && row.value.collection === 'conversation')
+  if (command === undefined) throw new Error('Missing captured conversation command')
+  const captured = { ...command.value, ...options.fields }
+  const replay = createReplay({ ...proof.world, recording: { ...recording,
+    subscriptions: [{ at_ms: -100, command: captured }],
+  } }, { clock })
   const frames: JsonObject[] = []
   try {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', ['st3.client.collections.v0'], {})
@@ -42,9 +50,7 @@ const captureMetadataFrames = async (proof: RecordedProof, recording: RecordedTr
     }
     clock.advance(0)
     await replay.flush()
-    const command = proof.rows.find((row) => row.kind === 'command' && row.value.collection === 'conversation')
-    if (command === undefined) throw new Error('Missing captured conversation command')
-    socket.send(JSON.stringify(command.value))
+    socket.send(JSON.stringify(options.send?.(captured) ?? captured))
     clock.advance(1100)
     await replay.flush()
     return frames
@@ -52,6 +58,30 @@ const captureMetadataFrames = async (proof: RecordedProof, recording: RecordedTr
 }
 
 describe('recorded transport fidelity', () => {
+  it.each(['reordered', 'window', 'cursor', 'array-order'] as const)('matches captured commands structurally: %s', async (change) => {
+    const proof = loadRecordedProof()
+    const source = proof.world.recording?.frames.find((frame) => frame.kind === 'conversation')
+    if (source === undefined) throw new Error('Missing captured selector')
+    const frames = await captureMetadataFrames(proof, { http: [], frames: [{
+      kind: 'error', ordinal: 100, at_ms: 10, selector: source.selector, message: 'Captured command matched',
+    }] }, {
+      fields: { window: { limit: 50, before: null }, cursor: ['first', 'second'] },
+      send: (command) => {
+        if (change === 'window') return { ...command, window: { limit: 25, before: null } }
+        if (change === 'cursor') return { ...command, cursor: ['different', 'second'] }
+        if (change === 'array-order') return { ...command, cursor: ['second', 'first'] }
+        return Object.fromEntries(Object.entries({ ...command, window: { before: null, limit: 50 } }).reverse())
+      },
+    })
+    if (change === 'reordered') {
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ kind: 'error', message: 'Captured command matched' })
+    } else {
+      expect(frames[0]).toMatchObject({ kind: 'conversation', replace: true })
+      expect(frames.some((frame) => frame.message === 'Captured command matched')).toBe(false)
+    }
+  })
+
   it('reconstructs captured frames and full HTTP exchanges at the pinned anchor', async () => {
     await assertFidelity(loadRecordedProof())
   })
