@@ -3,6 +3,7 @@ import { relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import { scenarioDomainFixture } from '@fractal/scenarios/domain-fixture'
 
 /** Only runtime static edges count: loaders' dynamic imports and erased types do not. */
 const staticImports = (source: string): readonly string[] => {
@@ -65,10 +66,15 @@ describe('light preview entry boundaries', () => {
     `)).toEqual(['./side-effect.ts', './fold.ts', './barrel.ts', './value.ts'])
   })
 
-  it.each(['src/react/index.ts', 'src/storybook/index.ts'])('%s has no static catalog or recording dependency', (entry) => {
+  it.each(['src/domain-fixture.ts', 'src/react/index.ts', 'src/storybook/index.ts'])('%s has no static catalog or recording dependency', (entry) => {
     const graph = runtimeGraph(entry)
     expect(graph).toContain(entry)
     expect(graph.filter((path) => /^(?:src\/worlds|recordings)\//.test(path))).toEqual([])
     expect(graph).not.toContain('src/index.ts')
+  })
+
+  it('exports a dependency-free fixture identity from its public light entry', () => {
+    expect(typeof scenarioDomainFixture).toBe('symbol')
+    expect(runtimeGraph('src/domain-fixture.ts')).toEqual(['src/domain-fixture.ts'])
   })
 })

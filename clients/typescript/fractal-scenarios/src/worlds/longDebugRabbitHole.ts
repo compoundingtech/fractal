@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { TimelineEntry, Work } from '@fractal/client'
 
 import type { Asciicast } from '../kit/asciicast.ts'
@@ -176,3 +177,5 @@ const build = (ctx: FactoryContext): Slices => {
 }
 
 export const longDebugRabbitHole: WorldDefinition = adoptNarrativeRecording(syntheticLongDebugRabbitHole)
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

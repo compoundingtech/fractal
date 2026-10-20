@@ -17,16 +17,16 @@ const Consumption = () => {
 const meta = {
   title: 'Scenarios/Consumption',
   component: Consumption,
-  parameters: { scenario: { slices: ['roster', 'attention'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['roster', 'attention'] } },
 } satisfies Meta<Args>
 
 export default meta
 export const Good = {} satisfies StoryObj<typeof meta>
 export const Pinned = {
-  parameters: { scenario: { world: 'fleet-mid-refactor' } },
+  parameters: { scenario: { ...meta.parameters.scenario, world: 'fleet-mid-refactor' } },
 } satisfies StoryObj<typeof meta>
 export const Fixed = {
-  parameters: { scenario: { slices: ['roster'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['roster'] } },
   render: () => <p>Fixed presentation without scenario data</p>,
 } satisfies StoryObj<typeof meta>
 
@@ -37,7 +37,7 @@ const UndeclaredConsumption = () => {
 }
 
 export const Undeclared = {
-  parameters: { scenario: { slices: ['roster'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['roster'] } },
   render: () => <UndeclaredConsumption />,
 } satisfies StoryObj<typeof meta>
 
@@ -47,7 +47,7 @@ const SyncConsumption = () => {
 }
 
 export const Sync = {
-  parameters: { scenario: { slices: ['sync'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['sync'] } },
   render: () => <SyncConsumption />,
 } satisfies StoryObj<typeof meta>
 
@@ -57,7 +57,7 @@ const InvariantConsumption = () => {
 }
 
 export const Invariant = {
-  parameters: { scenario: { slices: ['sync'], invariant: { sync: 'This layout does not display transport status' } } },
+  parameters: { scenario: { _tag: 'slices', slices: ['sync'], invariant: { sync: 'This layout does not display transport status' } } },
   render: () => <InvariantConsumption />,
 } satisfies StoryObj<typeof meta>
 
@@ -67,6 +67,6 @@ const LoadingRosterConsumption = () => {
 }
 
 export const LoadingRoster = {
-  parameters: { scenario: { slices: ['roster'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['roster'] } },
   render: () => <LoadingRosterConsumption />,
 } satisfies StoryObj<typeof meta>

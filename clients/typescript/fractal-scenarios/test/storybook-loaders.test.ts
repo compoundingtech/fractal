@@ -8,8 +8,10 @@ import { useScenarioSlice } from '../src/react/index.ts'
 
 const annotations = { globalTypes: scenarioGlobalTypes, loaders: scenarioLoaders, decorators: [withScenario] }
 
-it('renders a story without a scenario even with an invalid scenario global', async () => {
-  const Story = composeStory({ render: () => React.createElement('p', {}, 'ordinary story') }, {}, {
+it('renders an exempt story without loading scenario runtime even with an invalid scenario global', async () => {
+  const Story = composeStory({ render: () => React.createElement('p', {}, 'ordinary story'), parameters: {
+    scenario: { _tag: 'primitive', reason: 'Plain typography without scenario data' },
+  } }, {}, {
     ...annotations, initialGlobals: { scenario: 'not-a-world' },
   })
   await Story.load()
@@ -20,7 +22,7 @@ it('awaits the catalog before rendering and honors pinned worlds, time and slice
   const Consumer = () => React.createElement('p', {}, useScenarioSlice('roster').state.agents.length)
   const Story = composeStory({
     render: Consumer,
-    parameters: { scenario: { slices: ['roster'], world: 'fleet-mid-refactor' } },
+    parameters: { scenario: { _tag: 'slices', slices: ['roster'], world: 'fleet-mid-refactor' } },
     args: { roster: 'one-agent' },
   }, {}, { ...annotations, initialGlobals: { scenario: 'empty', scenarioNow: 1_800_000_000_000 } })
   await Story.load()
@@ -31,9 +33,26 @@ it('awaits the catalog before rendering and honors pinned worlds, time and slice
 })
 
 it('propagates invalid world errors after loading rather than silently rendering', async () => {
-  const Story = composeStory({ render: () => React.createElement('p'), parameters: { scenario: { slices: [] } } }, {}, {
+  const Story = composeStory({ render: () => React.createElement('p'), parameters: { scenario: { _tag: 'slices', slices: ['roster'] } } }, {}, {
     ...annotations, initialGlobals: { scenario: 'not-a-world' },
   })
   await Story.load()
   expect(() => renderToStaticMarkup(React.createElement(Story))).toThrow('unknown scenario world not-a-world')
+})
+
+it.each(['contract-fixture', 'primitive'] as const)('rejects useScenarioSlice under a %s exemption at render', async (_tag) => {
+  const Consumer = () => React.createElement('p', {}, useScenarioSlice('roster').state.agents.length)
+  const Story = composeStory({
+    render: Consumer,
+    parameters: { scenario: { _tag, reason: 'A deliberately invalid hook consumer' } },
+  }, {}, annotations)
+  await Story.load()
+  expect(() => renderToStaticMarkup(React.createElement(Story))).toThrow(`useScenarioSlice is forbidden under scenario ${_tag} exemption`)
+})
+
+it('rejects useScenarioSlice without a declaration at render', async () => {
+  const Consumer = () => React.createElement('p', {}, useScenarioSlice('roster').state.agents.length)
+  const Story = composeStory({ render: Consumer }, {}, annotations)
+  await Story.load()
+  expect(() => renderToStaticMarkup(React.createElement(Story))).toThrow('no parameters.scenario declaration')
 })

@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { revise } from '../kit/factories/turn.ts'
 import * as resources from '../kit/resources.ts'
 import { conversationVariants } from '../kit/variants/conversation.ts'
@@ -70,3 +71,5 @@ export const huge: WorldDefinition = {
     }
   },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

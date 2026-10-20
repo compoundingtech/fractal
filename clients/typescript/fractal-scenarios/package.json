@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./domain-fixture": "./src/domain-fixture.ts",
     "./replay": "./src/replay/index.ts",
     "./react": "./src/react/index.ts",
     "./storybook": "./src/storybook/index.ts",

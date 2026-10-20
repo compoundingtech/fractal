@@ -65,7 +65,7 @@ function BoundedSplitStory({ scheme }: { readonly scheme: Scheme }) {
 const meta = {
   title: 'Fractal UI/Docked split',
   component: DockedSplitStory,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Main pane with a right-docked, resizable Changes panel: 320–720 px, persisted per workspace key, sized through a CSS variable so a drag never re-renders the host. Pane headers share the 32px geometry.' } } },
+  parameters: { scenario: { _tag: 'primitive', reason: "Exercises pane geometry, resize input and workspace width persistence without scenario data." }, layout: 'fullscreen', docs: { description: { component: 'Main pane with a right-docked, resizable Changes panel: 320–720 px, persisted per workspace key, sized through a CSS variable so a drag never re-renders the host. Pane headers share the 32px geometry.' } } },
   args: { scheme: 'dark' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   beforeEach: () => { for (const workspace of workspaces) window.localStorage.removeItem(dockedSplitStorageKey(persistKey(workspace))); window.localStorage.removeItem(dockedSplitStorageKey('bounded-story')) },

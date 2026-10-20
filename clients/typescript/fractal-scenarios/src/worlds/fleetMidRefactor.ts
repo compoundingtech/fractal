@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { TimelineEntry } from '@fractal/client'
 
 import type { CastAgent, CastPerson } from '../kit/cast.ts'
@@ -306,3 +307,5 @@ const build = (ctx: FactoryContext): Slices => {
 
 
 export const fleetMidRefactor: WorldDefinition = adoptNarrativeRecording(syntheticFleetMidRefactor)
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
