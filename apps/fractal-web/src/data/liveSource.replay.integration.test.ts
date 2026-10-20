@@ -88,7 +88,7 @@ describe('scenario replay through the real live source', () => {
       expect(expectedAgents.length).toBeGreaterThan(0)
       expect(rosterIds(live)).toEqual(expectedAgents.map((agent) => agent.id).sort())
       expect(live.registry.get(live.source.agents)).toMatchObject({
-        _tag: 'Observed', value: [{ id: expectedAgents[0]!.id, state: { _tag: 'Unknown', raw: 'reconciling' } }],
+        _tag: 'Observed', value: [{ id: expectedAgents[0]!.id, state: { _tag: 'Unrecognized', raw: 'reconciling' } }],
       })
 
       const thread = world.slices.conversation.state.threads[0]!

@@ -204,6 +204,13 @@ KIT_PATTERNS = (
     "nix/web-shell*",
     ".github/workflows/fleet.yml*",
     ".github/workflows/workspace-ci.ts",
+    # The roster decode story replays captured daemon payloads through the SDK decode and the roster projection.
+    "apps/fractal-web/packages/fractal-sdk/src/**",
+    "apps/fractal-web/src/data/attention.ts",
+    "apps/fractal-web/src/data/projections.ts",
+    "apps/fractal-web/src/data/source.ts",
+    "apps/fractal-web/src/web/LiveRoster.stories.tsx",
+    "apps/fractal-web/src/web/LiveRoster.tsx",
 )
 SHA = re.compile(r"[0-9a-f]{40}")
 

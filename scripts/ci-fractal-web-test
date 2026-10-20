@@ -314,6 +314,7 @@ for required in (False, True):
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
         for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook and module graph", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
+        assert result.stdout.count("App replay browser e2e") == 1, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
         print(f"passed: kit lanes {'run' if required else 'skip explicitly'}")
@@ -323,7 +324,7 @@ for required in (False, True):
 fake_lane = r"""lane() {
   printf '%s\n' "$1"
   case "$1" in
-    "UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
+    "App replay browser e2e"|"UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
       [ "${TEST_STREAMS_ACTIVE:-0}" -eq 0 ] || { echo "exclusive kit lane overlapped test streams" >&2; return 17; } ;;
   esac
   case "$1" in
@@ -360,6 +361,7 @@ for shard, app, kit, build, index, expected in (
         for name in ("App unit tests", "Scenario tests", "Buck typecheck", "UI kit typecheck"):
             assert (name in result.stdout) == (shard == 0), (name, result.stdout)
         assert ("UI kit context isolation controls" in result.stdout) == (shard == 0 and not app and not index), result.stdout
+        assert result.stdout.count("App replay browser e2e") == int(shard == 0 and not (app or build or index)), result.stdout
         assert ("SDK frame CPU budgets" in result.stdout) == (shard == 0 and not (app or build or index)), result.stdout
         assert ("UI kit Storybook and module graph" in result.stdout) == (not app and not index), result.stdout
         assert ("UI kit strict plays" in result.stdout) == (not app and not build and not index), result.stdout
@@ -443,6 +445,8 @@ print("passed: merge-group shards preserve receipts and the semantic gate valida
 graph_check = root / "scripts/ci-fractal-web-kit-graph"
 detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
 assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
+roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "apps/fractal-web/packages/fractal-sdk/src/effect/resourceDecode.ts"]
+assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
