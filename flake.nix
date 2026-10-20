@@ -10,9 +10,9 @@
     pty.url = "github:compoundingtech/pty/063ff7f9d6ef099f76c31752b2eb52c5bba94c17";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
-    # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
+    # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b";
+      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
   };
 
   outputs =
@@ -1716,8 +1716,7 @@
         devShells.genie = pkgs.mkShell {
           packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
           shellHook = ''
-            mkdir -p repos
-            ln -sfn ${effect-utils} repos/effect-utils
+            [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root

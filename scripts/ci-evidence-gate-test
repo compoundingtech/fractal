@@ -1415,7 +1415,7 @@ class WorkflowStructure(unittest.TestCase):
             with tempfile.TemporaryDirectory() as scratch:
                 work = Path(scratch)
                 (work / '.github/workflows').mkdir(parents=True)
-                for name in ('queue-watch.ts', 'ready-pr.ts', 'build-snapshot.ts', 'cache-audit.ts', 'workspace-ci.ts'):
+                for name in ('queue-watch.ts', 'ready-pr.ts', 'build-snapshot.ts', 'cache-audit.ts', 'nix-sandbox-scope.ts', 'workspace-ci.ts'):
                     shutil.copy(ROOT / '.github/workflows' / name, work / '.github/workflows' / name)
                 (work / '.github/workflows/fleet.yml.genie.ts').write_text(source.replace(anchor, f'{probe}\n{anchor}', 1))
                 for name in ('repos', 'scripts'):
