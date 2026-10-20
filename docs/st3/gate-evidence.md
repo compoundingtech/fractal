@@ -76,20 +76,24 @@ what that tree's own records cost, however many trees have records. A test pins 
 `for-each-ref` listings during one verification return at most the tree's own records). The cost of the
 whole namespace is paid only by `scripts/evidence-gc`, which also keeps its size bounded (see below).
 
-**Tags, read first.** Every reader also reads `refs/tags/evidence/<tree>/<record>` and
+**Tags, written and read first.** Every reader also reads `refs/tags/evidence/<tree>/<record>` and
 `refs/tags/evidence/input/<check>/<key>/<record>` (lightweight tags naming the same signed commit), in the same
 listing or fetch as the notes, one prefix per tree or key in each namespace; a record under both names counts
-once. Nothing writes tags yet. Records move there because a ruleset can protect tags and not notes, and the
-readers must be on main before any producer writes one (`doc/fleet/factory/skip-ci-plan`, the hard
-precondition). A tree id is hex, so `input/` never collides with a tree's prefix; both live under `evidence/`,
-which the tag release workflow ignores and full-history checkouts leave out.
+once. Records move there because a ruleset can protect tags and not notes (`doc/fleet/factory/skip-ci-plan`, the
+hard precondition: the readers were on main before any producer wrote one). The producers
+(`scripts/evidence-publish`, `scripts/ci-evidence-observe`, `scripts/evidence-wrap` and so `scripts/st-test --push`)
+file every record under both names, the tag and the note, created together or not at all and pushed in one push:
+a gate whose base predates the tag readers reads only notes, and a record only it cannot see would hide a newer
+failure from it. Writing notes stops in a later change, once no gate that still runs reads notes only. A tree id
+is hex, so `input/` never collides with a tree's prefix; both live under `evidence/`, which the tag release
+workflow ignores, full-history checkouts leave out and no workflow's push trigger matches (a lint pins it).
 
 **The first layout** was `refs/notes/evidence/<record-id>` (one object id under the prefix). The
 verifier still reads it, with a pattern that matches only names exactly one object id long, so it never
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
 refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
-Publishers write the tree-prefixed layout only (`scripts/evidence-publish`, `scripts/ci-evidence-observe`,
-`scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/st3-kernel/src/evidence`) still writes
+Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/st3-kernel/src/evidence`) still writes
 the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
 removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
 
@@ -112,17 +116,19 @@ scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk -
 **Keep set.** A note applies to the exact tree it names, so a note of a superseded pull request head is not
 needed. Kept: records of each open pull request's *current* head tree and of each merge-queue tip while it is
 queued (`open-pr-head`); records of the trees of main's first-parent commits of the last `--keep-main-days`
-(default 3: `main-window`); and an input-index ref (`refs/notes/evidence-input/<check>/<key>/<record>`) whose
+(default 3: `main-window`); and an input-index ref (`refs/tags/evidence/input/<check>/<key>/<record>` or
+`refs/notes/evidence-input/<check>/<key>/<record>`) whose
 key still equals what a protected head tree (or main's tip) projects to for that check, so unchanged-input
 reuse keeps working (`input-key`). Everything else is kept for `--grace-hours` (default 24, a note written for a
 head the listing raced with) and then deleted. The first layout is read from the note: a protected record is
 migrated to `refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), an
-unprotected one is deleted.
+unprotected one is deleted. A record's tag and note get the same decision and count as one record.
 
-**Bounds.** `--soft` (default 3,000): above it the oldest unprotected refs go first. `--cap` (default 5,000): if
-the protected set alone is over it, nothing protected is deleted, the set is printed and the exit status is 3, so
-a job summary shows it; publishers never fail a job over the cap. Output: refs and advertised bytes before and
-after, and the count per reason.
+**Bounds.** Both count records, not refs, so filing each record twice during the move to tags does not halve them.
+`--soft` (default 3,000): above it the oldest unprotected records go first, both names of each. `--cap` (default
+5,000): if the protected set alone is over it, nothing protected is deleted, the set is printed and the exit status is 3, so
+a job summary shows it; publishers never fail a job over the cap. Output: refs, records and advertised bytes
+before and after, and the count per reason.
 
 **Sizing (2026-10-19 numbers).** A main tree that was tested carries 11.4 records on average and about 60 main
 trees a day have records, so the main window costs about 690 refs a day; the 265 open pull requests have 50 trees
@@ -132,9 +138,9 @@ raise the alert every day. The main window serves a re-run or a push on the exac
 which happens within hours, so 3 days is generous.
 
 **Safety.** It fails closed: if a head commit cannot be turned into a tree, `--apply` deletes nothing (exit 1). A
-failed remote push leaves the local refs alone. A second run finds nothing to do. Refs outside the two namespaces
+failed remote push leaves the local refs alone. A second run finds nothing to do. Refs outside the evidence namespaces
 and refs that are not well-formed records are never touched. Take a bundle first when running it by hand:
-`git bundle create evidence-notes.bundle 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
+`git bundle create evidence-notes.bundle 'refs/tags/evidence/*' 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
 
 ### Records as tags (in progress)
 
@@ -145,7 +151,7 @@ bypass is the App that `evidence-gc` uses. Until then the exposure is bounded: n
 undone by the merge queue's full run, and one run in five is sampled. The order, each step its own pull request:
 
 1. The tag release workflow ignores `evidence/**` tags (done).
-2. No workflow checkout fetches them. `fetch-depth: 0` fetches every tag, and 5,000 records as tags added 81.5 MiB and
+2. No workflow checkout fetches them (done). `fetch-depth: 0` fetches every tag, and 5,000 records as tags added 81.5 MiB and
    16 s to a full fetch (measured 2026-10-19), mostly source objects of tested commits that no branch holds. Every
    full-history checkout is now `fullHistoryCheckoutSteps` in `.github/workflows/workspace-ci.ts`: a one-commit checkout,
    then one fetch of every branch and tag with the negative refspec `^refs/tags/evidence/*`. Deepening the shallow clone
@@ -155,7 +161,9 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
    against a real repository.
    A plain `git fetch` does not follow these tags either: a record's tag points at a commit no fetched branch holds.
    A fresh `git clone` does fetch them.
-3. The verifier and the gate read tags first and notes as the legacy layout; then the producers write tags.
+3. The verifier and the gate read tags first and notes as the legacy layout (done); then the producers write each
+   record as a tag and a note (done, see "Tags, written and read first" above). Writing notes stops once no gate that
+   still runs reads notes only.
 4. The tag ruleset, and `evidence-gc` moves to the App.
 
 ## Trust and custody

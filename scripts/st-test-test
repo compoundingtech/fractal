@@ -336,14 +336,17 @@ class StTest(unittest.TestCase):
         linked = Path(self.tmp.name) / 'linked'
         git(self.work, 'worktree', 'add', '-q', str(linked), '-b', 'linked', 'feature')
         victim_config = (self.work / '.git/config').read_text()
-        victim_refs = git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags')
+        def own_refs():  # what the run may add is its own record, refs/tags/evidence/<tree>/<record>; nothing else
+            return [line for line in git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags').splitlines()
+                    if not line.startswith('refs/tags/evidence/')]
+        victim_refs = own_refs()
         script = ('d=$(mktemp -d) && git -C "$d" init -q && git -C "$d" config user.name Evil && git -C "$d" config user.email e@e.invalid '
                   '&& git -C "$d" commit -q --allow-empty -m initial && git -C "$d" checkout -q -b accepted-main && git -C "$d" commit -q --allow-empty -m author')
         leaked = {'GIT_DIR': str(self.work / '.git/worktrees/linked'), 'GIT_WORK_TREE': str(linked), 'GIT_INDEX_FILE': str(self.work / '.git/worktrees/linked/index')}
         code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', script], extra_env=leaked)
         self.assertEqual(code, 0, err + out)
         self.assertEqual((self.work / '.git/config').read_text(), victim_config)
-        self.assertEqual(git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags'), victim_refs)
+        self.assertEqual(own_refs(), victim_refs)
         self.assertNotIn('Evil', (self.work / '.git/config').read_text())
         self.assertEqual(git(self.work, 'branch', '--list', 'accepted-main'), '')
 
