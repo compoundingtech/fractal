@@ -531,6 +531,8 @@ pub async fn propose_planning_variant(
     }
     let intent =
         parse_intent(&preview.mission.resolved_intent.kdl, &state.node).map_err(ApiError::bad)?;
+    let intent = crate::store::identities::normalize_intent(&state.store.readers.get(), &intent)
+        .map_err(ApiError::bad)?;
     let mission = &intent.missions[&session.mission];
     let old = state
         .store

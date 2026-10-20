@@ -111,13 +111,6 @@ pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<Strin
     }
 }
 
-/// Projection-only lookup: retain diagnosable prior state even when admission is fenced.
-/// Effect and writer boundaries must use resolve_reference_conn instead.
-pub fn projection_identity_conn(connection: &Connection, id: &str) -> Result<String, St3Error> {
-    connection.query_row("SELECT identity FROM identity_names WHERE name=?1", [id], |row| row.get(0))
-        .optional().map_err(internal).map(|identity| identity.unwrap_or_else(|| id.into()))
-}
-
 pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput) -> Result<std::borrow::Cow<'a, ClaimInput>, St3Error> {
     let mut normalized = std::borrow::Cow::Borrowed(input);
     let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [&input.subject], |row|row.get(0)).optional().map_err(internal)?;
@@ -133,6 +126,19 @@ pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput)
             if let Some(id) = input.fields.get(field).and_then(Value::as_str) {
                 let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [id], |row|row.get(0)).optional().map_err(internal)?;
                 if let Some(identity) = identity { normalized.to_mut().fields.insert(field.into(), json!(identity)); }
+            }
+        }
+        // This is local admission only: bind placement targets before operation hashing
+        // and signing. Projectors must replay the signed identity without alias lookup.
+        if input.kind == "arrangement.edited"
+            && let Some(operations) = input.fields.get("operations").and_then(Value::as_array) {
+            for (index, operation) in operations.iter().enumerate() {
+                if operation["op"].as_str() != Some("subject.place") { continue; }
+                let Some(subject) = operation["subject"].as_str() else { continue; };
+                let identity = resolve_reference_conn(connection, subject)?;
+                if identity != subject {
+                    normalized.to_mut().fields.get_mut("operations").expect("operations array")[index]["subject"] = json!(identity);
+                }
             }
         }
     }

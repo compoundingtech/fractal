@@ -86,8 +86,8 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
             Operation::FolderMove { id,parent,key } => writes.push((format!("folder/{id}/position"), json!({"parent":parent,"key":key}))),
             Operation::FolderDelete { id } => writes.push((format!("folder/{id}/tombstone"), json!(true))),
             Operation::SubjectPlace { subject,folder,key } => {
-                let identity = super::identities::projection_identity_conn(transaction, &subject)?;
-                writes.push((format!("placement/{identity}"), json!({"folder":folder,"key":key})));
+                // Local admission already binds aliases; signed replay references are immutable.
+                writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key})));
             }
             Operation::Retire {} => { transaction.execute(/* sqlite-large-value: allow-for-now lv-h04cf56a8fdef owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
         }
@@ -260,6 +260,10 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             }
             Operation::SubjectPlace { subject,folder,key } => {
                 let identity = super::identities::resolve_reference_conn(transaction, subject)?;
+                if identity != *subject {
+                    return Err(St3Error::new("invalid-arrangement-operations",
+                        "signed placement targets must use immutable identities"));
+                }
                 heads.insert(format!("placement/{identity}"),prepared_head(json!({"folder":folder,"key":key})));
             }
             _ => {}

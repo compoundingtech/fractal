@@ -2322,6 +2322,91 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     server.abort();
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn bound_unix_socket_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
+    use http_body_util::{BodyExt as _, Full};
+
+    fn ancestor(_pid: u32) -> Option<String> {
+        Some("agent/example-bound-original".into())
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example-bound-original\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example-bound-other\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+    state.store.apply(&intent, &BTreeMap::new(), "bound-declare").unwrap();
+    let app = router(state.clone());
+    for (from, to) in [
+        ("agent/example-bound-original", "agent/example-bound-current"),
+        ("agent/example-bound-other", "agent/example-bound-foreign"),
+    ] {
+        let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+            "from":from,"to":to,"actor":"person/robin",
+            "reason":"Clarify seat","idempotency_key":format!("rename-{from}")
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{renamed}");
+    }
+    let socket = root.path().join("bound.sock");
+    let served_socket = socket.clone();
+    let (ready, serving) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        serve_unix_with_ancestor_ready(
+            &served_socket, None, app, true, ancestor,
+            || { let _ = ready.send(()); },
+        ).await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5), serving).await.unwrap().unwrap();
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await.unwrap();
+    let connection = tokio::spawn(async move { connection.await.unwrap() });
+    let old = "agent/example-bound-original";
+    let current = "agent/example-bound-current";
+    for actor in [old, current] {
+        for header in [old, current] {
+            let response = sender.send_request(Request::builder()
+                .method("POST").uri("/v1/agents/native-session")
+                .header("host", "local").header("content-type", "application/json")
+                .header(client_v0::LOCAL_PERSON_HEADER, header)
+                .body(Full::new(axum::body::Bytes::from(json!({
+                    "subject":current,"actor":actor,"incarnation_id":"bound-incarnation",
+                    "harness":"claude","session_id":"bound-alias-session"
+                }).to_string()))).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::OK, "{actor}, {header}: {body}");
+            assert_eq!(body["actor"], old);
+            assert_eq!(body["subject"], old);
+        }
+    }
+    for foreign in ["agent/example-bound-other", "agent/example-bound-foreign", "person/other"] {
+        for field in ["actor", "requester", "header"] {
+            let before = state.store.index().unwrap();
+            let mut body = json!({
+                "subject":current,"actor":current,"incarnation_id":"bound-incarnation",
+                "harness":"claude","session_id":"must-not-be-written"
+            });
+            if field != "header" { body[field] = json!(foreign); }
+            let response = sender.send_request(Request::builder()
+                .method("POST").uri("/v1/agents/native-session")
+                .header("host", "local").header("content-type", "application/json")
+                .header(client_v0::LOCAL_PERSON_HEADER, if field == "header" { foreign } else { current })
+                .body(Full::new(axum::body::Bytes::from(body.to_string()))).unwrap())
+                .await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{foreign}, {field}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    server.abort();
+    connection.abort();
+}
+
 #[test]
 fn cached_page_cursor_survives_graph_change_and_stays_person_scoped() {
     let root = tempfile::tempdir().unwrap();
@@ -11552,5 +11637,42 @@ mission "overview-original" state="ready" {
         assert_eq!(session["mission"], "overview-renamed");
         let stored = state.store.planning_session(session["id"].as_str().unwrap()).unwrap().unwrap();
         assert_eq!(stored.mission, "overview-original");
+        let candidate = br#"version 2
+mission "overview-renamed" state="ready" {
+  goal "Review the canonical-name candidate."
+  step "review" { assigned-to "person/robin" }
+}"#;
+        let original_candidate = std::str::from_utf8(candidate).unwrap()
+            .replace("overview-renamed", "overview-original");
+        let expected = parse_intent(&original_candidate, &state.node).unwrap();
+        let expected_revision = &expected.missions["overview-original"].revision;
+        let session_id = session["id"].as_str().unwrap();
+        let (status, submitted) = json_request(
+            app.clone(), &format!("/v1/launches/{session_id}/submit"),
+            serde_json::to_value(PlanningCandidateSubmitRequest {
+                actor: session["planner"].as_str().unwrap().into(),
+                markdown: b"# Canonical-name candidate\n".to_vec(),
+                kdl: candidate.to_vec(),
+                idempotency_key: format!("candidate-{requested}"),
+            }).unwrap(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{submitted}");
+        assert_eq!(submitted["mission"], "overview-renamed");
+        let (status, previewed) = json_request(
+            app.clone(), &format!("/v1/launches/{session_id}/preview"), json!({}),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{previewed}");
+        assert_eq!(previewed["preview"]["hash"], submitted["preview"]["hash"]);
+        let stored = state.store.planning_session(session_id).unwrap().unwrap();
+        assert_eq!(stored.mission, "overview-original");
+        let variant = stored.variants.iter().find(|variant| variant.name == "default").unwrap();
+        assert_eq!(&variant.candidate.mission_revision, expected_revision);
+        let preview = variant.preview.as_ref().unwrap();
+        assert_eq!(&preview.mission.mission_revisions["mission/overview-original"], expected_revision);
+        assert!(!preview.mission.mission_revisions.contains_key("mission/overview-renamed"));
+        assert_eq!(
+            serde_json::to_value(&preview.mission.mission_provenance).unwrap(),
+            serde_json::to_value(&expected.mission_provenance).unwrap(),
+        );
     }
 }

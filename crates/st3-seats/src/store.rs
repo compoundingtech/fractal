@@ -165,6 +165,8 @@ pub mod fleet_admission_tests;
 #[cfg(test)]
 pub mod harness_event_tests;
 #[cfg(test)]
+mod identity_boundary_tests;
+#[cfg(test)]
 pub mod mission_model_tests;
 #[cfg(test)]
 pub mod native_resume_tests;

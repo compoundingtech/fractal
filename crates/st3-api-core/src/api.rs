@@ -822,6 +822,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             (state.clone(), transport),
             response_envelope,
         ))
+        .layer(from_fn_with_state(state.clone(), guard_bound_actor))
         .with_state(state)
 }
 
@@ -6149,28 +6150,6 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(agent) = &bound_agent {
                         request.extensions_mut().insert(BoundAgent(agent.clone()));
                     }
-                    let client_request = request.uri().path().starts_with("/v1/client/");
-                    let request = match guard_bound_request(request, bound_agent.as_deref()).await {
-                        Ok(request) => request,
-                        Err(error) => {
-                            let response = if client_request {
-                                let status = error.status;
-                                let raw = json!({"code":error.code,"message":error.message,"details":error.details});
-                                (
-                                    status,
-                                    Json(client_error_envelope(
-                                        status,
-                                        &raw,
-                                        &format!("request/{}", new_request_id()),
-                                    )),
-                                )
-                                    .into_response()
-                            } else {
-                                error.into_response()
-                            };
-                            return Ok::<_, std::convert::Infallible>(response);
-                        }
-                    };
                     app.oneshot(request).await
                 }
             });
@@ -6418,9 +6397,49 @@ fn record_legacy_poll(
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
+// The transport supplies only the immutable ancestry binding. Resolve authored names here,
+// where the router's store is available, before any route or admission effect runs.
+async fn guard_bound_actor(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    let client_request = request.uri().path().starts_with("/v1/client/");
+    match guard_bound_request(request, bound_agent.as_deref(), &state.store).await {
+        Ok(request) => next.run(request).await,
+        Err(error) if client_request => {
+            let status = error.status;
+            let raw = json!({"code":error.code,"message":error.message,"details":error.details});
+            (
+                status,
+                Json(client_error_envelope(
+                    status,
+                    &raw,
+                    &format!("request/{}", new_request_id()),
+                )),
+            ).into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+fn is_bound_actor(store: &Store, actor: &str, bound_identity: &str) -> Result<bool, ApiError> {
+    if actor == bound_identity {
+        return Ok(true);
+    }
+    if actor.starts_with("agent/") {
+        Ok(public_identity(store, crate::store::identities::IdentityKind::Agent, actor)?.identity
+            == bound_identity)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
+    store: &Store,
 ) -> Result<Request<Body>, ApiError> {
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
@@ -6429,13 +6448,16 @@ pub async fn guard_bound_request(
         && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
+    let bound_identity = public_identity(
+        store, crate::store::identities::IdentityKind::Agent, bound_agent,
+    )?.identity;
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
     if let Some(person) = request
         .headers()
         .get(client_v0::LOCAL_PERSON_HEADER)
         .and_then(|value| value.to_str().ok())
-        && person != bound_agent
+        && !is_bound_actor(store, person, &bound_identity)?
     {
         return Err(ApiError::bad(St3Error::new(
             "foreign-agent-actor",
@@ -6492,7 +6514,7 @@ pub async fn guard_bound_request(
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
         for key in ["actor", "requester"] {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
-                && actor != bound_agent
+                && !is_bound_actor(store, actor, &bound_identity)?
             {
                 return Err(ApiError::bad(St3Error::new(
                     "foreign-agent-actor",
@@ -8211,6 +8233,13 @@ pub fn mission_source(
         .map_err(ApiError::internal)?;
     let resolved_kdl = resolve_document_references(kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
+    // Normalize authored names before deriving preview revisions, tokens, and provenance.
+    let intent = match crate::store::identities::normalize_intent(&state.store.readers.get(), &intent)
+        .map_err(ApiError::bad)?
+    {
+        std::borrow::Cow::Borrowed(_) => intent,
+        std::borrow::Cow::Owned(normalized) => normalized,
+    };
     let response = state
         .store
         .mission_at(

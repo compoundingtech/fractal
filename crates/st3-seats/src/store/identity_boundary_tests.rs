@@ -227,3 +227,107 @@ fn partition_collision_replay_preserves_fenced_identity_historical_placement() {
         assert_eq!(error.details["reason"], "conflict");
     }
 }
+
+#[test]
+fn alias_authored_placement_keeps_signed_identity_when_partition_collision_wins() {
+    use st3_missions::store::arrangements::ArrangementsStore as _;
+    const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let left = fixture();
+    let right = Store::open_memory("example-right").unwrap();
+    let naming_first = Store::open_memory("example-naming-first").unwrap();
+    let collision_first = Store::open_memory("example-collision-first").unwrap();
+    let other = "agent/example-other";
+    let target = "agent/example-target";
+    let arrangement = "arrangement/person/robin/019a0000-0000-7000-8000-000000000003";
+    for store in [&left, &right, &naming_first, &collision_first] {
+        store.bind_fleet(FLEET).unwrap();
+    }
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"example-other\" { command \"true\"; }", "example-right",
+    ).unwrap();
+    right.apply_internal(&intent, "independent-declaration").unwrap();
+    let sync = |from: &Store, to: &Store| {
+        let exchange = from.export_replication_exchange_answering(
+            FLEET, &to.replication_inventory().unwrap(),
+            &to.replication_signature_requests().unwrap(),
+        ).unwrap();
+        to.receive_replication_exchange(&from.origin, FLEET, &exchange).unwrap();
+        to.validate_replication_backlog().unwrap();
+        to.project_replication_backlog().unwrap();
+    };
+    sync(&left, &right);
+    sync(&right, &left);
+    let rename_to_target = |store: &Store, from: &str, key: &str| {
+        store.rename_identity(IdentityKind::Agent, &RenameRequest {
+            from: from.into(), to: target.into(), actor: "person/robin".into(),
+            reason: "Clarify responsibility".into(), expected_declaration: None,
+            expected_naming_revision: None, idempotency_key: key.into(),
+        }, &[]).unwrap()
+    };
+    let left_rename = rename_to_target(&left, ORIGINAL, "left-alias-placement");
+    let right_rename = rename_to_target(&right, other, "right-alias-placement");
+    // Choose the losing partition as A, so B -> T always wins without depending
+    // on random signing keys or claim hashes. Neither partition sees the collision yet.
+    let (author, competitor, a, b) = if left_rename.claim_id > right_rename.claim_id {
+        (&left, &right, ORIGINAL, other)
+    } else {
+        (&right, &left, other, ORIGINAL)
+    };
+    let input = |operations, key: &str| ClaimInput {
+        subject: arrangement.into(), kind: "arrangement.edited".into(),
+        actor: Some("person/robin".into()),
+        fields: serde_json::from_value(json!({"owner":"person/robin","operations":operations})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: Some(key.into()),
+    };
+    author.edit_arrangement(&input(json!([{"op":"create","name":"Work"}]), "alias-layout"), &BTreeMap::new()).unwrap();
+    let authored = input(json!([{"op":"subject.place","subject":target,"folder":null,"key":"a1"}]), "alias-placement");
+    let placement = author.edit_arrangement(&authored, &BTreeMap::new()).unwrap();
+    assert_eq!(authored.fields["operations"][0]["subject"], target);
+    assert_eq!(placement.body["fields"]["operations"][0]["subject"], a);
+    // The normalized operation, not its authored spelling, is the retry identity.
+    let mut immutable = authored.clone();
+    immutable.fields.get_mut("operations").unwrap()[0]["subject"] = json!(a);
+    assert_eq!(author.edit_arrangement(&immutable, &BTreeMap::new()).unwrap().id, placement.id);
+    let registers = |store: &Store| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT register,value,revision,winner FROM arrangement_registers WHERE subject=?1 AND register LIKE 'placement/%' ORDER BY register",
+        ).unwrap();
+        let rows = statement.query_map([arrangement], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?,
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        rows
+    };
+    let expected = registers(author);
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].0, format!("placement/{a}"));
+    assert_eq!(expected[0].2, placement.id);
+    sync(author, &naming_first);
+    sync(competitor, &naming_first);
+    sync(competitor, &collision_first);
+    sync(author, &collision_first);
+    let signature = author.claim_signature(&placement.id).unwrap().unwrap();
+    // Explicit signatures bypass normalization: refuse an alias rather than change
+    // the signed operation and silently sign a different placement.
+    let mut externally_signed = authored.clone();
+    externally_signed.idempotency_key = Some("externally-signed-alias".into());
+    let encoded_signature = serde_json::to_string(&signature).unwrap();
+    let error = append_claim_with_commit_context(
+        &author.graph, &externally_signed, None, None, None, None,
+        ClaimCommitContext { signature: Some(&encoded_signature), ..Default::default() },
+    ).unwrap_err();
+    assert_eq!(error.code, "invalid-arrangement-operations");
+    assert_eq!(registers(author), expected);
+    for store in [&naming_first, &collision_first] {
+        assert_eq!(store.resolve_identity(IdentityKind::Agent, target).unwrap().identity, b);
+        assert_eq!(store.resolve_identity(IdentityKind::Agent, a).unwrap_err().details["reason"], "conflict");
+        assert_eq!(registers(store), expected);
+        store.replay_replication_graph().unwrap();
+        assert_eq!(registers(store), expected);
+        let retained = store.claim_by_id(&placement.id).unwrap().unwrap();
+        assert_eq!(retained.body, placement.body);
+        assert_eq!(retained.body["fields"]["operations"][0]["subject"], a);
+        assert_eq!(store.claim_signature(&placement.id).unwrap().unwrap(), signature);
+    }
+}
