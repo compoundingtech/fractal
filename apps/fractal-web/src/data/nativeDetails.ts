@@ -128,9 +128,16 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const contextValid = contextAsOf !== undefined && contextAsOf <= now && (projected?.contextObservedAfter === undefined || contextAsOf > projected.contextObservedAfter)
   const contextField = (value: number | undefined): TraceFact<number> => value === undefined || !contextValid ? unknown('Context usage for the current session is not reported.') : known(value, contextAsOf)
   const rows = attributedRoot === undefined || period === undefined ? [] : period.rows.filter(item => item.agent === agentRef && item.native_session_id === attributedRoot)
-  const nativeWindow: TraceFact<TraceAccumulationWindow> = period !== undefined && rows.length > 0 && period.since_ms < period.until_ms
-    ? known({ _tag: 'Interval', fromMs: period.since_ms, toMs: period.until_ms }, period.until_ms)
-    : unknown('No reporting period is linked to this session.', periodFeed._tag === 'Waiting' ? 'loading' : 'not-attributed')
+  const sinceMs = period?.since_ms
+  const untilMs = period?.until_ms
+  // Zero is an unreported bound, not an epoch start. Check each DTO bound independently.
+  const reportedSince = typeof sinceMs === 'number' && Number.isFinite(sinceMs) && sinceMs > 0
+  const reportedUntil = typeof untilMs === 'number' && Number.isFinite(untilMs) && untilMs > 0
+  const nativeWindow: TraceFact<TraceAccumulationWindow> = rows.length > 0 && reportedSince && reportedUntil && sinceMs < untilMs
+    ? known({ _tag: 'Interval', fromMs: sinceMs, toMs: untilMs }, untilMs)
+    : rows.length > 0
+      ? unknown('The reporting period for this session’s spend is not reported.')
+      : unknown('No reporting period is linked to this session.', periodFeed._tag === 'Waiting' ? 'loading' : 'not-attributed')
   const hasPeriod = rows.length > 0 && nativeWindow._tag === 'Known'
   // Unpriced tokens are not expressible in kit coverage; the amount keeps unavailable attribution coverage.
   const cost = rows.reduce((sum, item) => sum + item.cost_microusd, 0) / 1_000_000
@@ -191,7 +198,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     trace: { agentId: agentRef, nativeSessionId: attributedRoot === undefined ? unknown('Usage could not be linked to the current session.', 'not-attributed') : known(attributedRoot),
       meters: { context: { reportedPercent: contextField(context?.used_percent), usedTokens: occupancy._tag === 'Known' ? contextField(occupancy.usedTokens) : unknown('Context tokens not reported.'), windowTokens: occupancy._tag === 'Known' ? contextField(occupancy.windowTokens) : unknown('Context capacity not reported.'), compactions: contextField(context?.compactions), lastCompactionMs: contextField(context?.last_compaction_ms === undefined ? undefined : Duration.toMillis(context.last_compaction_ms)) },
         spend: { usdScope: { _tag: 'IncludingSubagents' }, usdWindow: unknown('The reporting period for subagent spend is not reported.'), totalUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, totalUsd: unsupported,
-          mainUsdScope: { _tag: 'Self' }, mainUsdWindow: nativeWindow, mainUsdCoverage: nativeCoverage, mainUsd: hasPeriod ? known(cost, period?.until_ms) : unknown('No spend records are linked to this session.', 'not-attributed'),
+          mainUsdScope: { _tag: 'Self' }, mainUsdWindow: nativeWindow, mainUsdCoverage: nativeCoverage, mainUsd: rows.length > 0 ? known(cost, reportedUntil ? untilMs : undefined) : unknown('No spend records are linked to this session.', 'not-attributed'),
           subagentUsdScope: { _tag: 'IncludingSubagents' }, subagentUsdWindow: unknown('The reporting period for subagent spend is not reported.'), subagentUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, subagentUsd: unsupported,
           tokensScope: { _tag: 'AgentIncarnations' }, tokensWindow: unknown('The start of the agent’s total token count is not reported.'), tokens: cumulativeUsage === undefined ? unknown('The agent’s total token count is not reported.') : known(cumulativeUsage.total_tokens), split: unknown('This session does not report a cost breakdown.') } },
       coverage: { _tag: 'Unavailable', reason: 'not-covered' }, series: unknown('This session does not report context or spend history.'), turns: unknown('This session does not report context usage by turn.'), history: unknown('This session does not report previous sessions.'), subagents: unknown('This session reports subagents without a session usage breakdown.'), subagentsWindow: unknown('The reporting period for subagent usage is not reported.'), subagentCount: unknown('The number of subagent sessions is not reported.'),

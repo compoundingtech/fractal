@@ -146,8 +146,35 @@ describe('native observations mounted on the production kit Details pane', () =>
 })
 
 /** Internal vocabulary that must never reach the OMP inspector's text, accessible names or disclosed reasons. */
-const internalWords = /\b(native\w*|descendants?|incarnations?|provenance|series|ledger|attribution|window-global)\b|root completeness|this source/i
-const copyOf = (root: HTMLElement) => [root.textContent ?? '', ...[...root.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label') ?? '')].join(' ')
+const internalWords = /\b(native\w*|descendants?|incarnations?|provenance|series|ledger|attribution|window-global|matched|traced|self)\b|root completeness|this source|\bst resources\b|\breported window\b/i
+/** The one sentence allowed to say "matched"; exactly it is stripped before the ban applies. */
+const matchedSentence = /\b\d+(?:\.\d+)?% of spend matched to this agent\b/g
+/** A placeholder epoch never reaches the inspector, in ISO or display form. */
+const epoch = /1970-01-01|\b1 Jan(?:uary)? 1970\b|\bJan(?:uary)? 1,? 1970\b/
+const copyOf = (root: HTMLElement) => {
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT), text: string[] = []
+  while (walker.nextNode()) text.push(walker.currentNode.textContent ?? '')
+  return [...text, ...[...root.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label') ?? '')].join(' ').replace(matchedSentence, '')
+}
+const assertPlain = (root: HTMLElement) => {
+  expect(copyOf(root)).not.toMatch(internalWords)
+  expect(copyOf(root)).not.toMatch(epoch)
+}
+/** A spend row's label and period as painted, without its coverage line. */
+const spendLabel = (spend: HTMLElement, metric: string) => {
+  const dt = spend.querySelector(`[data-details-metric="${metric}"] dt`)!.cloneNode(true) as HTMLElement
+  for (const node of dt.querySelectorAll('[data-details-coverage-line],[data-details-coverage]')) node.remove()
+  return (dt.textContent ?? '').replace(/\s+/g, ' ').trim()
+}
+
+describe('OMP inspector copy guard', () => {
+  it('rejects each banned term and every other use of matched, and the placeholder epoch', () => {
+    for (const sample of ['Native session', 'Traced descendant', 'Traced sessions', 'Main session · self', 'Observed st resources', 'Reported window · 7d', 'Matched sessions', '99% matched', 'Spend matched to this agent', '100% of spend matched to this seat', '99% of spend matched to this session'])
+      expect(sample.replace(matchedSentence, '')).toMatch(internalWords)
+    expect('Spend incl. subagents · last 7 days. 99% of spend matched to this agent. Main session. Resources aren’t available for this session.'.replace(matchedSentence, '')).not.toMatch(internalWords)
+    for (const sample of ['Main session · 1970-01-01 00:00–00:00 UTC', 'Started 1 Jan 1970', 'Jan 1, 1970']) expect(sample).toMatch(epoch)
+  })
+})
 
 describe('OMP subagent activity on the production inspector', () => {
   const mount = async (state?: OmpSupplementState) => {
@@ -165,7 +192,7 @@ describe('OMP subagent activity on the production inspector', () => {
     expect(line.getAttribute('data-details-supplement-state')).toBe('Waiting')
     expect(within(line).getByRole('status').textContent).toBe('Loading subagent activity…')
     expect(line.querySelector('button[data-details-why]')).toBeNull()
-    expect(copyOf(host)).not.toMatch(internalWords)
+    assertPlain(host)
   })
   it('keeps the build composition’s unavailable reason plain and behind a collapsed Why?', async () => {
     await mount()
@@ -175,7 +202,7 @@ describe('OMP subagent activity on the production inspector', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     expect(panel.hidden).toBe(true)
     expect(panel.textContent).toBe("Subagent activity isn't reported for this session.")
-    expect(copyOf(host)).not.toMatch(internalWords)
+    assertPlain(host)
   })
   it('never renders a source’s technical failure detail', async () => {
     await mount('unavailable')
@@ -184,7 +211,20 @@ describe('OMP subagent activity on the production inspector', () => {
     await act(async () => trigger.click())
     expect(panel.hidden).toBe(false)
     expect(panel.textContent).toBe("Subagent activity couldn't be loaded.")
-    expect(copyOf(host)).not.toMatch(internalWords)
+    assertPlain(host)
+    // Missing spend shares one summary; which session spend belongs to is a Why?-only note, never a field.
+    const spend = host.querySelector<HTMLElement>('section[aria-label$="Spend"]')!
+    const partial = spend.querySelector<HTMLElement>('[data-details-not-reported="fields"]')!
+    const summary = partial.querySelector('[data-details-not-reported-summary]')?.textContent ?? ''
+    expect(summary).toMatch(/^Not reported: /)
+    expect(summary).toContain('total spend')
+    expect(summary).toContain('main session window')
+    expect(summary).not.toMatch(/matching|scope/i)
+    expect(spendLabel(spend, 'main-usd')).toBe('Main session')
+    const reasons = why(partial, 'Why? Spend details not reported')
+    expect(reasons.trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(reasons.panel.hidden).toBe(true)
+    expect(reasons.panel.textContent).toContain('Which session this spend belongs to isn’t reported.')
     expect(copyOf(host)).not.toContain('root not found')
   })
   it('states separate spend reports in one plain sentence, with the time window behind Why?', async () => {
@@ -195,7 +235,20 @@ describe('OMP subagent activity on the production inspector', () => {
     const { trigger, panel } = why(note, 'Why? Agent and total spend')
     await act(async () => trigger.click())
     expect(panel.textContent).toBe(spendWindowReason)
-    expect(copyOf(host)).not.toMatch(internalWords)
+    assertPlain(host)
+    // Plain accounting: the reported period reads in words, the main session's unknown period stays unknown.
+    const spend = host.querySelector<HTMLElement>('section[aria-label$="Spend"]')!
+    expect(spendLabel(spend, 'total-usd')).toBe('Spend incl. subagents · last 7 days')
+    expect(spendLabel(spend, 'main-usd')).toBe('Main session')
+    expect(spend.querySelector('[data-details-not-reported-summary]')?.textContent).toContain('main session window')
+    const coverage = spend.querySelector<HTMLElement>('[data-details-metric="total-usd"] [data-details-coverage-line]')!
+    expect(coverage.querySelector('[data-details-coverage]')?.textContent).toBe('99% of spend matched to this agent')
+    const linked = why(coverage, 'Why? Spend linked to this agent')
+    expect(linked.trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(linked.panel.textContent).toContain('This percentage shows how much spend could be linked to this agent.')
+    // A complete subagent list needs no count line.
+    expect(host.querySelector('[data-details-subagent-window]')?.textContent).toBe('Subagents · last 7 days')
+    expect(host.querySelector('[data-details-subagent-count]')).toBeNull()
   })
   it('describes retained activity honestly without the source’s failure detail', async () => {
     await mount('retained')
@@ -204,7 +257,7 @@ describe('OMP subagent activity on the production inspector', () => {
     const { trigger, panel } = why(line, 'Why? Subagent activity')
     await act(async () => trigger.click())
     expect(panel.textContent).toBe("The latest update couldn't be loaded, so earlier activity is shown.")
-    expect(copyOf(host)).not.toMatch(internalWords)
+    assertPlain(host)
   })
   it('opens a subagent’s reported details in plain words', async () => {
     await mount('reported')
@@ -213,6 +266,6 @@ describe('OMP subagent activity on the production inspector', () => {
     const dialog = within(document.body).getByRole('dialog', { name: 'Reported resource details' })
     expect(dialog.textContent).toContain("Reported details only; this resource can't be opened from here.")
     expect(dialog.textContent).toContain(`Session ${ompSubagent.sessionId} · 12 requests · $2.86 · ${ompSubagent.model}`)
-    expect(copyOf(dialog)).not.toMatch(internalWords)
+    assertPlain(dialog)
   })
 })

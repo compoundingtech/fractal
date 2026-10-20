@@ -25,7 +25,8 @@ export const ompAgentRow: Native.Agent = decodeUnknownSync(Agent)({
     phases: [], totals: { blocked: 0, completed: 0, in_progress: 0, pending: 0 }, truncated: false,
   } },
 })
-const ompUsagePeriod: Native.UsagePeriod = decodeUnknownSync(UsagePeriod)({ since_ms: 1000, until_ms: 5000, rows: [{
+// The host reports priced spend but no start bound; zero must never become an epoch interval.
+const ompUsagePeriod: Native.UsagePeriod = decodeUnknownSync(UsagePeriod)({ since_ms: 0, until_ms: 5000, rows: [{
   agent: ompAgentRef, native_session_id: ompSessionId, model: 'example-model', input_tokens: 10, output_tokens: 20, cached_tokens: 3,
   cache_write_tokens: 4, cache_write_1h_tokens: 0, total_tokens: 37, cost_microusd: 6_190_000, reported_cost_microusd: 0, unpriced_tokens: 0,
 }] })

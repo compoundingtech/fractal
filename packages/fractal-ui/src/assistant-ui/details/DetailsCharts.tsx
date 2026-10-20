@@ -11,9 +11,9 @@ import { adaptTrace } from './trace/adapter.ts'
 import { CompactSpend, CompactSpendPending } from './trace/CompactSpend.tsx'
 import { ContextPanel, ContextPanelPending, contextPanelFootprint, type ContextPanelFootprint } from './trace/ContextPanel.tsx'
 import { SpendPanel, SpendPanelPending } from './trace/SpendPanel.tsx'
-import { DescribedTooltipButton, DetailsInlineReason, DetailsNotReported, type NotReportedField } from './DetailsUnavailable.tsx'
+import { DescribedTooltipButton, DetailsInlineReason, DetailsNotReported, DetailsWhy, DetailsWhyPending, notReportedNotesSummary, type NotReportedField } from './DetailsUnavailable.tsx'
 import { NarrowLayoutContext } from '../composition/NarrowLayout.tsx'
-import { traceReasonText, joinDetailsReasons, traceFactReason } from './trace-reasons.ts'
+import { joinDetailsReasons, traceFactReason } from './trace-reasons.ts'
 export interface DetailsChartsProps {
   readonly trace: TraceSeries
   readonly context: 'C1' | 'C2' | 'C3'
@@ -94,38 +94,54 @@ const ContextMeterPending = ({ footprint }: { readonly footprint: DetailsPending
   </div>}
 </div>
 
-const scopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · self':scope._tag==='IncludingSubagents'?' · including subagents':scope._tag==='AgentIncarnations'?' · all agent sessions':''
-const tokenScopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · this agent':scope._tag==='IncludingSubagents'?' · this agent + subagents':scope._tag==='AgentIncarnations'?' · observed agent sessions':''
+/** Who a value covers, in plain words; the agent's own session alone needs no qualifier. */
+const scopeLabel = (scope:TraceSpendScope):string => scope._tag==='IncludingSubagents'?' incl. subagents':scope._tag==='AgentIncarnations'?' · all agent sessions':''
+const windowUnits = { d: 'day', h: 'hour', w: 'week' } as const
 export const accumulationParts = (fact:TraceFact<TraceAccumulationWindow>):readonly string[]|undefined => {
   if(fact._tag==='Unknown')return undefined
   const window=fact.value
   if(window._tag==='AllTime')return ['all time']
-  if(window._tag==='Reported')return [`reported window · ${window.label}`]
+  if(window._tag==='Reported'){
+    // Producer shorthand such as `7d` reads as `last 7 days`; any other label is painted as reported.
+    const short=/^(\d+)\s*([dhw])$/.exec(window.label)
+    if(short===null)return [window.label]
+    const count=Number(short[1]),unit=windowUnits[short[2] as keyof typeof windowUnits]
+    return [count===1?`last ${unit}`:`last ${count} ${unit}s`]
+  }
   const from = new Date(window.fromMs).toISOString()
   const to = new Date(window.toMs).toISOString()
   return from.slice(0,10) === to.slice(0,10)
     ? [`${from.slice(0,10)} ${from.slice(11,16)}–${to.slice(11,16)} UTC`]
     : [`${from.slice(0,10)} ${from.slice(11,16)}–`, `${to.slice(0,10)} ${to.slice(11,16)} UTC`]
 }
-/** Both row props and pending footprints normalize only the malformed row's coverage; unavailable attribution is a Not reported field. */
-const coverageLabel=(coverage:TraceCoverageState):string|undefined=>{
+/** The painted coverage sentence and whether a Why? explains it; unavailable coverage is a Why?-only note. */
+interface CoverageFootprint { readonly label: string; readonly why: boolean }
+const linkedSpendReason = 'This percentage shows how much spend could be linked to this agent.'
+const unreportedLinkReason = 'How much spend could be linked to this agent isn’t reported.'
+/** Both row props and pending footprints normalize only the malformed row's coverage. */
+const coverageFootprint=(coverage:TraceCoverageState):CoverageFootprint|undefined=>{
  const state=traceCoverageState(coverage)
- return state._tag==='Complete'||state._tag==='Unavailable'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% matched`:`Not tracked for ${state.harnessName}`
+ return state._tag==='Complete'||state._tag==='Unavailable'?undefined
+  :state._tag==='PartialUnreported'?{label:'Part of spend linked to this agent',why:true}
+  :state._tag==='Partial'?{label:`${Math.min(99,Math.floor(state.attributedFraction*100))}% of spend matched to this agent`,why:true}
+  :{label:`Not tracked for ${state.harnessName}`,why:false}
 }
 const notCoveredExplanation = 'Spend is recorded only for OMP sessions today.'
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
  const narrow=React.useContext(NarrowLayoutContext)
  const state=traceCoverageState(coverage)
- if(state._tag==='Complete'||state._tag==='Unavailable')return null
+ const footprint=coverageFootprint(state)
+ if(footprint===undefined)return null
  if(state._tag==='NotCovered')return narrow
-  ?<p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(state)}<DetailsInlineReason block>{notCoveredExplanation}</DetailsInlineReason></p>
-  :<DescribedTooltipButton data-details-coverage description={notCoveredExplanation} tooltipStyle={styles.coverageTooltip} {...stylex.props(styles.coverageTrigger)}>{coverageLabel(state)}</DescribedTooltipButton>
- return <p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(state)}</p>
+  ?<p data-details-coverage {...stylex.props(styles.scopeNote)}>{footprint.label}<DetailsInlineReason block>{notCoveredExplanation}</DetailsInlineReason></p>
+  :<DescribedTooltipButton data-details-coverage description={notCoveredExplanation} tooltipStyle={styles.coverageTooltip} {...stylex.props(styles.coverageTrigger)}>{footprint.label}</DescribedTooltipButton>
+ // One painted sentence; what the percentage means waits behind the kit's collapsed Why?.
+ return <p data-details-coverage-line {...stylex.props(styles.coverageLine)}><span data-details-coverage {...stylex.props(styles.coverageSummary)}>{footprint.label}</span><DetailsWhy explains="Spend linked to this agent" reasons={[state._tag==='Partial'?linkedSpendReason:unreportedLinkReason]} /></p>
 }
 
-/** Both live and pending rows use the same reported window and wrapping boundaries. */
+/** Both live and pending rows use the same reported window and wrapping boundaries; the period follows its label inline. */
 const MetricWindow = ({ parts, pending = false, tokens = false }: { readonly parts: readonly string[]; readonly pending?: boolean;readonly tokens?:boolean }): ReactNode =>
-  <span data-details-metric-period={pending?undefined:true} data-details-token-period={pending||!tokens ? undefined : true} {...stylex.props(styles.tokenWindow)}>{parts.map((part,index)=><span key={index}>{index>0?<wbr/>:null}<span {...stylex.props(styles.windowPart)}><span {...stylex.props(pending&&styles.pendingText)}>{part}</span></span></span>)}</span>
+  <><span aria-hidden="true" {...stylex.props(styles.tokenWindow, pending&&styles.pendingText)}> · </span><span data-details-metric-period={pending?undefined:true} data-details-token-period={pending||!tokens ? undefined : true} {...stylex.props(styles.tokenWindow)}>{parts.map((part,index)=><span key={index}>{index>0?<wbr/>:null}<span {...stylex.props(styles.windowPart)}><span {...stylex.props(pending&&styles.pendingText)}>{part}</span></span></span>)}</span></>
 
 /** One spend meter with its own scope, window and attribution; `prefix` names its metadata gaps. */
 interface SpendMetric {
@@ -142,31 +158,43 @@ interface SpendMetric {
 const spendMetrics = (trace: TraceSeries): readonly SpendMetric[] => {
   const spend = trace.meters.spend
   return [
-    { metric: 'total-usd', label: spend.totalUsdCoverage._tag === 'Complete' ? 'Total' : 'Recorded spend', name: 'total spend', prefix: 'total', fact: spend.totalUsd, scope: spend.usdScope, window: spend.usdWindow, coverage: spend.totalUsdCoverage, tokens: false },
+    { metric: 'total-usd', label: spend.totalUsdCoverage._tag === 'Complete' ? 'Total' : 'Spend', name: 'total spend', prefix: 'total', fact: spend.totalUsd, scope: spend.usdScope, window: spend.usdWindow, coverage: spend.totalUsdCoverage, tokens: false },
     { metric: 'main-usd', label: 'Main session', name: 'main session spend', prefix: 'main session', fact: spend.mainUsd, scope: spend.mainUsdScope, window: spend.mainUsdWindow, coverage: spend.mainUsdCoverage, tokens: false },
-    { metric: 'subagent-usd', label: spend.subagentUsdCoverage._tag === 'Partial' ? 'Attributed subagents' : 'Subagents', name: 'subagent spend', prefix: 'subagent', fact: spend.subagentUsd, scope: spend.subagentUsdScope, window: spend.subagentUsdWindow, coverage: spend.subagentUsdCoverage, tokens: false },
+    { metric: 'subagent-usd', label: 'Subagents', name: 'subagent spend', prefix: 'subagent', fact: spend.subagentUsd, scope: spend.subagentUsdScope, window: spend.subagentUsdWindow, coverage: spend.subagentUsdCoverage, tokens: false },
     { metric: 'tokens', label: 'Cumulative tokens', name: 'cumulative tokens', prefix: 'token', fact: spend.tokens, scope: spend.tokensScope, window: spend.tokensWindow, tokens: true },
   ]
 }
-const metricLabel = (row: SpendMetric): string => `${row.label}${row.tokens ? tokenScopeLabel(row.scope) : scopeLabel(row.scope)}`
+// Subagent spend already names who it covers.
+const metricLabel = (row: SpendMetric): string => row.metric === 'subagent-usd' ? row.label : `${row.label}${scopeLabel(row.scope)}`
 const metricValue = (row: SpendMetric, value: number): string => row.tokens ? compactNumber.format(value) : money.format(value)
 const reportedMetrics = (trace: TraceSeries): readonly (SpendMetric & { readonly value: number })[] =>
   spendMetrics(trace).flatMap(row => row.fact._tag === 'Known' ? [{ ...row, value: row.fact.value }] : [])
 const tracedSubagents = (trace: TraceSeries) => trace.subagents._tag === 'Known' ? trace.subagents.value : []
-const tracedSessionsLine = (trace: TraceSeries): string => {
+/** The subagent list's own period; an unreported period is named in the group's Not reported line, never guessed. */
+const subagentsLine = (trace: TraceSeries): string => {
   const parts = accumulationParts(trace.subagentsWindow)
-  return parts === undefined ? 'Traced sessions' : `Traced sessions · ${parts.join('')}`
+  return parts === undefined ? 'Subagents' : `Subagents · ${parts.join('')}`
 }
-/** A missing value names its metric; a reported value's missing scope, window or attribution names that metadata. */
+/** A missing value names its metric; a reported value's missing window names that window. */
 const spendGaps = (trace: TraceSeries): readonly NotReportedField[] => [
-  ...spendMetrics(trace).flatMap(row => row.fact._tag === 'Unknown' ? [gap(row.name, missingReason(row.fact))] : [
-    ...(row.scope._tag === 'Unknown' ? [gap(`${row.prefix} scope`, traceReasonText(row.scope.reason))] : []),
-    ...(row.window._tag === 'Unknown' ? [gap(`${row.prefix} window`, missingReason(row.window))] : []),
-    ...(row.coverage?._tag === 'Unavailable' ? [gap('session matching', traceReasonText(row.coverage.reason))] : []),
-  ]),
-  ...(trace.coverage._tag === 'Unavailable' ? [gap('session matching', traceReasonText(trace.coverage.reason))] : []),
-  ...(tracedSubagents(trace).length > 0 && trace.subagentsWindow._tag === 'Unknown' ? [gap('traced-session window', missingReason(trace.subagentsWindow))] : []),
+  ...spendMetrics(trace).flatMap(row => row.fact._tag === 'Unknown' ? [gap(row.name, missingReason(row.fact))]
+    : row.window._tag === 'Unknown' ? [gap(`${row.prefix} window`, missingReason(row.window))] : []),
+  ...(tracedSubagents(trace).length > 0 && trace.subagentsWindow._tag === 'Unknown' ? [gap('subagent list window', missingReason(trace.subagentsWindow))] : []),
 ]
+const unlinkedSpendNote = 'Which session this spend belongs to isn’t reported.'
+/** Facts about reported values that are not missing fields: who a value includes and which session spend belongs to. Why? only. */
+const spendNotes = (trace: TraceSeries): readonly string[] => [
+  ...reportedMetrics(trace).flatMap(row => [
+    ...(row.scope._tag === 'Unknown' ? [`${row.label}: which sessions are included isn’t reported.`] : []),
+    ...(row.coverage?._tag === 'Unavailable' ? [unlinkedSpendNote] : []),
+  ]),
+  ...(trace.coverage._tag === 'Unavailable' ? [unlinkedSpendNote] : []),
+]
+/** A row already showing the session-level coverage sentence makes a second copy redundant. */
+const repeatsTraceCoverage = (trace: TraceSeries): boolean => {
+  const label = coverageFootprint(trace.coverage)?.label
+  return label !== undefined && reportedMetrics(trace).some(row => row.coverage !== undefined && coverageFootprint(row.coverage)?.label === label)
+}
 
 const SpendMeter = ({ trace }: { readonly trace: TraceSeries }): ReactNode => {
   const rows = reportedMetrics(trace)
@@ -180,18 +208,22 @@ const SpendMeter = ({ trace }: { readonly trace: TraceSeries }): ReactNode => {
         <dd {...stylex.props(row.tokens ? styles.tokens : styles.amount)}>{metricValue(row, row.value)}</dd>
       </div>
     })}</dl>}
-    <TraceCoverageNote trace={trace} />
-    {subagents.length > 0 && <p data-details-subagent-spend-window {...stylex.props(styles.scopeNote)}>{tracedSessionsLine(trace)}</p>}
+    {!repeatsTraceCoverage(trace) && <TraceCoverageNote trace={trace} />}
+    {subagents.length > 0 && <p data-details-subagent-spend-window {...stylex.props(styles.scopeNote)}>{subagentsLine(trace)}</p>}
     {subagents.length > 0 && <dl {...stylex.props(styles.spendSnapshot)} aria-label="Subagent spend breakdown">{subagents.map((child) => <div key={child.sessionId} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}>{child.label._tag==='Known'?child.label.value:child.sessionId}</dt><dd {...stylex.props(styles.amount)}>{money.format(child.usd)}</dd></div>)}</dl>}
   </div>
 }
 
+/** Loading twin of a coverage sentence: the same ink and, when the live line has one, its Why? row. */
+const CoveragePending = ({ footprint }: { readonly footprint: CoverageFootprint }): ReactNode => {
+  return <p {...stylex.props(styles.coverageLine)}><span {...stylex.props(styles.coverageSummary)}><span {...stylex.props(styles.pendingText)}>{footprint.label}</span></span>{footprint.why && <DetailsWhyPending />}</p>
+}
 /** Loading twin of SpendMeter: the same reported rows and the same absent ones. */
 const SpendMeterPending = ({ footprint }: { readonly footprint: DetailsPendingShape['spend'] }): ReactNode => footprint.rows.length === 0 && footprint.subagents.length === 0 ? null : <div aria-hidden="true" inert {...stylex.props(styles.body)}>
   {footprint.rows.length > 0 && <dl {...stylex.props(styles.spendSnapshot)}>
-    {footprint.rows.map(row=><div key={row.label} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{row.label}</span>{row.window!==undefined&&<MetricWindow parts={row.window} pending tokens={row.tokens}/>}{row.coverage!==undefined&&<p {...stylex.props(styles.scopeNote)}><span {...stylex.props(styles.pendingText)}>{row.coverage}</span></p>}</dt><dd {...stylex.props(row.tokens?styles.tokens:styles.amount)}><span {...stylex.props(styles.pendingText)}>{row.value}</span></dd></div>)}
+    {footprint.rows.map(row=><div key={row.label} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{row.label}</span>{row.window!==undefined&&<MetricWindow parts={row.window} pending tokens={row.tokens}/>}{row.coverage!==undefined&&<CoveragePending footprint={row.coverage}/>}</dt><dd {...stylex.props(row.tokens?styles.tokens:styles.amount)}><span {...stylex.props(styles.pendingText)}>{row.value}</span></dd></div>)}
   </dl>}
-  {footprint.coverage!==undefined&&<p {...stylex.props(styles.scopeNote)}><span {...stylex.props(styles.pendingText)}>{footprint.coverage}</span></p>}
+  {footprint.coverage!==undefined&&<CoveragePending footprint={footprint.coverage}/>}
   {footprint.subagents.length>0&&<p {...stylex.props(styles.scopeNote)}><span {...stylex.props(styles.pendingText)}>{footprint.subagentWindow}</span></p>}
   {footprint.subagents.length>0&&<dl {...stylex.props(styles.spendSnapshot)}>{footprint.subagents.map((row,index)=><div key={index} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{row.label}</span></dt><dd {...stylex.props(styles.amount)}><span {...stylex.props(styles.pendingText)}>{row.value}</span></dd></div>)}</dl>}
 </div>
@@ -248,7 +280,7 @@ export const DetailsCharts = ({ trace, context, spend, section, showUnavailableR
     {contextWhole ? showUnavailableReasons && <DetailsNotReported group="Context" summary={contextSummary} fields={contextFields} /> : <>
       <ContextMeter context={trace.meters.context} />
       {contextSeries && projection !== undefined && <ContextPanel scene={projection.scene} lane={projection.lane} compact={context === 'C2'} />}
-      <DetailsNotReported fields={contextFields} />
+      <DetailsNotReported area="Context" fields={contextFields} />
     </>}
   </div>
   const spendBody = <div {...stylex.props(styles.body)} data-details-chart={spend}>
@@ -257,7 +289,7 @@ export const DetailsCharts = ({ trace, context, spend, section, showUnavailableR
       {compactSeries && <CompactSpend lane={spendProjection!.lane} descendantSpend={spendProjection!.descendantSpend} showTotals={false}/>}
       {panelSeries && <SpendPanel lane={spendProjection!.lane} {...(hasReportedSplit(trace) && trace.meters.spend.split._tag === 'Known' ? {split:trace.meters.spend.split.value} : {})} componentsKnown={hasReportedSplit(trace)} showTotals={false}/>}
       {splitOnly && trace.meters.spend.split._tag === 'Known' && <SpendPanel split={trace.meters.spend.split.value} componentsKnown showTotals={false}/>}
-      <DetailsNotReported fields={spendFields} />
+      <DetailsNotReported area="Spend" fields={spendFields} notes={spendNotes(trace)} />
     </>}
   </div>
   if (section === 'context') return contextBody
@@ -282,12 +314,15 @@ export interface DetailsPendingShape {
   }
   readonly spend: {
     /** Reported metrics only; absent metrics are named in `gaps`. */
-    readonly rows: readonly { readonly label: string; readonly window?: readonly string[]|undefined; readonly coverage?:string|undefined; readonly value: string; readonly tokens: boolean }[]
+    readonly rows: readonly { readonly label: string; readonly window?: readonly string[]|undefined; readonly coverage?:CoverageFootprint|undefined; readonly value: string; readonly tokens: boolean }[]
     readonly subagents: readonly { readonly label: string; readonly value: string }[]
     readonly subagentWindow?:string|undefined
     /** Not reported field names, in the live line's order. */
     readonly gaps: readonly string[]
-    readonly coverage?: string | undefined
+    /** Reported values carry Why?-only notes, so the partial line exists even without a missing field. */
+    readonly notes: boolean
+    /** Session-level coverage, omitted when a reported row already paints the same sentence. */
+    readonly coverage?: CoverageFootprint | undefined
     readonly compactChart?: { readonly series: boolean; readonly descendants: boolean; readonly partial: boolean }
     readonly fullChart?: { readonly series: boolean; readonly split: boolean; readonly partial: boolean }
   }
@@ -315,24 +350,29 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
       gaps: mergeGaps(contextGaps(trace.meters.context)).map(field => field.name),
     },
     spend: {
-      rows: reportedMetrics(trace).map(row => ({ label: metricLabel(row), window: accumulationParts(row.window), coverage: row.coverage === undefined ? undefined : coverageLabel(row.coverage), value: metricValue(row, row.value), tokens: row.tokens })),
+      rows: reportedMetrics(trace).map(row => ({ label: metricLabel(row), window: accumulationParts(row.window), coverage: row.coverage === undefined ? undefined : coverageFootprint(row.coverage), value: metricValue(row, row.value), tokens: row.tokens })),
       subagents: tracedSubagents(trace).map(child=>({label:child.label._tag==='Known'?child.label.value:child.sessionId,value:money.format(child.usd)})),
-      subagentWindow: tracedSessionsLine(trace),
+      subagentWindow: subagentsLine(trace),
       gaps: mergeGaps(spendGaps(trace)).map(field => field.name),
-      coverage: coverageLabel(trace.coverage),
+      notes: spendNotes(trace).length > 0,
+      coverage: repeatsTraceCoverage(trace) ? undefined : coverageFootprint(trace.coverage),
       compactChart: { series: (spendProjection?.lane.cumulativeValues.length ?? 0) > 0, descendants: (spendProjection?.descendantSpend.cumulativeValues.length ?? 0) > 0, partial: mainPartial || descendantPartial },
       fullChart: { series: (spendProjection?.lane.cumulativeValues.length ?? 0) > 0, split: hasReportedSplit(trace), partial: mainPartial },
     },
   }
 }
 
-/** Unpainted twin of DetailsNotReported, reserving the same line and the same unbreakable names. */
-const NotReportedPending = ({ group, summary, names }: { readonly group?: string; readonly summary?: string; readonly names: readonly string[] }): ReactNode => {
+/** Unpainted twin of DetailsNotReported, reserving the same line, the same unbreakable names and the same Why? row. */
+const NotReportedPending = ({ group, summary, area = 'Details', names, notes = false }: { readonly group?: string; readonly summary?: string; readonly area?: string; readonly names: readonly string[]; readonly notes?: boolean }): ReactNode => {
   const narrow = React.useContext(NarrowLayoutContext)
-  if (names.length === 0) return null
-  return <p {...stylex.props(styles.notReported)}><span {...stylex.props(styles.pendingText)}>{group !== undefined ? `${group} · not reported` : <>Not reported: {names.map((name, index) => <span key={name}>{index > 0 && ', '}<span {...stylex.props(styles.nowrap)}>{name}</span></span>)}</>}</span>
+  if (group !== undefined) return names.length === 0 ? null : <p {...stylex.props(styles.notReported)}><span {...stylex.props(styles.pendingText)}>{`${group} · not reported`}</span>
     {/* Phone whole groups reserve the live sentence and the collapsed Why? control. */}
-    {narrow && group !== undefined && summary !== undefined && <><span {...stylex.props(styles.pendingBlock)}><span {...stylex.props(styles.pendingText)}>{summary}</span></span><span {...stylex.props(styles.pendingWhy)} /></>}
+    {narrow && summary !== undefined && <><span {...stylex.props(styles.pendingBlock)}><span {...stylex.props(styles.pendingText)}>{summary}</span></span><DetailsWhyPending /></>}
+  </p>
+  if (names.length === 0 && !notes) return null
+  // Partial groups reserve one summary and one collapsed Why? row: 44px on phone, dense on desktop.
+  return <p {...stylex.props(styles.notReported)}><span {...stylex.props(styles.pendingBlock)}><span {...stylex.props(styles.pendingText)}>{names.length > 0 ? <>Not reported: {names.map((name, index) => <span key={name}>{index > 0 && ', '}<span {...stylex.props(styles.nowrap)}>{name}</span></span>)}</> : notReportedNotesSummary(area)}</span></span>
+    <DetailsWhyPending />
   </p>
 }
 
@@ -365,7 +405,7 @@ export const DetailsChartsPending = ({ context, spend, section, shape }: {
     {contextWhole ? <NotReportedPending group="Context" summary={contextSummary} names={contextNames} /> : <>
       <ContextMeterPending footprint={meter} />
       {panelFootprint !== undefined && <ContextPanelPending compact={context === 'C2'} footprint={panelFootprint} />}
-      <NotReportedPending names={contextNames} />
+      <NotReportedPending area="Context" names={contextNames} />
     </>}
   </div>
   const spendBody = <div aria-hidden="true" data-details-skeleton="spend" data-details-chart={spend} {...stylex.props(styles.body)}>
@@ -373,7 +413,7 @@ export const DetailsChartsPending = ({ context, spend, section, shape }: {
       <SpendMeterPending footprint={shape.spend} />
       {compactShown && <CompactSpendPending showTotals={false} {...(compact === undefined ? {} : {footprint:compact})}/>}
       {fullShown && <SpendPanelPending showTotals={false} {...(full === undefined ? {} : {footprint:full})}/>}
-      <NotReportedPending names={spendNames} />
+      <NotReportedPending area="Spend" names={spendNames} notes={shape.spend.notes} />
     </>}
   </div>
   if (section === 'context') return contextBody
@@ -385,12 +425,15 @@ const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0 },
   body: { display: 'flex', flexDirection: 'column', gap: space.md, minWidth: 0, color: text.fg, fontSize: type.metaSize, lineHeight: type.metaLeading },
   heading: { margin: 0, marginBottom: space.md, fontSize: type.metaSize, lineHeight: type.metaLeading, fontWeight: type.weightMedium, color: text.fg },
-  notReported: { margin: 0, color: text.fgMuted, fontSize: type.metaSize, lineHeight: type.metaLeading },
+  notReported: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', columnGap: space.xs, margin: 0, color: text.fgMuted, fontSize: type.metaSize, lineHeight: type.metaLeading },
   nowrap: { whiteSpace: 'nowrap' },
   // Narrow hosts: the estimate's explanation wraps onto its own row beneath the value.
   occupancyNarrow: { flexWrap: 'wrap' },
   estimateText: { color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading },
   scopeNote: { margin: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
+  // A coverage sentence on its own row; its Why? starts beneath it.
+  coverageLine: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', margin: 0, minWidth: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
+  coverageSummary: { flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
   coverageTrigger: { appearance:'none', borderWidth:0, padding:0, backgroundColor:surface.transparent, textAlign:'left', color:text.fgSoft, fontSize:type.denseSize, cursor:'help', outlineColor:accent.primary, outlineOffset:2 },
   coverageTooltip: { backgroundColor:surface.canvas, color:text.fg, borderWidth:1, borderStyle:'solid', borderColor:border.borderStrong, padding:space.md, fontSize:type.metaSize, maxWidth:280 },
   occupancy: { display: 'inline-flex', alignItems: 'baseline', gap: space.xs },
@@ -402,13 +445,12 @@ const styles = stylex.create({
   spendSnapshot: { display: 'flex', flexDirection: 'column', gap: space.xs, margin: 0, minWidth: 0 },
   spendRow: { display: 'grid', gridTemplateColumns: `var(--details-spend-columns, minmax(0, 1fr) minmax(${geometry.detailsValueMin}, max-content))`, alignItems: 'baseline', gap: space.md, fontVariantNumeric: 'tabular-nums' },
   label: { minWidth: 0, color: text.fgMuted, overflowWrap: 'normal' },
-  tokenWindow: { display: 'block', minWidth: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
+  // The period follows its label on the same line and wraps with it.
+  tokenWindow: { display: 'inline', minWidth: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
   // Reported window descriptions wrap between words at narrow widths without shortening scope or provenance; words never break.
   windowPart: { whiteSpace: 'normal', overflowWrap: 'normal' },
   pendingText: { color: surface.transparent, backgroundImage: `linear-gradient(${border.borderStrong}, ${border.borderStrong})`, backgroundSize: `100% ${space.md}`, backgroundPosition: 'center', backgroundRepeat: 'no-repeat', boxDecorationBreak: 'clone' },
-  pendingBlock: { display: 'block' },
-  // The phone Why? control's collapsed footprint: one 44px row.
-  pendingWhy: { display: 'block', height: geometry.touchTarget },
+  pendingBlock: { display: 'block', flexBasis: '100%', minWidth: 0 },
   amount: { margin: 0, textAlign: 'var(--details-value-align, right)', overflowWrap: 'normal' },
   tokens: { margin: 0, color: text.fgMuted, textAlign: 'var(--details-value-align, right)', overflowWrap: 'normal' },
 })

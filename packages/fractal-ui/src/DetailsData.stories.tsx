@@ -91,7 +91,7 @@ const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, n
   reportedLong, knownZero, unknownCount, boundedCount, observedEmpty: native,
   firstRead: native, firstReadDense: native, firstReadCompact: native, firstReadHideEmpty: native, firstReadShowEmpty: native, settledUnavailable: native, knownEmpty: native, timing: native,
 } as const
-/** Observed st resources reported as an explicit empty list, independent of the traced breakdown. */
+/** Observed resources reported as an explicit empty list, independent of the subagent breakdown. */
 const sectionsForScenario = (scenario: string, sections: readonly DetailsSection[]): readonly DetailsSection[] =>
   ['knownZero', 'unknownCount', 'observedEmpty'].includes(scenario)
     ? sections.map(section => section.title === 'Subagents' ? { ...section, items: { _tag: 'Known' as const, value: [] } } : section)
@@ -182,14 +182,14 @@ function assertPartial(root: HTMLElement, expected: string) {
   requireContract(labels.length > 0 && labels.every(label => label === expected), 'Coverage rounding or attribution copy differs')
   requireContract(!Array.from(spend(root).querySelectorAll('dt')).some(item => /^Total/.test(item.textContent ?? '')), 'Partial attribution was labelled a complete total')
 }
-function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens · observed agent sessions') {
+function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens · all agent sessions') {
   const section = spend(root)
   const tokenRow = section.querySelector('[data-details-token-label]')?.closest('div')
   requireContract(tokenRow?.querySelector('[data-details-token-label]')?.textContent === tokenLabel, 'Token scope inherited monetary scope')
-  requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-not-reported="fields"] button[data-details-not-reported-field="token window"]'), 'Token accumulation window was fabricated')
+  requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-not-reported="fields"] [data-details-not-reported-field="token window"]'), 'Token accumulation window was fabricated')
   // Reported metrics paint; the missing descendant amount and token window share one summary, never per-field dashes.
   requireContract(section.querySelectorAll('[data-details-not-reported]').length===1&&section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject')==='subagent spend, token window'&&!section.querySelector('[data-details-metric="subagent-usd"],[data-details-missing-value]')&&!/—|Window|Attribution/.test(paintedText(section)), 'Partial spend group repeats per-field missing values')
-  const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · self'))?.closest('div')
+  const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · '))?.closest('div')
   const monetaryText = monetaryRow?.textContent
   requireContract(typeof monetaryText === 'string', 'Monetary accumulation window inherited token window')
   requireContract(monetaryText?.includes('UTC') && !monetaryText.includes('all time'), 'Monetary accumulation window inherited token window')
@@ -244,11 +244,11 @@ function scenarioPane(canvas: HTMLElement, name: keyof typeof scenarios): HTMLEl
 
 /** Coverage copy rounds down, never claims 100% and keeps a legal 0%; each case falsifies its nearest wrong copy. */
 const coverageCases = [
-  { scenario: 'partial', expected: 'Partial · 62% matched', wrong: ['Complete'] },
-  { scenario: 'boundary', expected: 'Partial · 99% matched', wrong: ['Partial · 100% matched'] },
-  { scenario: 'boundary995', expected: 'Partial · 99% matched', wrong: ['Complete', 'Partial · 100% matched'] },
-  { scenario: 'zeroCoverage', expected: 'Partial · 0% matched', wrong: ['Partial · 1% matched'] },
-  { scenario: 'fullPartial', expected: 'Partial · 99% matched', wrong: ['Partial · 100% matched'] },
+  { scenario: 'partial', expected: '62% of spend matched to this agent', wrong: ['Complete'] },
+  { scenario: 'boundary', expected: '99% of spend matched to this agent', wrong: ['100% of spend matched to this agent'] },
+  { scenario: 'boundary995', expected: '99% of spend matched to this agent', wrong: ['Complete', '100% of spend matched to this agent'] },
+  { scenario: 'zeroCoverage', expected: '0% of spend matched to this agent', wrong: ['1% of spend matched to this agent'] },
+  { scenario: 'fullPartial', expected: '99% of spend matched to this agent', wrong: ['100% of spend matched to this agent'] },
 ] as const
 async function checkCoverage(canvasElement: HTMLElement) {
   for (const { scenario, expected, wrong } of coverageCases) {
@@ -256,7 +256,7 @@ async function checkCoverage(canvasElement: HTMLElement) {
     assertPartial(root, expected)
     for (const value of wrong) await rejectsControl('Coverage rounding or attribution copy differs', () => assertPartial(falsifyText(root, '[data-details-coverage]', value), expected))
   }
-  requireContract(scenarioPane(canvasElement, 'partial').textContent?.includes('Showing 1 of 4 traced sessions'), 'Retained descendants masqueraded as the full list')
+  requireContract(scenarioPane(canvasElement, 'partial').textContent?.includes('Showing 1 of 4 subagents'), 'Retained descendants masqueraded as the full list')
 }
 async function checkNotCovered(canvasElement: HTMLElement) {
   const root = scenarioPane(canvasElement, 'notCovered')
@@ -273,7 +273,7 @@ async function checkNotCovered(canvasElement: HTMLElement) {
 }
 function assertDescendantListWindow(root:HTMLElement) {
  const label=root.querySelector('[data-details-subagent-window]')?.textContent
- requireContract(label==='Traced sessions · reported window · 7d','Descendant list inherited the native session window')
+ requireContract(label==='Subagents · last 7 days','Descendant list inherited the native session window')
  const spendLabel=root.querySelector('[data-details-subagent-spend-window]')?.textContent
  requireContract(spendLabel===label,'Descendant spend breakdown lost its list window')
  requireContract(root.querySelector('[data-details-metric="main-usd"]')?.textContent?.includes('UTC'),'Native session lost its independent exact window')
@@ -289,7 +289,7 @@ async function checkDescendantListWindow(canvasElement: HTMLElement) {
 async function checkIndependentMetricScopes(canvasElement: HTMLElement) {
     const root = scenarioPane(canvasElement, 'independent')
     assertIndependent(root)
-    await rejectsControl('Token scope inherited monetary scope', () => assertIndependent(falsifyText(root,'[data-details-token-label]','Cumulative tokens · this agent')))
+    await rejectsControl('Token scope inherited monetary scope', () => assertIndependent(falsifyText(root,'[data-details-token-label]','Cumulative tokens')))
     const monetaryWindow=spend(root).querySelector('[data-details-metric="total-usd"] [data-details-metric-period]')?.textContent
     requireContract(monetaryWindow,'Missing monetary-window negative control target')
     for(const inventedWindow of ['all time',monetaryWindow]) {
@@ -307,10 +307,10 @@ function assertNativeWindow(root:HTMLElement) {
  const section=spend(root)
  const mainText=section.querySelector('[data-details-metric="main-usd"]')?.textContent
  requireContract(typeof mainText === 'string', 'Native monetary metadata inherited inclusive metadata')
- requireContract(mainText?.includes('Main session · self')&&!mainText.includes('reported window')&&mainText.includes('UTC')&&!mainText.includes('Partial'), 'Native monetary metadata inherited inclusive metadata')
+ requireContract(mainText?.startsWith('Main session · ')&&!/\bself\b|last 7 days/.test(mainText)&&mainText.includes('UTC')&&!mainText.includes('Partial'), 'Native monetary metadata inherited inclusive metadata')
  const totalText=section.querySelector('[data-details-metric="total-usd"]')?.textContent
  requireContract(typeof totalText === 'string', 'Producer window fabricated exact boundaries')
- requireContract(totalText?.includes('reported window · 7d')&&!totalText.includes('UTC'), 'Producer window fabricated exact boundaries')
+ requireContract(totalText?.includes('last 7 days')&&!totalText.includes('UTC'), 'Producer window fabricated exact boundaries')
  requireContract(mainText.includes('$12.34')&&totalText.includes('$100.00'), 'Independent monetary amounts were derived from one another')
 }
 async function checkNativeWindows(canvasElement: HTMLElement) {
@@ -333,9 +333,9 @@ function assertSession(root:HTMLElement) {
  const total=section.querySelector('[data-details-metric="total-usd"]')
  const main=section.querySelector('[data-details-metric="main-usd"]')
  const descendants=section.querySelector('[data-details-metric="subagent-usd"]')
- requireContract(total?.textContent?.includes('Total · including subagents')&&total.querySelector('dd')?.textContent==='$15.55', 'Inclusive monetary total lost its scope')
+ requireContract(total?.querySelector('dt')?.textContent?.startsWith('Total incl. subagents')&&total.querySelector('dd')?.textContent==='$15.55', 'Inclusive monetary total lost its scope')
  requireContract(main?.textContent?.includes('Main session')&&main.querySelector('dd')?.textContent==='$12.34'&&descendants?.textContent?.includes('Subagents')&&descendants.querySelector('dd')?.textContent==='$3.21', 'Session and descendants were conflated')
- requireContract(section.querySelector('[data-details-token-label]')?.textContent === 'Cumulative tokens · this agent', 'Self tokens inherited inclusive monetary scope')
+ requireContract(section.querySelector('[data-details-token-label]')?.textContent === 'Cumulative tokens', 'Self tokens inherited inclusive monetary scope')
 }
 function assertPartialFacts(root:HTMLElement) {
  const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('subagent-session'))
@@ -345,7 +345,7 @@ function assertPartialFacts(root:HTMLElement) {
  requireContract(facts&&facts.checkVisibility({opacityProperty:true,visibilityProperty:true})&&facts.getBoundingClientRect().height>0&&card.querySelector('[data-details-resource-row]')?.getAttribute('aria-describedby')===facts.id, 'Reported descendant facts are hidden behind hover')
  const text=facts.textContent??''
  requireContract(!text.includes('Invalid Date')&&!text.includes('NaN')&&!text.includes('First observed')&&!text.includes('Parent ·')&&text.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
- requireContract(root.textContent?.includes('Showing 1 of 4 traced sessions'), 'Missing descendant facts changed the reported descendant count')
+ requireContract(root.textContent?.includes('Showing 1 of 4 subagents'), 'Missing descendant facts changed the reported descendant count')
  requireContract(!card.textContent?.includes('gpt-5.4'), 'Unavailable model was fabricated')
  requireContract(card.querySelector('[data-details-resource-title]')?.textContent === 'role unreported · subagent-session', 'Missing descendant role was rendered as a bare identity')
 }
@@ -411,13 +411,14 @@ function assertAllStates(root:HTMLElement) {
  for(const name of names)requireContract(root.querySelectorAll(`section[aria-label="${name}"] [data-testid="details-pane"]`).length===1, 'AllStates omitted a named scenario')
  mounted.forEach(element=>requireContract(!/\bUnknown\b/.test(element.textContent??''), 'Literal Unknown escaped the fact boundary'))
  const period = root.querySelector<HTMLElement>('section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]')
- requireContract(period?.textContent === 'reported window · last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
+ requireContract(period?.textContent === 'last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
+ // A complete list needs no count: the known zero lives in the heading badge, beside the list's own window line.
  const knownZeroSection = root.querySelector<HTMLElement>('section[aria-label="knownZero"] section[aria-label="knownZero Subagents"]')
- requireContract(knownZeroSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 0 of 0 traced sessions', 'Known zero traced sessions disappeared under E3')
+ requireContract(knownZeroSection?.querySelector('[data-details-subagent-window]')&&!knownZeroSection.querySelector('[data-details-subagent-count]'), 'Known zero subagents disappeared under E3')
  requireContract(knownZeroSection?.querySelector('button[aria-expanded]')?.textContent === 'Subagents0', 'Known zero is absent from the Subagents heading')
  for (const name of ['knownZero', 'unknownCount', 'observedEmpty']) {
   const observed = root.querySelector(`section[aria-label="${name}"] [data-details-observed-subagent-count]`)
-  requireContract(observed?.textContent === 'Observed st resources · 0', 'Known empty st resources became unreported')
+  requireContract(observed?.textContent === 'No resources for this session.', 'Known empty resources became unreported')
  }
  for (const name of ['unknownCount', 'observedEmpty']) {
   const section = root.querySelector(`section[aria-label="${name}"] section[aria-label="${name} Subagents"]`)
@@ -429,7 +430,7 @@ function assertAllStates(root:HTMLElement) {
  requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
  const boundedSection = root.querySelector('section[aria-label="boundedCount"] section[aria-label="boundedCount Subagents"]')
  requireContract(boundedSection?.querySelector('button[aria-expanded]')?.textContent === 'Subagents309', 'Reported traced total disappeared from the Subagents heading')
- requireContract(boundedSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 1 of 309 traced sessions', 'Traced heading total became the retained list size')
+ requireContract(boundedSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 1 of 309 subagents', 'Traced heading total became the retained list size')
  for (const name of Object.keys(resourceScenarios)) {
   const resourceRoot = root.querySelector<HTMLElement>(`section[aria-label="${name}"] [data-testid="details-pane"]`)
   requireContract(resourceRoot, 'AllStates omitted a resource-read control')
@@ -506,7 +507,7 @@ export const ContextSamplesPercentOnly: Story = {
 function assertInvalidCoverageSurvives(canvas:HTMLElement,prefix:string) {
  const root=canvas.querySelector<HTMLElement>('[data-testid="details-pane"]')
  requireContract(root,'Invalid row blanked the Details pane')
- requireContract(root.querySelector('[data-details-metric="total-usd"] [data-details-coverage]')?.textContent==='Partial','Invalid fraction fabricated an attribution percentage')
+ requireContract(root.querySelector('[data-details-metric="total-usd"] [data-details-coverage]')?.textContent==='Part of spend linked to this agent','Invalid fraction fabricated an attribution percentage')
  requireContract(root.querySelector('[data-details-metric="main-usd"]')?.textContent?.includes('$12.34')&&root.querySelector('[data-details-metric="subagent-usd"]')?.textContent?.includes('$3.21'),'Invalid coverage erased valid monetary rows')
  requireContract(root.querySelector(`section[aria-label="${prefix}Overview"]`)&&root.querySelector('[data-details-chart^="C"]')&&root.querySelector(`section[aria-label="${prefix}Workspace"]`),'Invalid coverage erased sibling sections')
 }
@@ -518,7 +519,7 @@ async function checkInvalidCoverage(canvasElement: HTMLElement) {
   const blank=section.cloneNode(true) as HTMLElement
   blank.querySelector('[data-testid="details-pane"]')?.remove()
   await rejectsControl('Invalid row blanked the Details pane',()=>assertInvalidCoverageSurvives(blank,`${name} `))
-  const percentage=falsifyText(section,'[data-details-metric="total-usd"] [data-details-coverage]','Partial · NaN% matched')
+  const percentage=falsifyText(section,'[data-details-metric="total-usd"] [data-details-coverage]','NaN% of spend matched to this agent')
   await rejectsControl('Invalid fraction fabricated an attribution percentage',()=>assertInvalidCoverageSurvives(percentage,`${name} `))
  }
 }
@@ -534,10 +535,10 @@ export const AllStates: Story = {
     requireContract(missing,'Missing AllStates negative control target')
     missing.remove()
     await rejectsControl('AllStates omitted a production pane',()=>assertAllStates(wrong))
-    await rejectsControl('Reported accumulation description was shortened',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]','reported window · last 7 days')))
+    await rejectsControl('Reported accumulation description was shortened',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]','last 7 days')))
     await rejectsControl('Known zero is absent from the Subagents heading',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownZero Subagents"] button[aria-expanded]','Subagents')))
     await rejectsControl('Unknown traced count became zero',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="unknownCount Subagents"] button[aria-expanded]','Subagents0')))
-    await rejectsControl('Traced heading total became the retained list size',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 traced sessions')))
+    await rejectsControl('Traced heading total became the retained list size',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 subagents')))
     await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · subagent-session')))
     await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertAllStates(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
     await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.remove())))
@@ -563,7 +564,7 @@ function unclipped(element: Element | null): boolean {
 function assertReportedNarrow(root: HTMLElement) {
   const row = root.querySelector<HTMLElement>('[data-details-metric="total-usd"]')
   const period = row?.querySelector<HTMLElement>('[data-details-metric-period]')
-  requireContract(row && period?.textContent === 'reported window · last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
+  requireContract(row && period?.textContent === 'last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
   requireContract(unclipped(period) && unclipped(row.querySelector('dt')) && unclipped(row), 'Reported accumulation description clips instead of wrapping')
   const amount = row.querySelector('dd')
   requireContract(amount?.textContent === '$100.00' && unclipped(amount) && amount.getBoundingClientRect().right <= row.getBoundingClientRect().right + 1, 'Reported spend amount is clipped beside its description')

@@ -13,7 +13,7 @@ import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from
 import type { TraceSeries, TraceSubagent } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
-import { DetailsAvailabilityState, DetailsUnavailable, DetailsUnreportedSections, MissingDetailsValue } from './DetailsUnavailable'
+import { DetailsAvailabilityState, DetailsUnavailable, DetailsUnreportedSections, DetailsWhy, MissingDetailsValue } from './DetailsUnavailable'
 import { detailsReasonText, traceFactReason, traceReasonText } from './trace-reasons'
 import { traceCoverageState } from './trace-series'
 
@@ -131,7 +131,7 @@ function missingLineCountsNote(section: DetailsSection): string | undefined {
   return `${added && removed ? 'Added- and removed-line' : added ? 'Added-line' : 'Removed-line'} counts aren't reported for some files.`
 }
 
-/** No native-session-to-st-agent identity is supplied; traced sessions stay neutral. */
+/** No session-to-agent identity is supplied; subagent sessions stay neutral. */
 export function traceSubagentSection(trace: TraceSeries): DetailsSection {
   if (trace.subagents._tag !== 'Known') return { title: 'Subagents', items: { _tag: 'Unknown' } }
   return {
@@ -143,7 +143,7 @@ export function traceSubagentSection(trace: TraceSeries): DetailsSection {
       return {
         uri: `session:${subagent.sessionId}`,
         glyph: '◇',
-        card: { kind: 'file', label, detail: `Traced session · ${detail}`, fileCount: { _tag: 'Unknown' }, files: [] },
+        card: { kind: 'file', label, detail: `Subagent session · ${detail}`, fileCount: { _tag: 'Unknown' }, files: [] },
       }
     }) },
   }
@@ -185,38 +185,36 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
   const subagentWindow=section.title==='Subagents'?accumulationParts(trace.subagentsWindow):undefined
   const collectionReason = showBreakdown && section.items._tag === 'Unknown' ? unavailableReason(section, trace, empty) : undefined
   const observedReason = section.title === 'Subagents' && observedSubagents?.items._tag === 'Unknown'
-    ? observedSubagents.unavailableReason ?? 'This session doesn’t report st subagent resources.' : undefined
+    ? observedSubagents.unavailableReason ?? 'This session doesn’t report its resources.' : undefined
   const missingStatus = section.title === 'Subagents' && observedSubagents?.items._tag === 'Known'
     && observedSubagents.items.value.some(resource => resource.agent?.status === 'unobserved')
-  const partialNote = missingStatus ? "Status isn't reported for st resources." : missingLineCountsNote(section)
+  const partialNote = missingStatus ? "Status isn't reported for some resources." : missingLineCountsNote(section)
   const windowReason = section.title === 'Subagents' && showBreakdown && subagentWindow === undefined
-    ? trace.subagentsWindow._tag === 'Unknown' ? traceFactReason(trace.subagentsWindow) : 'Traced-session accumulation window is unreported.'
+    ? trace.subagentsWindow._tag === 'Unknown' ? traceFactReason(trace.subagentsWindow) : 'The period for this subagent list isn’t reported.'
     : undefined
   const countReason = section.title === 'Subagents' && showBreakdown && trace.subagents._tag === 'Known' && trace.subagentCount._tag === 'Unknown'
     ? traceFactReason(trace.subagentCount) : undefined
   const coverage = traceCoverageState(trace.coverage)
-  const coverageReason = section.title === 'Subagents'
-    ? coverage._tag === 'Unavailable' ? traceReasonText(coverage.reason)
-      : coverage._tag === 'PartialUnreported' ? 'The percentage matched to sessions is unreported.' : undefined
-    : undefined
+  // Which session spend belongs to is explained behind the Spend group's Why?, never as a missing field here.
   const gaps = [
-    { subject: 'Traced sessions', reason: collectionReason, partial: false },
-    { subject: 'Observed st resources', reason: observedReason, partial: false },
+    { subject: 'Subagent list', reason: collectionReason, partial: false },
+    { subject: 'Resources', reason: observedReason, partial: false },
     { subject: missingStatus ? 'Status' : 'Line counts', reason: partialNote, partial: missingStatus
       ? observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.some(resource => resource.agent !== undefined && resource.agent.status !== 'unobserved')
       : section.items._tag === 'Known' && section.items.value.some(resource => resource.file?.added._tag === 'Known' || resource.file?.removed._tag === 'Known') },
-    { subject: 'Traced-session window', reason: windowReason, partial: false },
-    { subject: 'Traced-session total', reason: countReason, partial: false },
-    { subject: 'Session matching', reason: coverageReason, partial: coverage._tag === 'PartialUnreported' },
+    { subject: 'Subagent list window', reason: windowReason, partial: false },
+    { subject: 'Subagent total', reason: countReason, partial: false },
   ].filter((gap): gap is { subject: string; reason: string; partial: boolean } => gap.reason !== undefined)
+  const allShown = trace.subagents._tag === 'Known' && trace.subagentCount._tag === 'Known' && trace.subagentCount.value === trace.subagents.value.length
   return <div aria-hidden={pending || undefined} inert={pending} data-details-skeleton={pending ? section.title : undefined} {...stylex.props(styles.contentShell)}>
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>
       {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && observedSubagents.items._tag === 'Known' && (observedSubagents.items.value.length === 0
-        ? <SkeletonLine pending={pending}><p data-details-observed-subagent-count {...stylex.props(styles.metaLine)}>Observed st resources · 0</p></SkeletonLine>
+        ? <SkeletonLine pending={pending}><p data-details-observed-subagent-count {...stylex.props(styles.metaLine)}>No resources for this session.</p></SkeletonLine>
         : <SectionItems section={observedSubagents} now={now} form={form} open={open} pending={pending} />)}
       {showBreakdown && <>
-        {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>Traced sessions · {subagentWindow === undefined ? <MissingDetailsValue label="Traced-session accumulation window" reason={windowReason ?? 'Traced-session accumulation window is unreported.'} /> : subagentWindow.join('')}</p></SkeletonLine>}
-        {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>Showing {trace.subagents.value.length} of {trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : <MissingDetailsValue label="Total traced-session count" reason={countReason ?? 'Traced-session total count is unreported.'} />} traced sessions</p></SkeletonLine>}
+        {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>Subagents · {subagentWindow === undefined ? <MissingDetailsValue label="Subagent list window" reason={windowReason ?? 'The period for this subagent list isn’t reported.'} /> : subagentWindow.join('')}</p></SkeletonLine>}
+        {/* A complete list needs no count; a bounded or unknown total says how many are shown. */}
+        {section.title === 'Subagents' && trace.subagents._tag === 'Known' && !allShown && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>Showing {trace.subagents.value.length} of {trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : <MissingDetailsValue label="Total subagent count" reason={countReason ?? 'The total number of subagents isn’t reported.'} />} subagents</p></SkeletonLine>}
         {section.title === 'Subagents' && (coverage._tag === 'Partial' || coverage._tag === 'NotCovered' || coverage._tag === 'PartialUnreported') && <SkeletonLine pending={pending}><TraceCoverageNote trace={trace} /></SkeletonLine>}
         {section.items._tag === 'Unknown'
           ? null
@@ -224,7 +222,9 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
             ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>None</p></SkeletonLine>
             : <SectionItems section={section} now={now} form={form} open={open} pending={pending} />}
       </>}
-      {gaps.length > 0 && <SkeletonLine pending={pending}><DetailsUnavailable subjects={gaps.map(gap => gap.subject)} state={gaps.every(gap => gap.partial) ? 'Partial' : 'Unavailable'} reason={gaps.map(gap => gap.reason).join(' ')} /></SkeletonLine>}
+      {gaps.length > 0 && <SkeletonLine pending={pending}>{gaps.length === 1 && gaps[0]!.subject === 'Resources'
+        ? <p data-details-unavailable data-details-unavailable-subject="Resources" {...stylex.props(styles.whyLine)}><span data-details-resources-unavailable {...stylex.props(styles.whySummary)}>Resources aren’t available for this session.</span><DetailsWhy explains="Resources" reasons={[detailsReasonText(gaps[0]!.reason)]} /></p>
+        : <DetailsUnavailable subjects={gaps.map(gap => gap.subject)} state={gaps.every(gap => gap.partial) ? 'Partial' : 'Unavailable'} reason={gaps.map(gap => gap.reason).join(' ')} />}</SkeletonLine>}
     </div>
   </div>
 }
@@ -367,6 +367,9 @@ const styles = stylex.create({
   count: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, flexShrink: 0 },
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInlineStart: s.xxl, paddingInlineEnd: s.md, paddingBottom: s.md, minWidth: 0 },
   metaLine: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
+  // One plain sentence on its own row; its Why? starts beneath it.
+  whyLine: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
+  whySummary: { flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
   allHidden: { padding: s.md },
   chevronSpace: { width: g.icon, flexShrink: 0 },
   entry: { display: 'flex', flexDirection: 'column', minWidth: 0 },

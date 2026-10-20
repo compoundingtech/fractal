@@ -10,7 +10,7 @@ import { DetailsPane, type DetailsVariants, type DetailsLayoutIntent } from './a
 import { DetailsLabelContext, traceHistorySection } from './assistant-ui/details/DetailsResources'
 import { ResourceCardV1, ResourceChipV1 } from './assistant-ui/resources/ResourceCardV1'
 import { resources as sharedResources } from './assistant-ui/details/resource-fixtures'
-import { hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
+import { accumulationParts, hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
 import { detailsStoryInputs, paintedText } from './assistant-ui/details/story-fixtures'
@@ -125,7 +125,7 @@ function assertHuman(pane: HTMLElement) {
   }
   assertMetricGroups(pane)
 }
-/** Context and Spend name every missing field once: one `Spend · not reported` line, or reported fields plus one `Not reported:` summary; never per-field dashes. */
+/** Context and Spend name every missing field once: one `Spend · not reported` line, or reported fields plus one `Not reported:` summary whose reasons wait behind one Why?; never per-field dashes or triggers. */
 function assertMetricGroups(pane: HTMLElement) {
   for (const name of ['Context', 'Spend']) {
     const section = pane.querySelector<HTMLElement>(`section[aria-label$="${name}"]`)
@@ -134,7 +134,10 @@ function assertMetricGroups(pane: HTMLElement) {
     requireContract(lines.length <= 1 && !section.querySelector('[data-details-missing-value]') && !paintedText(section).includes('—'), 'Metric group paints per-field missing values')
     const line = lines[0]
     if (line?.dataset.detailsNotReported === 'group') requireContract(line.parentElement?.childElementCount === 1 && paintedText(line) === `${name}·not reported` && line.querySelector(`button[aria-label="${name}: not reported"]`), 'Unreported metric group paints more than its one line')
-    if (line?.dataset.detailsNotReported === 'fields') requireContract(line.textContent?.startsWith('Not reported:') && line.querySelectorAll('button[data-details-not-reported-field]').length === line.getAttribute('data-details-unavailable-subject')?.split(', ').length, 'Partial metric group lacks one keyboard-reachable Not reported summary')
+    if (line?.dataset.detailsNotReported === 'fields') {
+      const names = (line.dataset.detailsNotReportedNames ?? '').split(', ').filter(Boolean), summary = line.querySelector('[data-details-not-reported-summary]')?.textContent ?? ''
+      requireContract((names.length > 0 ? summary.startsWith('Not reported: ') : summary === `Some ${name.toLowerCase()} details aren’t reported.`) && line.querySelectorAll('[data-details-not-reported-field]').length === names.length && line.querySelectorAll('button[data-details-why]').length === 1 && !line.querySelector('button:not([data-details-why])'), 'Partial metric group lacks one Not reported summary behind Why?')
+    }
   }
 }
 function rgb(value: string): number[] | undefined {
@@ -315,17 +318,17 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
   const scopeNote = spend.querySelector<HTMLElement>('[data-details-scope-note]')
   if (scopeNote) requireContract(scopeNote.getBoundingClientRect().height <= parseFloat(getComputedStyle(scopeNote).lineHeight) + 0.5, 'Unreported scope note is not one quiet line')
   if (meter.tokensScope._tag === 'Unknown') {
-    requireContract(!/including subagents|excludes subagents|this agent|observed agent sessions/i.test(label), 'Unreported total makes an unproven scope claim')
+    requireContract(!/incl\. subagents|all agent sessions|including subagents|excludes subagents|this agent|observed agent sessions/i.test(label), 'Unreported total makes an unproven scope claim')
     if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and subagent spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
-    requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token scope"]'), 'Unreported token total lacks its exact scope explanation')
+    requireContract([...spend.querySelectorAll('[data-details-not-reported] [data-details-reason-note] [data-details-reason-text]')].some(note => note.textContent === 'Cumulative tokens: which sessions are included isn’t reported.'), 'Unreported token total lacks its exact scope explanation')
   } else {
-    requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent sessions' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
+    requireContract(label === `Cumulative tokens${meter.tokensScope._tag === 'Self' ? '' : meter.tokensScope._tag === 'AgentIncarnations' ? ' · all agent sessions' : ' incl. subagents'}`, 'Reported token scope is absent from its inline label')
     if (meter.tokensWindow._tag === 'Known') {
       const window = meter.tokensWindow.value
       if (window._tag === 'AllTime') requireContract(period === 'all time', 'Reported all-time window is absent')
       else if (window._tag === 'Interval') { const from = new Date(window.fromMs).toISOString(), to = new Date(window.toMs).toISOString(); requireContract(period.includes(from.slice(0, 10)) && period.includes(from.slice(11, 16)) && period.includes(to.slice(11, 16)) && period.includes('UTC'), 'Reported accumulation interval is absent from its separate date line') }
-      else requireContract(period.includes(window.label), 'Reported accumulation window label is absent')
-    } else requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token window"]')&&!paintedText(spend).includes('all time'), 'Unreported accumulation window claims all-time scope')
+      else requireContract(period === accumulationParts(meter.tokensWindow)?.join(''), 'Reported accumulation window label is absent')
+    } else requireContract(spend.querySelector('[data-details-not-reported] [data-details-not-reported-field="token window"]')&&!paintedText(spend).includes('all time'), 'Unreported accumulation window claims all-time scope')
   }
 }
 function assertContext(pane: HTMLElement, trace: TraceSeries) {
@@ -454,7 +457,7 @@ export const SpendScope: Story = { args: { cases: [...scopeCases, ...unreportedS
   assertCraft(pane, item); assertScope(pane, trace)
   if (!scopeControlCases.includes(item.name)) return
   const label = pane.querySelector<HTMLElement>('[data-details-token-label]')!, text = label.textContent
-  try { label.textContent = 'Cumulative tokens · invented session scope'; const reason = trace.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, trace)) } finally { label.textContent = text }
+  try { label.textContent = 'Cumulative tokens · invented session scope'; const reason = trace.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens incl. subagents'; await rejectsControl(reason, () => assertScope(pane, trace)) } finally { label.textContent = text }
   assertScope(pane, trace)
 }) }
 /**

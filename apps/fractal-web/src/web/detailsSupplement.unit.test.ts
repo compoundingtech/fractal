@@ -88,7 +88,7 @@ describe('independent Details metric composition', () => {
     expect(accountingNoteSummary).toBe('Agent spend and total spend come from separate reports and may not add up.')
     expect(join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: known(6.19) } } }, supplement()).accountingNote?.reasons).toEqual([spendWindowReason])
     for (const copy of [result.accountingNote!.summary, ...result.accountingNote!.reasons])
-      expect(copy).not.toMatch(/\b(native\w*|descendants?|incarnations?|provenance|series|ledger|attribution|window-global)\b|root completeness|this source/i)
+      expect(copy.replace(/\b\d+(?:\.\d+)?% of spend matched to this agent\b/g, '')).not.toMatch(/\b(native\w*|descendants?|incarnations?|provenance|series|ledger|attribution|window-global|matched|traced|self)\b|root completeness|this source|st resources|reported window/i)
     expect(result.trace.meters.spend.subagentUsd._tag).toBe('Unknown')
     expect(join(native, { ...supplement(), nativeSessionId: 'unrelated-root' }).accountingNote).toBeUndefined()
     expect(join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: missing } } }, supplement()).accountingNote).toBeUndefined()

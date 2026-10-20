@@ -142,7 +142,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   // Missing facts render nothing: the grid, identity and meta lines carry only reported values, never a dangling separator.
   const fields=([['Status',overview.status],['Machine',overview.machine],['Harness',overview.harness],['Model',overview.model],['Status since',overview.since],['Age',overview.age]] as const).flatMap(([name,value])=>reported(value)?[[name,value] as const]:[])
   const identityFacts=[overview.machine,overview.model,overview.since].filter(reported).map((value,index)=><OverviewValue key={`identity-${index}`} value={value}/>)
-  const metaFacts=[...[overview.harness,overview.age].filter(reported).map((value,index)=><OverviewValue key={`meta-${index}`} value={value}/>),...(spend.totalUsd._tag==='Known'?[<span key="spend">{spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</span>]:[])]
+  const metaFacts=[...[overview.harness,overview.age].filter(reported).map((value,index)=><OverviewValue key={`meta-${index}`} value={value}/>),...(spend.totalUsd._tag==='Known'?[<span key="spend">{spend.totalUsdCoverage._tag==='Partial'?'Spend ':''}${spend.totalUsd.value.toFixed(2)}</span>]:[])]
   const durations=overview.durations??[]
   const shownDurations=durations.filter(duration=>duration.pending===true||reported(duration.value))
   // Every timing fact missing collapses to one source-level line instead of a row per absent value.
@@ -155,7 +155,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const pendingFields=([['Status',pendingOverview.status],['Machine',pendingOverview.machine],['Harness',pendingOverview.harness],['Model',pendingOverview.model],['Status since',pendingOverview.since],['Age',pendingOverview.age]] as const).flatMap(([name,value])=>reported(value)?[[name,value] as const]:[])
   const pendingSpend=pendingTrace.meters.spend.totalUsd
   const pendingContext=pendingTrace.meters.context
-  const pendingOverviewLine=[...[pendingOverview.harness,pendingOverview.age].filter(reported),...(pendingSpend._tag==='Known'?[`${pendingTrace.meters.spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}$${pendingSpend.value.toFixed(2)}`]:[])].join(' · ')
+  const pendingOverviewLine=[...[pendingOverview.harness,pendingOverview.age].filter(reported),...(pendingSpend._tag==='Known'?[`${pendingTrace.meters.spend.totalUsdCoverage._tag==='Partial'?'Spend ':''}$${pendingSpend.value.toFixed(2)}`]:[])].join(' · ')
   const pendingMission=reported(pendingOverview.mission)&&pendingOverview.mission.trim().toLowerCase()!=='none'?pendingOverview.mission:undefined
   const pendingDurations=(pendingOverview.durations??[]).filter(duration=>duration.pending===true||reported(duration.value))
   const pendingTimingMissing=(pendingOverview.durations?.length??0)>0&&pendingDurations.length===0&&!reported(pendingOverview.since)&&!reported(pendingOverview.age)

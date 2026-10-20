@@ -45,6 +45,34 @@ describe('fixture-free native Details projection', () => {
     expect(result.trace.meters.spend.mainUsdCoverage).toEqual({ _tag: 'Unavailable', reason: 'not-attributed' })
     expect(result.syncStatus).toBeUndefined()
   })
+  it.each(['since_ms', 'until_ms'] as const)('keeps attributed spend but does not invent a window for zero or missing %s', bound => {
+    for (const missingBound of [false, true]) {
+      const selectedPeriod = { ...period, [bound]: 0 }
+      // Exercise malformed host DTOs without giving a missing endpoint an arbitrary fallback.
+      if (missingBound) Reflect.deleteProperty(selectedPeriod, bound)
+      const result = project({ selectedPeriod: observed({ value: selectedPeriod }) })
+      expect(result.trace.meters.spend.mainUsdWindow).toEqual({ _tag: 'Unknown', reason: 'not-covered', detail: 'The reporting period for this session’s spend is not reported.' })
+      expect(result.trace.meters.spend.mainUsd).toEqual({
+        _tag: 'Known', value: 3.5, source: 'st', ...(bound === 'until_ms' ? {} : { asOfMs: 5000 }),
+      })
+      expect(result.trace.meters.spend.mainUsdCoverage).toEqual({ _tag: 'Unavailable', reason: 'not-attributed' })
+      expect(result.nativeSessionId).toBe('native/root')
+      expect(result.state).toBe('partial')
+      const unbound = project({ selected: { ...row, todo: Option.none() }, selectedPeriod: observed({ value: selectedPeriod }) })
+      expect(unbound.trace.meters.spend.mainUsd._tag).toBe('Unknown')
+      expect(unbound.nativeSessionId).toBeUndefined()
+    }
+  })
+  it.each([
+    { since_ms: 5000, until_ms: 1000 },
+    { since_ms: 5000, until_ms: 5000 },
+    { since_ms: Number.NaN, until_ms: 5000 },
+    { since_ms: 1000, until_ms: Number.POSITIVE_INFINITY },
+  ])('does not report an invalid spend interval for $since_ms to $until_ms', bounds => {
+    const result = project({ selectedPeriod: observed({ value: { ...period, ...bounds } }) })
+    expect(result.trace.meters.spend.mainUsdWindow._tag).toBe('Unknown')
+    expect(result.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
+  })
   it('keeps observed agent cumulative tokens when no current native root is proven, without inventing a window', () => {
     const result = project({ selected: { ...row, todo: Option.none() }, selectedPeriod: missing })
     expect(result.nativeSessionId).toBeUndefined()

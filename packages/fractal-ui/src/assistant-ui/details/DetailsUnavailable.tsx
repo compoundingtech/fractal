@@ -90,8 +90,9 @@ const reasonGroups = (fields: readonly NotReportedField[]): readonly ReasonGroup
 }
 /** A shared reason is the sentence alone; differing reasons prefix the fields each explains. */
 const reasonPrefix = (group: ReasonGroup, groups: readonly ReasonGroup[]): string => groups.length > 1 ? `${sentence(group.names.join(', '))}: ` : ''
-const ReasonLines = ({ groups }: { readonly groups: readonly ReasonGroup[] }) =>
-  <>{groups.map(group => <span key={group.reason} data-details-reason-line data-details-reason-fields={groups.length > 1 ? group.names.join(', ') : undefined} {...stylex.props(styles.reasonLine)}>{reasonPrefix(group, groups)}<span data-details-reason-text>{group.reason}</span></span>)}</>
+const ReasonLines = ({ groups, notes = [] }: { readonly groups: readonly ReasonGroup[]; readonly notes?: readonly string[] }) =>
+  <>{groups.map(group => <span key={group.reason} data-details-reason-line data-details-reason-fields={groups.length > 1 ? group.names.join(', ') : undefined} {...stylex.props(styles.reasonLine)}>{reasonPrefix(group, groups)}<span data-details-reason-text>{group.reason}</span></span>)}
+    {notes.map(note => <span key={note} data-details-reason-line data-details-reason-note {...stylex.props(styles.reasonLine)}><span data-details-reason-text>{note}</span></span>)}</>
 
 /**
  * Disclosure for detailed reasons: collapsed by default, a quiet control whose accessible name keeps the visible
@@ -115,6 +116,12 @@ export function DetailsWhy({ explains, reasons }: { readonly explains: string; r
   return <WhyDisclosure explains={explains}><DetailsInlineReason block>{reasons.map(reason => <span key={reason} data-details-reason-line {...stylex.props(styles.reasonLine)}><span data-details-reason-text>{reason}</span></span>)}</DetailsInlineReason></WhyDisclosure>
 }
 
+/** An inert loading twin shares the live control's baseline and wrapping geometry. */
+export function DetailsWhyPending() {
+  const narrow = React.useContext(NarrowLayoutContext)
+  return <span {...stylex.props(styles.why, !narrow && styles.whyDense, styles.pendingWhy)}><Icon name="chevron-right" />Why?</span>
+}
+
 /**
  * The resource column's tail: one summary line names every section this session does not report, in pane order, and
  * their grouped reasons wait behind the same collapsed `Why?` as a whole metric group. Desktop and phone share the
@@ -127,36 +134,47 @@ export function DetailsUnreportedSections({ sections }: { readonly sections: rea
     <WhyDisclosure explains="Sections not reported"><DetailsInlineReason block><ReasonLines groups={reasonGroups(sections)} /></DetailsInlineReason></WhyDisclosure>
   </>
 }
-
 /**
  * A metric group's single missing-data line; never per-field dashes. A whole group paints
- * `Spend · not reported`; a partial group paints `Not reported: window, attribution`.
+ * `Spend · not reported`; a partial group paints one summary, `Not reported: window, subagent spend`.
  * Reasons are grouped: a reason shared by every missing field is one sentence; differing reasons each paint once,
- * prefixed by the fields they explain. Desktop: the state word (whole) or each name (partial) is a
- * keyboard-reachable trigger whose reason is its tooltip and accessible description. Narrow hosts paint a partial
- * group's grouped reasons beneath the line; a whole group paints one plain `summary` sentence, whatever the fields'
- * individual reasons, and keeps those reasons behind a collapsed `Why?` disclosure.
+ * prefixed by the fields they explain. `notes` are plain sentences about reported values (which session spend belongs
+ * to, which sessions a total includes) that are not missing fields; they live only behind Why?.
+ * Whole group: desktop paints the state word as a keyboard-reachable trigger whose reason is its tooltip and accessible
+ * description; narrow hosts paint one plain `summary` sentence and keep the reasons behind a collapsed `Why?`.
+ * Partial group: desktop and phone alike paint the summary and keep every reason behind one collapsed `Why?`
+ * (44px on phone, dense on desktop).
  */
-export function DetailsNotReported({ group, summary, fields }: { readonly group?: string; readonly summary?: string; readonly fields: readonly NotReportedField[] }) {
+export function DetailsNotReported({ group, summary, area = 'Details', fields, notes = [] }: {
+  readonly group?: string; readonly summary?: string
+  /** The metric group a partial line belongs to; names its Why? control. */
+  readonly area?: string
+  readonly fields: readonly NotReportedField[]; readonly notes?: readonly string[]
+}) {
   const narrow = React.useContext(NarrowLayoutContext)
-  if (fields.length === 0) return null
   const names = fields.map(field => field.name).join(', ')
   const groups = reasonGroups(fields)
-  const reasons = <DetailsInlineReason block><ReasonLines groups={groups} /></DetailsInlineReason>
-  if (group !== undefined) return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
-    <span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
-    {narrow
-      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason><WhyDisclosure explains={`${group} not reported`}>{reasons}</WhyDisclosure></>
-      : <DescribedTooltipButton aria-label={`${group}: not reported`} description={groups.map(reason => `${reasonPrefix(reason, groups)}${reason.reason}`).join('; ')} tooltip={<ReasonLines groups={groups} />} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
-  </p>
-  // Prose, not flex: names wrap like the pending twin's ink, so arrival never reflows the line.
-  return <p data-details-unavailable data-details-unavailable-subject={names} data-details-not-reported="fields" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.prose)}>
-    Not reported: {fields.map((field, index) => <React.Fragment key={field.name}>{index > 0 && ', '}{narrow
-      ? <span data-details-not-reported-field={field.name} {...stylex.props(styles.nowrap)}>{field.name}</span>
-      : <DescribedTooltipButton data-details-not-reported-field={field.name} aria-label={`${sentence(field.name)}: not reported`} description={detailsReasonText(field.reason)} {...stylex.props(styles.trigger, styles.inlineTrigger)}>{field.name}</DescribedTooltipButton>}</React.Fragment>)}
-    {narrow && reasons}
+  if (group !== undefined) {
+    if (fields.length === 0) return null
+    const reasons = <DetailsInlineReason block><ReasonLines groups={groups} /></DetailsInlineReason>
+    return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
+      <span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
+      {narrow
+        ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason><WhyDisclosure explains={`${group} not reported`}>{reasons}</WhyDisclosure></>
+        : <DescribedTooltipButton aria-label={`${group}: not reported`} description={groups.map(reason => `${reasonPrefix(reason, groups)}${reason.reason}`).join('; ')} tooltip={<ReasonLines groups={groups} />} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
+    </p>
+  }
+  const uniqueNotes = [...new Set(notes)]
+  if (fields.length === 0 && uniqueNotes.length === 0) return null
+  return <p data-details-unavailable data-details-unavailable-subject={names || area} data-details-not-reported="fields" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
+    <span data-details-not-reported-summary {...stylex.props(styles.summaryLine)}>{fields.length > 0
+      ? <>Not reported: {fields.map((field, index) => <React.Fragment key={field.name}>{index > 0 && ', '}<span data-details-not-reported-field={field.name} {...stylex.props(styles.nowrap)}>{field.name}</span></React.Fragment>)}</>
+      : notReportedNotesSummary(area)}</span>
+    <WhyDisclosure explains={`${area} details not reported`}><DetailsInlineReason block><ReasonLines groups={groups} notes={uniqueNotes} /></DetailsInlineReason></WhyDisclosure>
   </p>
 }
+/** A partial line whose reported values carry only notes still reads as one plain sentence; pending twins paint it too. */
+export const notReportedNotesSummary = (area: string): string => `Some ${area.toLowerCase()} details aren’t reported.`
 
 const styles = stylex.create({
   trigger: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: space.zero, minWidth: geometry.icon, borderWidth: 0, borderRadius: radius.sm, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
@@ -168,6 +186,7 @@ const styles = stylex.create({
   why: { display: 'inline-flex', alignItems: 'center', gap: space.xs, minWidth: geometry.touchTarget, minHeight: geometry.touchTarget, padding: space.zero, borderWidth: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'pointer', ':hover': { color: text.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
   // Desktop keeps its dense row height.
   whyDense: { minWidth: 0, minHeight: geometry.toolRow },
+  pendingWhy: { visibility: 'hidden' },
   // The tail's summary occupies its own row; Why? starts beneath it.
   summaryLine: { display: 'block', flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
   whyPanel: { display: 'block', flexBasis: '100%', minWidth: 0 },

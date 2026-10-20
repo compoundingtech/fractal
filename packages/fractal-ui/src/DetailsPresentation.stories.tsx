@@ -107,8 +107,8 @@ function assertCombined(root:HTMLElement,states:readonly string[]){
   for(const state of states)requireContract(root.querySelectorAll(`[data-details-all-state="${state}"] [data-testid="details-pane"][data-details-pane-state="${state}"]`).length===1,'Combined AllStates omitted a named state')
   panes.forEach(pane=>{requireContract(!/\bUnknown\b/.test(paintedText(pane)),'Combined AllStates exposed a raw missing-value tag');assertSections(pane as HTMLElement)})
 }
-/** The partial fixture reports only cumulative tokens; every other spend fact is named once, in source order. */
-const partialSpendFields='total spend, main session spend, subagent spend, token scope, token window, session matching'
+/** The partial fixture reports only cumulative tokens; every missing spend field is named once, in source order. Who the tokens include and which session spend belongs to are Why?-only notes, not fields. */
+const partialSpendFields='total spend, main session spend, subagent spend, token window'
 function metricSection(root:HTMLElement,state:string,name:'Context'|'Spend'){const section=root.querySelector<HTMLElement>(`[data-details-all-state="${state}"] section[aria-label$="${name}"]`);requireContract(section,`Missing ${state} ${name} section`);return section}
 function assertMetricLines(root:HTMLElement){
   for(const name of ['Context','Spend'] as const){
@@ -116,7 +116,7 @@ function assertMetricLines(root:HTMLElement){
     requireContract(line?.dataset.detailsNotReported==='group'&&paintedText(line)===`${name}·not reported`&&line.parentElement?.childElementCount===1&&!section.querySelector('[data-details-missing-value],dl,[role="meter"]')&&!paintedText(section).includes('—'),'Unreported group repeats per-field dashes')
   }
   const spend=metricSection(root,'partial','Spend'),summary=spend.querySelectorAll<HTMLElement>('[data-details-not-reported]')
-  requireContract(summary.length===1&&summary[0]?.dataset.detailsNotReported==='fields'&&paintedText(summary[0])===`Not reported: ${partialSpendFields}`&&spend.querySelector('[data-details-token-label]')?.textContent==='Cumulative tokens'&&!spend.querySelector('[data-details-missing-value]')&&!paintedText(spend).includes('—')&&!/Recorded spend|Window|Session matching/.test(paintedText(spend)),'Partial group lacks one Not reported summary')
+  requireContract(summary.length===1&&summary[0]?.dataset.detailsNotReported==='fields'&&paintedText(summary[0].querySelector<HTMLElement>('[data-details-not-reported-summary]')??summary[0])===`Not reported: ${partialSpendFields}`&&spend.querySelector('[data-details-token-label]')?.textContent==='Cumulative tokens'&&!spend.querySelector('[data-details-missing-value]')&&!paintedText(spend).includes('—')&&!/Recorded spend|Window|Session matching|token scope|session matching/.test(paintedText(spend)),'Partial group lacks one Not reported summary')
   for(const state of ['busy','partial'] as const){
     const context=metricSection(root,state,'Context'),value=context.querySelector<HTMLElement>('[data-details-occupancy]')
     requireContract(value?.dataset.detailsOccupancy==='estimated'&&value.textContent==='6%est.'&&context.querySelector('[role="meter"]')?.getAttribute('aria-valuetext')==='6 percent, estimated from tokens'&&!context.querySelector('[data-details-not-reported]')&&!/reported percentage/i.test(context.textContent??''),'Token-derived occupancy is not marked estimated')
@@ -140,8 +140,13 @@ async function checkMetricLines(canvasElement:HTMLElement){
   // Every unknown Spend field shares one reason: the group reads it once, as the mapped sentence, never per field or as a code.
   const group=within(metricSection(canvasElement,'unknown','Spend')).getByRole('button',{name:'Spend: not reported'})
   requireContract(group.closest('[data-details-not-reported]')?.getAttribute('data-details-reason-groups')==='1'&&await keyboardTooltip(group)===detailsReasonText('no-provider'),'Unreported group lost its provenance tooltip')
-  const field=within(metricSection(canvasElement,'partial','Spend')).getByRole('button',{name:'Token window: not reported'})
-  requireContract(await keyboardTooltip(field)===detailsReasonText('no-provider'),'Not reported field lost its provenance tooltip')
+  // The partial group's reasons and notes wait behind one collapsed Why?; it opens from the keyboard with the mapped sentence.
+  const why=within(metricSection(canvasElement,'partial','Spend')).getByRole('button',{name:'Why? Spend details not reported'}),panel=canvasElement.ownerDocument.getElementById(why.getAttribute('aria-controls')??'')
+  requireContract(panel&&why.getAttribute('aria-expanded')==='false'&&panel.hidden,'Partial group reasons are not collapsed')
+  why.focus();await userEvent.keyboard('{Enter}')
+  await waitFor(()=>requireContract(!panel.hidden&&[...panel.querySelectorAll('[data-details-reason-text]')].some(node=>node.textContent===detailsReasonText('no-provider'))&&[...panel.querySelectorAll('[data-details-reason-note] [data-details-reason-text]')].some(node=>node.textContent==='Cumulative tokens: which sessions are included isn’t reported.'),'Partial group Why? lost its reasons'))
+  await userEvent.keyboard('{Enter}')
+  await waitFor(()=>requireContract(panel.hidden&&why.getAttribute('aria-expanded')==='false','Partial group reasons are not collapsed'))
 }
 export const AllStates:Story={
   args:{opening:'Restored',width:1440},
@@ -278,7 +283,8 @@ const inspectorHosts=[
 const inspectorLayout=group([{uri:'details:agent/worker-1',view:'details'},{uri:'changes:agent/worker-1'}])
 function InspectorHost({host,scheme,width}:{readonly host:(typeof inspectorHosts)[number];readonly scheme:Args['scheme'];readonly width:number}){
   const [intent,setIntent]=React.useState<DetailsLayoutIntent>({hiddenSections:[]})
-  const base=host.id==='unreported'?detailsStoryInputs('partial',detailsTraceFixtures.unknown):detailsStoryInputs(host.state)
+  const input=host.id==='unreported'?detailsStoryInputs('partial',detailsTraceFixtures.unknown):detailsStoryInputs(host.state)
+  const base=host.id==='retained'?{...input,trace:{...input.trace,meters:{...input.trace.meters,spend:{...input.trace.meters.spend,mainUsd:{_tag:'Unknown' as const,reason:'out-of-retention' as const,detail:'Earlier main session spend is no longer retained.'}}}}}:input
   const overview=host.id==='unreported'?{...base.overview,since:undefined,age:undefined,durations:[{label:'Session elapsed (from session start to end or now; wall time, not active)',value:'Unreported'}]}:base.overview
   const failure={_tag:'Failed',cause:{_tag:'Server',code:'timeout',message:'The retained observation request timed out.'}} as const
   const renderPane=(pane:WorkbenchPane)=>pane.view==='details'?<DetailsPane {...base} overview={overview} state={host.state} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:host.empty}} {...(host.id==='retained'?{syncStatus:failure,hasPriorContent:true}:{})} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}}/>:undefined
@@ -338,10 +344,42 @@ function assertPhoneReasons(root:HTMLElement){
     failures.push(`${host} "${line.getAttribute('data-details-unavailable-subject')??''}" (${line.getAttribute('data-details-not-reported')??'state'}): anchor ${geometry(anchor)}, reason ${geometry(reason)} "${(reason?.textContent??'').slice(0,40)}"`)
   }
   for(const line of groups)below(line,line.querySelector('[data-details-not-reported-word]'))
-  for(const line of fields)below(line,[...line.querySelectorAll('[data-details-not-reported-field]')].at(-1))
+  // Partial lines paint one summary and keep their reasons behind Why?: `assertPartialGroups` owns that shape.
   for(const line of exposedLines(root,'[data-details-unavailable]:not([data-details-not-reported])'))if(line.querySelector('[data-details-availability]'))below(line,line.querySelector('[data-details-availability]'))
   requireContract(failures.length===0,`${notBeneath}: ${failures.join('; ')}`)
   for(const value of missing)requireContract(reasonText(value,false),'Phone missing value lacks its painted reason')
+}
+const partialShape='A partial group is not one summary behind a collapsed Why?'
+/**
+ * A partially reported group paints exactly one summary built from its missing fields ("Not reported: …"), never a
+ * per-field trigger or painted reason; every reason and note waits behind one collapsed Why?, 44px on phone and
+ * dense on desktop.
+ */
+function assertPartialGroups(root:HTMLElement,narrow:boolean){
+  const lines=exposedLines(root,'[data-details-not-reported="fields"]'),failures:string[]=lines.length===0?['no partial group']:[]
+  for(const line of lines){
+    const subject=line.dataset.detailsUnavailableSubject,summaries=line.querySelectorAll<HTMLElement>('[data-details-not-reported-summary]'),summary=(summaries[0]?.textContent??'').replace(/\s+/g,' ').trim()
+    if(summaries.length!==1||!/^(Not reported: \S.*|Some \w+ details aren’t reported\.)$/.test(summary)||/matching|scope/i.test(summary))failures.push(`${subject}: ${summaries.length} summaries "${summary}"`)
+    const painted=[...line.querySelectorAll<HTMLElement>('[data-details-reason],[data-details-reason-line]')].filter(node=>paintedElement(node)&&node.getBoundingClientRect().height>0)
+    if(painted.length>0)failures.push(`${subject}: ${painted.length} painted reasons`)
+    if(line.querySelector('button:not([data-details-why])'))failures.push(`${subject}: per-field trigger`)
+    const whys=[...line.querySelectorAll<HTMLElement>('button[data-details-why]')],why=whys[0],panel=why&&root.ownerDocument.getElementById(why.getAttribute('aria-controls')??'')
+    if(whys.length!==1||why?.getAttribute('aria-expanded')!=='false'||!panel||!line.contains(panel)||paintedElement(panel)||!panel.querySelector('[data-details-reason-text]'))failures.push(`${subject}: ${whys.length} Why? ${why?.getAttribute('aria-expanded')??'absent'}`)
+    const box=why?.getBoundingClientRect()
+    if(box&&(box.width>=43.5&&box.height>=43.5)!==narrow)failures.push(`${subject}: Why? ${box.width.toFixed(1)}×${box.height.toFixed(1)} on ${narrow?'phone':'desktop'}`)
+  }
+  requireContract(failures.length===0,`${partialShape}: ${failures.join('; ')}`)
+}
+/** The partial shape with falsifying controls: a painted reason, a per-field trigger, a second summary, the wrong Why? geometry. */
+async function checkPartialGroups(root:HTMLElement,narrow:boolean){
+  assertPartialGroups(root,narrow)
+  const line=exposedLines(root,'[data-details-not-reported="fields"]')[0]!,summary=line.querySelector<HTMLElement>('[data-details-not-reported-summary]')!,why=line.querySelector<HTMLElement>('button[data-details-why]')!
+  const doc=root.ownerDocument,reason=doc.createElement('span');reason.setAttribute('data-details-reason','block');reason.textContent='Not reported for this session.'
+  const trigger=doc.createElement('button');trigger.setAttribute('data-details-not-reported-field','token window');trigger.textContent='token window'
+  for(const leak of [reason,trigger,summary.cloneNode(true) as HTMLElement]){summary.after(leak);try{await rejectsCause(partialShape,()=>assertPartialGroups(root,narrow))}finally{leak.remove()}}
+  const minWidth=why.style.minWidth,minHeight=why.style.minHeight
+  try{why.style.minWidth=narrow?'0':'44px';why.style.minHeight=narrow?'24px':'44px';await rejectsCause(partialShape,()=>assertPartialGroups(root,narrow))}finally{why.style.minWidth=minWidth;why.style.minHeight=minHeight}
+  assertPartialGroups(root,narrow)
 }
 export const PhoneDetails:Story={
   render:inspectorRender(true,390),
@@ -367,6 +405,7 @@ export const PhoneDetails:Story={
     assertTouch(touchTargets(doc.body));await userEvent.keyboard('{Escape}')
     await waitFor(()=>requireContract(body.queryAllByRole('button',{name:'Retry'}).length===retries,'Retained failure popover did not close'))
     assertPhoneReasons(canvasElement)
+    await checkPartialGroups(canvasElement,true)
     const reason=exposedLines(canvasElement,'[data-details-not-reported="group"]')[0]?.querySelector<HTMLElement>('[data-details-reason]');requireContract(reason,'Missing reason control target')
     const display=reason.style.display;try{reason.style.display='none';await rejectsCause(notBeneath,()=>assertPhoneReasons(canvasElement))}finally{reason.style.display=display}
     assertPhoneReasons(canvasElement)
@@ -421,7 +460,7 @@ function assertGroupedReasons(root:HTMLElement,narrow:boolean){
   if(narrow){
     let differing=0
     for(const line of exposedLines(root,'[data-details-not-reported]')){
-      const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]')]
+      const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]:not([data-details-reason-note])')]
       const reasons=lines.map(item=>(item.querySelector('[data-details-reason-text]')?.textContent??'').trim())
       if(new Set(reasons).size!==reasons.length)failures.push(`${line.dataset.detailsUnavailableSubject} repeats a reason`)
       if(lines.length<2)continue
@@ -534,7 +573,7 @@ async function checkTail(root:HTMLElement,narrow:boolean,expected?:string){
   await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='false'&&!paintedElement(panel),'Tail Why? did not collapse from the keyboard'))
   assertTail(root,narrow,expected)
 }
-const describedTriggers='button[data-details-missing-value],button[data-details-availability],[data-details-not-reported] button,button[data-details-coverage]'
+const describedTriggers='button[data-details-missing-value],button[data-details-availability],[data-details-not-reported] button:not([data-details-why]),button[data-details-coverage]'
 const undescribed='Missing-data reason is not the trigger’s accessible description'
 function descriptionOf(trigger:HTMLElement):string{
   return (trigger.getAttribute('aria-describedby')??'').split(/\s+/).filter(Boolean).map(id=>trigger.ownerDocument.getElementById(id)?.textContent??'').join(' ').replace(/\s+/g,' ').trim()
@@ -553,16 +592,18 @@ export const DesktopReasonDescriptions:Story={
     const unreported=inspector(canvasElement,'unreported'),retained=inspector(canvasElement,'retained')
     await waitFor(()=>requireContract(canvasElement.querySelectorAll('[role="tab"]').length===inspectorHosts.length*2,'Desktop inspectors lack their Details and Changes tabs'))
     const triggers=exposedTriggers(canvasElement)
-    requireContract(triggers.some(trigger=>trigger.closest('[data-details-not-reported="group"]'))&&triggers.some(trigger=>trigger.matches('[data-details-not-reported-field]')),'Desktop harness lacks a whole-group or partial trigger')
+    requireContract(triggers.some(trigger=>trigger.closest('[data-details-not-reported="group"]'))&&exposedLines(canvasElement,'[data-details-not-reported="fields"]').length>0,'Desktop harness lacks a whole-group or partial case')
     assertOverviewOmission(unreported,1)
     assertDescribed(triggers)
     const target=triggers[0]!,ids=target.getAttribute('aria-describedby')!
     try{target.removeAttribute('aria-describedby');await rejectsCause(undescribed,()=>assertDescribed([target]))}finally{target.setAttribute('aria-describedby',ids)}
     assertDescribed(triggers)
     await checkHumanReasons(canvasElement,false)
-    // The keyboard tooltip paints the same provenance the description announces.
-    const groupTrigger=exposedTriggers(unreported).find(trigger=>trigger.closest('[data-details-not-reported="group"]')),field=exposedTriggers(retained).find(trigger=>trigger.matches('[data-details-not-reported-field]'))
-    for(const trigger of [groupTrigger,field]){requireContract(trigger,'Missing desktop provenance trigger');requireContract(await keyboardTooltip(trigger)===descriptionOf(trigger).split('; ').join(''),'Desktop tooltip and accessible description disagree')}
+    // The keyboard tooltip paints the same reason the description announces.
+    const groupTrigger=exposedTriggers(unreported).find(trigger=>trigger.closest('[data-details-not-reported="group"]'));requireContract(groupTrigger,'Missing desktop group trigger')
+    requireContract(await keyboardTooltip(groupTrigger)===descriptionOf(groupTrigger).split('; ').join(''),'Desktop tooltip and accessible description disagree')
+    // Partial groups match the phone hierarchy at desktop density: one summary, one dense Why?.
+    await checkPartialGroups(canvasElement,false)
     // Desktop keeps its density and its tooltips: no 44px phone geometry, no painted reasons.
     const assertDense=()=>{for(const tab of canvasElement.querySelectorAll<HTMLElement>('[role="tab"]'))requireContract(tab.getBoundingClientRect().height<44,'Desktop Details adopted phone geometry');requireContract(![...canvasElement.querySelectorAll('[data-details-reason]')].some(paintedElement),'Desktop Details adopted phone geometry')}
     assertDense()
@@ -575,15 +616,24 @@ export const DesktopReasonDescriptions:Story={
 }
 
 /** Internal vocabulary and source wording never reach production copy: painted text, accessible names, descriptions and disclosed reasons. */
-const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series|ledger|attribution|window-global)\b|\broot completeness\b|\b(?:by )?this source\b/i
+const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series|ledger|attribution|window-global|matched|traced|self)\b|\broot completeness\b|\b(?:by )?this source\b|\bst resources\b|\breported window\b/i
+/** The one plain sentence allowed to say "matched"; exactly it is stripped before the ban applies. */
+const matchedSentence=/\b\d+(?:\.\d+)?% of spend matched to this agent\b/g
 const internalCopy='Production Details exposes internal vocabulary'
 function assertPlainCopy(root:HTMLElement){
   const hidden=[...root.querySelectorAll('[data-details-why-panel],[data-details-reason-description]')].map(node=>node.textContent??'')
-  const offenders=[root.innerText,...[...root.querySelectorAll('[aria-label]')].map(node=>node.getAttribute('aria-label')??''),...hidden].flatMap(text=>text.match(internalWords)?.[0]??[])
+  const offenders=[root.innerText,...[...root.querySelectorAll('[aria-label]')].map(node=>node.getAttribute('aria-label')??''),...hidden].flatMap(text=>text.replace(matchedSentence,'').match(internalWords)?.[0]??[])
   requireContract(offenders.length===0,`${internalCopy}: ${offenders.join(', ')}`)
 }
-/** One sample per banned term, so every word in the list has its own negative control. */
-const bannedSamples=['Native session','Traced descendant','Root incarnation','Reported provenance','Spend series','Spend ledger','Cost attribution','Window-global spend','Root completeness','Timing not reported by this source.']
+/** One sample per banned term, so every word in the list has its own negative control; the near misses prove only the exact percentage sentence may say "matched". */
+const bannedSamples=['Native session','Traced descendant','Root incarnation','Reported provenance','Spend series','Spend ledger','Cost attribution','Window-global spend','Root completeness','Timing not reported by this source.','Traced sessions','Main session · self','Observed st resources','Reported window · 7d','Matched sessions','99% matched','Spend matched to this agent','100% of spend matched to this seat','99% of spend matched to this session']
+const allowedMatched='99% of spend matched to this agent'
+const epochLeak='Production Details renders the 1970 epoch'
+/** No placeholder epoch reaches painted text, collapsed Why? panels, descriptions or accessible names. */
+function assertNoEpoch(root:HTMLElement){
+  const texts=[root.innerText,root.textContent??'',...[...root.querySelectorAll('[aria-label],[title]')].flatMap(node=>[node.getAttribute('aria-label')??'',node.getAttribute('title')??''])]
+  requireContract(!texts.some(text=>/1970-01-01|\b1 Jan(?:uary)? 1970\b|\bJan(?:uary)? 1,? 1970\b/.test(text)),epochLeak)
+}
 /** Plain copy holds, and each banned term is rejected at every target: painted lines and collapsed Why? panels alike. */
 async function checkPlainCopy(root:HTMLElement,targets:readonly HTMLElement[]){
   assertPlainCopy(root)
@@ -591,6 +641,8 @@ async function checkPlainCopy(root:HTMLElement,targets:readonly HTMLElement[]){
     const leak=root.ownerDocument.createElement('span');leak.textContent=` ${sample}`;target.append(leak)
     try{await rejectsCause(internalCopy,()=>assertPlainCopy(root))}finally{leak.remove()}
   }
+  // The exact percentage sentence is the one allowed use of "matched".
+  for(const target of targets){const allowed=root.ownerDocument.createElement('span');allowed.textContent=` ${allowedMatched}.`;target.append(allowed);try{assertPlainCopy(root)}finally{allowed.remove()}}
   assertPlainCopy(root)
 }
 const productionTail=`${tailPrefix}Workspace, Subagents, Declared bindings, Missions, Pull requests, CI runs, Reviews, Files touched, History.`
@@ -685,6 +737,50 @@ function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:bool
   </div>
 }
 const ompShape='Production OMP Details line is not one plain summary behind a collapsed Why?'
+const ompSpendShape='Production OMP Spend is not plain accounting with one partial summary behind Why?'
+/** A spend row's label and period as painted, without its coverage line. */
+function spendRowLabel(row:Element|null){
+  const dt=row?.querySelector('dt')?.cloneNode(true) as HTMLElement|undefined;if(!dt)return ''
+  for(const node of dt.querySelectorAll('[data-details-coverage-line],[data-details-coverage]'))node.remove()
+  return (dt.textContent??'').replace(/\s+/g,' ').trim()
+}
+/**
+ * OMP accounting in plain words: the main session keeps its unknown period unknown (no forged 7d), the live report
+ * reads "Spend incl. subagents · last 7 days" with the one percentage sentence, and a complete subagent list needs no
+ * count. Missing spend fields share one summary; which session spend belongs to is only a Why? note.
+ */
+function assertOmpSpend(panel:HTMLElement,state:OmpSupplementState){
+  const spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]'),failures:string[]=spend?[]:['no Spend section']
+  if(spend){
+    const main=spendRowLabel(spend.querySelector('[data-details-metric="main-usd"]'))
+    if(main!=='Main session')failures.push(`main row "${main}"`)
+    const lines=exposedLines(spend,'[data-details-not-reported="fields"]'),names=(lines[0]?.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean)
+    const required=['main session window',...(state==='loading'||state==='unavailable'?['total spend']:[])]
+    if(lines.length!==1||!required.every(name=>names.includes(name))||names.some(name=>/matching|scope|7d/i.test(name)))failures.push(`${lines.length} partial lines "${names.join(', ')}"`)
+    const panelId=lines[0]?.querySelector('button[data-details-why]')?.getAttribute('aria-controls'),notes=[...(panelId?panel.ownerDocument.getElementById(panelId)?.querySelectorAll('[data-details-reason-text]')??[]:[])].map(node=>node.textContent??'')
+    if((state==='loading'||state==='unavailable')&&!notes.includes('Which session this spend belongs to isn’t reported.'))failures.push(`Why? notes "${notes.join('|')}"`)
+    if(state==='reported'){
+      const total=spendRowLabel(spend.querySelector('[data-details-metric="total-usd"]')),coverage=[...panel.querySelectorAll('[data-details-coverage]')].map(node=>node.textContent??'')
+      if(total!=='Spend incl. subagents · last 7 days')failures.push(`total row "${total}"`)
+      if(coverage.length===0||coverage.some(text=>text!=='99% of spend matched to this agent')||!within(spend).queryByRole('button',{name:'Why? Spend linked to this agent'}))failures.push(`coverage "${coverage.join('|')}"`)
+      const listWindow=panel.querySelector('[data-details-subagent-window]')?.textContent
+      if(listWindow!=='Subagents · last 7 days'||panel.querySelector('[data-details-subagent-count]'))failures.push(`subagents "${listWindow}" with count ${!!panel.querySelector('[data-details-subagent-count]')}`)
+    }
+  }
+  for(const node of panel.querySelectorAll('[data-details-resources-unavailable]'))if(node.textContent!=='Resources aren’t available for this session.'||!node.parentElement?.querySelector('button[data-details-why]'))failures.push(`resources "${node.textContent}"`)
+  requireContract(failures.length===0,`${ompSpendShape}: ${failures.join('; ')}`)
+}
+/** Accounting and epoch contracts with falsifying controls: a forged main period, a matching field, a painted epoch. */
+async function checkOmpAccounting(panel:HTMLElement,narrow:boolean,state:OmpSupplementState){
+  assertOmpSpend(panel,state);assertNoEpoch(panel);assertPartialGroups(panel,narrow)
+  const doc=panel.ownerDocument,main=panel.querySelector<HTMLElement>('section[aria-label$="Spend"] [data-details-metric="main-usd"] dt')!,forged=doc.createElement('span');forged.textContent=' · 7d';main.append(forged)
+  try{await rejectsCause(ompSpendShape,()=>assertOmpSpend(panel,state))}finally{forged.remove()}
+  const line=exposedLines(panel,'section[aria-label$="Spend"] [data-details-not-reported="fields"]')[0]!,names=line.dataset.detailsNotReportedNames??''
+  try{line.dataset.detailsNotReportedNames=`${names}, session matching`;await rejectsCause(ompSpendShape,()=>assertOmpSpend(panel,state))}finally{line.dataset.detailsNotReportedNames=names}
+  const whyPanel=doc.getElementById(line.querySelector('button[data-details-why]')?.getAttribute('aria-controls')??'')!
+  for(const target of [line,whyPanel]){const epoch=doc.createElement('span');epoch.textContent=' 1970-01-01 00:00–00:00 UTC';target.append(epoch);try{await rejectsCause(epochLeak,()=>assertNoEpoch(panel))}finally{epoch.remove()}}
+  assertOmpSpend(panel,state);assertNoEpoch(panel)
+}
 /**
  * Outside the kit pane: one painted summary; any reasons wait behind one collapsed Why?, 44px on phone and dense on
  * desktop. A live report paints no activity line; retained activity may keep its spend note, checked as copy.
@@ -707,7 +803,8 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
   return async({canvasElement}:{canvasElement:HTMLElement})=>{
     const panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'}),doc=canvasElement.ownerDocument,expected=ompLines[state]
     await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
-    await waitFor(()=>assertOmpLine(panel,narrow,state))
+    await waitFor(()=>{assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state)})
+    await checkOmpAccounting(panel,narrow,state)
     // The pre-fix shape: a second paragraph painted beside the summary.
     const line=exposedLines(panel,expected.line)[0]!,summary=line.querySelector<HTMLElement>('[data-details-supplement-summary],[data-details-accounting-summary]')!
     const painted=summary.cloneNode(true) as HTMLElement;summary.after(painted)
@@ -739,7 +836,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
       await userEvent.click(within(dialog).getByRole('button',{name:'Close'}))
       await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
     }
-    assertOmpLine(panel,narrow,state)
+    assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
   }
 }
 // The kit gate runs each story at 440/1440 and dark/light; the inspector keeps its phone or desktop width.
