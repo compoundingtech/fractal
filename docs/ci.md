@@ -5,7 +5,7 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
+(which pull requests and the queue do not run; the daily long lanes run it too), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
@@ -984,7 +984,8 @@ What only exists or only means something with them:
 `daily-long.yml` runs the long lanes once a day on `main` (05:07 UTC, and on dispatch): the
 lanes that need a VM, real sockets across daemon restarts, or an older st3. Today those are
 `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat`, plus the shared test
-producer they consume. Each runs exactly as Workspace CI runs it, because both workflows build
+producer they consume. It also runs the cost check as `daily-perf-cost` (see
+[Performance gate](#performance-gate)) as Main upkeep runs it. The others run exactly as Workspace CI runs them, because both workflows build
 the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
 `.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
 no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no
@@ -1059,15 +1060,18 @@ tests out of `linux-tests`.
 The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
 replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
 child inherits the explicit evidence parent, including when `CI_RUN_ID` is absent.
-The existing `perf-cost-logs` upload runs on failure and includes this visible tree;
+The existing `perf-cost-logs` upload (`daily-perf-cost-logs` in the daily run) runs on failure and includes this visible tree;
 its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
 leave partial evidence; an uploaded directory is not a completed-test verdict.
 
-`perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
-`main` push, on the stages' runner. It skips
-merge-queue entries, which wait only for required checks, so a queued entry needs no more runners
-than before (see [Measured concurrency](#measured-concurrency)); if it becomes required, it must
-run there too. It generates a store at scale 0.01 and one at 0.1 with the
+`perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every `main` push (Main
+upkeep) and once a day as `daily-perf-cost` in the [daily long lanes](#daily-long-lanes), whose
+report shows its time and failures. It does not run on pull requests or merge-queue entries. On
+pull requests it took a 15.3-minute median on Namespace; on a quiet 24-thread machine it takes
+12.1 minutes and 45.5 core-minutes warm (69.5 cold, 12.7 GiB peak), 437 s of it the quarantined
+`link_minutes` case, against 74 core-minutes for the rest of a warm PR run: nearly 40% of PR
+compute for an optional lane. If it becomes required, it must run on pull requests and in the
+queue again. It generates a store at scale 0.01 and one at 0.1 with the
 `daemon_bench` generator, serves each from an in-process daemon, and counts the SQLite work of
 every route: virtual machine steps, steps through a table without an index, sorts and
 auto-index rows, read from each statement's counters as it finishes
@@ -1397,8 +1401,8 @@ Namespace limits CPU and memory per platform; a workflow run is not a fixed unit
 With the current 8x16 stage runners, a merge-queue Workspace CI group initially starts four
 8-vCPU/16-GiB stage jobs and two 8-vCPU/16-GiB profile jobs: 48 vCPUs and 96 GiB at peak.
 The TypeScript client job follows generator freshness and reuses its runner slot.
-PR runs also start `perf-cost`, taking their initial peak to 56 vCPUs and 112 GiB. Main upkeep
-runs that check separately; its cache-fill jobs normally finish after their lookup-only probes.
+PR runs no longer start `perf-cost` (at this measurement it took their initial peak to 56 vCPUs
+and 112 GiB). Main upkeep and the daily long lanes run that check separately; Main upkeep's cache-fill jobs normally finish after their lookup-only probes.
 Five complete merge-queue groups need 240 vCPUs and 480 GiB, within the Linux pool limit;
 `max_entries_to_build` was 5 at this historical measurement; current capacity policy appears in [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes).
 PRs, main pushes and other workloads share that capacity; Namespace queues jobs until resources
