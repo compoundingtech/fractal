@@ -173,7 +173,7 @@ def main(argv):
         }
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
-            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs'}
+            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs', 'runner'}
             if set(facts) - known or not {'command', 'exit_code'} <= set(facts) or ('output' in facts) == ('output_sha256' in facts):
                 raise Failure('--aggregate FILE must hold command, exit_code, exactly one of output or output_sha256, and optionally inputs')
             command, exit_code = facts['command'], facts['exit_code']
@@ -196,6 +196,8 @@ def main(argv):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}
+        if args.aggregate and facts.get('runner'):
+            request['runner'] = facts['runner']
         signer = json.loads(args.signer)
         done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300)
         if done.returncode != 0:
