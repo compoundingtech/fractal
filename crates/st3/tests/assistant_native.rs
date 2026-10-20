@@ -20,6 +20,25 @@ const OWNER: &str = "person/ada";
 const AGENT: &str = "agent/native.worker";
 const POLICY: &str = "custom.client.assistant.v1.policy";
 
+
+async fn mcp_call(app: &Router, name: &str, arguments: Value) -> (bool, Value) {
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/mcp")
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-03-26")
+        .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":name,"arguments":arguments}}).to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "MCP {name}: {}", String::from_utf8_lossy(&bytes));
+    let result: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("MCP {name} returned invalid JSON: {error}: {}", String::from_utf8_lossy(&bytes)));
+    assert!(result.get("error").is_none(), "{result}");
+    let tool = &result["result"];
+    let output = serde_json::from_str(tool["content"][0]["text"].as_str().unwrap()).unwrap();
+    (tool["isError"].as_bool().unwrap_or(false), output)
+}
 struct Harness {
     root: tempfile::TempDir,
     state: AppState,
@@ -216,6 +235,81 @@ async fn pairing_caller_bound_rich_reads_and_budget_do_not_silently_truncate() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{value}");
     assert_eq!(value["code"], "response-budget-exceeded");
     assert!(value.get("value").is_none(), "A failed bounded read must not masquerade as a complete page");
+}
+
+#[tokio::test]
+async fn mcp_conversation_discovery_reads_agent_ack_and_rejects_another_grants_handle() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let h = Harness::new();
+    let paired = h.pair().await;
+    let other = h.pair().await;
+    assert_ne!(paired.grant.id, other.grant.id);
+    let incarnation = "native-pty:conversation-readback";
+    h.state.store.append_claim(&ClaimInput {
+        subject: AGENT.into(), kind: "runtime.observed".into(), actor: Some(AGENT.into()),
+        fields: serde_json::from_value(json!({"status":"running",
+            "runtime_id":"conversation-readback", "incarnation_id":incarnation,"terminal":true})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let message = h.message(AGENT, "conversation-readback").await;
+    let (status, sent) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let incoming = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    assert_eq!(incoming.from, "assistant/chatgpt");
+    assert_eq!(incoming.assistant_metadata().unwrap().assistant_grant_id, Some(paired.grant.id.as_str()));
+    let ack = format!("ACK-conversation-readback-{}", uuid::Uuid::new_v4());
+    let reply_text = format!("{ack}\n{}", "Agent reply body. ".repeat(700));
+    let (status, reply) = request(&h.local, "POST", "/v1/messages", None, None, &json!({
+        "idempotency_key":"native-test-conversation-ack", "from":AGENT,
+        "to":incoming.from, "in_reply_to":incoming.subject, "content":reply_text,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let reply = h.state.store.messages(Some("assistant/chatgpt"), true).unwrap().pop().unwrap();
+    assert_eq!(reply.from, AGENT);
+    assert_eq!(reply.to, "assistant/chatgpt");
+    assert!(reply.content.starts_with(&ack));
+    let reply_claim = h.state.store.latest_claim(&reply.subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(reply_claim.body["fields"]["content"], reply.content);
+    assert_eq!(reply_claim.body["fields"]["in_reply_to"], incoming.subject);
+
+
+    let socket = h.root.path().join("st3-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let gateway = h.fabric.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let credential = h.root.path().join("assistant-credential");
+    std::fs::write(&credential, &paired.credential).unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let app = st_chatgpt::http_router(st_chatgpt::Adapter::new(&socket, &credential).unwrap());
+    let other_credential = h.root.path().join("other-assistant-credential");
+    std::fs::write(&other_credential, &other.credential).unwrap();
+    std::fs::set_permissions(&other_credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let other_app = st_chatgpt::http_router(st_chatgpt::Adapter::new(&socket, &other_credential).unwrap());
+
+    let (error, listed) = mcp_call(&app, "st_conversations_list", json!({})).await;
+    assert!(!error, "{listed}");
+    let conversation = listed["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["agent_id"] == AGENT).expect("the managed agent is discovered");
+    let (error, timeline) = mcp_call(&app, "st_conversation_timeline", json!({
+        "agent_id":conversation["agent_id"],"session_id":conversation["session_id"],
+    })).await;
+    assert!(!error, "{timeline}");
+    let handle = timeline["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["text"].as_str().is_some_and(|text| text.contains(&ack)))
+        .expect("the durable agent ACK is present in the actual timeline")["read"].clone();
+    assert!(handle.is_object(), "{timeline}");
+    let (error, content) = mcp_call(&app, "st_conversation_read", handle.clone()).await;
+    assert!(!error, "{content}");
+    assert!(content["value"]["text"].as_str().unwrap().contains(&ack), "{content}");
+    for key in ["agent_id", "session_id", "reference", "revision", "start", "end"] {
+        assert_eq!(content["value"][key], handle[key], "{key}");
+    }
+    let (error, denied) = mcp_call(&other_app, "st_conversation_read", handle).await;
+    assert!(error, "another valid grant must not redeem the first grant's content handle: {denied}");
+    assert_eq!(denied["code"], "daemon-denied");
+    assert!(!denied.to_string().contains(&ack));
+    server.abort();
 }
 
 #[tokio::test]

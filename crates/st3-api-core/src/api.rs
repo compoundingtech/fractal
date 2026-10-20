@@ -224,7 +224,7 @@ impl ClientTransportBoundary {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientSnapshot {
     pub id: String,
-    host_id: String,
+    pub host_id: String,
     pub store_index: u64,
     projection_version: String,
     pub created_at: String,
@@ -387,7 +387,8 @@ impl ApiError {
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
-            "database-busy" | "database-locked" | "message-selectors-not-ready" => StatusCode::SERVICE_UNAVAILABLE,
+            "database-busy" | "database-locked" | "message-selectors-not-ready"
+            | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -450,7 +451,11 @@ impl IntoResponse for ApiError {
         if let Some(applied) = body["details"].get("applied").cloned() {
             body["applied"] = applied;
         }
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if self.code == "read-deadline" {
+            response.extensions_mut().insert(crate::otel::ReadDeadline);
+        }
+        response
     }
 }
 
@@ -826,12 +831,44 @@ async fn schema() -> Json<Value> {
     }))
 }
 
+/// Lives outside the deadline future, so timeout responses finish the same sample
+/// and dropping the request records cancellation exactly once.
+struct RequestDuration<'a> {
+    method: &'a str,
+    route: &'a str,
+    client_class: crate::otel_client_class::ClientClass,
+    started: Instant,
+    outcome: crate::otel::RequestOutcome,
+}
+
+impl Drop for RequestDuration<'_> {
+    fn drop(&mut self) {
+        crate::otel::record_http_request_duration(
+            self.method, self.route, self.client_class, self.outcome, self.started.elapsed(),
+        );
+    }
+}
+
 pub async fn response_envelope(
     State(state): State<(AppState, ClientTransportBoundary)>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    read_deadline::envelope(state, request, next).await
+    let method = request.method().clone();
+    let route = request.extensions().get::<axum::extract::MatchedPath>().cloned();
+    let client_class = crate::otel_client_class::ClientClass::from_header(
+        request.headers().get(client_presence::CLIENT_HEADER).and_then(|value| value.to_str().ok()),
+    );
+    let mut duration = RequestDuration {
+        method: method.as_str(),
+        route: route.as_ref().map_or("/unmatched", axum::extract::MatchedPath::as_str),
+        client_class,
+        started: Instant::now(),
+        outcome: crate::otel::RequestOutcome::Cancelled,
+    };
+    let response = read_deadline::envelope(state, request, next).await;
+    duration.outcome = crate::otel::RequestOutcome::from_response(Some(&response));
+    response
 }
 
 async fn response_envelope_unbounded(
@@ -926,7 +963,11 @@ async fn response_envelope_unbounded(
         && !client_request
         && request.uri().path() != "/v1/health")
         .then(client_v0::fabric_boundary_forbidden);
-    let cursor_snapshot = client_request.then(|| {
+    // Conversation continuations carry projection/grant authentication. Their
+    // readers recover pinned snapshots only after verifying that wrapper.
+    let cursor_snapshot = (client_request
+        && request_path != "/v1/client/assistant/conversations"
+        && !request_path.starts_with("/v1/client/assistant/conversation-")).then(|| {
         request
             .uri()
             .query()
@@ -1207,13 +1248,6 @@ async fn response_envelope_unbounded(
             long_poll,
             remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
         },
-    );
-    crate::otel::record_http_request_duration(
-        request_method.as_str(),
-        &request_route,
-        client_class,
-        status,
-        started.elapsed(),
     );
     finish_request_trace(otel, status);
     if let Some(profile) = profile {
@@ -1758,7 +1792,7 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
     })
 }
 
-fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
+pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
     if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
@@ -7918,6 +7952,10 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[cfg(test)]
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
+
+#[cfg(test)]
+#[path = "api/checkpoint_plan_tests.rs"]
+mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.

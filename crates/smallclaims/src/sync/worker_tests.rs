@@ -3207,8 +3207,9 @@ mod retry_tests {
     }
 
     /// `fabric dial` never connects, so a member's refusal reaches the worker as a tunnel that
-    /// closes. The worker then asks `fabric probe --json`, and only a refusal class puts the
-    /// route to sleep.
+    /// closes. The worker then asks `fabric probe --json`, and only a refusal class reports the
+    /// peer `refused`. A refused route keeps normal peer backoff (docs/st3/replication.md), so the
+    /// probe is asked once per attempt and never faster than that backoff allows.
     #[tokio::test]
     async fn a_tunnel_that_closes_is_a_refusal_only_when_the_probe_says_so() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3259,6 +3260,7 @@ mod retry_tests {
                 protocol: "st3-peer-v1".into(),
             }]);
             let wake = watch::channel(0).0;
+            let started = std::time::Instant::now();
             let worker = tokio::spawn(dial_peer(
                 Local(store.clone()),
                 "indigo".into(),
@@ -3281,12 +3283,25 @@ mod retry_tests {
             })
             .await
             .unwrap_or_else(|_| panic!("{probe}: the probe was never asked"));
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let peer = store
-                .replication_status(true, Some(fleet_id), &["amber".into()])
-                .unwrap()
-                .peers
-                .remove(0);
+            // Then until it has recorded what the probe said, rather than for a fixed time.
+            let status = || {
+                store
+                    .replication_status(true, Some(fleet_id), &["amber".into()])
+                    .unwrap()
+                    .peers
+                    .remove(0)
+            };
+            let peer = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let peer = status();
+                    if peer.last_failed_exchange.is_some() {
+                        return peer;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{probe}: the failed exchange was never recorded"));
             let failed = peer
                 .last_failed_exchange
                 .as_ref()
@@ -3307,10 +3322,22 @@ mod retry_tests {
                         .unwrap()
                         .contains("that member's Fabric grants")
                 );
-                // Asleep: more time passes and the probe is not asked again.
+                // No hot loop: one probe per attempt, and attempts no closer together than the
+                // backoff's shortest jitter allows. A slow runner only makes fewer attempts.
                 tokio::time::sleep(Duration::from_millis(600)).await;
+                let elapsed = started.elapsed();
                 let asked = std::fs::read_to_string(&probes).unwrap().lines().count();
-                assert_eq!(asked, 1, "{probe}");
+                let mut allowed = 1;
+                let mut earliest = Duration::ZERO;
+                loop {
+                    earliest += PeerBackoff::delay(allowed as u32 - 1, 0);
+                    if earliest > elapsed {
+                        break;
+                    }
+                    allowed += 1;
+                }
+                assert!((1..=allowed).contains(&asked), "{probe}: {asked} probes in {elapsed:?}");
+                assert_eq!(status().status, "refused", "{probe}");
             } else {
                 assert_ne!(peer.status, "refused", "{probe}");
                 assert!(peer.refusal_reason.is_none(), "{probe}");
@@ -4914,6 +4941,220 @@ mod early_recovery {
         tokio::time::advance(PEER_PROBE_WINDOW).await;
         assert_eq!(worker.wait(unanswered.as_deref(), 45).await, None);
         assert!(worker.early_spent.is_empty());
+        awake.abort();
+        link.server.abort();
+    }
+
+    /// A link in front of a real peer that, for a span of paused time, drops every open
+    /// connection and closes each new one without an answer, as the messaging-faults link does
+    /// between `link.drop()` and `link.enabled = True`. Otherwise it forwards bytes both ways.
+    struct Outage {
+        url: String,
+        down_until: Arc<Mutex<tokio::time::Instant>>,
+        dropped: Arc<watch::Sender<u64>>,
+        /// Exchanges that reached the link while it was down.
+        refused: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Outage {
+        async fn start(peer: SocketAddr) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let down_until = Arc::new(Mutex::new(tokio::time::Instant::now()));
+            let dropped = Arc::new(watch::channel(0).0);
+            let refused = Arc::new(AtomicUsize::new(0));
+            let (until, drops, counted) = (down_until.clone(), dropped.clone(), refused.clone());
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let down = tokio::time::Instant::now() < *until.lock().unwrap();
+                    let (mut dropped, counted) = (drops.subscribe(), counted.clone());
+                    tokio::spawn(async move {
+                        if down {
+                            if read_request(&mut stream).await == Some(true) {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                            }
+                            return;
+                        }
+                        let Ok(mut upstream) = tokio::net::TcpStream::connect(peer).await else {
+                            return;
+                        };
+                        tokio::select! {
+                            _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream) => {}
+                            _ = dropped.changed() => {}
+                        }
+                    });
+                }
+            });
+            Self {
+                url,
+                down_until,
+                dropped,
+                refused,
+                server,
+            }
+        }
+
+        /// Drop every open connection and refuse new ones for `outage` of paused time.
+        fn drop_for(&self, outage: Duration) {
+            *self.down_until.lock().unwrap() = tokio::time::Instant::now() + outage;
+            self.dropped.send_modify(|generation| *generation += 1);
+        }
+    }
+
+    /// The per-PR contract for the messaging-faults `link_seconds` case: a link outage of a few
+    /// seconds, after a healthy exchange, resumes replication within that case's 10-second read
+    /// deadline, without spinning on the dead link while it is down.
+    #[tokio::test(start_paused = true)]
+    async fn a_seconds_long_link_outage_resumes_exchange_within_the_read_deadline() {
+        const STEP: Duration = Duration::from_millis(100);
+        let awake = keep_awake();
+        let fleet_id = "d706eab5-433c-474b-ae43-fd2a7891d85d";
+        let auth = FleetAuth::test(fleet_id, &[42; 32]);
+        let root = tempfile::tempdir().unwrap();
+        let local = Arc::new(plain_open(&root.path().join("harbor.sqlite3"), "harbor").unwrap());
+        let remote = Arc::new(plain_memory("beacon").unwrap());
+        for store in [&local, &remote] {
+            store.bind_fleet(fleet_id).unwrap();
+        }
+        // When each exchange reached the peer, in paused time.
+        let exchanges = Arc::new(Mutex::new(Vec::new()));
+        let observed = exchanges.clone();
+        let app = peer_router(
+            PeerState {
+                backend: Local(remote.clone()),
+                node: "beacon".into(),
+                auth: auth.clone(),
+                fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
+                outbound_notify: watch::channel(0).0,
+            },
+            Router::new(),
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                if request.method() == axum::http::Method::POST {
+                    observed.lock().unwrap().push(tokio::time::Instant::now());
+                }
+                next.run(request)
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let link = Outage::start(listener.local_addr().unwrap()).await;
+        let peer = tokio::spawn(axum::serve(listener, app).into_future());
+        let (_route_tx, routes) = watch::channel(vec![Route::Http(link.url.clone())]);
+        let (notify, _) = watch::channel(0);
+        let dialer = tokio::spawn(dial_peer(
+            Local(local.clone()),
+            "harbor".into(),
+            "beacon".into(),
+            routes,
+            auth,
+            FleetContext::legacy(BTreeSet::from(["beacon".into()])),
+            notify.subscribe(),
+        ));
+        fn phase(local: &Store) -> Option<String> {
+            local
+                .replication_sync
+                .lock()
+                .unwrap()
+                .get("beacon")
+                .and_then(|progress| progress.worker.clone())
+                .map(|worker| worker.phase)
+        }
+        // Paused time must not outrun loopback sockets or the store's blocking work: let an
+        // exchange in flight finish before each step of the clock.
+        async fn step(local: &Store) {
+            let started = std::time::Instant::now();
+            loop {
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+                if phase(local).as_deref() != Some("exchange")
+                    || started.elapsed() > Duration::from_secs(10)
+                {
+                    break;
+                }
+            }
+            tokio::time::advance(STEP).await;
+        }
+        // A warm link, as the case's cross-node warmup leaves it: the first exchanges have
+        // settled and the worker has been idle for two seconds.
+        let warm = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !(phase(&local).as_deref() == Some("idle")
+            && exchanges
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|at| at.elapsed() >= Duration::from_secs(2)))
+        {
+            assert!(tokio::time::Instant::now() < warm, "no healthy exchange");
+            step(&local).await;
+        }
+        // The link drops, and a message is written while it is down.
+        let outage = Duration::from_secs(3);
+        let started = tokio::time::Instant::now();
+        let ended = started + outage;
+        link.drop_for(outage);
+        fleet_claim(
+            &local,
+            "transport.observed",
+            "host/harbor",
+            serde_json::json!({"status": "up"}),
+        );
+        notify.send_modify(|generation| *generation += 1);
+        let resumed = loop {
+            if let Some(at) = exchanges
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .find(|at| *at > started)
+            {
+                break at;
+            }
+            assert!(
+                tokio::time::Instant::now() < ended + Duration::from_secs(30),
+                "no exchange after the outage"
+            );
+            step(&local).await;
+        };
+        // No exchange reaches the peer through a dropped link, so the first one that does was
+        // sent after the link returned.
+        assert!(resumed >= ended);
+        assert!(
+            resumed - ended < Duration::from_secs(10),
+            "the first exchange after the outage started {:?} after it ended",
+            resumed - ended
+        );
+        // That exchange succeeds and carries the message written during the outage.
+        let delivered = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !(phase(&local).as_deref() == Some("idle")
+            && remote
+                .latest_claim("host/harbor", Some("transport.observed"))
+                .unwrap()
+                .is_some())
+        {
+            assert!(
+                tokio::time::Instant::now() < delivered,
+                "the message did not replicate"
+            );
+            step(&local).await;
+        }
+        // Not a spin: while the link was down the worker tried no more often than the shortest
+        // jitter of its backoff schedule allows.
+        let (mut schedule, mut allowed) = (Duration::ZERO, 0);
+        while schedule < outage {
+            schedule += PeerBackoff::delay(allowed, 0);
+            allowed += 1;
+        }
+        let refused = link.refused.load(Ordering::SeqCst);
+        assert!(
+            (1..=allowed as usize).contains(&refused),
+            "{refused} exchanges in a {outage:?} outage; the backoff allows {allowed}"
+        );
+        dialer.abort();
+        peer.abort();
         awake.abort();
         link.server.abort();
     }
