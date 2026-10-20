@@ -6,6 +6,7 @@ import type { ChartScene as AgentTraceScene, ChartLane as Lane } from './adapter
 import { DetailsInk, DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
 import type { TraceCostSplit } from '../trace-series.ts'
 import { MissingDetailsValue } from '../DetailsUnavailable.tsx'
+import { traceFactReason } from '../trace-reasons.ts'
 type SpendComponents = { readonly input: number; readonly cacheRead: number; readonly cacheWrite: number; readonly output: number }
 const SPEND_COMPONENTS: ReadonlyArray<{ readonly id: keyof SpendComponents; readonly label: string; readonly color: string }> = [
   { id: 'input', label: 'Input', color: accent.primary },
@@ -41,7 +42,7 @@ export const SpendPanel = ({ lane, componentsKnown = true, showTotals = true, sp
   const componentTotals = lastComponents !== undefined && hasComponents(lastComponents) ? SPEND_COMPONENTS.map((component) => ({ ...component, value: lastComponents[component.id] })) : []
   const attributedTotal = componentTotals.reduce((total, component) => total + component.value, 0)
   return <div {...stylex.props(styles.root)}>
-    <div data-details-data-row={showTotals && lane?.totalUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.header)}>{showTotals && <span>Main session <strong>{lane?.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane?.totalUsd._tag === 'Unknown' ? lane.totalUsd.detail ?? lane.totalUsd.reason : 'Session spend total was not supplied.'}/>}</strong></span>}<span {...stylex.props(styles.note)}>API-equivalent</span></div>
+    <div data-details-data-row={showTotals && lane?.totalUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.header)}>{showTotals && <span>Main session <strong>{lane?.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane?.totalUsd._tag === 'Unknown' ? traceFactReason(lane.totalUsd) : 'Session spend total was not supplied.'}/>}</strong></span>}<span {...stylex.props(styles.note)}>API-equivalent</span></div>
     {hasSeries && <>
       <svg {...stylex.props(styles.chart)} viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={attributed ? 'Cumulative API-equivalent spend split by input, cache read, cache write and output' : 'Cumulative main-session API-equivalent spend'}>
         <path d={`M${CHART_INSET} ${baseline}H${CHART_WIDTH - CHART_INSET}`} stroke={border.borderStrong} />

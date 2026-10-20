@@ -1,5 +1,6 @@
 /** Portable projection; the schema and Effect provider live in separate modules. */
-export type TraceUnknownReason = 'no-provider'|'not-covered'|'not-attributed'|'out-of-retention'|'loading'|'failed'
+export const traceUnknownReasons = ['no-provider', 'not-covered', 'not-attributed', 'out-of-retention', 'loading', 'failed'] as const
+export type TraceUnknownReason = typeof traceUnknownReasons[number]
 export type TraceFact<A> = {readonly _tag:'Known';readonly value:A;readonly source:'st'|'series';readonly asOfMs?:number}|{readonly _tag:'Unknown';readonly reason:TraceUnknownReason;readonly detail?:string}
 export type TraceSpendScope = {readonly _tag:'Self'}|{readonly _tag:'IncludingSubagents'}|{readonly _tag:'AgentIncarnations'}|{readonly _tag:'Unknown';readonly reason:'not-attributed'}
 export type TraceCoverage = {readonly _tag:'Complete'}|{readonly _tag:'Partial';readonly attributedFraction:number}|{readonly _tag:'NotCovered';readonly harnessName:string}|{readonly _tag:'Unavailable';readonly reason:TraceUnknownReason}

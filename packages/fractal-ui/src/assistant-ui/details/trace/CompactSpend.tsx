@@ -5,6 +5,7 @@ import { clock, money } from './chart.ts'
 import type { ChartLane as Lane, TraceChartProjection } from './adapter.ts'
 import { DetailsInk, DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
 import { MissingDetailsValue } from '../DetailsUnavailable.tsx'
+import { traceFactReason } from '../trace-reasons.ts'
 export interface CompactSpendProps {
   readonly lane: Lane
   /** Role aggregates when the provider cannot attribute marks to individual descendants. */
@@ -33,7 +34,7 @@ export const CompactSpend = ({ lane, descendantSpend, showTotals = true }: Compa
   const hasSeries = lane.cumulativeValues.length > 0
   const hasDescendantSeries = descendantSpend.cumulativeValues.length > 0
   return <div {...stylex.props(styles.root)} aria-label="Session and descendant spend">
-    {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}>Main session <strong>{lane.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane.totalUsd.detail ?? lane.totalUsd.reason}/>}</strong></span><span {...stylex.props(styles.descendants)}>Subagents <strong>{descendantUsd._tag === 'Known' ? money.format(descendantUsd.value) : <MissingDetailsValue label="Subagent spend" reason={descendantUsd.detail ?? descendantUsd.reason}/>}</strong></span></div>}
+    {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}>Main session <strong>{lane.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={traceFactReason(lane.totalUsd)}/>}</strong></span><span {...stylex.props(styles.descendants)}>Subagents <strong>{descendantUsd._tag === 'Known' ? money.format(descendantUsd.value) : <MissingDetailsValue label="Subagent spend" reason={traceFactReason(descendantUsd)}/>}</strong></span></div>}
     {(hasSeries || hasDescendantSeries) && <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
       {hasSeries && <path d={path([lane.cumulativeValues])} fill="none" stroke={accent.primary} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
       {hasDescendantSeries && <path d={path(descendantSeries)} fill="none" stroke={text.fgSoft} strokeWidth={1.5} strokeDasharray="4 2" vectorEffect="non-scaling-stroke" />}

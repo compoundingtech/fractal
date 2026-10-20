@@ -7,6 +7,8 @@ import type { DetailsOverview, TraceSeries, TraceFact } from '@smalltalk/fractal
 import { detailsWithSupplement } from './detailsSupplement.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
 import { observed, unavailable } from '../data/source.ts'
+import { traceUnknownReasons } from '../../../../packages/fractal-ui/src/assistant-ui/details/trace-series.ts'
+import { detailsReasonText, joinDetailsReasons, traceFactReason, traceReasonText } from '../../../../packages/fractal-ui/src/assistant-ui/details/trace-reasons.ts'
 
 // Match the existing node-rendering lane: semantic DOM, not compiled CSS.
 vi.mock('@stylexjs/stylex', () => ({
@@ -16,6 +18,23 @@ vi.mock('@stylexjs/stylex', () => ({
   keyframes: () => 'test-animation',
   props: () => ({}),
 }))
+
+describe('Details reason copy exhausts the trace wire contract', () => {
+  it.each(traceUnknownReasons)('maps %s to plain language rather than a raw code or fallback', reason => {
+    const text = traceReasonText(reason)
+    expect(text).not.toBe(reason)
+    expect(text).not.toBe('Not reported')
+    expect(text).not.toMatch(/^[a-z]+(-[a-z]+)+$/)
+    expect(traceFactReason({ _tag: 'Unknown', reason })).toBe(text)
+  })
+  it('uses a safe fallback for unknown codes and collapses repeated input reasons', () => {
+    expect(detailsReasonText('future-reason-code')).toBe('Not reported')
+    expect(traceReasonText('future')).toBe('Not reported')
+    expect(traceFactReason({ _tag: 'Unknown', reason: 'failed', detail: 'future-reason-code' })).toBe('Not reported')
+    expect(joinDetailsReasons(['no-provider', 'no-provider', 'no-provider'])).toBe('This harness does not report it.')
+    expect(detailsReasonText('The host has not reported a percentage.')).toBe('The host has not reported a percentage.')
+  })
+})
 
 const known = <A>(value: A): TraceFact<A> => ({ _tag: 'Known', value, source: 'st', asOfMs: 2_000 })
 const missing = { _tag: 'Unknown', reason: 'no-provider' } as const

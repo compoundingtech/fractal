@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Tooltip, TooltipTrigger, VisuallyHidden, type ButtonProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { detailsReasonText } from './trace-reasons'
 
 type DescribedTooltipButtonProps = Omit<ButtonProps, 'aria-describedby' | 'children'> & {
   /** Plain-text provenance: the trigger's persistent accessible description. */
@@ -36,12 +37,14 @@ export function DetailsInlineReason({ block = false, children }: { readonly bloc
 
 /**
  * An inline missing value beside its painted label. Desktop: a keyboard-reachable em dash whose reason is its
- * tooltip and accessible description. Narrow hosts paint the reason beside the dash.
+ * tooltip and accessible description. Narrow hosts paint the reason itself in the value's place; the em dash would
+ * only repeat it.
  */
 export function MissingDetailsValue({ label, reason }: { readonly label: string; readonly reason: string }) {
   const narrow = React.useContext(NarrowLayoutContext)
-  if (narrow) return <span data-details-missing-value {...stylex.props(styles.missingNarrow)}><span aria-hidden="true">—</span><VisuallyHidden elementType="span">{label}: unavailable.</VisuallyHidden> <DetailsInlineReason>{reason}</DetailsInlineReason></span>
-  return <DescribedTooltipButton data-details-missing-value aria-label={`${label}: unavailable`} description={reason} {...stylex.props(styles.trigger)}>—</DescribedTooltipButton>
+  const text = detailsReasonText(reason)
+  if (narrow) return <span data-details-missing-value {...stylex.props(styles.missingNarrow)}><VisuallyHidden elementType="span">{label}: unavailable. </VisuallyHidden><DetailsInlineReason>{text}</DetailsInlineReason></span>
+  return <DescribedTooltipButton data-details-missing-value aria-label={`${label}: unavailable`} description={text} {...stylex.props(styles.trigger)}>—</DescribedTooltipButton>
 }
 
 export type DetailsAvailability = 'Unavailable' | 'Partial'
@@ -52,8 +55,9 @@ export type DetailsAvailability = 'Unavailable' | 'Partial'
  */
 export function DetailsAvailabilityState({ subject, state = 'Unavailable', reason }: { readonly subject: string; readonly state?: DetailsAvailability; readonly reason: string }) {
   const narrow = React.useContext(NarrowLayoutContext)
-  if (narrow) return <><span data-details-availability={state} {...stylex.props(styles.word)}>{state}</span><DetailsInlineReason block>{reason}</DetailsInlineReason></>
-  return <DescribedTooltipButton data-details-availability={state} aria-label={`${subject}: ${state.toLowerCase()}`} description={reason} {...stylex.props(styles.trigger, styles.word)}>{state}</DescribedTooltipButton>
+  const text = detailsReasonText(reason)
+  if (narrow) return <><span data-details-availability={state} {...stylex.props(styles.word)}>{state}</span><DetailsInlineReason block>{text}</DetailsInlineReason></>
+  return <DescribedTooltipButton data-details-availability={state} aria-label={`${subject}: ${state.toLowerCase()}`} description={text} {...stylex.props(styles.trigger, styles.word)}>{state}</DescribedTooltipButton>
 }
 
 /** Subjects read as one phrase: deduped, comma-joined, sentence case. Pending footprints paint the same text. */
@@ -71,31 +75,49 @@ export function DetailsUnavailable({ subjects, state = 'Unavailable', reason }: 
 /** One unreported field of a metric group, with the source's own reason. */
 export interface NotReportedField { readonly name: string; readonly reason: string }
 const sentence = (name: string): string => name.charAt(0).toUpperCase() + name.slice(1)
-const FieldReasons = ({ fields }: { readonly fields: readonly NotReportedField[] }) =>
-  <DetailsInlineReason block>{fields.map(field => <span key={field.name} {...stylex.props(styles.reasonLine)}>{sentence(field.name)}: {field.reason}</span>)}</DetailsInlineReason>
+/** Fields sharing a reason, in first-seen order. */
+interface ReasonGroup { readonly names: readonly string[]; readonly reason: string }
+/** Each distinct human reason once, with every field it explains; codes never reach the UI. */
+const reasonGroups = (fields: readonly NotReportedField[]): readonly ReasonGroup[] => {
+  const groups = new Map<string, string[]>()
+  for (const field of fields) {
+    const reason = detailsReasonText(field.reason), names = groups.get(reason)
+    if (names === undefined) groups.set(reason, [field.name])
+    else if (!names.includes(field.name)) names.push(field.name)
+  }
+  return [...groups].map(([reason, names]) => ({ names, reason }))
+}
+/** A shared reason is the sentence alone; differing reasons prefix the fields each explains. */
+const reasonPrefix = (group: ReasonGroup, groups: readonly ReasonGroup[]): string => groups.length > 1 ? `${sentence(group.names.join(', '))}: ` : ''
+const ReasonLines = ({ groups }: { readonly groups: readonly ReasonGroup[] }) =>
+  <>{groups.map(group => <span key={group.reason} data-details-reason-line data-details-reason-fields={groups.length > 1 ? group.names.join(', ') : undefined} {...stylex.props(styles.reasonLine)}>{reasonPrefix(group, groups)}<span data-details-reason-text>{group.reason}</span></span>)}</>
 
 /**
  * A metric group's single missing-data line; never per-field dashes. A whole group paints
  * `Spend · not reported`; a partial group paints `Not reported: window, attribution`.
- * Desktop: the state word (whole) or each name (partial) is a keyboard-reachable trigger whose reason is its
- * tooltip and accessible description. Narrow hosts paint every field's reason beneath the line.
+ * Reasons are grouped: a reason shared by every missing field is one sentence; differing reasons each paint once,
+ * prefixed by the fields they explain. Desktop: the state word (whole) or each name (partial) is a
+ * keyboard-reachable trigger whose reason is its tooltip and accessible description. Narrow hosts paint the
+ * grouped reasons beneath the line.
  */
 export function DetailsNotReported({ group, fields }: { readonly group?: string; readonly fields: readonly NotReportedField[] }) {
   const narrow = React.useContext(NarrowLayoutContext)
   if (fields.length === 0) return null
   const names = fields.map(field => field.name).join(', ')
-  if (group !== undefined) return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" {...stylex.props(styles.line)}>
+  const groups = reasonGroups(fields)
+  const reasons = <DetailsInlineReason block><ReasonLines groups={groups} /></DetailsInlineReason>
+  if (group !== undefined) return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
     <span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
     {narrow
-      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><FieldReasons fields={fields} /></>
-      : <DescribedTooltipButton aria-label={`${group}: not reported`} description={fields.map(field => `${sentence(field.name)}: ${field.reason}`).join('; ')} tooltip={fields.map(field => <span key={field.name} {...stylex.props(styles.reasonLine)}>{sentence(field.name)}: {field.reason}</span>)} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
+      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span>{reasons}</>
+      : <DescribedTooltipButton aria-label={`${group}: not reported`} description={groups.map(reason => `${reasonPrefix(reason, groups)}${reason.reason}`).join('; ')} tooltip={<ReasonLines groups={groups} />} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
   </p>
   // Prose, not flex: names wrap like the pending twin's ink, so arrival never reflows the line.
-  return <p data-details-unavailable data-details-unavailable-subject={names} data-details-not-reported="fields" {...stylex.props(styles.prose)}>
+  return <p data-details-unavailable data-details-unavailable-subject={names} data-details-not-reported="fields" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.prose)}>
     Not reported: {fields.map((field, index) => <React.Fragment key={field.name}>{index > 0 && ', '}{narrow
       ? <span data-details-not-reported-field={field.name} {...stylex.props(styles.nowrap)}>{field.name}</span>
-      : <DescribedTooltipButton data-details-not-reported-field={field.name} aria-label={`${sentence(field.name)}: not reported`} description={field.reason} {...stylex.props(styles.trigger, styles.inlineTrigger)}>{field.name}</DescribedTooltipButton>}</React.Fragment>)}
-    {narrow && <FieldReasons fields={fields} />}
+      : <DescribedTooltipButton data-details-not-reported-field={field.name} aria-label={`${sentence(field.name)}: not reported`} description={detailsReasonText(field.reason)} {...stylex.props(styles.trigger, styles.inlineTrigger)}>{field.name}</DescribedTooltipButton>}</React.Fragment>)}
+    {narrow && reasons}
   </p>
 }
 

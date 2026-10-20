@@ -13,6 +13,7 @@ import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts
 import { useNativeDetails } from './useNativeDetails.ts'
 import { detailsWithSupplement } from './detailsSupplement.ts'
 import { ChangesInspector } from './ChangesInspector.tsx'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 
 /** Deployed defaults, individually replaceable without ratifying exploration alternatives. */
 export const liveDetailsVariants: DetailsVariants = {
@@ -34,6 +35,7 @@ export interface AgentDetailsPanelProps {
 
 /** The real kit tab-group owns Details' status/action slot; hidden tabs release reader demand. */
 export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, variants = liveDetailsVariants }: AgentDetailsPanelProps) {
+  const narrow = React.useContext(NarrowLayoutContext)
   const sourceRegistry = React.useContext(RegistryContext)
   const layout = React.useMemo<WorkbenchLayout>(() => ({ kind: 'group', tabs: [
     { uri: `details:${agentRef}`, view: 'details' },
@@ -43,7 +45,7 @@ export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, va
   const [selected, setSelected] = React.useState(detailsKey)
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
   return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={width === 'fill' ? undefined : { width }} {...stylex.props(styles.root, width === 'fill' && styles.fillRoot)}>
-    <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" onPress={onClose} {...stylex.props(styles.close)}>Close</Button></div>
+    <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouchTarget)}>Close</Button></div>
     <Workbench layout={layout} resources={resources} workspaceId={`live-inspector:${agentRef}`} scheme={scheme}
       appearance={{ width: 'W1', header: 'H3', chrome: 'P1', dropZones: 'D3' }}
       landmarkContext="Agent inspector" focusedPaneKey={selected} onPaneSelect={setSelected}
@@ -139,6 +141,7 @@ const styles = stylex.create({
   fillRoot: { width: '100%', flexGrow: 1 },
   closeBar: { display: 'flex', justifyContent: 'flex-end', flexShrink: 0, padding: s.xs },
   close: { fontSize: t.metaSize, color: c.fgMuted, backgroundColor: 'transparent', borderWidth: 0, padding: s.xs, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  closeTouchTarget: { minWidth: g.touchTarget, minHeight: g.touchTarget },
   content: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flexGrow: 1, overflowY: 'auto' },
   coverage: { margin: 0, padding: s.sm, fontSize: t.metaSize, color: c.fgMuted, overflowWrap: 'anywhere', flexShrink: 0 },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },

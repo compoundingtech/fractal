@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
 import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex.ts'
-import type { TraceSeries, TraceUnknownReason } from './trace-series.ts'
+import type { TraceSeries } from './trace-series.ts'
 import { contextOccupancy, estimatedOccupancyExplanation, traceCoverageState, type ContextOccupancy, type TraceAccumulationWindow, type TraceCoverage, type TraceCoverageState, type TraceFact, type TraceSpendScope } from './trace-series.ts'
 import { Button, Tooltip, TooltipTrigger } from 'react-aria-components'
 import type { DetailsEmptyRule } from './DetailsResources.tsx'
@@ -13,6 +13,7 @@ import { ContextPanel, ContextPanelPending, contextPanelFootprint, type ContextP
 import { SpendPanel, SpendPanelPending } from './trace/SpendPanel.tsx'
 import { DescribedTooltipButton, DetailsInlineReason, DetailsNotReported, type NotReportedField } from './DetailsUnavailable.tsx'
 import { NarrowLayoutContext } from '../composition/NarrowLayout.tsx'
+import { traceReasonText, joinDetailsReasons, traceFactReason } from './trace-reasons.ts'
 export interface DetailsChartsProps {
   readonly trace: TraceSeries
   readonly context: 'C1' | 'C2' | 'C3'
@@ -24,16 +25,7 @@ export interface DetailsChartsProps {
   readonly showUnavailableReasons?: boolean
 }
 
-const missingReason = (fact: TraceFact<unknown>): string => fact._tag === 'Unknown' ? fact.detail ?? fact.reason : 'Context occupancy could not be derived from the reported values.'
-
-const seriesExplanation: Record<TraceUnknownReason, string> = {
-  'no-provider': 'The current source does not provide historical samples.',
-  'not-covered': 'Historical samples are not available for this session.',
-  'not-attributed': 'Historical samples are not attributed to this session.',
-  'out-of-retention': 'Historical samples are no longer retained.',
-  loading: 'Historical samples are still loading.',
-  failed: 'Historical samples could not be loaded.',
-}
+const missingReason = (fact: TraceFact<unknown>): string => fact._tag === 'Unknown' ? traceFactReason(fact) : 'Context occupancy could not be derived from the reported values.'
 
 /** A group's missing fields, named once; a field missing for several reasons keeps all of them. */
 const gap = (name: string, reason: string): NotReportedField => ({ name, reason })
@@ -44,14 +36,14 @@ const mergeGaps = (gaps: readonly NotReportedField[]): readonly NotReportedField
     if (!reasons.includes(reason)) reasons.push(reason)
     merged.set(name, reasons)
   }
-  return [...merged].map(([name, reasons]) => gap(name, reasons.join(' · ')))
+  return [...merged].map(([name, reasons]) => gap(name, joinDetailsReasons(reasons)))
 }
 
 type ContextMeters = TraceSeries['meters']['context']
 const hasContextMeterData = (context: ContextMeters): boolean => contextOccupancy(context) !== undefined || context.compactions._tag === 'Known' || context.lastCompactionMs._tag === 'Known'
 /** Only displayed facts are gaps: a token-derived occupancy is an estimate, not a missing percentage. */
 const contextGaps = (context: ContextMeters): readonly NotReportedField[] => [
-  ...(contextOccupancy(context) === undefined ? [gap('occupancy', [context.reportedPercent, context.usedTokens, context.windowTokens].filter(fact => fact._tag === 'Unknown').map(missingReason).join(' · ') || 'Context occupancy could not be derived from the reported values.')] : []),
+  ...(contextOccupancy(context) === undefined ? [gap('occupancy', joinDetailsReasons([context.reportedPercent, context.usedTokens, context.windowTokens].filter(fact => fact._tag === 'Unknown').map(missingReason)) || 'Context occupancy could not be derived from the reported values.')] : []),
   ...(context.compactions._tag === 'Unknown' ? [gap('compactions', missingReason(context.compactions))] : []),
   ...(context.lastCompactionMs._tag === 'Unknown' ? [gap('last compaction', missingReason(context.lastCompactionMs))] : []),
 ]
@@ -165,11 +157,11 @@ const tracedSessionsLine = (trace: TraceSeries): string => {
 /** A missing value names its metric; a reported value's missing scope, window or attribution names that metadata. */
 const spendGaps = (trace: TraceSeries): readonly NotReportedField[] => [
   ...spendMetrics(trace).flatMap(row => row.fact._tag === 'Unknown' ? [gap(row.name, missingReason(row.fact))] : [
-    ...(row.scope._tag === 'Unknown' ? [gap(`${row.prefix} scope`, row.scope.reason)] : []),
+    ...(row.scope._tag === 'Unknown' ? [gap(`${row.prefix} scope`, traceReasonText(row.scope.reason))] : []),
     ...(row.window._tag === 'Unknown' ? [gap(`${row.prefix} window`, missingReason(row.window))] : []),
-    ...(row.coverage?._tag === 'Unavailable' ? [gap('attribution', row.coverage.reason)] : []),
+    ...(row.coverage?._tag === 'Unavailable' ? [gap('attribution', traceReasonText(row.coverage.reason))] : []),
   ]),
-  ...(trace.coverage._tag === 'Unavailable' ? [gap('attribution', trace.coverage.reason)] : []),
+  ...(trace.coverage._tag === 'Unavailable' ? [gap('attribution', traceReasonText(trace.coverage.reason))] : []),
   ...(tracedSubagents(trace).length > 0 && trace.subagentsWindow._tag === 'Unknown' ? [gap('traced-session window', missingReason(trace.subagentsWindow))] : []),
 ]
 
@@ -233,7 +225,7 @@ export const hasDetailsChartData = ({ trace, context, spend, section, empty = 'E
 /** Meters and drawing evidence share one portable Known/Unknown contract; each group paints at most one missing-data line. */
 export const DetailsCharts = ({ trace, context, spend, section, showUnavailableReasons = true }: DetailsChartsProps): ReactNode => {
   const projection = adaptTrace(trace)
-  const seriesReason = trace.series._tag === 'Unknown' ? trace.series.detail ?? seriesExplanation[trace.series.reason] : 'No historical samples were retained.'
+  const seriesReason = trace.series._tag === 'Unknown' ? traceFactReason(trace.series) : 'No historical samples were retained.'
   const spendProjection = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? undefined : projection
   const spendReason = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? 'Session spend scope is not attributed' : seriesReason
   const contextSamples = projection?.lane.turnSamples !== undefined && (context === 'C2' || projection.lane.samples.length === 0) ? projection.lane.turnSamples : projection?.lane.samples

@@ -6,6 +6,8 @@ import { Button } from 'react-aria-components'
 import { DetailsPane, type DetailsLayoutIntent } from './assistant-ui/details/DetailsPane'
 import { DetailsLabelContext } from './assistant-ui/details/DetailsResources'
 import { detailsStoryInputs, detailsWorkbenchResources, paintedText } from './assistant-ui/details/story-fixtures'
+import { detailsReasonText } from './assistant-ui/details/trace-reasons'
+import { traceUnknownReasons } from './assistant-ui/details/trace-series'
 import { detailsTraceFixtures } from './assistant-ui/details/trace/fixture-provider'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
@@ -14,6 +16,11 @@ import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { Workbench } from './assistant-ui/workbench/Workbench'
 import { group, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
 import { accentVars as accent, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
+import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { AgentDetailsPanel } from '../../../apps/fractal-web/src/web/AgentDetailsPanel'
+import { DataSourceProvider } from '../../../apps/fractal-web/src/data/react'
+import { fixtureSource } from '../../../apps/fractal-web/src/data/fixtureSource'
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
 const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),inspector:(width:number)=>({display:'flex',flexDirection:'column',width,maxWidth:'100%',height:720,minHeight:0,overflow:'hidden',backgroundColor:surface.canvas}),canvas:{backgroundColor:surface.canvas},pane:{height:660},comparison:{display:'flex',flexWrap:'wrap',alignItems:'flex-start',gap:space.xl,backgroundColor:surface.canvas},card:{width:440,maxWidth:'100%',height:640},control:{color:text.fg,backgroundColor:surface.controlFill,borderWidth:0,borderRadius:radius.control,paddingInline:space.sm,paddingBlock:space.xs,marginInlineEnd:space.xs,fontFamily:type.fontSans,fontSize:type.metaSize,cursor:'pointer',':focus-visible':{outlineWidth:geometry.focusRing,outlineStyle:'solid',outlineColor:accent.primary}}})
@@ -54,7 +61,8 @@ async function play({canvasElement}:{canvasElement:HTMLElement}){
   const wrong=root.cloneNode(true) as HTMLElement,section=wrong.querySelector('section');requireContract(section,'Missing unavailable control target');for(let i=0;i<2;i++){const duplicate=doc.createElement('p');duplicate.setAttribute('data-details-unavailable','true');duplicate.textContent='Unavailable';section.append(duplicate)}await rejectsControl('Unavailable prose repeats within a section',()=>assertSections(wrong))
   const line=root.querySelector<HTMLElement>('[data-details-overview-line]');requireContract(line,'Missing one-line control target');const height=line.style.height;try{line.style.height='80px';await rejectsControl('Overview sentence exceeds one line',()=>assertOverview(root))}finally{line.style.height=height}
   const missing=within(root).getByRole('button',{name:'Managed-session elapsed (from session start to end or now; wall time, not active): unavailable'});expect(missing).toHaveTextContent('—');missing.focus();await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
-  const tooltip=await within(doc.body).findByRole('tooltip');const assertProvenance=()=>requireContract(tooltip.textContent?.includes('not reported')||tooltip.textContent==='Unreported','Missing value lost its provenance tooltip');assertProvenance();const text=tooltip.textContent;try{tooltip.textContent='Available';await rejectsControl('Missing value lost its provenance tooltip',assertProvenance)}finally{tooltip.textContent=text}
+  // The state word is never the reason: an unreported duration explains itself in plain prose.
+  const tooltip=await within(doc.body).findByRole('tooltip');const assertProvenance=()=>requireContract(/\bnot reported\b/i.test(tooltip.textContent??'')&&tooltip.textContent!=='Unreported','Missing value lost its provenance tooltip');assertProvenance();const text=tooltip.textContent;try{tooltip.textContent='Unreported';await rejectsControl('Missing value lost its provenance tooltip',assertProvenance)}finally{tooltip.textContent=text}
   await userEvent.keyboard('{Escape}');close.focus()
   const assertClosed=()=>requireContract(!canvas.queryByTestId('details-pane')&&doc.activeElement===opener,'Escape did not close Details and restore opener focus')
   const intercept=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation()}};root.addEventListener('keydown',intercept,{capture:true});try{await userEvent.keyboard('{Escape}');await rejectsControl('Escape did not close Details and restore opener focus',assertClosed)}finally{root.removeEventListener('keydown',intercept,{capture:true})}
@@ -125,10 +133,11 @@ async function checkMetricLines(canvasElement:HTMLElement){
   await mutate('Token-derived occupancy is not marked estimated','[data-details-all-state="busy"] section[aria-label$="Context"] [data-details-occupancy-estimated]',node=>node.remove())
   const estimate=metricSection(canvasElement,'busy','Context').querySelector<HTMLElement>('button[data-details-occupancy-estimated]');requireContract(estimate,'Missing estimated occupancy trigger')
   requireContract(await keyboardTooltip(estimate)==='Harness did not report a percentage; estimated from tokens.','Estimated occupancy lost its explanation')
+  // Every unknown Spend field shares one reason: the group reads it once, as the mapped sentence, never per field or as a code.
   const group=within(metricSection(canvasElement,'unknown','Spend')).getByRole('button',{name:'Spend: not reported'})
-  requireContract((await keyboardTooltip(group))?.includes('Total spend: no-provider'),'Unreported group lost its provenance tooltip')
+  requireContract(group.closest('[data-details-not-reported]')?.getAttribute('data-details-reason-groups')==='1'&&await keyboardTooltip(group)===detailsReasonText('no-provider'),'Unreported group lost its provenance tooltip')
   const field=within(metricSection(canvasElement,'partial','Spend')).getByRole('button',{name:'Token window: not reported'})
-  requireContract(await keyboardTooltip(field)==='no-provider','Not reported field lost its provenance tooltip')
+  requireContract(await keyboardTooltip(field)===detailsReasonText('no-provider'),'Not reported field lost its provenance tooltip')
 }
 export const AllStates:Story={
   args:{opening:'Restored',width:1440},
@@ -357,7 +366,89 @@ export const PhoneDetails:Story={
     const reason=exposedLines(canvasElement,'[data-details-not-reported="group"]')[0]?.querySelector<HTMLElement>('[data-details-reason]');requireContract(reason,'Missing reason control target')
     const display=reason.style.display;try{reason.style.display='none';await rejectsCause(notBeneath,()=>assertPhoneReasons(canvasElement))}finally{reason.style.display=display}
     assertPhoneReasons(canvasElement)
+    await checkHumanReasons(canvasElement,true)
+    // An unreported duration paints a plain reason under its full label, not a dash and its state word.
+    assertDurationReason(unreported)
+    const durationReason=unreported.querySelector('[data-details-duration-label]')?.closest('[data-details-overview-line]')?.querySelector<HTMLElement>('[data-details-missing-value] [data-details-reason]');requireContract(durationReason,'Missing duration reason control target')
+    const durationText=durationReason.textContent;try{durationReason.textContent='Unreported';await rejectsControl(strayState,()=>assertDurationReason(unreported))}finally{durationReason.textContent=durationText}
+    assertDurationReason(unreported)
   },
+}
+/** Canonical hyphenated wire codes; host prose such as model identifiers is never matched against a generic pattern. */
+const rawReasonCodes=new RegExp(`\\b(?:${traceUnknownReasons.filter(code=>code.includes('-')).join('|')})\\b`)
+/** Every node that carries a reason: painted phone reasons, grouped reason text and hidden accessible descriptions. */
+const reasonNodes='[data-details-reason],[data-details-reason-text],[data-details-reason-description]'
+const rawCode='Details exposes a raw reason code or an empty reason'
+function assertNoReasonCodes(root:HTMLElement){
+  const offenders:string[]=[]
+  for(const pane of root.querySelectorAll<HTMLElement>('[data-testid="details-pane"]')){const match=(pane.textContent??'').match(rawReasonCodes);if(match)offenders.push(`pane text "${match[0]}"`)}
+  for(const node of root.querySelectorAll<HTMLElement>(reasonNodes)){
+    const text=(node.textContent??'').trim()
+    if(/^[a-z]+(?:-[a-z]+)+\.?$/.test(text)||rawReasonCodes.test(text))offenders.push(`code "${text}"`)
+    else if(!text&&!node.closest('[inert],[aria-hidden="true"]'))offenders.push('empty exposed reason')
+  }
+  requireContract(offenders.length===0,`${rawCode}: ${offenders.join('; ')}`)
+}
+const sharedReason='A shared group reason is not one sentence'
+const fieldPrefix=(text:string,names:readonly string[])=>names.some(name=>text.toLowerCase().includes(`${name.toLowerCase()}:`))
+/**
+ * The unreported host's Context and Spend groups each miss several fields for one reason: phone paints one reason
+ * line, desktop describes one sentence, with no per-field prefix. Phone partial lines with differing reasons name
+ * each reason once, prefixed by exactly the fields it explains.
+ */
+function assertGroupedReasons(root:HTMLElement,narrow:boolean){
+  const failures:string[]=[]
+  const groups=exposedLines(inspector(root,'unreported'),'[data-details-not-reported="group"]')
+  if(groups.length!==2)failures.push(`${groups.length} whole groups`)
+  for(const line of groups){
+    const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),subject=line.dataset.detailsUnavailableSubject
+    if(names.length<2)failures.push(`${subject} misses ${names.length} field`)
+    if(narrow){
+      const lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]')],text=(lines[0]?.textContent??'').trim()
+      if(lines.length!==1||lines[0]!.hasAttribute('data-details-reason-fields')||!text||fieldPrefix(text,names))failures.push(`${subject}: ${lines.map(item=>item.textContent).join(' | ')}`)
+    }else{
+      const trigger=line.querySelector<HTMLElement>('button'),description=trigger?descriptionOf(trigger):''
+      if(!description||description.includes('; ')||fieldPrefix(description,names))failures.push(`${subject}: "${description}"`)
+    }
+  }
+  if(narrow){
+    let differing=0
+    for(const line of exposedLines(root,'[data-details-not-reported]')){
+      const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]')]
+      const reasons=lines.map(item=>(item.querySelector('[data-details-reason-text]')?.textContent??'').trim())
+      if(new Set(reasons).size!==reasons.length)failures.push(`${line.dataset.detailsUnavailableSubject} repeats a reason`)
+      if(lines.length<2)continue
+      differing++
+      const explained=lines.flatMap(item=>(item.dataset.detailsReasonFields??'').split(', ').filter(Boolean))
+      if(explained.length!==names.length||!names.every(name=>explained.includes(name)))failures.push(`${line.dataset.detailsUnavailableSubject} groups ${explained.join(', ')}`)
+    }
+    if(differing===0)failures.push('no line with differing reasons')
+  }
+  requireContract(failures.length===0,`${sharedReason}: ${failures.join('; ')}`)
+}
+/** Human, deduplicated reasons with falsifying controls: a raw code, a per-field split of a shared reason. */
+async function checkHumanReasons(root:HTMLElement,narrow:boolean){
+  assertNoReasonCodes(root);assertGroupedReasons(root,narrow)
+  const node=[...root.querySelectorAll<HTMLElement>(narrow?'[data-details-reason-text]':'[data-details-reason-description]')].find(item=>!item.closest('[inert],[aria-hidden="true"]'));requireContract(node,'Missing reason code control target')
+  const text=node.textContent;try{node.textContent='no-provider';await rejectsCause(rawCode,()=>assertNoReasonCodes(root))}finally{node.textContent=text}
+  const group=exposedLines(inspector(root,'unreported'),'[data-details-not-reported="group"]')[0];requireContract(group,'Missing shared reason control target')
+  const names=(group.dataset.detailsNotReportedNames??'').split(', ')
+  const split=names.map(name=>`${name.charAt(0).toUpperCase()}${name.slice(1)}: ${text}`).join('; ')
+  if(narrow){
+    const line=group.querySelector<HTMLElement>('[data-details-reason-line]');requireContract(line,'Missing shared reason line')
+    const copy=line.cloneNode(true) as HTMLElement;copy.textContent=split;line.after(copy)
+    try{await rejectsCause(sharedReason,()=>assertGroupedReasons(root,narrow))}finally{copy.remove()}
+  }else{
+    const trigger=group.querySelector<HTMLElement>('button'),description=trigger&&root.ownerDocument.getElementById(trigger.getAttribute('aria-describedby')??'');requireContract(description,'Missing shared reason description')
+    const original=description.textContent;try{description.textContent=split;await rejectsCause(sharedReason,()=>assertGroupedReasons(root,narrow))}finally{description.textContent=original}
+  }
+  assertNoReasonCodes(root);assertGroupedReasons(root,narrow)
+}
+const strayState='Missing duration repeats its state word instead of a reason'
+function assertDurationReason(host:HTMLElement){
+  const value=host.querySelector('[data-details-duration-label]')?.closest('[data-details-overview-line]')?.querySelector<HTMLElement>('[data-details-missing-value]')
+  const reason=value?.querySelector('[data-details-reason]')?.textContent?.trim()??''
+  requireContract(value&&/\bnot reported\b/i.test(reason)&&!/^unreported\.?$/i.test(reason)&&!value.textContent?.includes('—')&&value.textContent?.includes(': unavailable.'),strayState)
 }
 const describedTriggers='button[data-details-missing-value],button[data-details-availability],[data-details-not-reported] button,button[data-details-unreported-section],button[data-details-coverage]'
 const undescribed='Missing-data reason is not the trigger’s accessible description'
@@ -383,6 +474,7 @@ export const DesktopReasonDescriptions:Story={
     const target=triggers[0]!,ids=target.getAttribute('aria-describedby')!
     try{target.removeAttribute('aria-describedby');await rejectsCause(undescribed,()=>assertDescribed([target]))}finally{target.setAttribute('aria-describedby',ids)}
     assertDescribed(triggers)
+    await checkHumanReasons(canvasElement,false)
     // The keyboard tooltip paints the same provenance the description announces.
     const groupTrigger=exposedTriggers(unreported).find(trigger=>trigger.closest('[data-details-not-reported="group"]')),field=exposedTriggers(retained).find(trigger=>trigger.matches('[data-details-not-reported-field]')),missing=exposedTriggers(unreported).find(trigger=>trigger.matches('[data-details-missing-value]'))
     for(const trigger of [groupTrigger,field,missing]){requireContract(trigger,'Missing desktop provenance trigger');requireContract(await keyboardTooltip(trigger)===descriptionOf(trigger).split('; ').join(''),'Desktop tooltip and accessible description disagree')}
@@ -392,5 +484,39 @@ export const DesktopReasonDescriptions:Story={
     const tab=canvasElement.querySelector<HTMLElement>('[role="tab"]')!,height=tab.style.height
     try{tab.style.height='44px';await rejectsControl('Desktop Details adopted phone geometry',assertDense)}finally{tab.style.height=height}
     assertDense()
+  },
+}
+
+/** The deployed inspector boundary, including its host-owned close control rather than only the kit pane. */
+function ProductionPhoneInspector({ scheme }: Args) {
+  const [registry] = React.useState(() => AtomRegistry.make())
+  const [source] = React.useState(() => fixtureSource({ world: {
+    now: 10_000, agents: [decodeUnknownSync(Agent)({
+      kind: 'agent', id: 'agent/phone-details', name: 'Phone Details seat', host_id: 'host/example', runtime_ids: [],
+      reachability: 'reachable', state: 'running', revision: '1', incarnation_id: 'first', updated_at: '1970-01-01T00:00:04.000Z',
+    })], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
+  } }))
+  React.useEffect(() => () => registry.dispose(), [registry])
+  return <div role="main" aria-label="Production phone inspector" {...stylex.props(...baselineTheme, ...(scheme === 'light' ? lightTheme : []))} style={{ width: 390, maxWidth: '100%', height: 900, display: 'flex', flexDirection: 'column' }}>
+    <ThemePortal><NarrowLayoutContext.Provider value={true}><DataSourceProvider source={source} registry={registry}>
+      <AgentDetailsPanel agentRef="agent/phone-details" width="fill" scheme={scheme} onClose={() => undefined} onOpen={() => undefined} />
+    </DataSourceProvider></NarrowLayoutContext.Provider></ThemePortal>
+  </div>
+}
+export const ProductionPhoneDetails: Story = {
+  render: ProductionPhoneInspector,
+  play: async ({ canvasElement }) => {
+    const panel = await within(canvasElement).findByRole('complementary', { name: 'Agent inspector' })
+    await waitFor(() => requireContract(panel.querySelectorAll('[role="tab"]').length === 2 && panel.querySelector('[data-testid="details-pane"]'), 'Production inspector did not mount Details and Changes'))
+    const close = within(panel).getByRole('button', { name: 'Close agent inspector' })
+    requireContract(touchTargets(panel).includes(close), 'Production phone sweep omitted the host close control')
+    assertTouch(touchTargets(panel))
+    const minimum = close.style.minHeight
+    try {
+      close.style.minHeight = '24px'
+      await rejectsCause(touchFloor, () => assertTouch(touchTargets(panel)))
+    } finally { close.style.minHeight = minimum }
+    assertTouch(touchTargets(panel))
+    assertNoReasonCodes(panel)
   },
 }

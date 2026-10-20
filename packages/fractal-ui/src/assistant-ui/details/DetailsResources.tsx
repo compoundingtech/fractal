@@ -10,10 +10,11 @@ import { ResourceCardV1, ResourceHoverV1, WholeResourceMeta } from '../resources
 import { AgentHoverCard } from '../sidebar/SidebarAgentRow'
 import { AGENT_DRAG_MIME, agentPaneKey } from '../workbench/agent-drag'
 import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from './model'
-import type { TraceSeries, TraceSubagent, TraceUnknownReason } from './trace-series'
+import type { TraceSeries, TraceSubagent } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
 import { DescribedTooltipButton, DetailsAvailabilityState, DetailsInlineReason, DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
+import { detailsReasonText, traceFactReason, traceReasonText } from './trace-reasons'
 import { traceCoverageState } from './trace-series'
 
 export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
@@ -105,27 +106,17 @@ function visible(items: DetailsValue<readonly DetailsResource[]>, rule: DetailsE
 const knownZeroTracedSubagents = (trace: TraceSeries): boolean => trace.subagentCount._tag === 'Known'
   && trace.subagentCount.value === 0 && trace.subagents._tag === 'Known' && trace.subagents.value.length === 0
 
-/** Collection provenance stays in the missing-value tooltip. */
-const humanSubagentReasons: Readonly<Record<TraceUnknownReason, string>> = {
-  'no-provider': 'This source doesn’t report subagent breakdowns.',
-  'not-covered': 'Subagent breakdowns aren’t tracked for this session.',
-  'not-attributed': 'Subagent breakdowns aren’t attributed to this session.',
-  'out-of-retention': 'Subagent breakdowns are no longer retained.',
-  loading: 'Subagent breakdowns are still loading.',
-  failed: 'Subagent breakdowns couldn’t be loaded.',
-}
 const humanSectionReasons: Readonly<Partial<Record<DetailsSection['title'], string>>> = {
   Reviews: 'This source doesn’t report reviews.',
   'Declared bindings': 'This source doesn’t report declared bindings.',
   History: 'This source doesn’t report session history.',
 }
 function unavailableReason(section: DetailsSection, trace: TraceSeries, empty: DetailsEmptyRule): string {
-  if (section.items._tag === 'Unknown' && section.unavailableReason !== undefined) return section.unavailableReason
-  if (section.title === 'Subagents' && trace.subagents._tag === 'Unknown' && trace.subagents.detail !== undefined) return trace.subagents.detail
-  if (section.title === 'History' && trace.history._tag === 'Unknown' && trace.history.detail !== undefined) return trace.history.detail
-  const subagentReason = trace.subagents._tag === 'Unknown' ? trace.subagents.reason : 'no-provider'
-  if (empty !== 'E3') return section.title === 'Subagents' ? humanSubagentReasons[subagentReason] : `This source doesn’t report ${section.title.toLowerCase()} yet.`
-  return section.title === 'Subagents' ? humanSubagentReasons[subagentReason] : humanSectionReasons[section.title] ?? `This source doesn’t report ${section.title.toLowerCase()}.`
+  if (section.items._tag === 'Unknown' && section.unavailableReason !== undefined) return detailsReasonText(section.unavailableReason)
+  if (section.title === 'Subagents') return trace.subagents._tag === 'Unknown' ? traceFactReason(trace.subagents) : traceReasonText('no-provider')
+  if (section.title === 'History' && trace.history._tag === 'Unknown' && trace.history.detail !== undefined) return traceFactReason(trace.history)
+  if (empty !== 'E3') return `This source doesn’t report ${section.title.toLowerCase()} yet.`
+  return humanSectionReasons[section.title] ?? `This source doesn’t report ${section.title.toLowerCase()}.`
 }
 
 /** Name only missing row metrics; unrelated unreported facts need no section note. */
@@ -199,13 +190,13 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
     && observedSubagents.items.value.some(resource => resource.agent?.status === 'unobserved')
   const partialNote = missingStatus ? "Status isn't reported for st resources." : missingLineCountsNote(section)
   const windowReason = section.title === 'Subagents' && showBreakdown && subagentWindow === undefined
-    ? trace.subagentsWindow._tag === 'Unknown' ? trace.subagentsWindow.detail ?? `Traced-session accumulation window: ${trace.subagentsWindow.reason}.` : 'Traced-session accumulation window is unreported.'
+    ? trace.subagentsWindow._tag === 'Unknown' ? traceFactReason(trace.subagentsWindow) : 'Traced-session accumulation window is unreported.'
     : undefined
   const countReason = section.title === 'Subagents' && showBreakdown && trace.subagents._tag === 'Known' && trace.subagentCount._tag === 'Unknown'
-    ? trace.subagentCount.detail ?? `Traced-session total count: ${trace.subagentCount.reason}.` : undefined
+    ? traceFactReason(trace.subagentCount) : undefined
   const coverage = traceCoverageState(trace.coverage)
   const coverageReason = section.title === 'Subagents'
-    ? coverage._tag === 'Unavailable' ? `Attribution coverage: ${coverage.reason}.`
+    ? coverage._tag === 'Unavailable' ? traceReasonText(coverage.reason)
       : coverage._tag === 'PartialUnreported' ? 'The attributed fraction is unreported.' : undefined
     : undefined
   const gaps = [

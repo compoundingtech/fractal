@@ -13,6 +13,7 @@ import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
 import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry } from '../composition-tokens.stylex'
 import { DetailsInlineReason, MissingDetailsValue } from './DetailsUnavailable'
+import { detailsReasonText } from './trace-reasons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 export interface DetailsVariants {
@@ -20,13 +21,16 @@ export interface DetailsVariants {
 }
 /**
  * A host `detail` is the missing value's provenance, or a known value's provenance beneath it in the tooltip.
+ * A missing value's state word (`Unreported`) is never its reason: without a host `detail` the reason is plain prose,
+ * naming the field only where its label is not painted beside it (`labelPainted`).
  * Narrow (phone) hosts have no hover: the value wraps in full and its provenance paints beneath it.
  */
-function OverviewValue({label,value,detail}:{label:string;value:string|undefined;detail?:string|undefined}) {
+function OverviewValue({label,value,detail,labelPainted=false}:{label:string;value:string|undefined;detail?:string|undefined;labelPainted?:boolean}) {
   const narrow=React.useContext(NarrowLayoutContext)
-  if(value===undefined||/\b(unreported|unavailable)\b/i.test(value))return <MissingDetailsValue label={label} reason={detail??value??`${label} is not reported by this source.`}/>
-  if(narrow)return <span data-details-overview-value {...stylex.props(styles.valueText)}>{value}{detail!==undefined&&<DetailsInlineReason block>{detail}</DetailsInlineReason>}</span>
-  return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}{detail!==undefined&&<span data-details-value-detail {...stylex.props(styles.tooltipDetail)}>{detail}</span>}</Tooltip></TooltipTrigger>
+  if(value===undefined||/\b(unreported|unavailable)\b/i.test(value))return <MissingDetailsValue label={label} reason={detail??(labelPainted?'Not reported by this source.':`${label} is not reported by this source.`)}/>
+  const provenance=detail===undefined?undefined:detailsReasonText(detail)
+  if(narrow)return <span data-details-overview-value {...stylex.props(styles.valueText)}>{value}{provenance!==undefined&&<DetailsInlineReason block>{provenance}</DetailsInlineReason>}</span>
+  return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}{provenance!==undefined&&<span data-details-value-detail {...stylex.props(styles.tooltipDetail)}>{provenance}</span>}</Tooltip></TooltipTrigger>
 }
 export interface DetailsLayoutIntent { readonly hiddenSections: readonly string[] }
 function Section({title,children,hidden}:{title:string;children:React.ReactNode;hidden:boolean}) {
@@ -174,7 +178,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         </>}
         </>:<>
         {overview.title!==undefined&&<strong data-details-name {...stylex.props(styles.name)}>{overview.title}</strong>}
-        {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=><React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}><OverviewValue label={name} value={value}/></dd></React.Fragment>)}</dl>:<>
+        {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=><React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}><OverviewValue label={name} value={value} labelPainted/></dd></React.Fragment>)}</dl>:<>
           <div data-details-overview-line {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}<OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
           {variants.overview==='O2'&&<>
             <div data-details-overview-line {...stylex.props(line)}><OverviewValue label="Harness" value={overview.harness}/><span>·</span><OverviewValue label="Incarnation age" value={overview.age}/>{spend.totalUsd._tag==='Known'&&<> · {spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</>}</div>
@@ -187,7 +191,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         {(pending?pendingOverview.durations:overview.durations)?.map(duration=>{
           // A first-read field keeps its known label and reserves the host's placeholder value; settled siblings stay readable.
           const fieldPending=!pending&&duration.pending===true
-          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue label={duration.label} value={duration.value} detail={duration.detail}/>}</>}</div>
+          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue label={duration.label} value={duration.value} detail={duration.detail} labelPainted/>}</>}</div>
         })}
       </div>
     </Section>
