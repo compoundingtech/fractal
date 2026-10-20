@@ -3560,7 +3560,8 @@ mod mission_golden {
                     } else {
                         std::collections::HashSet::new()
                     };
-                    let doc = mission_detail(&world, Some(&mission.id), width, "⠋", None, &expanded);
+                    let doc =
+                        mission_detail(&world, Some(&mission.id), width, "⠋", None, &expanded);
                     // The digest also locks styles, exact span boundaries and click targets.
                     let digest = Sha256::digest(format!("{doc:#?}").as_bytes());
                     actual.push_str(&format!(
