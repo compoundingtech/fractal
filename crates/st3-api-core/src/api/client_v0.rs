@@ -197,6 +197,7 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
+    "write.client-diagnostics",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -468,7 +469,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         .map(|scope| {
             json!({
                 "id": scope,
-                "version": 0,
+                "version": if *scope == "write.client-diagnostics" { 1 } else { 0 },
                 "state": if session.allows(scope) { "granted" } else { "ungranted" }
             })
         })
@@ -640,6 +641,11 @@ pub fn authenticate(
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
     session.messages_paging = messages_paging;
+    if request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/client/diagnostics"
+    {
+        require_scope(&session, "write.client-diagnostics")?;
+    }
     if request.method() == axum::http::Method::GET {
         let scope = if request
             .uri()
@@ -2059,7 +2065,7 @@ pub fn native_timeline_page(
     Ok(Json(page_value))
 }
 
-fn native_timeline_order(
+pub fn native_timeline_order(
     managed: Option<&super::ManagedSessionOwner>,
 ) -> crate::external_sessions::TimelineOrder {
     if managed.is_some() {
@@ -2403,6 +2409,11 @@ pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
+/// A stored page's position for one entry; the stored projection sorts by it alone.
+pub fn stored_timeline_position(item: &Value) -> u64 {
+    item["sequence"].as_u64().unwrap_or(u64::MAX)
+}
+
 pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
     item["role"] = json!("system");
@@ -3463,7 +3474,7 @@ pub fn timeline_first_page(
         });
         items.extend([query_notice, prefix_notice].into_iter().flatten());
     }
-    items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
+    items.sort_by_key(stored_timeline_position);
     let header = conversation_page_header(state, session, &session_id, &items, false);
     // A conversation opens at its newest bounded window. The cursor walks toward older
     // windows, while each individual page remains chronological for straightforward rendering.

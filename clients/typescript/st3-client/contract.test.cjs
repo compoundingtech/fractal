@@ -208,7 +208,7 @@ test('onOpen cancellation and fence replacement follow pre-open subscriptions in
     assert.deepEqual(held.get('term'), { kind: 'subscribe', id: 'term', collection: 'terminal', terminal: 'terminal/test', incarnation: 'new-incarnation', capability: 'new-capability' });
 });
 function envelope(value) { return { api_version: 'st3.client.v0', request_id: 'request/test', snapshot, value }; }
-function response(value, status = 200) { return { ok: status < 400, status, json: async () => value, arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(value)).buffer }; }
+function response(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabilities.json');
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };

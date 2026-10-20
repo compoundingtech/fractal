@@ -970,6 +970,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "client",
+            "client/DEVICE",
+            "A paired device's server-derived diagnostic identity.",
+            false,
+        ),
+        (
             "custom",
             "custom/NAMESPACE/NAME",
             "An extension subject.",
@@ -2194,6 +2200,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             false,
             &[],
         ),
+        ("client.launch", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("client.js-error", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -2798,6 +2808,27 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
+            ("event_id", required_string()),
+            ("launch_id", required_string()),
+            ("sequence", required_integer()),
+            ("occurred_at_unix_ms", required_integer()),
+            ("captured_at_unix_ms", required_integer()),
+            ("occurrence_time_basis", required_enum(&["exact", "metric-interval-end"])),
+            ("launch_id_basis", required_enum(&["process", "metric-interval"])),
+            ("app_version", required_string()),
+            ("native_build", required_string()),
+            ("runtime_version", required_string()),
+            ("update_id", required_string()),
+            ("platform", required_enum(&["ios"])),
+            ("os_version", required_string()),
+            ("severity", required_enum(&["info", "warning", "error", "fatal"])),
+            ("capture_source", required_enum(&["js", "native-marker", "metrickit"])),
+            ("payload", required_object()),
+            ("paired_device", required_string()),
+            ("pairing_grant", required_string()),
+            ("person_id", required_string()),
+        ],
         "person.delegation-set" => &[("actions", required_array())],
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
@@ -4454,6 +4485,7 @@ mod tests {
                 "attention",
                 "checkpoint",
                 "checkpoint-excusal",
+                "client",
                 "custom",
                 "daemon",
                 "doc",
@@ -4540,6 +4572,10 @@ mod tests {
                 "checkpoint.excused",
                 "checkpoint.sealed",
                 "checkpoint.verified",
+                "client.hang",
+                "client.js-error",
+                "client.launch",
+                "client.native-crash",
                 "daemon.diagnostic",
                 "daemon.started",
                 "delivery.hold",
@@ -4690,7 +4726,8 @@ mod tests {
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
             "assistant/chatgpt[/session/assistant-grant/ID]".into();
-        assert_ne!(previous.digest(), current.digest());
+        assert_eq!(previous.digest(), "059d60c401c736e9c2121008d2e6888156f57962dec47a54444ceaca1a0d5fa8");
+        assert_eq!(current.digest(), "cd0db5963a1252e8ed1af11d681de2376a3b3205cee1f562d51ba6c154035dfa");
         println!("assistant principal registry digest: {} -> {}", previous.digest(), current.digest());
     }
 

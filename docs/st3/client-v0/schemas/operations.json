@@ -93,6 +93,7 @@
     {"id": "assistant.terminal-content", "method": "GET", "path": "/v1/client/assistant/terminal-content", "query_model": "AssistantTerminalContentRequest", "response": "AssistantContentPage", "scope": "read.assistant.terminal", "principals": ["assistant/chatgpt", "assistant/mcp"], "proof_header": "x-st3-scg-read-authorization", "proof": "ScgReadAuthorization", "minimal_read_mode": "approval-once", "default_response_bytes": 4096, "max_response_bytes": 16384}
   ],
   "commands": [
+    { "id": "diagnostics.submit", "method": "POST", "path": "/v1/client/diagnostics", "request": "ClientDiagnosticsBatch", "response": "ClientDiagnosticsAck", "scope": "write.client-diagnostics", "max_request_bytes": 131072 },
     {"id": "observations.report", "method": "POST", "path": "/v1/client/observations", "request": "ObservationReport", "response": "ObservationResponse", "authentication": "paired-session", "max_request_bytes": 65536, "durable_receipt": false, "replicated": false, "snapshot_fence": false},
     {"id": "push.register", "method": "POST", "path": "/v1/client/push-registration", "request": "PushRegistration", "response": "PushRegistrationResponse", "authentication": "paired-session", "max_request_bytes": 4096, "durable_receipt": false, "replicated": false, "snapshot_fence": false},
     {"id": "push.unregister", "method": "DELETE", "path": "/v1/client/push-registration", "response": "PushRegistrationResponse", "authentication": "paired-session", "durable_receipt": false, "replicated": false, "snapshot_fence": false},

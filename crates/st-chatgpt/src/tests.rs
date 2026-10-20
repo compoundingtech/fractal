@@ -92,6 +92,22 @@ fn validation_accepts_every_published_tool_contract() {
 }
 
 #[test]
+fn attention_selector_is_additive_discoverable_and_exact() {
+    let contract = schema("st_alerts_list");
+    assert_eq!(contract["required"], json!([]));
+    assert_eq!(contract["properties"]["agent_id"]["maxLength"], 256);
+    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
+    for invalid in ["chief-of-staff", "agent/", "person/operator", "agent/private prose"] {
+        assert_eq!(validate_arguments("st_alerts_list", &json!({"agent_id":invalid}))
+            .unwrap_err()["code"], "invalid-arguments");
+    }
+    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":false})).is_err());
+    assert!(validate_arguments("st_missions_list", &json!({"agent_id":"agent/chief-of-staff"})).is_err());
+    // The two selectors are independent: each tool accepts only its own.
+    assert!(validate_arguments("st_agents_list", &json!({"agent_id":"agent/chief-of-staff"})).is_ok());
+}
+
+#[test]
 fn agent_selector_is_additive_discoverable_and_exact() {
     let contract = schema("st_agents_list");
     assert_eq!(contract["required"], json!([]));
@@ -102,7 +118,8 @@ fn agent_selector_is_additive_discoverable_and_exact() {
             .unwrap_err()["code"], "invalid-arguments");
     }
     assert!(validate_arguments("st_agents_list", &json!({"agent_id":false})).is_err());
-    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/example-reader"})).is_err());
+    assert!(validate_arguments("st_alerts_list", &json!({"agent_id":"agent/example-reader"})).is_ok());
+    assert!(validate_arguments("st_missions_list", &json!({"agent_id":"agent/chief-of-staff"})).is_err());
 }
 
 fn write_arguments(name: &str) -> Value {

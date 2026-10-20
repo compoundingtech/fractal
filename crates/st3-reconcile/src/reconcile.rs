@@ -7565,6 +7565,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // A missing portable transcript does not discard single-host continuity.
                 // Cross-host fetch will refuse until a complete archive exists.
                 let _ = crate::seat_snapshot::seal(self.driver_state_dir.parent().unwrap(), &self.store, agent, member, suspension);
+                // The stop is now verified, so a fault from an earlier attempt that timed out
+                // while the process was still exiting is over. Clear it before the completion: a
+                // reader that waits for the suspended phase must not find the seat failed.
+                self.record_member_reconcile_result(agent, Ok(()))?;
                 self.record_suspension_phase(
                     agent,
                     suspension,

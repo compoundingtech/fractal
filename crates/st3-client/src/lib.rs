@@ -516,6 +516,16 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation})).await
     }
+    /// Follow an agent's or a session's conversation showing at most `limit` of its newest
+    /// entries in the first frame; the server caps the request to its page ceiling.
+    pub async fn subscribe_conversation_with_limit(
+        &mut self,
+        id: &str,
+        conversation: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation, "limit":limit})).await
+    }
     pub async fn unsubscribe(&mut self, id: &str) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"unsubscribe", "id":id}))
             .await
@@ -666,6 +676,9 @@ pub enum CollectionEvent {
         items: Vec<TimelineEntry>,
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
+        /// On a replacement with older history: the timeline cursor for the entries just
+        /// before this frame's oldest entry. Absent on deltas and when nothing is older.
+        older_cursor: Option<String>,
         /// The conversation header (contract §3) when this frame carries one.
         header: Option<serde_json::Value>,
     },
@@ -727,6 +740,7 @@ impl CollectionEvent {
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
                 has_more: field(&frame, "has_more")?,
+                older_cursor: field(&frame, "older_cursor")?,
                 header: frame.get("header").cloned(),
                 id,
             }),
@@ -2947,6 +2961,14 @@ impl Client {
         let request = ActionRequest::work_retry(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
+    }
+    /// Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable,
+    /// including duplicates. Requires `write.client-diagnostics`.
+    pub async fn diagnostics_submit(
+        &self,
+        batch: &ClientDiagnosticsBatch,
+    ) -> Result<Envelope<ClientDiagnosticsAck>, ClientError> {
+        self.post("/v1/client/diagnostics", batch).await
     }
     /// Local diagnostic acceptance; retry the identical disjoint intervals and report ID.
     pub async fn observations_report(

@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, st3_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, st3_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v3.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v4.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -90,6 +90,23 @@ fn the_corpus_includes_every_registry_kind() {
             corpus().contains_key(kind),
             "add {kind} to a versioned corpus"
         );
+    }
+}
+
+#[test]
+fn the_corpus_generates_each_client_diagnostic_input() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["client.launch", "client.js-error", "client.native-crash", "client.hang"] {
+        let input = world
+            .claim_of(&corpus()[kind], 0)
+            .unwrap_or_else(|| panic!("generate a native input for {kind}"));
+        assert_eq!(input.kind, kind);
+        assert!(input.subject.starts_with("client/"));
+        for (name, field) in &corpus()[kind].fields {
+            if field.required {
+                assert!(input.fields.contains_key(name), "{kind} requires {name}");
+            }
+        }
     }
 }
 
@@ -890,6 +907,10 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
+        self.claim_of(spec, index)
+    }
+
+    fn claim_of(&mut self, spec: &st3_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
         let mut fields = Map::new();
@@ -922,6 +943,7 @@ impl World {
             "account" => format!("account/example-{small}"),
             "agent" => format!("agent/run-{}/worker-{small}", self.rng.below(2)),
             "attention" => format!("attention/{}", self.fresh("attention")),
+            "client" => format!("client/{}", self.fresh("device")),
             "custom" => format!("custom/convergence/{small}"),
             "daemon" => format!("daemon/{}", self.nodes[index].name),
             "doc" => format!("doc/convergence/{small}"),
@@ -1608,10 +1630,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v3, seeds 5 and 34
-/// never reach a trim; every other fixed seed must. This list is tied to the corpus because
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v4, only seed 5
+/// never reaches a trim; every other fixed seed must. This list is tied to the corpus because
 /// claim generation consumes the same RNG as the schedule.
-const NEVER_TRIMS: &[u64] = &[5, 34];
+const NEVER_TRIMS: &[u64] = &[5];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
@@ -1821,7 +1843,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v3.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v4.json"
         }))
         .unwrap(),
     )

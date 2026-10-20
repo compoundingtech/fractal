@@ -1194,8 +1194,8 @@ not past it at the start, at its lowest 5-second sample or at the end.
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
 every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
-`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
-`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+`GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
 not, until `ST_LOAD_HOG_STRICT=1`.
 
@@ -1327,9 +1327,10 @@ Apply the fifth live ruleset check after this workflow has passed on main.
 ## Generated files and existing workflows
 
 All workflow YAML and `.github/repo-settings.json` are generated from neighboring `.genie.ts`
-files. The `effect-utils` flake input supplies the generator library and CLI. The small, separate
-`genie` shell creates `repos/effect-utils` as a symlink to the exact input's Nix store path;
-`repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
+files. The `effect-utils` flake input supplies the genie CLI and the `effect-utils` member in
+`megarepo.lock` supplies the generator library: run `mr apply` first, which links
+`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/st-test` run the same command; the small,
+separate `genie` shell only warns when it is missing). `repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
 shell is not changed to depend on genie, so generation does not build its PTY/collector tools.
 
 ```sh

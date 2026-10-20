@@ -72,6 +72,7 @@ mod client_blobs;
 mod terminal_gate_evidence;
 mod message_bodies;
 mod client_adapters;
+mod client_diagnostics;
 pub mod client_presence;
 pub mod client_v0;
 mod custom;
@@ -391,6 +392,7 @@ impl ApiError {
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
+            "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -496,6 +498,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/health", get(health))
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route(
+            "/v1/client/diagnostics",
+            post(client_diagnostics::ingest)
+                .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
+        )
         .route("/v1/client/notes", get(directive_notes::read))
         .route("/v1/notes", axum::routing::put(directive_notes::write))
         .route("/v1/client/sets", get(owned_sets::list))
@@ -1655,6 +1662,7 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
 
 pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
+        "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"

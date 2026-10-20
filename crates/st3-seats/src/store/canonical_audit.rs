@@ -99,6 +99,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_publication_bootstrap",
         "local_publication_launch_epoch",
         "local_observations",
+        "client_diagnostic_receipts",
         // Member-local secret authority, not a graph-rebuildable projection.
         "local_push_registrations",
         "local_runtime_starts",

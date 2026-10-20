@@ -742,6 +742,11 @@ fn validate_surfaces(
         "TimelineEntry",
         "TimelinePage",
         "ConversationChanges",
+        "ClientDiagnosticJsFrame",
+        "ClientDiagnosticNativeFrame",
+        "ClientDiagnosticEvent",
+        "ClientDiagnosticsBatch",
+        "ClientDiagnosticsAck",
         "ObservationReport",
         "ObservationAccepted",
         "ObservationResponse",
@@ -802,6 +807,7 @@ fn validate_surfaces(
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for token in [
+        "pub async fn diagnostics_submit",
         "pub async fn observations_report",
         "pub async fn push_register",
         "pub async fn push_unregister",
@@ -817,6 +823,7 @@ fn validate_surfaces(
         }
     }
     for token in [
+        "func diagnosticsSubmit(",
         "func capabilities(",
         "func timeline(",
         "cursor: String?",
