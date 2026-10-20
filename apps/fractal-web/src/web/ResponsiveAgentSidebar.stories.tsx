@@ -8,6 +8,7 @@ import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packa
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
+import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
 const storyNow = Date.UTC(2026, 9, 8, 12)
 const rows: readonly SidebarAgentRowData[] = ['Builder', 'Reviewer'].map(title => ({
@@ -58,7 +59,8 @@ const assertModalIsolation = (dialog: HTMLElement, thread: HTMLElement): void =>
 
 const assertSidebarHitTarget = (splitter: HTMLElement): void => {
   const box = splitter.getBoundingClientRect()
-  for (let y = box.top + 0.5; y < box.bottom; y += 1) {
+  // Sample raster rows: Chromium rounds fractional boundary hits into the next pixel (the fixed chrome row).
+  for (let y = Math.ceil(box.top); y < Math.floor(box.bottom); y += 1) {
     for (const x of [box.left - 2.5, box.left + box.width / 2, box.right + 2.5]) {
       const target = splitter.ownerDocument.elementFromPoint(x, y)
       if (target !== splitter && !splitter.contains(target)) throw new Error(`Sidebar resize hit intercepted at ${x}, ${y}`)
@@ -181,7 +183,7 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
     await expect(sidebar.getBoundingClientRect().width).toBeGreaterThanOrEqual(sidebarMinimumWidth)
     await expect(root.querySelector('[role="dialog"]')).toBeNull()
     const splitter = canvas.getByRole('separator', { name: 'Agent sidebar width' })
-    assertSidebarHitTarget(splitter)
+    await waitFor(() => assertSidebarHitTarget(splitter))
     const previousStack = splitter.style.zIndex
     try {
       splitter.style.zIndex = '0'
@@ -215,8 +217,10 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await expect(thread.getBoundingClientRect().width).toBe(viewport)
   const opener = canvas.getByRole('button', { name: 'Expand sidebar' })
   await expect(opener.querySelector('[title]')).toBeNull()
+  // Match the kit chrome plays: the first pointer movement enters the header before its control.
+  await userEvent.hover(thread.querySelector('header')!)
   await userEvent.hover(opener)
-  await expect(await within(document.body).findByRole('tooltip', { name: 'Expand sidebar (⌘/Ctrl+B)' })).toBeVisible()
+  await tooltipFor(opener, 'Expand sidebar (⌘/Ctrl+B)')
   await userEvent.unhover(opener)
   const before = rect()
   const entries: { readonly value: number; readonly hadRecentInput: boolean }[] = []
@@ -285,6 +289,8 @@ export const At700: Story = { args: { viewport: 700 }, play: drawerPlay }
 export const At900: Story = { args: { viewport: 900 }, play: drawerPlay }
 export const At1440: Story = { args: { viewport: 1440 }, play: drawerPlay }
 export const At440Light: Story = { args: { viewport: 440, scheme: 'light' }, play: drawerPlay }
+export const At700Light: Story = { args: { viewport: 700, scheme: 'light' }, play: drawerPlay }
+export const At900Light: Story = { args: { viewport: 900, scheme: 'light' }, play: drawerPlay }
 export const At1440Light: Story = { args: { viewport: 1440, scheme: 'light' }, play: drawerPlay }
 export const DragUnmountCleanup: Story = { args: { viewport: 1440 }, play: dragUnmountPlay }
 const assertFrozenTrack = (track: HTMLElement): void => {
@@ -292,33 +298,33 @@ const assertFrozenTrack = (track: HTMLElement): void => {
   if (getComputedStyle(track).cursor === 'col-resize' || getComputedStyle(track).cursor === 'row-resize') throw new Error('Frozen resize track must not advertise resizing')
 }
 
-export const AllStates: Story = {
-  render: () => <div {...stylex.props(styles.matrix)}>{(['light', 'dark'] as const).flatMap(scheme => [440, 700, 900, 1440].map(viewport => <section key={`${scheme}-${viewport}`}><h2>{scheme} · {viewport}px</h2><ResponsiveSidebarSurface viewport={viewport} scheme={scheme} shortcut={false} /></section>))}{(['fixed', 'reversed', 'nonfinite'] as const).map(range => <section key={range}><h2>{range} resize range</h2><ResponsiveSidebarSurface viewport={900} range={range} shortcut={false} /></section>)}</div>,
-  play: async ({ canvasElement }) => {
-    for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-range]:not([data-range="resizable"])')) {
-      const track = root.querySelector<HTMLElement>('[data-resizer-track="live-agent-sidebar"]')!
-      await expect(root.querySelector('[data-resizer="live-agent-sidebar"]')).toBeNull()
-      await expect(track).toHaveAttribute('aria-hidden', 'true')
-      await expect(track.hasAttribute('tabindex')).toBe(false)
-      await expect(track.getBoundingClientRect().width).toBe(1)
-      await expect(getComputedStyle(track).cursor).not.toBe('col-resize')
-      await expect(getComputedStyle(track, '::after').content).toBe('none')
-      assertFrozenTrack(track)
-      try {
-        track.tabIndex = 0
-        await expect(() => assertFrozenTrack(track)).toThrow('Frozen resize track must not be focusable or interactive')
-      } finally { track.removeAttribute('tabindex') }
-      const originalCursor = track.style.cursor
-      try {
-        track.style.cursor = 'col-resize'
-        await expect(() => assertFrozenTrack(track)).toThrow('Frozen resize track must not advertise resizing')
-      } finally { track.style.cursor = originalCursor }
-      assertFrozenTrack(track)
-      track.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
-      await expect(root.dataset.resizeCommits).toBe('0')
-    }
-  },
+/** One complete app shell per document: each frozen range keeps the former matrix's assertions. */
+const frozenRangePlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  const root = canvasElement.querySelector<HTMLElement>('[data-sidebar-layout-story]')!
+  const track = root.querySelector<HTMLElement>('[data-resizer-track="live-agent-sidebar"]')!
+  await expect(root.querySelector('[data-resizer="live-agent-sidebar"]')).toBeNull()
+  await expect(track).toHaveAttribute('aria-hidden', 'true')
+  await expect(track.hasAttribute('tabindex')).toBe(false)
+  await expect(track.getBoundingClientRect().width).toBe(1)
+  await expect(getComputedStyle(track).cursor).not.toBe('col-resize')
+  await expect(getComputedStyle(track, '::after').content).toBe('none')
+  assertFrozenTrack(track)
+  try {
+    track.tabIndex = 0
+    await expect(() => assertFrozenTrack(track)).toThrow('Frozen resize track must not be focusable or interactive')
+  } finally { track.removeAttribute('tabindex') }
+  const originalCursor = track.style.cursor
+  try {
+    track.style.cursor = 'col-resize'
+    await expect(() => assertFrozenTrack(track)).toThrow('Frozen resize track must not advertise resizing')
+  } finally { track.style.cursor = originalCursor }
+  assertFrozenTrack(track)
+  track.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+  await expect(root.dataset.resizeCommits).toBe('0')
 }
+export const FixedResizeRange: Story = { args: { viewport: 900, range: 'fixed' }, play: frozenRangePlay }
+export const ReversedResizeRange: Story = { args: { viewport: 900, range: 'reversed' }, play: frozenRangePlay }
+export const NonfiniteResizeRange: Story = { args: { viewport: 900, range: 'nonfinite' }, play: frozenRangePlay }
 
 const styles = stylex.create({
   root: { display: 'flex', position: 'relative', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', maxWidth: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
@@ -331,5 +337,4 @@ const styles = stylex.create({
   roster: { display: 'flex', flexDirection: 'column', padding: s.md, flexGrow: 1, minHeight: 0, overflow: 'hidden' },
   button: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.borderStrong}`, borderRadius: 6, padding: s.md },
   chromeBoundary: { position: 'absolute', insetInline: 0, bottom: 0, height: 1, zIndex: 1000, backgroundColor: c.canvas },
-  matrix: { display: 'grid', gap: s.lg, overflow: 'auto', padding: s.lg },
 })
