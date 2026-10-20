@@ -76,6 +76,8 @@ let
   staging = cfg.fractalMigration.phase != "legacy";
   completed = cfg.fractalMigration.phase == "completed";
   targetState = "${config.xdg.stateHome}/fractal";
+  legacyState = "${config.xdg.stateHome}/st3";
+  targetDaemonState = targetArgs cfg.stateDir;
   receipt = "${targetState}/.fractal-migration-completed";
   receiptMarker = "arn:lmig:smalltalk:2026-10-16-state-dirs-fractal";
   configFenceMarker = "# arn:lmig:smalltalk:2026-10-16-service-labels-fractal Home Manager legacy-generation fence";
@@ -86,11 +88,11 @@ let
     + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
     + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
     + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
-    + "state_dir = ${builtins.toJSON (if completed then targetState else cfg.stateDir)}\n"
+    + "state_dir = ${builtins.toJSON (if completed then targetDaemonState else cfg.stateDir)}\n"
     + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON (if completed then targetArgs cfg.ptyRoot else cfg.ptyRoot)}\n"
     + lib.optionalString (cfg.socket != null) "socket = ${builtins.toJSON (if completed then targetArgs cfg.socket else cfg.socket)}\n"
     + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON (if completed then targetArgs cfg.clientGatewaySocket else cfg.clientGatewaySocket)}\n";
-  completedConfig = pkgs.writeText "fractal-config.toml" "${configText}\n${configFenceMarker}\n";
+  completedConfig = pkgs.writeText "fractal-config.toml" "${config.xdg.configFile."st3/config.toml".text}\n${configFenceMarker}\n";
   configFenceReady = ''
     config=${lib.escapeShellArg "${config.xdg.configHome}/fractal/config.toml"}
     fence=${lib.escapeShellArg configFence}
@@ -100,8 +102,8 @@ let
     while IFS= read -r line; do marker=$line; done < "$fence"
     [ "$marker" = ${lib.escapeShellArg configFenceMarker} ] || exit 1
   '';
-  targetExecutable = if externallyManaged then cfg.binary.path else "${targetState}/bin/st3";
-  targetArgs = lib.replaceStrings [ cfg.stateDir ] [ targetState ];
+  targetExecutable = if externallyManaged then cfg.binary.path else "${targetDaemonState}/bin/st3";
+  targetArgs = lib.replaceStrings [ legacyState ] [ targetState ];
   targetUpArgs = map targetArgs upArgs ++ [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
   targetEnvironment = lib.mapAttrs (_: targetArgs) environment;
   migrationReady = ''
@@ -149,8 +151,8 @@ let
     EnvironmentVariables = targetEnvironment;
     ProcessType = "Interactive";
     SoftResourceLimits.NumberOfFiles = 8192;
-    StandardOutPath = "${targetState}/logs/st3.stdout.log";
-    StandardErrorPath = "${targetState}/logs/st3.stderr.log";
+    StandardOutPath = "${targetDaemonState}/logs/st3.stdout.log";
+    StandardErrorPath = "${targetDaemonState}/logs/st3.stderr.log";
   };
   targetApplyPlist = {
     Label = "com.compoundingtech.fractal-apply";
@@ -264,8 +266,9 @@ in
   config = mkIf cfg.enable {
     # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
     assertions = lib.optional staging {
-      assertion = cfg.stateDir == "${config.xdg.stateHome}/st3";
-      message = "services.smalltalk.fractalMigration requires the default st3 stateDir.";
+      assertion = (cfg.stateDir == legacyState || lib.hasPrefix "${legacyState}/" cfg.stateDir)
+        && !(builtins.any (part: part == "." || part == "..") (lib.splitString "/" cfg.stateDir));
+      message = "services.smalltalk.fractalMigration requires stateDir within the default st3 state root (without dot path components).";
     } ++ lib.optional staging {
       # Match HM's check-link-targets.sh literally: $targetPath == $forcedPath*.
       # This is a raw string prefix, not a path-component/ancestor comparison.
@@ -275,12 +278,13 @@ in
       ) (
         lib.concatLists (lib.mapAttrsToList (name: file:
           let target = file.target or name;
-          in lib.optional (file.force or false)
+          # Disabled entries never reach HM's file linker.
+          in lib.optional ((file.enable or true) && (file.force or false))
             (if lib.hasPrefix "/" target then target else "${config.home.homeDirectory}/${target}")
         ) config.home.file)
         ++ lib.concatLists (lib.mapAttrsToList (name: file:
           let target = file.target or name;
-          in lib.optional (file.force or false)
+          in lib.optional ((file.enable or true) && (file.force or false))
             (if lib.hasPrefix "/" target then target else "${config.xdg.configHome}/${target}")
         ) config.xdg.configFile)
       ));
@@ -367,7 +371,13 @@ in
           )
         fi
       '');
-    xdg.configFile."st3/config.toml" = mkIf (!completed) { text = configText; };
+    xdg.configFile."st3/config.toml" = {
+      text = configText;
+      # A staged generation must itself be a safe rollback candidate. Adopt the
+      # consumer's text, but never let force bypass the persistent cutover fence.
+      force = lib.mkIf staging (lib.mkForce false);
+      enable = lib.mkIf completed (lib.mkForce false);
+    };
     # The host migrator owns this foreign symlink. Keeping it outside home.file
     # fences immutable old generations in checkLinkTargets, including backup mode.
     home.activation.fractalConfig = mkIf completed (lib.hm.dag.entryBetween
