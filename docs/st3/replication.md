@@ -231,8 +231,8 @@ envelope hash commits its original payload and chain metadata. Thus members hold
 wire log agree on this digest even while their projections differ. Inventory equality does
 not prove signature admission; unsigned, fenced and invalid records retain their diagnostics.
 The graph and table digests describe this build's admitted projections and may differ until
-all members learn the same claim vocabulary. Automatic projection comparisons run
-only for matching registry digests with no locally waiting claims. A rolling upgrade clears
+all members learn the same claim vocabulary. Projection comparisons, where the divergence check
+turns them on, run only for matching registry digests with no locally waiting claims. A rolling upgrade clears
 old divergence measurements; comparisons resume after upgrade. A first sync between different
 builds verifies the equal wire log once every envelope passes admission, recording its
 `authority_digest` and leaving graph equality unasserted. Fleet join can then complete while
@@ -889,11 +889,15 @@ that a later envelope resolves still looks open. Every client page then carries 
 `st now` and the other product commands print a `SYNCING` line before their items, and the terminal UI shows
 `⟳ Syncing` with the same line.
 
-Two nodes are in sync only when they hold the same envelopes and project the same graph from
-them. Each exchange at which both nodes hold the same envelopes compares their graph digests; an
-exchange that stores new envelopes, or meets a deferred projection, compares nothing. The same
-envelopes must project the same graph, so a difference that outlasts a minute, longer than a peer
-takes to project what it stored, means the graphs diverged: for example, one node's projection
+Two nodes are in sync when they hold the same envelopes and each has admitted and projected
+them all. Sync settles on claims alone and never waits on a projection comparison. Comparing
+projections with a peer is an optional diagnostic: only where the daemon's environment sets
+`ST3_DIVERGENCE_CHECK_INTERVAL_MS` (below) does each exchange at which both nodes hold the same
+envelopes compare their graph digests; an exchange that stores new envelopes, or meets a deferred
+projection, compares nothing. Without the check nothing is compared, nothing reports a
+divergence, and status names no comparison. The same envelopes must project the same graph, so
+with the check on a difference that outlasts a minute, longer than a peer takes to project what
+it stored, means the graphs diverged: for example, one node's projection
 followed a rule that a replay from nothing does not, or lost claims it had admitted while keeping
 their envelopes. Exchanges cannot fix that, so the status view leads with it:
 
@@ -927,7 +931,7 @@ unsigned 404 from `/v1/peer/heal`, reports the heal as unavailable, and backs of
 A divergence is a projection pure-function bug that needs a reproduction, never something to
 repair. Where the daemon's environment sets `ST3_DIVERGENCE_CHECK_INTERVAL_MS`, it looks for
 divergences at that interval, never more often than hourly; unset or zero, it never looks. The
-check is cheap by construction. Exchanges already compare digests; with the check on, a
+check is cheap by construction. With the check on, exchanges compare digests, and a
 comparison that first finds a difference also keeps what a reproduction needs, with one pass over
 the inventory in memory, and a difference that lasts keeps the range it opened with. The check
 reads those comparisons in memory and, with one indexed read on the reader pool, every divergence

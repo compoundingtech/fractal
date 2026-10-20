@@ -4537,6 +4537,7 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
     state.fleet_id = Some("fleet/audit".into());
     state.configured_peers = vec!["alder".into()];
     state.store.bind_fleet("fleet/audit").unwrap();
+    state.store.capture_divergences(true);
     let source = Store::open_memory("alder").unwrap();
     source.bind_fleet("fleet/audit").unwrap();
     let original = source.export_replication_summary("fleet/audit").unwrap();
