@@ -16,16 +16,17 @@ export interface SidePanelProps {
   readonly id?: string
   readonly ref?: React.Ref<HTMLElement>
   readonly 'data-testid'?: string
+  /** A dock is sized by its workspace split; overlays remain available to narrow hosts. */
+  readonly placement?: 'overlay' | 'dock'
   readonly style?: stylex.StyleXStyles
 }
 
 /**
- * A non-modal side panel floating over the trailing edge of the workspace. It moves focus to its
- * heading on mount, closes on Escape and returns focus to the element focused before it opened,
- * but never contains Tab, hides, inerts or scroll-locks the rest of the app. Use a modal dialog
- * only when the user must finish or dismiss the task before anything else.
+ * A non-modal panel, either in a workspace dock or over a narrow workspace. It moves focus to its
+ * heading on mount, closes on Escape and restores focus on close, but never contains Tab, hides,
+ * inerts or scroll-locks the rest of the app.
  */
-export function SidePanel({ 'aria-label': label, heading, actions, onClose, children, id, ref, 'data-testid': testId, style }: SidePanelProps) {
+export function SidePanel({ 'aria-label': label, heading, actions, onClose, children, id, ref, 'data-testid': testId, style, placement = 'overlay' }: SidePanelProps) {
   const title = React.useRef<HTMLHeadingElement>(null)
   // The heading is a programmatic focus target only (tabIndex -1): Tab starts at the first control,
   // and neither the region nor a control paints a focus ring the user did not ask for.
@@ -38,7 +39,7 @@ export function SidePanel({ 'aria-label': label, heading, actions, onClose, chil
     onClose()
   }
   return <FocusScope restoreFocus>
-    <aside ref={ref} id={id} aria-label={label} data-side-panel="" data-testid={testId} onKeyDown={onKeyDown} {...stylex.props(styles.panel, style)}>
+    <aside ref={ref} id={id} aria-label={label} data-side-panel="" data-side-panel-placement={placement} data-testid={testId} onKeyDown={onKeyDown} {...stylex.props(styles.panel, placement === 'dock' && styles.docked, style)}>
       <header {...stylex.props(styles.header)}>
         <h2 ref={title} tabIndex={-1} data-side-panel-heading="" {...stylex.props(styles.heading)}>{heading}</h2>
         {actions}
@@ -57,6 +58,7 @@ const styles = stylex.create({
     borderInlineStartWidth: 1, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong,
     boxShadow: elevation.dialog,
   },
+  docked: { position: 'relative', insetBlock: 'auto', insetInlineEnd: 'auto', zIndex: 'auto', width: '100%', maxWidth: 'none', height: '100%', borderInlineStartWidth: 0, boxShadow: 'none' },
   header: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, flexShrink: 0,
     padding: s.lg, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: border.border,

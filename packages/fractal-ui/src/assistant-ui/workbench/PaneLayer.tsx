@@ -133,6 +133,9 @@ export function PaneHeaderAccessory({ children, inlineFallback = false }: { chil
   return host === undefined ? (inlineFallback ? children : null) : createPortal(children, host)
 }
 
+/** A host that owns its own header row (outside Workbench) supplies the element pane accessories portal into. */
+export const PaneHeaderAccessoryHost = PaneHeaderContext.Provider
+
 /** The active pane's header accessory host, attached like its content host. */
 export function PaneHeaderSlot({ path, reserveDetails = false }: { path: string; reserveDetails?: boolean }) {
   const mount = React.useContext(PaneSlotsContext)?.byPath.get(path)

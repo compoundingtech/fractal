@@ -110,11 +110,34 @@ function assertCombined(root:HTMLElement,states:readonly string[]){
 /** The partial fixture reports only cumulative tokens; every missing spend field is named once, in source order. Who the tokens include and which session spend belongs to are Why?-only notes, not fields. */
 const partialSpendFields='total spend, main session spend, subagent spend, token window'
 function metricSection(root:HTMLElement,state:string,name:'Context'|'Spend'){const section=root.querySelector<HTMLElement>(`[data-details-all-state="${state}"] section[aria-label$="${name}"]`);requireContract(section,`Missing ${state} ${name} section`);return section}
+/** The approved whole-group copy, identical on desktop and phone. */
+const groupSummaries:Readonly<Record<string,string>>={Context:'This session does not report context usage.',Spend:'This session does not report spend.'}
+const groupPresentation='Unreported group is not its summary behind a collapsed Why?'
+/**
+ * A wholly missing group, on desktop and phone alike: `Spend · not reported`, the approved summary sentence painted
+ * beneath it, and one collapsed Why? (44px on phone, dense on desktop) holding its reasons. Never a tooltip-only state.
+ */
+function wholeGroupFailures(line:HTMLElement,narrow:boolean):string[]{
+  const subject=line.dataset.detailsUnavailableSubject??'',failures:string[]=[]
+  const head=[...line.children].slice(0,3).map(node=>node.textContent).join(''),summary=line.querySelectorAll('[data-details-group-summary]')
+  if(head!==`${subject}·not reported`)failures.push(`${subject}: head "${head}"`)
+  if(summary.length!==1||summary[0]!.textContent!==groupSummaries[subject])failures.push(`${subject}: summary "${[...summary].map(node=>node.textContent).join(' | ')}"`)
+  if(line.querySelector('button:not([data-details-why]),[aria-describedby],[data-details-reason-description]'))failures.push(`${subject}: tooltip trigger`)
+  // Clone-safe: negative controls run on detached copies, so the panel is found inside the line and geometry is measured only when laid out.
+  const whys=[...line.querySelectorAll<HTMLElement>('button[data-details-why]')],why=whys[0],panel=why&&[...line.querySelectorAll<HTMLElement>('[data-details-why-panel]')].find(node=>node.id!==''&&node.id===why.getAttribute('aria-controls'))
+  if(whys.length!==1||(why?.textContent??'').replace(/\s+/g,' ').trim()!==`Why? ${subject} not reported`||why?.getAttribute('aria-expanded')!=='false'||!panel||!panel.hidden||(panel.isConnected&&paintedElement(panel))||!panel.querySelector('[data-details-reason-line] [data-details-reason-text]'))failures.push(`${subject}: Why? ${why?.getAttribute('aria-expanded')??'absent'}`)
+  const box=why?.isConnected?why.getBoundingClientRect():undefined
+  if(box&&(box.width>=43.5&&box.height>=43.5)!==narrow)failures.push(`${subject}: Why? ${box.width.toFixed(1)}×${box.height.toFixed(1)} on ${narrow?'phone':'desktop'}`)
+  return failures
+}
 function assertMetricLines(root:HTMLElement){
+  const failures:string[]=[]
   for(const name of ['Context','Spend'] as const){
     const section=metricSection(root,'unknown',name),line=section.querySelector<HTMLElement>('[data-details-not-reported]')
-    requireContract(line?.dataset.detailsNotReported==='group'&&paintedText(line)===`${name}·not reported`&&line.parentElement?.childElementCount===1&&!section.querySelector('[data-details-missing-value],dl,[role="meter"]')&&!paintedText(section).includes('—'),'Unreported group repeats per-field dashes')
+    requireContract(line?.dataset.detailsNotReported==='group'&&line.parentElement?.childElementCount===1&&!section.querySelector('[data-details-missing-value],dl,[role="meter"]')&&!paintedText(section).includes('—'),'Unreported group repeats per-field dashes')
+    failures.push(...wholeGroupFailures(line,false))
   }
+  requireContract(failures.length===0,`${groupPresentation}: ${failures.join('; ')}`)
   const spend=metricSection(root,'partial','Spend'),summary=spend.querySelectorAll<HTMLElement>('[data-details-not-reported]')
   requireContract(summary.length===1&&summary[0]?.dataset.detailsNotReported==='fields'&&paintedText(summary[0].querySelector<HTMLElement>('[data-details-not-reported-summary]')??summary[0])===`Not reported: ${partialSpendFields}`&&spend.querySelector('[data-details-token-label]')?.textContent==='Cumulative tokens'&&!spend.querySelector('[data-details-missing-value]')&&!paintedText(spend).includes('—')&&!/Recorded spend|Window|Session matching|token scope|session matching/.test(paintedText(spend)),'Partial group lacks one Not reported summary')
   for(const state of ['busy','partial'] as const){
@@ -131,15 +154,24 @@ async function keyboardTooltip(trigger:HTMLElement){
 }
 async function checkMetricLines(canvasElement:HTMLElement){
   assertMetricLines(canvasElement)
-  const mutate=async(cause:string,selector:string,change:(node:HTMLElement)=>void)=>{const wrong=canvasElement.cloneNode(true) as HTMLElement,node=wrong.querySelector<HTMLElement>(selector);requireContract(node,`Missing negative control target: ${selector}`);change(node);await rejectsControl(cause,()=>assertMetricLines(wrong))}
+  const mutate=async(cause:string,selector:string,change:(node:HTMLElement)=>void)=>{const wrong=canvasElement.cloneNode(true) as HTMLElement,node=wrong.querySelector<HTMLElement>(selector);requireContract(node,`Missing negative control target: ${selector}`);change(node);await rejectsCause(cause,()=>assertMetricLines(wrong))}
   await mutate('Unreported group repeats per-field dashes','[data-details-all-state="unknown"] section[aria-label$="Spend"] [data-details-not-reported]',node=>node.after(Object.assign(node.ownerDocument.createElement('span'),{textContent:'Window —'})))
   await mutate('Partial group lacks one Not reported summary','[data-details-all-state="partial"] section[aria-label$="Spend"] [data-details-not-reported]',node=>node.before(node.cloneNode(true)))
   await mutate('Token-derived occupancy is not marked estimated','[data-details-all-state="busy"] section[aria-label$="Context"] [data-details-occupancy-estimated]',node=>node.remove())
   const estimate=metricSection(canvasElement,'busy','Context').querySelector<HTMLElement>('button[data-details-occupancy-estimated]');requireContract(estimate,'Missing estimated occupancy trigger')
   requireContract(await keyboardTooltip(estimate)==='Harness did not report a percentage; estimated from tokens.','Estimated occupancy lost its explanation')
-  // Every unknown Spend field shares one reason: the group reads it once, as the mapped sentence, never per field or as a code.
-  const group=within(metricSection(canvasElement,'unknown','Spend')).getByRole('button',{name:'Spend: not reported'})
-  requireContract(group.closest('[data-details-not-reported]')?.getAttribute('data-details-reason-groups')==='1'&&await keyboardTooltip(group)===detailsReasonText('no-provider'),'Unreported group lost its provenance tooltip')
+  // The pre-fix desktop shape: a tooltip-only state word with no painted summary and no Why?.
+  const unknownSpend='[data-details-all-state="unknown"] section[aria-label$="Spend"] [data-details-not-reported="group"]'
+  await mutate(groupPresentation,`${unknownSpend} [data-details-group-summary]`,node=>{node.textContent='Not reported for this session.'})
+  await mutate(groupPresentation,`${unknownSpend} button[data-details-why]`,node=>{const trigger=node.ownerDocument.createElement('button');trigger.setAttribute('aria-describedby','reason');trigger.textContent='not reported';node.replaceWith(trigger)})
+  // Every unknown Spend field shares one reason: the group's collapsed Why? opens from the keyboard with the mapped sentence once, never per field or as a code.
+  const groupLine=metricSection(canvasElement,'unknown','Spend').querySelector<HTMLElement>('[data-details-not-reported="group"]');requireContract(groupLine,'Missing unreported Spend group')
+  const groupWhy=within(groupLine).getByRole('button',{name:'Why? Spend not reported'}),groupPanel=canvasElement.ownerDocument.getElementById(groupWhy.getAttribute('aria-controls')??'')
+  requireContract(groupLine.dataset.detailsReasonGroups==='1'&&groupPanel&&groupPanel.hidden&&groupWhy.getAttribute('aria-expanded')==='false','Unreported group reasons are not collapsed')
+  groupWhy.focus();await userEvent.keyboard('{Enter}')
+  await waitFor(()=>{const reasons=[...groupPanel.querySelectorAll<HTMLElement>('[data-details-reason-line]')];requireContract(!groupPanel.hidden&&groupWhy.getAttribute('aria-expanded')==='true'&&reasons.length===1&&!reasons[0]!.hasAttribute('data-details-reason-fields')&&reasons[0]!.textContent===detailsReasonText('no-provider'),'Unreported group Why? lost its reason')})
+  await userEvent.keyboard('{Enter}')
+  await waitFor(()=>requireContract(groupPanel.hidden&&groupWhy.getAttribute('aria-expanded')==='false','Unreported group reasons are not collapsed'))
   // The partial group's reasons and notes wait behind one collapsed Why?; it opens from the keyboard with the mapped sentence.
   const why=within(metricSection(canvasElement,'partial','Spend')).getByRole('button',{name:'Why? Spend details not reported'}),panel=canvasElement.ownerDocument.getElementById(why.getAttribute('aria-controls')??'')
   requireContract(panel&&why.getAttribute('aria-expanded')==='false'&&panel.hidden,'Partial group reasons are not collapsed')
@@ -409,14 +441,14 @@ export const PhoneDetails:Story={
     const reason=exposedLines(canvasElement,'[data-details-not-reported="group"]')[0]?.querySelector<HTMLElement>('[data-details-reason]');requireContract(reason,'Missing reason control target')
     const display=reason.style.display;try{reason.style.display='none';await rejectsCause(notBeneath,()=>assertPhoneReasons(canvasElement))}finally{reason.style.display=display}
     assertPhoneReasons(canvasElement)
-    await checkHumanReasons(canvasElement,true)
+    await checkHumanReasons(canvasElement)
     // Missing Overview facts render nothing: all-missing timing is one line, with no dash, state word or per-field reason.
     assertOverviewOmission(unreported,1)
     const overviewLine=unreported.querySelector<HTMLElement>('section[aria-label$="Overview"] [data-details-overview-line]');requireContract(overviewLine,'Missing Overview omission control target')
     const stray=doc.createElement('span');stray.setAttribute('data-details-missing-value','');stray.textContent='Machine: unavailable. Not reported for this session.';overviewLine.append(stray)
     try{await rejectsControl(omittedOverview,()=>assertOverviewOmission(unreported,1))}finally{stray.remove()}
     assertOverviewOmission(unreported,1)
-    await checkWhyDisclosure(unreported)
+    await checkWhyDisclosure(unreported,true)
     await checkTail(retained,true)
   },
 }
@@ -438,57 +470,45 @@ function assertNoReasonCodes(root:HTMLElement){
 const sharedReason='A shared group reason is not one sentence'
 const fieldPrefix=(text:string,names:readonly string[])=>names.some(name=>text.toLowerCase().includes(`${name.toLowerCase()}:`))
 /**
- * The unreported host's Context and Spend groups each miss several fields for one reason: phone paints one reason
- * line, desktop describes one sentence, with no per-field prefix. Phone partial lines with differing reasons name
- * each reason once, prefixed by exactly the fields it explains.
+ * The unreported host's Context and Spend groups each miss several fields for one reason: desktop and phone alike,
+ * the collapsed Why? holds one reason line with no per-field prefix. Partial lines with differing reasons name each
+ * reason once, prefixed by exactly the fields it explains.
  */
-function assertGroupedReasons(root:HTMLElement,narrow:boolean){
+function assertGroupedReasons(root:HTMLElement){
   const failures:string[]=[]
   const groups=exposedLines(inspector(root,'unreported'),'[data-details-not-reported="group"]')
   if(groups.length!==2)failures.push(`${groups.length} whole groups`)
   for(const line of groups){
     const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),subject=line.dataset.detailsUnavailableSubject
     if(names.length<2)failures.push(`${subject} misses ${names.length} field`)
-    if(narrow){
-      const lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]')],text=(lines[0]?.textContent??'').trim()
-      if(lines.length!==1||lines[0]!.hasAttribute('data-details-reason-fields')||!text||fieldPrefix(text,names))failures.push(`${subject}: ${lines.map(item=>item.textContent).join(' | ')}`)
-    }else{
-      const trigger=line.querySelector<HTMLElement>('button'),description=trigger?descriptionOf(trigger):''
-      if(!description||description.includes('; ')||fieldPrefix(description,names))failures.push(`${subject}: "${description}"`)
-    }
+    const lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]')],text=(lines[0]?.textContent??'').trim()
+    if(lines.length!==1||lines[0]!.hasAttribute('data-details-reason-fields')||!text||fieldPrefix(text,names))failures.push(`${subject}: ${lines.map(item=>item.textContent).join(' | ')}`)
   }
-  if(narrow){
-    let differing=0
-    for(const line of exposedLines(root,'[data-details-not-reported]')){
-      const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]:not([data-details-reason-note])')]
-      const reasons=lines.map(item=>(item.querySelector('[data-details-reason-text]')?.textContent??'').trim())
-      if(new Set(reasons).size!==reasons.length)failures.push(`${line.dataset.detailsUnavailableSubject} repeats a reason`)
-      if(lines.length<2)continue
-      differing++
-      const explained=lines.flatMap(item=>(item.dataset.detailsReasonFields??'').split(', ').filter(Boolean))
-      if(explained.length!==names.length||!names.every(name=>explained.includes(name)))failures.push(`${line.dataset.detailsUnavailableSubject} groups ${explained.join(', ')}`)
-    }
-    if(differing===0)failures.push('no line with differing reasons')
+  let differing=0
+  for(const line of exposedLines(root,'[data-details-not-reported]')){
+    const names=(line.dataset.detailsNotReportedNames??'').split(', ').filter(Boolean),lines=[...line.querySelectorAll<HTMLElement>('[data-details-reason-line]:not([data-details-reason-note])')]
+    const reasons=lines.map(item=>(item.querySelector('[data-details-reason-text]')?.textContent??'').trim())
+    if(new Set(reasons).size!==reasons.length)failures.push(`${line.dataset.detailsUnavailableSubject} repeats a reason`)
+    if(lines.length<2)continue
+    differing++
+    const explained=lines.flatMap(item=>(item.dataset.detailsReasonFields??'').split(', ').filter(Boolean))
+    if(explained.length!==names.length||!names.every(name=>explained.includes(name)))failures.push(`${line.dataset.detailsUnavailableSubject} groups ${explained.join(', ')}`)
   }
+  if(differing===0)failures.push('no line with differing reasons')
   requireContract(failures.length===0,`${sharedReason}: ${failures.join('; ')}`)
 }
-/** Human, deduplicated reasons with falsifying controls: a raw code, a per-field split of a shared reason. */
-async function checkHumanReasons(root:HTMLElement,narrow:boolean){
-  assertNoReasonCodes(root);assertGroupedReasons(root,narrow)
-  const node=[...root.querySelectorAll<HTMLElement>(narrow?'[data-details-reason-text]':'[data-details-reason-description]')].find(item=>!item.closest('[inert],[aria-hidden="true"]'));requireContract(node,'Missing reason code control target')
+/** Human, deduplicated reasons with falsifying controls: a raw code, a per-field split of a shared reason. Desktop and phone share the Why? panels. */
+async function checkHumanReasons(root:HTMLElement){
+  assertNoReasonCodes(root);assertGroupedReasons(root)
+  const node=[...root.querySelectorAll<HTMLElement>('[data-details-reason-text]')].find(item=>!item.closest('[inert],[aria-hidden="true"]'));requireContract(node,'Missing reason code control target')
   const text=node.textContent;try{node.textContent='no-provider';await rejectsCause(rawCode,()=>assertNoReasonCodes(root))}finally{node.textContent=text}
   const group=exposedLines(inspector(root,'unreported'),'[data-details-not-reported="group"]')[0];requireContract(group,'Missing shared reason control target')
   const names=(group.dataset.detailsNotReportedNames??'').split(', ')
   const split=names.map(name=>`${name.charAt(0).toUpperCase()}${name.slice(1)}: ${text}`).join('; ')
-  if(narrow){
-    const line=group.querySelector<HTMLElement>('[data-details-reason-line]');requireContract(line,'Missing shared reason line')
-    const copy=line.cloneNode(true) as HTMLElement;copy.textContent=split;line.after(copy)
-    try{await rejectsCause(sharedReason,()=>assertGroupedReasons(root,narrow))}finally{copy.remove()}
-  }else{
-    const trigger=group.querySelector<HTMLElement>('button'),description=trigger&&root.ownerDocument.getElementById(trigger.getAttribute('aria-describedby')??'');requireContract(description,'Missing shared reason description')
-    const original=description.textContent;try{description.textContent=split;await rejectsCause(sharedReason,()=>assertGroupedReasons(root,narrow))}finally{description.textContent=original}
-  }
-  assertNoReasonCodes(root);assertGroupedReasons(root,narrow)
+  const line=group.querySelector<HTMLElement>('[data-details-reason-line]');requireContract(line,'Missing shared reason line')
+  const copy=line.cloneNode(true) as HTMLElement;copy.textContent=split;line.after(copy)
+  try{await rejectsCause(sharedReason,()=>assertGroupedReasons(root))}finally{copy.remove()}
+  assertNoReasonCodes(root);assertGroupedReasons(root)
 }
 const omittedOverview='Overview paints a missing fact instead of omitting it'
 /** The icon-only status glyph's screen-reader description is not a painted identity fact. */
@@ -505,31 +525,39 @@ function assertOverviewOmission(host:HTMLElement,descriptionRows:number){
   requireContract(timing.length===1&&timing[0]!.textContent==="Timing isn't available for this session."&&overview.querySelectorAll('[data-details-description-row]').length===descriptionRows&&!overview.querySelector('[data-details-missing-value]')&&!text.includes('—')&&!/\b(unreported|unavailable)\b/i.test(text),omittedOverview)
 }
 const wholeGroup='A whole missing group is not one summary behind a collapsed Why? disclosure'
-/** Each wholly missing group paints one plain summary sentence; its per-field reasons wait behind a collapsed Why?. */
-function assertWholeGroups(root:HTMLElement){
+/**
+ * Each wholly missing group, desktop and phone alike, paints the approved summary sentence as its only reason; its
+ * per-field reasons wait behind one collapsed Why? (44px on phone, dense on desktop), never a tooltip.
+ */
+function assertWholeGroups(root:HTMLElement,narrow:boolean){
   const lines=exposedLines(root,'[data-details-not-reported="group"]'),failures:string[]=lines.length===0?['no whole group']:[]
   for(const line of lines){
     const painted=[...line.querySelectorAll<HTMLElement>('[data-details-reason]')].filter(node=>paintedElement(node)&&node.getBoundingClientRect().height>0)
-    const summary=line.querySelector<HTMLElement>('[data-details-group-summary]'),why=line.querySelector<HTMLElement>('button[data-details-why]')
-    const panel=why&&root.ownerDocument.getElementById(why.getAttribute('aria-controls')??'')
-    if(painted.length!==1||!summary||!painted[0]!.contains(summary)||!/^This session does not report .+\.$/.test(summary.textContent??'')||why?.getAttribute('aria-expanded')!=='false'||!panel||paintedElement(panel)||!panel.querySelector('[data-details-reason-line]'))
-      failures.push(`${line.dataset.detailsUnavailableSubject}: ${painted.length} painted reasons, Why? ${why?.getAttribute('aria-expanded')??'absent'}`)
+    const summary=line.querySelector<HTMLElement>('[data-details-group-summary]')
+    if(painted.length!==1||!summary||!painted[0]!.contains(summary))failures.push(`${line.dataset.detailsUnavailableSubject}: ${painted.length} painted reasons`)
+    failures.push(...wholeGroupFailures(line,narrow))
   }
   requireContract(failures.length===0,`${wholeGroup}: ${failures.join('; ')}`)
 }
-/** The Why? control discloses and collapses the grouped reasons from the keyboard, with a group-specific name. */
-async function checkWhyDisclosure(root:HTMLElement){
-  assertWholeGroups(root)
+/** The Why? control discloses and collapses the grouped reasons from the keyboard, with a group-specific name; the pre-fix shapes and the wrong geometry are rejected. */
+async function checkWhyDisclosure(root:HTMLElement,narrow:boolean){
+  assertWholeGroups(root,narrow)
   const line=exposedLines(root,'[data-details-not-reported="group"]')[0],reason=line?.querySelector<HTMLElement>('[data-details-group-summary]')?.closest<HTMLElement>('[data-details-reason]');requireContract(line&&reason,'Missing whole-group control target')
-  // The pre-fix shape: per-field reasons painted beside the summary.
-  const repeated=reason.cloneNode(true) as HTMLElement;reason.after(repeated);try{await rejectsCause(wholeGroup,()=>assertWholeGroups(root))}finally{repeated.remove()}
+  // The pre-fix phone shape: per-field reasons painted beside the summary.
+  const repeated=reason.cloneNode(true) as HTMLElement;reason.after(repeated);try{await rejectsCause(wholeGroup,()=>assertWholeGroups(root,narrow))}finally{repeated.remove()}
+  // The pre-fix desktop shape: no painted summary, the reasons only in a tooltip.
+  const display=reason.style.display;try{reason.style.display='none';await rejectsCause(wholeGroup,()=>assertWholeGroups(root,narrow))}finally{reason.style.display=display}
   const why=within(line).getByRole('button',{name:`Why? ${line.dataset.detailsUnavailableSubject} not reported`}),panel=root.ownerDocument.getElementById(why.getAttribute('aria-controls')??'');requireContract(panel,'Why? controls no panel')
+  // Phone loses its 44px target; desktop adopts phone geometry.
+  const minWidth=why.style.minWidth,minHeight=why.style.minHeight
+  try{why.style.minWidth=narrow?'0':'44px';why.style.minHeight=narrow?'24px':'44px';await rejectsCause(wholeGroup,()=>assertWholeGroups(root,narrow))}finally{why.style.minWidth=minWidth;why.style.minHeight=minHeight}
+  assertWholeGroups(root,narrow)
   why.focus();await userEvent.keyboard('{Enter}')
   await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='true'&&paintedElement(panel)&&panel.querySelectorAll('[data-details-reason-line]').length>0,'Why? did not disclose its reasons from the keyboard'))
-  await rejectsCause(wholeGroup,()=>assertWholeGroups(root))
+  await rejectsCause(wholeGroup,()=>assertWholeGroups(root,narrow))
   await userEvent.keyboard('{Enter}')
   await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='false'&&!paintedElement(panel),'Why? did not collapse from the keyboard'))
-  assertWholeGroups(root)
+  assertWholeGroups(root,narrow)
 }
 const tailPrefix='Not reported for this session: '
 const tailShape='Details tail is not one session summary behind a collapsed Why?'
@@ -592,20 +620,20 @@ export const DesktopReasonDescriptions:Story={
     const unreported=inspector(canvasElement,'unreported'),retained=inspector(canvasElement,'retained')
     await waitFor(()=>requireContract(canvasElement.querySelectorAll('[role="tab"]').length===inspectorHosts.length*2,'Desktop inspectors lack their Details and Changes tabs'))
     const triggers=exposedTriggers(canvasElement)
-    requireContract(triggers.some(trigger=>trigger.closest('[data-details-not-reported="group"]'))&&exposedLines(canvasElement,'[data-details-not-reported="fields"]').length>0,'Desktop harness lacks a whole-group or partial case')
+    requireContract(exposedLines(unreported,'[data-details-not-reported="group"]').length>0&&exposedLines(canvasElement,'[data-details-not-reported="fields"]').length>0,'Desktop harness lacks a whole-group or partial case')
     assertOverviewOmission(unreported,1)
+    // Inline desktop triggers that remain (missing values, availability words) keep their reason as the accessible description.
     assertDescribed(triggers)
-    const target=triggers[0]!,ids=target.getAttribute('aria-describedby')!
-    try{target.removeAttribute('aria-describedby');await rejectsCause(undescribed,()=>assertDescribed([target]))}finally{target.setAttribute('aria-describedby',ids)}
+    const target=triggers[0]
+    if(target){const ids=target.getAttribute('aria-describedby')!;try{target.removeAttribute('aria-describedby');await rejectsCause(undescribed,()=>assertDescribed([target]))}finally{target.setAttribute('aria-describedby',ids)}}
     assertDescribed(triggers)
-    await checkHumanReasons(canvasElement,false)
-    // The keyboard tooltip paints the same reason the description announces.
-    const groupTrigger=exposedTriggers(unreported).find(trigger=>trigger.closest('[data-details-not-reported="group"]'));requireContract(groupTrigger,'Missing desktop group trigger')
-    requireContract(await keyboardTooltip(groupTrigger)===descriptionOf(groupTrigger).split('; ').join(''),'Desktop tooltip and accessible description disagree')
+    await checkHumanReasons(canvasElement)
+    // Whole groups match the phone hierarchy at desktop density: painted summary, one dense collapsed Why?, never a tooltip.
+    await checkWhyDisclosure(unreported,false)
     // Partial groups match the phone hierarchy at desktop density: one summary, one dense Why?.
     await checkPartialGroups(canvasElement,false)
-    // Desktop keeps its density and its tooltips: no 44px phone geometry, no painted reasons.
-    const assertDense=()=>{for(const tab of canvasElement.querySelectorAll<HTMLElement>('[role="tab"]'))requireContract(tab.getBoundingClientRect().height<44,'Desktop Details adopted phone geometry');requireContract(![...canvasElement.querySelectorAll('[data-details-reason]')].some(paintedElement),'Desktop Details adopted phone geometry')}
+    // Desktop keeps its density: no 44px phone geometry, and no painted reason beyond a whole group's summary sentence.
+    const assertDense=()=>{for(const tab of canvasElement.querySelectorAll<HTMLElement>('[role="tab"]'))requireContract(tab.getBoundingClientRect().height<44,'Desktop Details adopted phone geometry');requireContract(![...canvasElement.querySelectorAll('[data-details-reason]')].some(node=>paintedElement(node)&&!node.querySelector('[data-details-group-summary]')),'Desktop Details adopted phone geometry')}
     assertDense()
     const tab=canvasElement.querySelector<HTMLElement>('[role="tab"]')!,height=tab.style.height
     try{tab.style.height='44px';await rejectsControl('Desktop Details adopted phone geometry',assertDense)}finally{tab.style.height=height}
@@ -703,7 +731,7 @@ export const ProductionPhoneDetails: Story = {
     const dangling = panel.ownerDocument.createElement('span'); dangling.textContent = '·'; identity.append(dangling)
     try { await rejectsCause(identityGap, () => assertProductionIdentity(panel)) } finally { dangling.remove() }
     assertProductionIdentity(panel)
-    await checkWhyDisclosure(panel)
+    await checkWhyDisclosure(panel, true)
     await checkTail(panel, true, productionTail)
     // A collapsed Why? panel is copy too: source wording hidden there is still rejected.
     const tailPanel = panel.ownerDocument.getElementById(panel.querySelector('[data-details-unreported-sections] button[data-details-why]')?.getAttribute('aria-controls') ?? ''); requireContract(tailPanel, 'Missing tail Why? panel')
@@ -714,7 +742,7 @@ export const ProductionPhoneDetails: Story = {
     await waitFor(() => requireContract(whys.every(why => why.getAttribute('aria-expanded') === 'true'), 'Why? did not expand'))
     assertPlainCopy(panel)
     for (const why of whys) await userEvent.click(why)
-    await waitFor(() => { assertWholeGroups(panel); assertTail(panel, true, productionTail) })
+    await waitFor(() => { assertWholeGroups(panel, true); assertTail(panel, true, productionTail) })
   },
 }
 

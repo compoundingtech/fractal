@@ -55,8 +55,14 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(host.querySelector('[data-testid="details-pane"]')).not.toBeNull()
     expect(host.textContent).toContain('Synthetic Details seat')
     expect(host.textContent).toContain('synthetic-reported-model')
-    expect(within(host).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
-    expect(within(host).getByRole('button', { name: 'Visible sections' })).not.toBeNull()
+    const row = host.querySelector<HTMLElement>('[data-agent-inspector-tabs]')!
+    expect(within(row).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Changes', 'Details'])
+    expect(within(row).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
+    // Details' controls and the dock's close share the tab row; no generic workbench copy/theme/panel actions.
+    expect(within(row).getByRole('button', { name: 'Visible sections' })).not.toBeNull()
+    expect(within(row).getByRole('button', { name: 'Close agent inspector' })).not.toBeNull()
+    expect(within(host).queryAllByRole('button', { name: /theme|copy|panel|split/i })).toEqual([])
+    expect(host.querySelector('[data-testid="workbench"]')).toBeNull()
     const context = within(host).getByRole('progressbar', { name: 'Context window' })
     expect(Number(context.getAttribute('aria-valuenow'))).toBeCloseTo(6.1206, 6)
     expect(host.textContent).not.toMatch(/worker-1|Small Talk release|Self vs descendants.*\$0/)
@@ -99,12 +105,16 @@ describe('native observations mounted on the production kit Details pane', () =>
   })
   it('preserves Changes as a selectable real captured-changes surface and returns to Details', async () => {
     await act(async () => within(host).getByRole('tab', { name: 'Changes' }).click())
-    expect(host.querySelector('aside[aria-label="Changes"]')).not.toBeNull()
+    expect(within(host).getByRole('tab', { name: 'Changes' }).getAttribute('aria-selected')).toBe('true')
+    expect(host.querySelectorAll('aside[aria-label="Changes"]')).toHaveLength(1)
     expect(host.querySelector('[data-testid="details-pane"]')).toBeNull()
+    // The hidden Details pane released its controls from the shared row.
+    expect(host.querySelector('[data-agent-inspector-accessory]')?.childElementCount).toBe(0)
     expect(host.textContent).toContain('Captured changes unavailable')
     await act(async () => within(host).getByRole('tab', { name: 'Details' }).click())
     expect(host.querySelector('[data-testid="details-pane"]')).not.toBeNull()
     expect(host.querySelector('aside[aria-label="Changes"]')).toBeNull()
+    expect(within(host.querySelector<HTMLElement>('[data-agent-inspector-tabs]')!).getByRole('button', { name: 'Visible sections' })).not.toBeNull()
   })
   it('re-fetches and re-projects a rejected declaration tree when Retry is pressed', async () => {
     let declarationReads = 0
@@ -136,12 +146,21 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(declarationReads).toBe(2)
     expect(registry.get(declaration)).toMatchObject({ _tag: 'Observed', value: { bindings: [{ kind: 'workspace', count: 1 }] } })
   })
-  it('keeps the app source registry when kit tab state has its own registry and closes through the host', async () => {
+  it('reads through the app source registry and closes through the host', async () => {
     await act(async () => registry.set(agents, observed({ value: [{ ...row, name: 'Updated Details seat' }] })))
     expect(host.textContent).toContain('Updated Details seat')
     expect(host.textContent).not.toContain('Synthetic Details seat')
     await act(async () => within(host).getByRole('button', { name: 'Close agent inspector' }).click())
     expect(onClose).toHaveBeenCalledOnce()
+  })
+  it('leaves the phone sheet its own close while keeping both tabs selectable', async () => {
+    const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef="agent/synthetic" width="fill" scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
+    expect(within(host).queryByRole('button', { name: /close/i })).toBeNull()
+    expect(within(host).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
+    await act(async () => within(host).getByRole('tab', { name: 'Changes' }).click())
+    expect(host.querySelectorAll('aside[aria-label="Changes"]')).toHaveLength(1)
+    expect(host.querySelector('[data-testid="details-pane"]')).toBeNull()
   })
 })
 

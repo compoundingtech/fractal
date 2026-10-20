@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
@@ -43,8 +44,12 @@ export const retainedResourceAtoms = (source: DataSource): ResourceAtoms => {
   return atoms
 }
 
-/** Native conversation controls, retained from the former ConversationDetail header portal. */
-export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef: string; readonly ux?: UxTelemetry }) => {
+/** Conversation controls stay in the responsive header; the workspace supplies the desktop dock. */
+export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
+  readonly agentRef: string
+  readonly ux?: UxTelemetry
+  readonly resourcesDock?: { readonly host: HTMLElement | null; readonly open: boolean; readonly onOpenChange: (open: boolean) => void }
+}) => {
   const source = useDataSource()
   const narrow = React.useContext(NarrowLayoutContext)
   const registry = React.useContext(RegistryContext)
@@ -54,7 +59,8 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
     registry.mount(atoms.queue(agentRef))()
   }
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
-  const [resourcesOpen, setResourcesOpen] = React.useState(false)
+  const [standaloneResourcesOpen, setStandaloneResourcesOpen] = React.useState(false)
+  const resourcesOpen = resourcesDock?.open ?? standaloneResourcesOpen
   const [declarationOpen, setDeclarationOpen] = React.useState(false)
   const [syncDetailsOpen, setSyncDetailsOpen] = React.useState(false)
   const conversation = useConversation(agentRef)
@@ -72,12 +78,13 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
       setOpening(ux?.beginOpen({ surface: 'resources' }))
     }
     else { cancelMeasure('resources_panel'); opening?.cancel(); setOpening(undefined) }
-    setResourcesOpen(open)
+    if (resourcesDock === undefined) setStandaloneResourcesOpen(open)
+    else resourcesDock.onOpenChange(open)
   }
   const shellCommit = React.useCallback((node: HTMLElement | null) => {
     if (node === null || opening === undefined) return
     opening.phase('shell')
-    return () => opening.cancel()
+    return () => { opening.cancel(); cancelMeasure('resources_panel') }
   }, [opening])
   const panelId = React.useId()
   /** Closing releases UI demand, but the intent-created wrapper retains its poll for 60 seconds. */
@@ -87,16 +94,15 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
     ? resources.reason === 'ungranted' ? 'Read access to agent resources has not been granted.'
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
     : undefined
-  // A non-modal complementary panel: opening it never inerts or hides the workspace, so the click
-  // commits the panel in the same frame instead of restyling the whole app.
+  const panel = resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} placement={resourcesDock === undefined ? 'overlay' : 'dock'} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close resources</Aria.Button>} onClose={() => changeResourcesOpen(false)}>
+    <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
+  </SidePanel> : null
   return <div {...stylex.props(styles.actions)}>
-    <span {...stylex.props(styles.secondary)}>
+    <span {...stylex.props(styles.secondary, narrow && styles.secondaryHidden)}>
       <ChromeControl icon="folder" label="Resources" active={resourcesOpen} expanded={resourcesOpen} {...(resourcesOpen ? { controls: panelId } : {})} onPrefetch={prefetch} onPress={() => changeResourcesOpen(!resourcesOpen)} {...(disabledReason === undefined ? {} : { disabledReason })} />
     </span>
-    {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close resources</Aria.Button>} onClose={() => changeResourcesOpen(false)}>
-      <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
-    </SidePanel> : null}
-    <span {...stylex.props(styles.secondary)}>
+    {resourcesDock === undefined ? panel : resourcesDock.host === null ? null : createPortal(panel, resourcesDock.host)}
+    <span {...stylex.props(styles.secondary, narrow && styles.secondaryHidden)}>
       <Tooltip label="View KDL">
         <Aria.Button aria-label="View KDL" onPress={() => setDeclarationOpen(true)} {...stylex.props(styles.button, styles.declarationButton)}>
           <span {...stylex.props(styles.declarationIcon)}><Icon name="checklist" /></span>
@@ -187,6 +193,7 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
   secondary: { display: { default: 'inline-flex', '@container thread-header (max-width: 440px)': 'none' }, flexShrink: 0 },
+  secondaryHidden: { display: 'none' },
   declarationButton: { height: 28, minWidth: 28, justifyContent: 'center', paddingInline: { default: 8, '@container thread-header (max-width: 680px)': 0 } },
   declarationIcon: { display: { default: 'none', '@container thread-header (max-width: 680px)': 'inline-flex' } },
   declarationLabel: { display: { default: 'inline', '@container thread-header (max-width: 680px)': 'none' } },

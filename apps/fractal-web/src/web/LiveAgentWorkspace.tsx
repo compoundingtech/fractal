@@ -18,9 +18,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { ChromeControl, SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, DockedSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
-// Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
-import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { ChromeControl, SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, DockedSplit, NarrowSheet, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
@@ -269,6 +267,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
   const [headerSlot, setHeaderSlot] = React.useState<HTMLDivElement | null>(null)
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
+  const [resourcesHost, setResourcesHost] = React.useState<HTMLDivElement | null>(null)
+  const [resourcesAgent, setResourcesAgent] = React.useState<string>()
   const [panes, setPanes] = useAtom(workspacePanes(current))
   const query = new URLSearchParams(location.split('?')[1])
   const selectedPane = query.get('open') ?? 'thread'
@@ -278,7 +278,6 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
   const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
   const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
-  const terminalReasonId = React.useId()
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -295,6 +294,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       onSelectConversation?.(ref)
     }
     setDiffOpen(false)
+    setResourcesAgent(undefined)
     setOpenedTool(undefined)
     agentsDrawer.current?.close()
     navigate(ref)
@@ -402,7 +402,8 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const changesWorkspace = agent?.workspace._tag === 'Known' ? JSON.stringify([agent.host, agent.workspace.value]) : current
   const terminalOpen = selectedPane.includes('terminal/')
   const toggleTerminal = () => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
-  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} ux={ux} /></>
+  const resourcesDockOpen = !narrow && current !== '' && resourcesAgent === current
+  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} ux={ux} {...(narrow ? {} : { resourcesDock: { host: resourcesHost, open: resourcesDockOpen, onOpenChange: (open: boolean) => { setResourcesAgent(open ? current : undefined); if (open) { setDiffOpen(false); setOpenedTool(undefined) } } } })} /></>
   // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
   const narrowDetailsOpen = narrow && current !== '' && (diffOpen || openedTool !== undefined)
   const closeDetails = () => { setDiffOpen(false); setOpenedTool(undefined) }
@@ -468,13 +469,13 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 </aside>
                 <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               </>}
-              <DockedSplit persistKey={`live.${changesWorkspace}.changes`} label="Resize changes" minMainSize={geometryNumbers.panelMin} onCollapse={() => setDiffOpen(false)} dock={!narrow && diffOpen && openedTool === undefined && current !== '' ? (
+              <DockedSplit persistKey={`live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}`} label={resourcesDockOpen ? 'Resize resources' : 'Resize changes'} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : !narrow && diffOpen && openedTool === undefined && current !== '' ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
                   <AgentDetailsPanel key={current} agentRef={current} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} />
                 </React.Suspense>
               ) : undefined}>
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarSheet={sheet} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => setDiffOpen(value => !value)} onToggleDrawer={toggleTerminal} />}
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarSheet={sheet} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} />}
                 <GatewayConnectionStatus />
                 {!narrow && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
@@ -506,17 +507,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
               ) : null}
               {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
               <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
-              {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400} actions={
-                <NarrowActionRow label="Agent actions">
-                  {agentHeaderActions}
-                  {terminalRef === undefined && terminalDisabledReason === undefined ? null : <>
-                    <Aria.Button aria-pressed={terminalOpen} isDisabled={!terminalOpen && terminalRef === undefined} aria-describedby={terminalRef === undefined ? terminalReasonId : undefined} onPress={() => { closeDetails(); toggleTerminal() }} {...stylex.props(styles.textButton, styles.narrowAction)}>
-                      <CompositionIcon name="drawer" />Terminal
-                    </Aria.Button>
-                    {terminalRef === undefined ? <span id={terminalReasonId} hidden>{terminalDisabledReason}</span> : null}
-                  </>}
-                </NarrowActionRow>
-              }>
+              {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
                 {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
                   <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>
                     <AgentDetailsPanel key={current} agentRef={current} width="fill" scheme={scheme} onClose={closeDetails} onOpen={(uri) => { closeDetails(); openDetailsUri(uri) }} />
@@ -528,7 +519,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
+    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
     </ThreadHeaderSlotContext.Provider>
   </NarrowLayoutContext.Provider>)
 }
@@ -673,6 +664,7 @@ const styles = stylex.create({
   skeletonHost: { gridRow: '2', width: '44%' },
   footer: { height: 40, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0 },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
+  resourcesDock: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, height: '100%' },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   phoneHidden: { display: 'none' },
   // Identical geometry in both states: revealing a pane must not invalidate its layout. Only
@@ -689,7 +681,6 @@ const styles = stylex.create({
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
   sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
-  narrowAction: { display: 'inline-flex', alignItems: 'center', gap: s.xs, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
   toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
   toolDetailTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize },
   toolDetailOutput: { margin: 0, padding: s.lg, minHeight: 0, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.fgMuted },

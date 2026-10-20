@@ -140,10 +140,9 @@ export function DetailsUnreportedSections({ sections }: { readonly sections: rea
  * Reasons are grouped: a reason shared by every missing field is one sentence; differing reasons each paint once,
  * prefixed by the fields they explain. `notes` are plain sentences about reported values (which session spend belongs
  * to, which sessions a total includes) that are not missing fields; they live only behind Why?.
- * Whole group: desktop paints the state word as a keyboard-reachable trigger whose reason is its tooltip and accessible
- * description; narrow hosts paint one plain `summary` sentence and keep the reasons behind a collapsed `Why?`.
- * Partial group: desktop and phone alike paint the summary and keep every reason behind one collapsed `Why?`
- * (44px on phone, dense on desktop).
+ * Whole group and partial group alike, desktop and phone share one hierarchy: a painted summary sentence (a whole
+ * group's `summary`, e.g. `This session does not report spend.`) and every reason behind one collapsed `Why?` (44px on
+ * phone, dense on desktop). No reason is tooltip-only.
  */
 export function DetailsNotReported({ group, summary, area = 'Details', fields, notes = [] }: {
   readonly group?: string; readonly summary?: string
@@ -151,17 +150,15 @@ export function DetailsNotReported({ group, summary, area = 'Details', fields, n
   readonly area?: string
   readonly fields: readonly NotReportedField[]; readonly notes?: readonly string[]
 }) {
-  const narrow = React.useContext(NarrowLayoutContext)
   const names = fields.map(field => field.name).join(', ')
   const groups = reasonGroups(fields)
   if (group !== undefined) {
     if (fields.length === 0) return null
-    const reasons = <DetailsInlineReason block><ReasonLines groups={groups} /></DetailsInlineReason>
     return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
-      <span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
-      {narrow
-        ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason><WhyDisclosure explains={`${group} not reported`}>{reasons}</WhyDisclosure></>
-        : <DescribedTooltipButton aria-label={`${group}: not reported`} description={groups.map(reason => `${reasonPrefix(reason, groups)}${reason.reason}`).join('; ')} tooltip={<ReasonLines groups={groups} />} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
+      <span {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
+      <span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span>
+      <DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason>
+      <WhyDisclosure explains={`${group} not reported`}><DetailsInlineReason block><ReasonLines groups={groups} /></DetailsInlineReason></WhyDisclosure>
     </p>
   }
   const uniqueNotes = [...new Set(notes)]

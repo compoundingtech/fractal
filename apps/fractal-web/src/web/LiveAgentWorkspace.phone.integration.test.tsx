@@ -94,6 +94,23 @@ it('closes the drawer when an agent is selected and supports its explicit close 
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
 })
 
+it('keeps conversation actions in the header and gives the Details sheet only one close control', async () => {
+  const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Agent details"]')!
+  await act(async () => trigger.click())
+  await act(async () => vi.dynamicImportSettled())
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    const sheet = host.querySelector<HTMLElement>('[role="dialog"][aria-label="Agent details"]')!
+    expect(sheet).not.toBeNull()
+    expect(sheet.querySelector('[data-testid="details-pane"]')).not.toBeNull()
+    expect(sheet.querySelectorAll('button[aria-label^="Close"]')).toHaveLength(1)
+    expect(sheet.querySelector('button[aria-label="Close agent details"]')).not.toBeNull()
+    expect(sheet.querySelector('[data-narrow-actions]')).toBeNull()
+    expect(sheet.querySelector('button[aria-label="Conversation menu"]')).toBeNull()
+    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Conversation menu"]')).not.toBeNull()
+  }, { timeout: 15_000 })
+})
+
 it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {
   const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
   expect(tabs.map(tab => tab.textContent)).toEqual(['Thread', 'Changes'])

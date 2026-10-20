@@ -362,10 +362,9 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
 
 /** Unpainted twin of DetailsNotReported, reserving the same line, the same unbreakable names and the same Why? row. */
 const NotReportedPending = ({ group, summary, area = 'Details', names, notes = false }: { readonly group?: string; readonly summary?: string; readonly area?: string; readonly names: readonly string[]; readonly notes?: boolean }): ReactNode => {
-  const narrow = React.useContext(NarrowLayoutContext)
   if (group !== undefined) return names.length === 0 ? null : <p {...stylex.props(styles.notReported)}><span {...stylex.props(styles.pendingText)}>{`${group} · not reported`}</span>
-    {/* Phone whole groups reserve the live sentence and the collapsed Why? control. */}
-    {narrow && summary !== undefined && <><span {...stylex.props(styles.pendingBlock)}><span {...stylex.props(styles.pendingText)}>{summary}</span></span><DetailsWhyPending /></>}
+    {/* Whole groups reserve the live sentence and the collapsed Why? control on desktop and phone alike. */}
+    {summary !== undefined && <><span {...stylex.props(styles.pendingBlock)}><span {...stylex.props(styles.pendingText)}>{summary}</span></span><DetailsWhyPending /></>}
   </p>
   if (names.length === 0 && !notes) return null
   // Partial groups reserve one summary and one collapsed Why? row: 44px on phone, dense on desktop.

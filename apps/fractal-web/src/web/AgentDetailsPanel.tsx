@@ -1,12 +1,12 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components'
-import { RegistryContext } from '@effect/atom-react'
-import { DetailsPane, DetailsWhy, Workbench } from '@smalltalk/fractal-ui/assistant-ui'
-import type { DetailsLayoutIntent, DetailsVariants, WorkbenchLayout, WorkbenchResources } from '@smalltalk/fractal-ui/assistant-ui'
+import { Button, Dialog, Heading, Modal, ModalOverlay, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import { DetailsPane, DetailsWhy } from '@smalltalk/fractal-ui/assistant-ui'
+import type { DetailsLayoutIntent, DetailsVariants } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-status.ts'
 import { colorVars as c, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { PaneHeaderAccessoryHost } from '../../../../packages/fractal-ui/src/assistant-ui/workbench/PaneLayer.tsx'
 import { useClockDeadline, useGatewaySync, useNowSnapshot } from '../data/react.tsx'
 import { syncLineNextChange } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
 import { earliestChange, formatRelative, nextRelativeChange } from '@smalltalk/fractal-ui/human-time/format'
@@ -22,14 +22,13 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 export const liveDetailsVariants: DetailsVariants = {
   overview: 'O2', context: 'C3', spend: 'S2', resources: 'R1', empty: 'E3',
 }
-const resources: WorkbenchResources = {
-  threads: new Map(), diffs: new Map(), terminals: { state: 'unknown' },
-}
+type InspectorView = 'changes' | 'details'
 
 export interface AgentDetailsPanelProps {
   readonly agentRef: string
   /** A number sizes a standalone panel; `dock` fills DockedSplit, and `fill` flows in the narrow sheet. */
   readonly width: number | 'fill' | 'dock'
+  /** The host shell applies the light/dark tokens; the inspector carries no theme control of its own. */
   readonly scheme: 'dark' | 'light'
   readonly onClose: () => void
   readonly onOpen: (uri: string, split: boolean) => void
@@ -38,30 +37,34 @@ export interface AgentDetailsPanelProps {
   readonly detailsSupplement?: UseDetailsSupplement
 }
 
-/** The real kit tab-group owns Details' status/action slot; hidden tabs release reader demand. */
-export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement }: AgentDetailsPanelProps) {
+/**
+ * One fixed row: Changes and Details tabs, Details' status/section controls, then the dock's close.
+ * In the phone sheet (`fill`) the sheet header owns the only close. Hidden tabs unmount, releasing reader demand.
+ */
+export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement }: AgentDetailsPanelProps) {
   const narrow = React.useContext(NarrowLayoutContext)
-  const sourceRegistry = React.useContext(RegistryContext)
-  const layout = React.useMemo<WorkbenchLayout>(() => ({ kind: 'group', tabs: [
-    { uri: `details:${agentRef}`, view: 'details' },
-    { uri: `changes:${agentRef}` },
-  ] }), [agentRef])
-  const detailsKey = `details:${agentRef} view=details`
-  const [selected, setSelected] = React.useState(detailsKey)
+  const [selected, setSelected] = React.useState<InspectorView>('details')
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
+  // Details portals its sync status and Visible sections into this row, as it does into a kit pane header.
+  const [accessoryHost, setAccessoryHost] = React.useState<HTMLDivElement | null>(null)
   return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={typeof width === 'number' ? { width } : undefined} {...stylex.props(styles.root, typeof width !== 'number' && styles.fillRoot)}>
-    {/* Phone: a recognizable 44px control (icon, label, filled shape); desktop keeps the quiet text button. */}
-    <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" data-agent-inspector-close onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouch)}>{narrow && <Icon name="x" />}Close</Button></div>
-    <Workbench layout={layout} resources={resources} workspaceId={`live-inspector:${agentRef}`} scheme={scheme}
-      appearance={{ width: 'W1', header: 'H3', chrome: 'P1', dropZones: 'D3' }}
-      landmarkContext="Agent inspector" focusedPaneKey={selected} onPaneSelect={setSelected}
-      describePane={pane => ({ title: pane.view === 'details' ? 'Details' : 'Changes' })}
-      renderPane={pane => <RegistryContext.Provider value={sourceRegistry}>
-        {pane.view === 'details'
-          ? <NativeDetailsPane agentRef={agentRef} variants={variants} intent={intent} onIntentChange={setIntent} onOpen={onOpen} useSupplement={detailsSupplement} />
-          : <ChangesInspector agentRef={agentRef} width={width} />}
-      </RegistryContext.Provider>}
-    />
+    {/* data-testid="tab-group" lets Details return focus to the selected tab after Retry. */}
+    <Tabs selectedKey={selected} onSelectionChange={key => setSelected(key === 'changes' ? 'changes' : 'details')} data-testid="tab-group" {...stylex.props(styles.tabs)}>
+      <div data-agent-inspector-tabs {...stylex.props(styles.row, narrow && styles.rowTouch)}>
+        <TabList aria-label="Agent inspector views" {...stylex.props(styles.tabList)}>
+          <Tab id="changes" {...stylex.props(styles.tab, narrow && styles.tabTouch)}>Changes</Tab>
+          <Tab id="details" {...stylex.props(styles.tab, narrow && styles.tabTouch)}>Details</Tab>
+        </TabList>
+        <div ref={setAccessoryHost} data-agent-inspector-accessory {...stylex.props(styles.accessory)} />
+        {width === 'fill' ? null : <Button aria-label="Close agent inspector" data-agent-inspector-close onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouch)}><Icon name="x" /></Button>}
+      </div>
+      <TabPanel id="changes" {...stylex.props(styles.panel)}><ChangesInspector agentRef={agentRef} width={width} /></TabPanel>
+      <TabPanel id="details" {...stylex.props(styles.panel)}>
+        <PaneHeaderAccessoryHost value={accessoryHost ?? undefined}>
+          <NativeDetailsPane agentRef={agentRef} variants={variants} intent={intent} onIntentChange={setIntent} onOpen={onOpen} useSupplement={detailsSupplement} />
+        </PaneHeaderAccessoryHost>
+      </TabPanel>
+    </Tabs>
   </aside>
 }
 
@@ -168,9 +171,17 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
 const styles = stylex.create({
   root: { flexShrink: 0, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.canvas, color: c.fg },
   fillRoot: { width: '100%', flexGrow: 1 },
-  closeBar: { display: 'flex', justifyContent: 'flex-end', flexShrink: 0, padding: s.xs },
-  close: { fontSize: t.metaSize, color: c.fgMuted, backgroundColor: 'transparent', borderWidth: 0, padding: s.xs, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
-  closeTouch: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, minWidth: g.touchTarget, minHeight: g.touchTarget, paddingInline: s.lg, color: c.fg, backgroundColor: c.rowActive, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: r.control },
+  tabs: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
+  // Fixed height in every state: Details' status folds by this row's width (`pane-header`), never wraps.
+  row: { display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlLg, flexShrink: 0, boxSizing: 'border-box', paddingInline: s.sm, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: c.border, minWidth: 0, containerType: 'inline-size', containerName: 'pane-header' },
+  rowTouch: { height: `calc(${g.touchTarget} + 2 * ${s.xs})` },
+  tabList: { display: 'flex', alignItems: 'center', gap: s.xs2, minWidth: 0, flexShrink: 0 },
+  tab: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, paddingInline: s.sm, borderRadius: r.control, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: c.fg }, ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } },
+  tabTouch: { height: g.touchTarget, paddingInline: s.lg },
+  accessory: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: s.xs2, flexShrink: 0, alignSelf: 'stretch', minWidth: 0 },
+  close: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } },
+  closeTouch: { width: g.touchTarget, height: g.touchTarget },
+  panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0, outline: 'none', containerType: 'inline-size', containerName: 'pane-mount' },
   content: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flexGrow: 1, overflowY: 'auto' },
   // A wrapping line: the summary takes a full row, Why? and its panel start beneath it.
   note: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: s.xs, margin: 0, paddingInline: s.sm, paddingBlock: s.xs, fontSize: t.metaSize, color: c.fgMuted, flexShrink: 0 },

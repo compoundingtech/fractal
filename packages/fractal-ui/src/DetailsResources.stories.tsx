@@ -125,7 +125,9 @@ function assertHuman(pane: HTMLElement) {
   }
   assertMetricGroups(pane)
 }
-/** Context and Spend name every missing field once: one `Spend · not reported` line, or reported fields plus one `Not reported:` summary whose reasons wait behind one Why?; never per-field dashes or triggers. */
+/** The approved whole-group summary, identical on desktop and phone. */
+const groupSummaries: Readonly<Record<string, string>> = { Context: 'This session does not report context usage.', Spend: 'This session does not report spend.' }
+/** Context and Spend name every missing field once: `Spend · not reported` with its summary sentence and one collapsed Why?, or reported fields plus one `Not reported:` summary whose reasons wait behind one Why?; never per-field dashes or tooltip triggers. */
 function assertMetricGroups(pane: HTMLElement) {
   for (const name of ['Context', 'Spend']) {
     const section = pane.querySelector<HTMLElement>(`section[aria-label$="${name}"]`)
@@ -133,7 +135,10 @@ function assertMetricGroups(pane: HTMLElement) {
     const lines = section.querySelectorAll<HTMLElement>('[data-details-not-reported]')
     requireContract(lines.length <= 1 && !section.querySelector('[data-details-missing-value]') && !paintedText(section).includes('—'), 'Metric group paints per-field missing values')
     const line = lines[0]
-    if (line?.dataset.detailsNotReported === 'group') requireContract(line.parentElement?.childElementCount === 1 && paintedText(line) === `${name}·not reported` && line.querySelector(`button[aria-label="${name}: not reported"]`), 'Unreported metric group paints more than its one line')
+    if (line?.dataset.detailsNotReported === 'group') {
+      const head = [...line.children].slice(0, 3).map(node => node.textContent).join(''), summaries = line.querySelectorAll('[data-details-group-summary]'), whys = line.querySelectorAll<HTMLElement>('button[data-details-why]')
+      requireContract(line.parentElement?.childElementCount === 1 && head === `${name}·not reported` && summaries.length === 1 && summaries[0]!.textContent === groupSummaries[name] && whys.length === 1 && whys[0]!.getAttribute('aria-expanded') === 'false' && (whys[0]!.textContent ?? '').replace(/\s+/g, ' ').trim() === `Why? ${name} not reported` && !line.querySelector('button:not([data-details-why]),[aria-describedby]'), 'Unreported metric group is not its summary behind one collapsed Why?')
+    }
     if (line?.dataset.detailsNotReported === 'fields') {
       const names = (line.dataset.detailsNotReportedNames ?? '').split(', ').filter(Boolean), summary = line.querySelector('[data-details-not-reported-summary]')?.textContent ?? ''
       requireContract((names.length > 0 ? summary.startsWith('Not reported: ') : summary === `Some ${name.toLowerCase()} details aren’t reported.`) && line.querySelectorAll('[data-details-not-reported-field]').length === names.length && line.querySelectorAll('button[data-details-why]').length === 1 && !line.querySelector('button:not([data-details-why])'), 'Partial metric group lacks one Not reported summary behind Why?')
