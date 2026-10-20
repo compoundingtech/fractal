@@ -606,6 +606,80 @@ export const evidenceStepSteps = (
     artifact: options.artifact,
   })
 
+/**
+ * Signing steps for the Nix path: build the check derivation (`nix build .#checks.<system>.NAME`), then sign a `nix`
+ * record for it as `nix-NAME`. The facts script, the signer and the helper all come from the base commit; the build runs
+ * before the key is written, as every signing job's work does. The note is retained as the artifact
+ * `nix-evidence-note-NAME`, which the aggregate gate's `evidence-note-*` collection does not match: nothing publishes or
+ * reads it until gate-evidence's verifier accepts the `nix` kind. Without the Nix daemon's `secret-key-files` on the
+ * runner the path carries no Nix signature and the record says `nix_unsigned`, which a verifier rejects.
+ */
+export const nixEvidenceSteps = (name: string): unknown[] => {
+  const soft = { if: 'always()', 'continue-on-error': true } as const
+  const record = `nix-${name}`  // the ledger name only: one signature per job
+  return [
+    {
+      name: 'Take the evidence signer from the base commit',
+      id: 'evidence-base',
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+    },
+    {
+      // A failing build is a record too: the facts script exits 1 after writing it, so this step does not stop the signing.
+      name: `Build checks.${name} and record the facts`,
+      id: 'nix-build',
+      'continue-on-error': true,
+      run: `python3 "$RUNNER_TEMP/evidence-base/scripts/nix-check-facts" --check ${name} --out "$RUNNER_TEMP/nix-facts.json"`,
+    },
+    {
+      ...soft,
+      name: 'May this job use the signing key?',
+      id: 'evidence-guard',
+      if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
+      run: `python3 ${evidenceHelper} guard`,
+    },
+    {
+      ...soft,
+      name: 'Write the signer configuration and key',
+      id: 'evidence-configure',
+      if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
+      env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+      run: `set -o pipefail
+python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+    },
+    {
+      ...soft,
+      name: `Sign the nix record for ${name}`,
+      if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
+      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `helper=${evidenceHelper}
+python3 "$helper" once ${record}
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${name} \\
+  --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\
+  --out "$RUNNER_TEMP/evidence-notes" \\
+  --toolchain-sha256 "$(printf '%s|%s' "$(nix --version 2>/dev/null)" "$RUNNER_ARCH" | sha256sum | cut -d' ' -f1)"`,
+    },
+    { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
+    {
+      ...soft,
+      name: 'Retain the signed note',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: `nix-evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+    },
+  ]
+}
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({
