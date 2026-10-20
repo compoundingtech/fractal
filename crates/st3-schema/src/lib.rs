@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use st_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h7993ce9b59fd owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8da8a9f235f8 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -119,6 +119,16 @@ the repaired record's reference. A trigger copies them whenever a record becomes
 repaired again, and deleting the record leaves them; rows are never deleted. A one-time copy at
 open reads only the repaired records that predate the triggers, through their partial index.
 Readers still use the records and `projection_digest_repaired_claims`.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.
 "#;
 
 pub fn storage_digest() -> String {

@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `bbd4445c35a9217fd22d9a902e61aed42e550c7163a971c3ef28edf37a95a90e`
+Storage digest: `ab318454d85787af18a36821c53eefcd4bc33c97da610305e607525dc6fb0b92`
 
 ## Subject families
 
@@ -356,6 +356,16 @@ the repaired record's reference. A trigger copies them whenever a record becomes
 repaired again, and deleting the record leaves them; rows are never deleted. A one-time copy at
 open reads only the repaired records that predate the triggers, through their partial index.
 Readers still use the records and `projection_digest_repaired_claims`.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.
 
 ## Local message selectors
 
