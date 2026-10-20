@@ -73,7 +73,7 @@ export function DetailsUnavailable({ subjects, state = 'Unavailable', reason }: 
   return <p data-details-unavailable data-details-unavailable-subject={subject} {...stylex.props(styles.line)}><span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{subject}</span><span aria-hidden="true">·</span><DetailsAvailabilityState subject={subject} state={state} reason={reason} /></p>
 }
 
-/** One unreported field of a metric group, with the source's own reason. */
+/** One unreported field of a metric group or section, with the session's own reason. */
 export interface NotReportedField { readonly name: string; readonly reason: string }
 const sentence = (name: string): string => name.charAt(0).toUpperCase() + name.slice(1)
 /** Fields sharing a reason, in first-seen order. */
@@ -94,16 +94,30 @@ const ReasonLines = ({ groups }: { readonly groups: readonly ReasonGroup[] }) =>
   <>{groups.map(group => <span key={group.reason} data-details-reason-line data-details-reason-fields={groups.length > 1 ? group.names.join(', ') : undefined} {...stylex.props(styles.reasonLine)}>{reasonPrefix(group, groups)}<span data-details-reason-text>{group.reason}</span></span>)}</>
 
 /**
- * Phone disclosure for a whole group's per-field reasons: collapsed by default, a 44px quiet control whose
- * accessible name keeps the visible `Why?` and adds the group it explains. The panel is removed from layout and the
- * accessibility tree while collapsed.
+ * Disclosure for a whole group's per-field reasons: collapsed by default, a quiet control whose accessible name keeps
+ * the visible `Why?` and adds the group it explains. Phone hosts get a 44px target; desktop keeps a dense row. The
+ * panel is removed from layout and the accessibility tree while collapsed.
  */
 function WhyDisclosure({ group, children }: { readonly group: string; readonly children: React.ReactNode }) {
+  const narrow = React.useContext(NarrowLayoutContext)
   const [open, setOpen] = React.useState(false)
   const id = React.useId()
   return <>
-    <Button data-details-why aria-expanded={open} aria-controls={id} onPress={() => setOpen(value => !value)} {...stylex.props(styles.why)}><Icon name={open ? 'chevron-down' : 'chevron-right'} />Why?<VisuallyHidden elementType="span"> {group} not reported</VisuallyHidden></Button>
+    <Button data-details-why aria-expanded={open} aria-controls={id} onPress={() => setOpen(value => !value)} {...stylex.props(styles.why, !narrow && styles.whyDense)}><Icon name={open ? 'chevron-down' : 'chevron-right'} />Why?<VisuallyHidden elementType="span"> {group} not reported</VisuallyHidden></Button>
     <span id={id} hidden={!open} data-details-why-panel {...stylex.props(styles.whyPanel, !open && styles.collapsed)}>{children}</span>
+  </>
+}
+
+/**
+ * The resource column's tail: one summary line names every section this session does not report, in pane order, and
+ * their grouped reasons wait behind the same collapsed `Why?` as a whole metric group. Desktop and phone share the
+ * rule; only the control's geometry differs.
+ */
+export function DetailsUnreportedSections({ sections }: { readonly sections: readonly NotReportedField[] }) {
+  if (sections.length === 0) return null
+  return <>
+    <span data-details-unreported-summary {...stylex.props(styles.summaryLine)}>Not reported for this session: {sections.map((section, index) => <React.Fragment key={section.name}>{index > 0 && ', '}<span data-details-unreported-section={section.name}>{section.name}</span></React.Fragment>)}.</span>
+    <WhyDisclosure group="Sections"><DetailsInlineReason block><ReasonLines groups={reasonGroups(sections)} /></DetailsInlineReason></WhyDisclosure>
   </>
 }
 
@@ -143,8 +157,12 @@ const styles = stylex.create({
   // Names flow as prose; a multi-word name never splits across lines.
   inlineTrigger: { display: 'inline', minWidth: 0, whiteSpace: 'nowrap' },
   nowrap: { whiteSpace: 'nowrap' },
-  // Quiet, recognizable phone disclosure: muted ink, a chevron and a full 44px hit area, aligned with the line's text.
+  // Quiet, recognizable disclosure: muted ink, a chevron and a full 44px phone hit area, aligned with the line's text.
   why: { display: 'inline-flex', alignItems: 'center', gap: space.xs, minWidth: geometry.touchTarget, minHeight: geometry.touchTarget, padding: space.zero, borderWidth: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'pointer', ':hover': { color: text.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
+  // Desktop keeps its dense row height.
+  whyDense: { minWidth: 0, minHeight: geometry.toolRow },
+  // The tail's summary occupies its own row; Why? starts beneath it.
+  summaryLine: { display: 'block', flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
   whyPanel: { display: 'block', flexBasis: '100%', minWidth: 0 },
   collapsed: { display: 'none' },
   reasonLine: { display: 'block' },

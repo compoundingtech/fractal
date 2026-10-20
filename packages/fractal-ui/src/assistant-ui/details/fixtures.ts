@@ -59,7 +59,7 @@ const busyItems: Readonly<Record<DetailsSectionName, DetailsValue<readonly Detai
     { ...item('terminal:sample/2', 'Build terminal', 'Idle', '>_'), terminal: ['$ pnpm build', 'done in 4.2s'] },
   ]),
   Subagents: known(root.children.flatMap(agent => [{ ...item(`agent:${agent.id}`, agent.title, agent.statusLabel, '●'), agent }])),
-  'Missions / queue': known(fixtureMissionDTOs.slice(0, 3).map(mission => item(`mission:${mission.id.split('/').at(-1)}`, mission.title, String(mission.state), '◇'))),
+  Missions: known(fixtureMissionDTOs.slice(0, 3).map(mission => item(`mission:${mission.id.split('/').at(-1)}`, mission.title, String(mission.state), '◇'))),
   Attention: known(fixtureAttentionDTOs.filter(attention => attention.source_id === root.ref).map(attention => item(`attention:${attention.id.split('/').at(-1)}`, attention.title, attention.detail, '!'))),
   'Declared bindings': unknown,
   History: unknown,

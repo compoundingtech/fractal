@@ -79,15 +79,20 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(host.textContent).toContain('42%')
     expect(host.textContent).not.toContain('42% est.')
   })
-  it('hides not-supplied resource sections and names their absence once, without inventing empty counts', () => {
-    for (const name of ['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions / queue', 'History'])
+  it('hides not-supplied resource sections and names their absence once, without inventing empty counts', async () => {
+    for (const name of ['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions', 'History'])
       expect(within(host).queryByRole('region', { name })).toBeNull()
-    expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('Not supplied:')
-    expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('CI runs')
-    const reasonTrigger = host.querySelector<HTMLElement>('[data-details-unreported-section="CI runs"]')!
-    const description = document.getElementById(reasonTrigger.getAttribute('aria-describedby')!)
-    expect(description?.textContent).toBe('This source does not report CI runs.')
-    expect(description?.hasAttribute('hidden')).toBe(true)
+    const footer = host.querySelector<HTMLElement>('[data-details-unreported-sections]')!
+    expect(footer.querySelector('[data-details-unreported-summary]')?.textContent).toContain('Not reported for this session:')
+    expect(footer.querySelector('[data-details-unreported-summary]')?.textContent).toContain('CI runs')
+    const reasonTrigger = within(footer).getByRole('button', { name: 'Why? Sections not reported' })
+    const panel = document.getElementById(reasonTrigger.getAttribute('aria-controls')!)!
+    expect(reasonTrigger.getAttribute('aria-expanded')).toBe('false')
+    expect(panel.hidden).toBe(true)
+    await act(async () => reasonTrigger.click())
+    expect(reasonTrigger.getAttribute('aria-expanded')).toBe('true')
+    expect(panel.hidden).toBe(false)
+    expect([...panel.querySelectorAll('[data-details-reason-text]')].map(reason => reason.textContent)).toContain('This session does not report CI runs.')
     expect(within(host).getByRole('region', { name: 'Attention' }).textContent).toContain('No attention action observed')
   })
   it('preserves Changes as a selectable real captured-changes surface and returns to Details', async () => {

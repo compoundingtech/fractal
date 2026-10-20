@@ -169,7 +169,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       expect(last?.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', value: 42 })
       expect(requests.filter(url => url.pathname.endsWith('/usage'))).toHaveLength(1)
       expect(requests.some(url => url.pathname.includes('root-detail') || url.pathname.includes('conversation'))).toBe(false)
-      expect(last?.sections.find(section => section.title === 'Missions / queue')?.items._tag).toBe('Known')
+      expect(last?.sections.find(section => section.title === 'Missions')?.items._tag).toBe('Known')
       await act(async () => registry.set(agents, observed({ value: [nativeRow('second')] })))
       expect(last?.trace.meters.context.reportedPercent._tag).toBe('Unknown')
       await act(async () => { await vi.waitFor(() => expect(requests.filter(url => url.pathname.includes('/sessions/')).map(url => url.pathname)).toEqual(['/v1/client/sessions/first', '/v1/client/sessions/second'])) })

@@ -32,7 +32,7 @@ export interface DetailsOverview {
   readonly age: string | undefined
 }
 
-export const detailsSectionOrder = ['Workspace', 'Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Subagents', 'Missions / queue', 'Attention', 'Declared bindings', 'History'] as const
+export const detailsSectionOrder = ['Workspace', 'Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Subagents', 'Missions', 'Attention', 'Declared bindings', 'History'] as const
 export type DetailsSectionName = typeof detailsSectionOrder[number]
 export interface DetailsResource {
   readonly uri: string

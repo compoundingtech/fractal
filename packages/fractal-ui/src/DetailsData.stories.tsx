@@ -97,9 +97,9 @@ const sectionsForScenario = (scenario: string, sections: readonly DetailsSection
     ? sections.map(section => section.title === 'Subagents' ? { ...section, items: { _tag: 'Known' as const, value: [] } } : section)
     : sections
 const unavailableSections: readonly DetailsSection[] = [
-  { title: 'Workspace', items: { _tag: 'Unknown' }, unavailableReason: 'Workspace details are not supplied by this source.' },
-  { title: 'Declared bindings', items: { _tag: 'Unknown' }, unavailableReason: 'Declared bindings are not supplied by this source.' },
-  { title: 'Reviews', items: { _tag: 'Unknown' }, unavailableReason: 'Reviews are not supplied by this source.' },
+  { title: 'Workspace', items: { _tag: 'Unknown' }, unavailableReason: 'This session does not report workspace details.' },
+  { title: 'Declared bindings', items: { _tag: 'Unknown' }, unavailableReason: 'This session does not report declared bindings.' },
+  { title: 'Reviews', items: { _tag: 'Unknown' }, unavailableReason: 'This session does not report reviews.' },
 ]
 const firstReadSections = unavailableSections.map(section => section.title === 'Reviews' ? section : { ...section, pending: true })
 const emptySections: readonly DetailsSection[] = unavailableSections.map(section => ({ title: section.title, items: { _tag: 'Known', value: [] } }))
@@ -363,7 +363,7 @@ function assertResourceRead(root: HTMLElement, scenario: string, prefix: string)
   for (const title of ['Workspace', 'Declared bindings']) {
     const section = root.querySelector<HTMLElement>(`section[aria-label="${prefix}${title}"]`)
     if (!firstRead && scenario !== 'knownEmpty') {
-      const absent = root.querySelector(`[data-details-unreported-section="${title}"]`)
+      const absent = root.querySelector(`[data-details-unreported-summary] [data-details-unreported-section="${title}"]`)
       requireContract(!section && absent, 'Settled absence lost its explicit unavailable reason')
       requireContract(!absent.hasAttribute('aria-busy'), 'Settled resource stayed pending')
       continue
@@ -384,7 +384,7 @@ function assertResourceRead(root: HTMLElement, scenario: string, prefix: string)
   } else if (scenario === 'firstReadShowEmpty') {
     requireContract(reviews?.getAttribute('data-details-section-state') === 'unavailable' && !reviews.hasAttribute('aria-busy'), 'Static unreported section became pending')
   } else if (scenario !== 'firstReadHideEmpty') {
-    const absent = root.querySelector('[data-details-unreported-section="Reviews"]')
+    const absent = root.querySelector('[data-details-unreported-summary] [data-details-unreported-section="Reviews"]')
     requireContract(!reviews && absent && !absent.hasAttribute('aria-busy'), 'Static unreported section became pending')
   }
 }
@@ -626,12 +626,14 @@ async function checkFirstReadResources(canvasElement: HTMLElement) {
     await rejectsControl('Static unreported section became pending', () => assertResourceRead(mutated(root, '[data-details-unreported-section="Reviews"]', node => node.setAttribute('aria-busy', 'true')), 'firstRead', prefix))
     await rejectsControl('Resource read replaced loaded sibling details', () => assertResourceRead(mutated(root, '[data-details-content-slot]', node => node.closest('[data-testid="details-pane"]')?.setAttribute('data-details-pane-state', 'loading')), 'firstRead', prefix))
     await rejectsControl('First-read or settled resource section was filtered out', () => assertResourceRead(mutated(root, `section[aria-label="${prefix}Declared bindings"]`, node => node.remove()), 'firstRead', prefix))
-    const trigger = root.querySelector<HTMLElement>('[data-details-unreported-section="Reviews"]')
-    requireContract(trigger, 'Reviews absence is not keyboard reachable')
+    const footer = root.querySelector<HTMLElement>('[data-details-unreported-sections]')
+    requireContract(footer, 'Reviews absence summary is missing')
+    const trigger = within(footer).getByRole('button', { name: 'Why? Sections not reported' })
+    const panel = trigger.ownerDocument.getElementById(trigger.getAttribute('aria-controls')!)
+    requireContract(panel && panel.hidden && trigger.getAttribute('aria-expanded') === 'false', 'Missing section reasons are not collapsed')
     await focusInView(trigger)
-    // Tabbing into the next AllStates scenario scrolls this trigger out of view at 440px
-    // and intentionally dismisses its tooltip. Keep this source-reason check in its pane.
-    await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Reviews absence did not receive keyboard focus'))
-    await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Reviews are not supplied by this source.', 'Reviews absence lost its source reason'))
-    await userEvent.keyboard('{Escape}')
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => requireContract(!panel.hidden && trigger.getAttribute('aria-expanded') === 'true' && [...panel.querySelectorAll('[data-details-reason-text]')].some(reason => reason.textContent === 'This session does not report reviews.'), 'Reviews absence lost its session reason'))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => requireContract(panel.hidden && trigger.getAttribute('aria-expanded') === 'false', 'Missing section reasons did not collapse'))
 }

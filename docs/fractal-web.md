@@ -170,6 +170,8 @@ until a strictly newer occupancy observation arrives; cumulative token totals al
 cannot restore them.
 Elapsed and age each stay pending until the session first read settles. A shared
 timing guard reason appears once, without duplicating it beneath both values.
+When all timing facts are missing, Overview says “Timing isn't available for this session.”
+Rendered Details absence reasons refer to the session, not the data source.
 
 Selected native-root attribution requires a current-incarnation binding plus matching
 native usage rows. `UsageRow` does not expose its grouping incarnation ID; a unique
@@ -187,7 +189,8 @@ target opens a read-only dialog rather than fabricating a routable subject.
 Reported spend-window descriptions wrap at narrow pane widths without shortening
 their scope or provenance; monetary amounts keep their intrinsic width.
 The kit's E3 policy hides empty and unavailable resource bodies; unavailable categories
-are named once in its compact “Not supplied” line with keyboard provenance tooltips.
+are named once in its compact “Not reported for this session: …” summary. A collapsed
+“Why? Sections not reported” disclosure groups the reasons beneath it on desktop and phone.
 User-hidden categories are omitted. Known zero traced or observed st subagent counts
 remain visible evidence, distinct from an unknown count.
 The Subagents heading uses the reported traced-session total for both zero and
@@ -196,7 +199,7 @@ Inclusive ledger totals and native self amounts are independently sourced and
 windowed observations, not a reconciled monetary split. Their difference never
 establishes descendant spend, including when the ledger reports zero descendants.
 First-read resource sections remain pending until their relevant feed settles; they
-are not included in “Not supplied” while loading. Settled absence is still explicit.
+are not included in the missing-section summary while loading. Settled absence is still explicit.
 Native root prerequisites carry their own acquisition state: a still-loading agent
 or usage-period read is not evidence that no verified native root exists. Only a
 settled missing identity/root is unavailable; loading never authorizes a provider read.
@@ -211,7 +214,7 @@ before Open; generic reported roles remain generic, and missing kinds are not in
 An omitted role remains explicit as “role unreported” before the full session identity.
 Attention preserves main's sidebar union of waiting status and observed attention
 subjects; it does not introduce a separate sidebar policy. Terminal resources reuse the observed runtime's native navigation
-reference. Missions / queue mounts the same selected-agent queue reader as Resources;
+reference. Missions mounts the same selected-agent queue reader as Resources;
 grant refusal removes values, while stale retained queues are labelled last observed.
 
 Details readers acquire demand only for the visible tab. The tab group's local

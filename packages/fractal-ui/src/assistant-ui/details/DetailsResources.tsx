@@ -13,7 +13,7 @@ import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from
 import type { TraceSeries, TraceSubagent } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
-import { DescribedTooltipButton, DetailsAvailabilityState, DetailsInlineReason, DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
+import { DetailsAvailabilityState, DetailsUnavailable, DetailsUnreportedSections, MissingDetailsValue } from './DetailsUnavailable'
 import { detailsReasonText, traceFactReason, traceReasonText } from './trace-reasons'
 import { traceCoverageState } from './trace-series'
 
@@ -56,7 +56,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
   const unreported = empty === 'E3' && state !== 'new'
     ? candidates.filter(section => !section.pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
     : []
-  // Pane-level loading keeps the settled footprint: the Not supplied line is reserved, unpainted and inert, so recovery never grows the slot.
+  // Pane-level loading keeps the settled footprint: the unreported-sections tail is reserved, unpainted and inert, so recovery never grows the slot.
   const reserveUnreported = state === 'loading'
   const sections = candidates
     // First reads stay pending, never masquerading as settled unavailable data.
@@ -87,10 +87,10 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
         </div>}
       </section>
     })}
-    {unreported.length > 0 && <p data-details-unreported-sections={reserveUnreported ? undefined : true} data-details-unreported-reserved={reserveUnreported || undefined} aria-hidden={reserveUnreported || undefined} inert={reserveUnreported} {...stylex.props(styles.metaLine, styles.allHidden, reserveUnreported && styles.skeletonHidden)}>Not supplied: {unreported.map((section, index) => <React.Fragment key={section.title}>{index > 0 && ', '}{narrow
-      ? <span data-details-unreported-section={reserveUnreported ? undefined : section.title}>{section.title}</span>
-      : <DescribedTooltipButton data-details-unreported-section={reserveUnreported ? undefined : section.title} description={unavailableReason(section, trace, empty)} tooltipStyle={styles.tooltip} {...stylex.props(styles.unreportedTrigger)}>{section.title}</DescribedTooltipButton>}</React.Fragment>)}.
-      {narrow && <DetailsInlineReason block>{unreported.map(section => <span key={section.title} {...stylex.props(styles.reasonLine)}>{section.title}: {unavailableReason(section, trace, empty)}</span>)}</DetailsInlineReason>}</p>}
+    {/* One summary line for every unreported section; their reasons wait behind a collapsed Why? on desktop and phone alike. */}
+    {unreported.length > 0 && <div data-details-unreported-sections={reserveUnreported ? undefined : true} data-details-unreported-reserved={reserveUnreported || undefined} aria-hidden={reserveUnreported || undefined} inert={reserveUnreported} {...stylex.props(styles.metaLine, styles.allHidden, styles.unreportedTail, reserveUnreported && styles.skeletonHidden)}>
+      <DetailsUnreportedSections sections={unreported.map(section => ({ name: section.title, reason: unavailableReason(section, trace, empty) }))} />
+    </div>}
     {sections.length === 0 && unreported.length === 0 && state !== 'error' && !(state === 'new' && empty === 'E3') && <p {...stylex.props(styles.metaLine, styles.allHidden)}>Every section is empty or hidden.</p>}
   </div>
 }
@@ -107,16 +107,16 @@ const knownZeroTracedSubagents = (trace: TraceSeries): boolean => trace.subagent
   && trace.subagentCount.value === 0 && trace.subagents._tag === 'Known' && trace.subagents.value.length === 0
 
 const humanSectionReasons: Readonly<Partial<Record<DetailsSection['title'], string>>> = {
-  Reviews: 'This source doesn’t report reviews.',
-  'Declared bindings': 'This source doesn’t report declared bindings.',
-  History: 'This source doesn’t report session history.',
+  Reviews: 'This session doesn’t report reviews.',
+  'Declared bindings': 'This session doesn’t report declared bindings.',
+  History: 'This session doesn’t report its history.',
 }
 function unavailableReason(section: DetailsSection, trace: TraceSeries, empty: DetailsEmptyRule): string {
   if (section.items._tag === 'Unknown' && section.unavailableReason !== undefined) return detailsReasonText(section.unavailableReason)
   if (section.title === 'Subagents') return trace.subagents._tag === 'Unknown' ? traceFactReason(trace.subagents) : traceReasonText('no-provider')
   if (section.title === 'History' && trace.history._tag === 'Unknown' && trace.history.detail !== undefined) return traceFactReason(trace.history)
-  if (empty !== 'E3') return `This source doesn’t report ${section.title.toLowerCase()} yet.`
-  return humanSectionReasons[section.title] ?? `This source doesn’t report ${section.title.toLowerCase()}.`
+  if (empty !== 'E3') return `This session doesn’t report ${section.title.toLowerCase()} yet.`
+  return humanSectionReasons[section.title] ?? `This session doesn’t report ${section.title.toLowerCase()}.`
 }
 
 /** Name only missing row metrics; unrelated unreported facts need no section note. */
@@ -185,7 +185,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
   const subagentWindow=section.title==='Subagents'?accumulationParts(trace.subagentsWindow):undefined
   const collectionReason = showBreakdown && section.items._tag === 'Unknown' ? unavailableReason(section, trace, empty) : undefined
   const observedReason = section.title === 'Subagents' && observedSubagents?.items._tag === 'Unknown'
-    ? observedSubagents.unavailableReason ?? 'This source doesn’t report st subagent resources.' : undefined
+    ? observedSubagents.unavailableReason ?? 'This session doesn’t report st subagent resources.' : undefined
   const missingStatus = section.title === 'Subagents' && observedSubagents?.items._tag === 'Known'
     && observedSubagents.items.value.some(resource => resource.agent?.status === 'unobserved')
   const partialNote = missingStatus ? "Status isn't reported for st resources." : missingLineCountsNote(section)
@@ -357,7 +357,8 @@ const styles = stylex.create({
   touchSquare: { width: g.touchTarget, height: g.touchTarget },
   // The unavailable state's reason wraps onto its own row beneath the section title.
   headerWrap: { flexWrap: 'wrap', paddingBlock: s.xs },
-  reasonLine: { display: 'block' },
+  // The unreported-sections tail: its summary takes a full row, Why? and its panel start beneath it.
+  unreportedTail: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: s.xs },
   root: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, fontFamily: t.fontSans, color: ink.fg },
   section: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   header: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.md },
@@ -368,7 +369,6 @@ const styles = stylex.create({
   metaLine: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   allHidden: { padding: s.md },
   chevronSpace: { width: g.icon, flexShrink: 0 },
-  unreportedTrigger: { display: 'inline', padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'help', ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
   entry: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   agentEntry: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0 },
   agentRow: { flex: 1, minWidth: 0 },

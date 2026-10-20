@@ -67,7 +67,7 @@ describe('fixture-free native Details projection', () => {
     expect(result.overview.mission).toBe('mission/example · mission title unreported · current work: Observed step title')
   })
   it('uses a concise empty mission and user-facing copy for every projected missing fact', () => {
-    const banned = /\b(native|incarnation|provenance|descendant|series)\b/i
+    const banned = /\b(native|incarnation|provenance|descendant|series|source)\b/i
     const collectCopy = (value: unknown): readonly string[] => {
       if (Array.isArray(value)) return value.flatMap(collectCopy)
       if (typeof value !== 'object' || value === null) return []
@@ -90,9 +90,9 @@ describe('fixture-free native Details projection', () => {
     expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Request · question')
     const terminals = sections.find(section => section.title === 'Terminals')?.items
     expect(terminals?._tag === 'Known' ? terminals.value.map(item => item.uri) : []).toEqual(['terminal/example'])
-    expect(JSON.stringify(sections.find(section => section.title === 'Missions / queue'))).toContain('1 ready, 0 waiting')
-    expect(project({ selectedQueue: observed({ value: { ...queue, agent_id: Native.decodeUnknownSync(Native.Id)('agent/other') } }) }).sections.find(section => section.title === 'Missions / queue')?.items._tag).toBe('Unknown')
-    expect(project({ selectedQueue: { _tag: 'Observed', freshness: 'live', value: queue, error: { reason: 'ungranted', detail: 'Revoked' } } }).sections.find(section => section.title === 'Missions / queue')?.items._tag).toBe('Unknown')
+    expect(JSON.stringify(sections.find(section => section.title === 'Missions'))).toContain('1 ready, 0 waiting')
+    expect(project({ selectedQueue: observed({ value: { ...queue, agent_id: Native.decodeUnknownSync(Native.Id)('agent/other') } }) }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
+    expect(project({ selectedQueue: { _tag: 'Observed', freshness: 'live', value: queue, error: { reason: 'ungranted', detail: 'Revoked' } } }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
     expect(project({ needsMe: false }).sections.find(section => section.title === 'Attention')?.items._tag).toBe('Known')
     expect(project().sections.find(section => section.title === 'Attention')?.items._tag).toBe('Unknown')
   })
@@ -157,10 +157,10 @@ describe('fixture-free native Details projection', () => {
   it('marks only actively waiting declarations and queue as pending, never static missing producers', () => {
     const waiting = project({ selectedDeclarations: { _tag: 'Waiting' }, selectedQueue: { _tag: 'Waiting' } })
     expect(waiting.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(true)
-    expect(waiting.sections.find(section => section.title === 'Missions / queue')?.pending).toBe(true)
+    expect(waiting.sections.find(section => section.title === 'Missions')?.pending).toBe(true)
     const absent = project()
     expect(absent.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(false)
-    expect(absent.sections.find(section => section.title === 'Missions / queue')?.pending).not.toBe(true)
+    expect(absent.sections.find(section => section.title === 'Missions')?.pending).not.toBe(true)
     expect(absent.sections.find(section => section.title === 'History')?.pending).not.toBe(true)
   })
   it('carries first native root acquisition instead of declaring missing root prerequisites', () => {

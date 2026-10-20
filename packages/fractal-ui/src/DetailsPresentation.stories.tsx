@@ -60,7 +60,7 @@ async function play({canvasElement}:{canvasElement:HTMLElement}){
   assertOverview(root);assertSections(root)
   const wrong=root.cloneNode(true) as HTMLElement,section=wrong.querySelector('section');requireContract(section,'Missing unavailable control target');for(let i=0;i<2;i++){const duplicate=doc.createElement('p');duplicate.setAttribute('data-details-unavailable','true');duplicate.textContent='Unavailable';section.append(duplicate)}await rejectsControl('Unavailable prose repeats within a section',()=>assertSections(wrong))
   const line=root.querySelector<HTMLElement>('[data-details-overview-line]');requireContract(line,'Missing one-line control target');const height=line.style.height;try{line.style.height='80px';await rejectsControl('Overview sentence exceeds one line',()=>assertOverview(root))}finally{line.style.height=height}
-  // Missing Overview facts render nothing; an all-missing timing group is one source-level line, never a per-field dash.
+  // Missing Overview facts render nothing; an all-missing timing group is one session-level line, never a per-field dash.
   assertOverviewOmission(root,1)
   const timing=root.querySelector<HTMLElement>('[data-details-timing-missing]');requireContract(timing,'Missing timing summary control target')
   const repeated=timing.cloneNode(true) as HTMLElement;timing.after(repeated);try{await rejectsControl(omittedOverview,()=>assertOverviewOmission(root,1))}finally{repeated.remove()}
@@ -318,9 +318,9 @@ function assertTouch(targets:readonly HTMLElement[]){
   requireContract(small.length===0,`${touchFloor}: ${small.map(describeControl).join('; ')}`)
 }
 /** Phone provenance is painted, never a hover- or focus-only disclosure; the Why? control discloses detail behind an already painted summary. */
-const disclosureOnly='button[data-details-missing-value],button[data-details-availability],button[data-details-not-reported-field],[data-details-not-reported] button:not([data-details-why]),button[data-details-unreported-section],button[data-details-coverage],button[data-details-occupancy-estimated]'
+const disclosureOnly='button[data-details-missing-value],button[data-details-availability],button[data-details-not-reported-field],[data-details-not-reported] button:not([data-details-why]),button[data-details-coverage],button[data-details-occupancy-estimated]'
 const reasonText=(scope:Element,block:boolean)=>[...scope.querySelectorAll<HTMLElement>(block?'[data-details-reason="block"]':'[data-details-reason]')].find(reason=>paintedElement(reason)&&reason.getBoundingClientRect().height>0&&!!reason.textContent?.trim())
-/** Exposed lines only: a first-load failure keeps its pending footprint (and reserved Not supplied line) hidden, inert and aria-hidden. */
+/** Exposed lines only: a first-load failure keeps its pending footprint (and reserved unreported-sections tail) hidden, inert and aria-hidden. */
 const exposedLines=(root:ParentNode,selector:string)=>[...root.querySelectorAll<HTMLElement>(selector)].filter(line=>paintedElement(line)&&line.getBoundingClientRect().height>0&&!line.closest('[inert],[aria-hidden="true"]'))
 const notBeneath='Phone missing-data reason is not painted beneath its line'
 function assertPhoneReasons(root:HTMLElement){
@@ -372,10 +372,11 @@ export const PhoneDetails:Story={
     // Missing Overview facts render nothing: all-missing timing is one line, with no dash, state word or per-field reason.
     assertOverviewOmission(unreported,1)
     const overviewLine=unreported.querySelector<HTMLElement>('section[aria-label$="Overview"] [data-details-overview-line]');requireContract(overviewLine,'Missing Overview omission control target')
-    const stray=doc.createElement('span');stray.setAttribute('data-details-missing-value','');stray.textContent='Machine: unavailable. Not reported by this source.';overviewLine.append(stray)
+    const stray=doc.createElement('span');stray.setAttribute('data-details-missing-value','');stray.textContent='Machine: unavailable. Not reported for this session.';overviewLine.append(stray)
     try{await rejectsControl(omittedOverview,()=>assertOverviewOmission(unreported,1))}finally{stray.remove()}
     assertOverviewOmission(unreported,1)
     await checkWhyDisclosure(unreported)
+    await checkTail(retained,true)
   },
 }
 /** Canonical hyphenated wire codes; host prose such as model identifiers is never matched against a generic pattern. */
@@ -460,7 +461,7 @@ function assertOverviewOmission(host:HTMLElement,descriptionRows:number){
   const overview=host.querySelector<HTMLElement>('section[aria-label$="Overview"]');requireContract(overview,'Missing Overview')
   // Host prose (a mission may mention unavailable data) is not a fact line; only identity, meta and grid values are checked.
   const timing=overview.querySelectorAll<HTMLElement>('[data-details-timing-missing]'),text=[...overview.querySelectorAll<HTMLElement>('[data-details-overview-line]:not([data-details-description-row]):not([data-details-timing-missing]),dd')].map(overviewFactText).join(' ')
-  requireContract(timing.length===1&&timing[0]!.textContent==='Timing not reported by this source.'&&overview.querySelectorAll('[data-details-description-row]').length===descriptionRows&&!overview.querySelector('[data-details-missing-value]')&&!text.includes('—')&&!/\b(unreported|unavailable)\b/i.test(text),omittedOverview)
+  requireContract(timing.length===1&&timing[0]!.textContent==="Timing isn't available for this session."&&overview.querySelectorAll('[data-details-description-row]').length===descriptionRows&&!overview.querySelector('[data-details-missing-value]')&&!text.includes('—')&&!/\b(unreported|unavailable)\b/i.test(text),omittedOverview)
 }
 const wholeGroup='A whole missing group is not one summary behind a collapsed Why? disclosure'
 /** Each wholly missing group paints one plain summary sentence; its per-field reasons wait behind a collapsed Why?. */
@@ -489,7 +490,49 @@ async function checkWhyDisclosure(root:HTMLElement){
   await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='false'&&!paintedElement(panel),'Why? did not collapse from the keyboard'))
   assertWholeGroups(root)
 }
-const describedTriggers='button[data-details-missing-value],button[data-details-availability],[data-details-not-reported] button,button[data-details-unreported-section],button[data-details-coverage]'
+const tailPrefix='Not reported for this session: '
+const tailShape='Details tail is not one session summary behind a collapsed Why?'
+/**
+ * The unreported-sections tail, on desktop and phone alike: one painted summary line naming the sections, then one
+ * collapsed Why? whose hidden panel holds the grouped reasons; no reason paints until it is opened. Phone gives Why? a
+ * 44px target; desktop keeps it dense.
+ */
+function assertTail(root:HTMLElement,narrow:boolean,expected?:string){
+  const tails=exposedLines(root,'[data-details-unreported-sections]'),tail=tails[0],failures:string[]=tails.length===1?[]:[`${tails.length} tails`]
+  if(tail){
+    const summaries=exposedLines(tail,'[data-details-unreported-summary]'),summary=(summaries[0]?.textContent??'').replace(/\s+/g,' ').trim()
+    const whys=[...tail.querySelectorAll<HTMLElement>('button[data-details-why]')],why=whys[0],panel=why&&root.ownerDocument.getElementById(why.getAttribute('aria-controls')??'')
+    const painted=[...tail.querySelectorAll<HTMLElement>('[data-details-reason],[data-details-reason-line]')].filter(node=>paintedElement(node)&&node.getBoundingClientRect().height>0)
+    const box=why?.getBoundingClientRect(),touch=!!box&&box.width>=43.5&&box.height>=43.5
+    if(summaries.length!==1||!summary.startsWith(tailPrefix)||!summary.endsWith('.')||(expected!==undefined&&summary!==expected))failures.push(`${summaries.length} summaries "${summary}"`)
+    if(whys.length!==1||why?.getAttribute('aria-expanded')!=='false'||!panel||!tail.contains(panel)||paintedElement(panel)||!panel.querySelector('[data-details-reason-line] [data-details-reason-text]'))failures.push(`Why? ${why?.getAttribute('aria-expanded')??'absent'}`)
+    if(painted.length>0)failures.push(`${painted.length} painted reasons`)
+    if(touch!==narrow)failures.push(`Why? ${box?`${box.width.toFixed(1)}×${box.height.toFixed(1)}`:'unmeasured'} on ${narrow?'phone':'desktop'}`)
+  }
+  requireContract(failures.length===0,`${tailShape}: ${failures.join('; ')}`)
+}
+/** The tail's Why? opens and closes its reasons from the keyboard; the pre-fix shapes and the wrong geometry are rejected. */
+async function checkTail(root:HTMLElement,narrow:boolean,expected?:string){
+  assertTail(root,narrow,expected)
+  const doc=root.ownerDocument,tail=exposedLines(root,'[data-details-unreported-sections]')[0]!,summary=tail.querySelector<HTMLElement>('[data-details-unreported-summary]')!
+  // The pre-fix shape: per-section reasons painted beneath the list.
+  const reasons=doc.createElement('span');reasons.setAttribute('data-details-reason','block');reasons.textContent='Reviews: This session doesn’t report reviews.';summary.after(reasons)
+  try{await rejectsCause(tailShape,()=>assertTail(root,narrow,expected))}finally{reasons.remove()}
+  const twin=summary.cloneNode(true) as HTMLElement;summary.after(twin)
+  try{await rejectsCause(tailShape,()=>assertTail(root,narrow,expected))}finally{twin.remove()}
+  const why=within(tail).getByRole('button',{name:'Why? Sections not reported'}),panel=doc.getElementById(why.getAttribute('aria-controls')??'');requireContract(panel,'Tail Why? controls no panel')
+  // Phone loses its 44px target; desktop adopts phone geometry.
+  const minWidth=why.style.minWidth,minHeight=why.style.minHeight
+  try{why.style.minWidth=narrow?'0':'44px';why.style.minHeight=narrow?'24px':'44px';await rejectsCause(tailShape,()=>assertTail(root,narrow,expected))}finally{why.style.minWidth=minWidth;why.style.minHeight=minHeight}
+  assertTail(root,narrow,expected)
+  why.focus();await userEvent.keyboard('{Enter}')
+  await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='true'&&paintedElement(panel)&&panel.querySelectorAll('[data-details-reason-text]').length>0,'Tail Why? did not disclose its reasons from the keyboard'))
+  await rejectsCause(tailShape,()=>assertTail(root,narrow,expected))
+  await userEvent.keyboard(' ')
+  await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='false'&&!paintedElement(panel),'Tail Why? did not collapse from the keyboard'))
+  assertTail(root,narrow,expected)
+}
+const describedTriggers='button[data-details-missing-value],button[data-details-availability],[data-details-not-reported] button,button[data-details-coverage]'
 const undescribed='Missing-data reason is not the trigger’s accessible description'
 function descriptionOf(trigger:HTMLElement):string{
   return (trigger.getAttribute('aria-describedby')??'').split(/\s+/).filter(Boolean).map(id=>trigger.ownerDocument.getElementById(id)?.textContent??'').join(' ').replace(/\s+/g,' ').trim()
@@ -524,16 +567,20 @@ export const DesktopReasonDescriptions:Story={
     const tab=canvasElement.querySelector<HTMLElement>('[role="tab"]')!,height=tab.style.height
     try{tab.style.height='44px';await rejectsControl('Desktop Details adopted phone geometry',assertDense)}finally{tab.style.height=height}
     assertDense()
+    // The tail follows the phone's collapse rule at desktop density.
+    await checkTail(retained,false)
   },
 }
 
-/** Internal vocabulary never reaches production copy: painted text, accessible names and disclosed reasons. */
-const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series)\b/i
+/** Internal vocabulary and source wording never reach production copy: painted text, accessible names, descriptions and disclosed reasons. */
+const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series)\b|\b(?:by )?this source\b/i
 const internalCopy='Production phone Details exposes internal vocabulary'
 function assertPlainCopy(root:HTMLElement){
-  const offenders=[root.innerText,...[...root.querySelectorAll('[aria-label]')].map(node=>node.getAttribute('aria-label')??''),...[...root.querySelectorAll('[data-details-why-panel]')].map(panel=>panel.textContent??'')].flatMap(text=>text.match(internalWords)?.[0]??[])
+  const hidden=[...root.querySelectorAll('[data-details-why-panel],[data-details-reason-description]')].map(node=>node.textContent??'')
+  const offenders=[root.innerText,...[...root.querySelectorAll('[aria-label]')].map(node=>node.getAttribute('aria-label')??''),...hidden].flatMap(text=>text.match(internalWords)?.[0]??[])
   requireContract(offenders.length===0,`${internalCopy}: ${offenders.join(', ')}`)
 }
+const productionTail=`${tailPrefix}Workspace, Subagents, Declared bindings, Missions, Pull requests, CI runs, Reviews, Files touched, History.`
 const identityGap='Production phone identity paints a missing fact, a dangling separator or a redundant empty mission'
 /** Identity and meta carry only known facts; `Mission none` paints only when it is the sole Overview fact. */
 function assertProductionIdentity(root:HTMLElement){
@@ -592,15 +639,23 @@ export const ProductionPhoneDetails: Story = {
     try { await rejectsCause(identityGap, () => assertProductionIdentity(panel)) } finally { dangling.remove() }
     assertProductionIdentity(panel)
     await checkWhyDisclosure(panel)
+    await checkTail(panel, true, productionTail)
     assertPlainCopy(panel)
     const leak = panel.ownerDocument.createElement('span'); leak.textContent = 'Root incarnation'; identity.append(leak)
     try { await rejectsCause(internalCopy, () => assertPlainCopy(panel)) } finally { leak.remove() }
+    const sourced = panel.ownerDocument.createElement('span'); sourced.textContent = 'Timing not reported by this source.'; identity.append(sourced)
+    try { await rejectsCause(internalCopy, () => assertPlainCopy(panel)) } finally { sourced.remove() }
+    // A collapsed Why? panel is copy too: source wording hidden there is still rejected.
+    const tailPanel = panel.ownerDocument.getElementById(panel.querySelector('[data-details-unreported-sections] button[data-details-why]')?.getAttribute('aria-controls') ?? ''); requireContract(tailPanel, 'Missing tail Why? panel')
+    const hiddenSource = panel.ownerDocument.createElement('span'); hiddenSource.textContent = 'This source doesn’t report reviews.'; tailPanel.append(hiddenSource)
+    try { await rejectsCause(internalCopy, () => assertPlainCopy(panel)) } finally { hiddenSource.remove() }
+    assertPlainCopy(panel)
     // Disclosed reasons are rendered text too: expanded, they stay plain.
     const whys = [...panel.querySelectorAll<HTMLElement>('button[data-details-why]')]
     for (const why of whys) await userEvent.click(why)
     await waitFor(() => requireContract(whys.every(why => why.getAttribute('aria-expanded') === 'true'), 'Why? did not expand'))
     assertPlainCopy(panel)
     for (const why of whys) await userEvent.click(why)
-    await waitFor(() => assertWholeGroups(panel))
+    await waitFor(() => { assertWholeGroups(panel); assertTail(panel, true, productionTail) })
   },
 }
