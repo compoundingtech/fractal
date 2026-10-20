@@ -4,7 +4,7 @@ import type { TraceFact, TraceUnknownReason } from './trace-series.ts'
 const reasonText = {
   'no-provider': 'This harness does not report it.',
   'not-covered': 'This information is not tracked for this session.',
-  'not-attributed': 'This information is not attributed to this session.',
+  'not-attributed': 'This information could not be matched to this session.',
   'out-of-retention': 'This information is no longer retained.',
   loading: 'This information is still loading.',
   failed: 'This information could not be loaded.',

@@ -33,9 +33,9 @@ export const CompactSpend = ({ lane, descendantSpend, showTotals = true }: Compa
   const partial = (lane.totalUsd._tag === 'Known' && Math.abs(retainedRoot - lane.totalUsd.value) > 0.005) || (descendantUsd._tag === 'Known' && Math.abs(retainedDescendants - descendantUsd.value) > 0.005)
   const hasSeries = lane.cumulativeValues.length > 0
   const hasDescendantSeries = descendantSpend.cumulativeValues.length > 0
-  return <div {...stylex.props(styles.root)} aria-label="Session and descendant spend">
+  return <div {...stylex.props(styles.root)} aria-label="Session and subagent spend">
     {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}>Main session <strong>{lane.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={traceFactReason(lane.totalUsd)}/>}</strong></span><span {...stylex.props(styles.descendants)}>Subagents <strong>{descendantUsd._tag === 'Known' ? money.format(descendantUsd.value) : <MissingDetailsValue label="Subagent spend" reason={traceFactReason(descendantUsd)}/>}</strong></span></div>}
-    {(hasSeries || hasDescendantSeries) && <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
+    {(hasSeries || hasDescendantSeries) && <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and subagent API-equivalent spend">
       {hasSeries && <path d={path([lane.cumulativeValues])} fill="none" stroke={accent.primary} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
       {hasDescendantSeries && <path d={path(descendantSeries)} fill="none" stroke={text.fgSoft} strokeWidth={1.5} strokeDasharray="4 2" vectorEffect="non-scaling-stroke" />}
     </svg>}

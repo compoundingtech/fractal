@@ -94,18 +94,25 @@ const ReasonLines = ({ groups }: { readonly groups: readonly ReasonGroup[] }) =>
   <>{groups.map(group => <span key={group.reason} data-details-reason-line data-details-reason-fields={groups.length > 1 ? group.names.join(', ') : undefined} {...stylex.props(styles.reasonLine)}>{reasonPrefix(group, groups)}<span data-details-reason-text>{group.reason}</span></span>)}</>
 
 /**
- * Disclosure for a whole group's per-field reasons: collapsed by default, a quiet control whose accessible name keeps
- * the visible `Why?` and adds the group it explains. Phone hosts get a 44px target; desktop keeps a dense row. The
- * panel is removed from layout and the accessibility tree while collapsed.
+ * Disclosure for detailed reasons: collapsed by default, a quiet control whose accessible name keeps the visible
+ * `Why?` and adds what it `explains`. Phone hosts get a 44px target; desktop keeps a dense row. The panel is removed
+ * from layout and the accessibility tree while collapsed. Place it in a wrapping flex line: Why? and its panel start
+ * beneath a full-row summary.
  */
-function WhyDisclosure({ group, children }: { readonly group: string; readonly children: React.ReactNode }) {
+function WhyDisclosure({ explains, children }: { readonly explains: string; readonly children: React.ReactNode }) {
   const narrow = React.useContext(NarrowLayoutContext)
   const [open, setOpen] = React.useState(false)
   const id = React.useId()
   return <>
-    <Button data-details-why aria-expanded={open} aria-controls={id} onPress={() => setOpen(value => !value)} {...stylex.props(styles.why, !narrow && styles.whyDense)}><Icon name={open ? 'chevron-down' : 'chevron-right'} />Why?<VisuallyHidden elementType="span"> {group} not reported</VisuallyHidden></Button>
+    <Button data-details-why aria-expanded={open} aria-controls={id} onPress={() => setOpen(value => !value)} {...stylex.props(styles.why, !narrow && styles.whyDense)}><Icon name={open ? 'chevron-down' : 'chevron-right'} />Why?<VisuallyHidden elementType="span"> {explains}</VisuallyHidden></Button>
     <span id={id} hidden={!open} data-details-why-panel {...stylex.props(styles.whyPanel, !open && styles.collapsed)}>{children}</span>
   </>
+}
+
+/** Host-supplied plain reasons behind the same collapsed `Why?` the kit uses for missing groups and sections. */
+export function DetailsWhy({ explains, reasons }: { readonly explains: string; readonly reasons: readonly string[] }) {
+  if (reasons.length === 0) return null
+  return <WhyDisclosure explains={explains}><DetailsInlineReason block>{reasons.map(reason => <span key={reason} data-details-reason-line {...stylex.props(styles.reasonLine)}><span data-details-reason-text>{reason}</span></span>)}</DetailsInlineReason></WhyDisclosure>
 }
 
 /**
@@ -117,7 +124,7 @@ export function DetailsUnreportedSections({ sections }: { readonly sections: rea
   if (sections.length === 0) return null
   return <>
     <span data-details-unreported-summary {...stylex.props(styles.summaryLine)}>Not reported for this session: {sections.map((section, index) => <React.Fragment key={section.name}>{index > 0 && ', '}<span data-details-unreported-section={section.name}>{section.name}</span></React.Fragment>)}.</span>
-    <WhyDisclosure group="Sections"><DetailsInlineReason block><ReasonLines groups={reasonGroups(sections)} /></DetailsInlineReason></WhyDisclosure>
+    <WhyDisclosure explains="Sections not reported"><DetailsInlineReason block><ReasonLines groups={reasonGroups(sections)} /></DetailsInlineReason></WhyDisclosure>
   </>
 }
 
@@ -139,7 +146,7 @@ export function DetailsNotReported({ group, summary, fields }: { readonly group?
   if (group !== undefined) return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
     <span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
     {narrow
-      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason><WhyDisclosure group={group}>{reasons}</WhyDisclosure></>
+      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason><WhyDisclosure explains={`${group} not reported`}>{reasons}</WhyDisclosure></>
       : <DescribedTooltipButton aria-label={`${group}: not reported`} description={groups.map(reason => `${reasonPrefix(reason, groups)}${reason.reason}`).join('; ')} tooltip={<ReasonLines groups={groups} />} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
   </p>
   // Prose, not flex: names wrap like the pending twin's ink, so arrival never reflows the line.

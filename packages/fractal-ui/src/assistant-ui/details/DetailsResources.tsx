@@ -197,7 +197,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
   const coverage = traceCoverageState(trace.coverage)
   const coverageReason = section.title === 'Subagents'
     ? coverage._tag === 'Unavailable' ? traceReasonText(coverage.reason)
-      : coverage._tag === 'PartialUnreported' ? 'The attributed fraction is unreported.' : undefined
+      : coverage._tag === 'PartialUnreported' ? 'The percentage matched to sessions is unreported.' : undefined
     : undefined
   const gaps = [
     { subject: 'Traced sessions', reason: collectionReason, partial: false },
@@ -207,7 +207,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
       : section.items._tag === 'Known' && section.items.value.some(resource => resource.file?.added._tag === 'Known' || resource.file?.removed._tag === 'Known') },
     { subject: 'Traced-session window', reason: windowReason, partial: false },
     { subject: 'Traced-session total', reason: countReason, partial: false },
-    { subject: 'Attribution', reason: coverageReason, partial: coverage._tag === 'PartialUnreported' },
+    { subject: 'Session matching', reason: coverageReason, partial: coverage._tag === 'PartialUnreported' },
   ].filter((gap): gap is { subject: string; reason: string; partial: boolean } => gap.reason !== undefined)
   return <div aria-hidden={pending || undefined} inert={pending} data-details-skeleton={pending ? section.title : undefined} {...stylex.props(styles.contentShell)}>
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>

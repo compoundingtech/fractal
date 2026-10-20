@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { DetailsResources, traceSubagentSection } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
 import { DetailsPane } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsPane.tsx'
 import type { DetailsOverview, TraceSeries, TraceFact } from '@smalltalk/fractal-ui/assistant-ui'
-import { detailsWithSupplement } from './detailsSupplement.ts'
+import { accountingNoteSummary, detailsWithSupplement, spendWindowReason } from './detailsSupplement.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
 import { observed, unavailable } from '../data/source.ts'
 import { traceUnknownReasons } from '../../../../packages/fractal-ui/src/assistant-ui/details/trace-series.ts'
@@ -58,7 +58,7 @@ const supplement = (): DetailsSupplement => ({
   usdWindow: { _tag: 'Known', value: { _tag: 'Reported', label: '7d' }, source: 'series' },
   coverage: { _tag: 'Partial', attributedFraction: 0.995 }, subagents: { _tag: 'Known', value: [], source: 'series' },
   subagentsWindow: { _tag: 'Known', value: { _tag: 'Reported', label: '7d' }, source: 'series' }, subagentCount: { _tag: 'Known', value: 66, source: 'series' },
-  durations: [{ label: 'Root ledger wall span · 7d as reported', value: '2h' }],
+  durations: [{ label: 'Session wall time · last 7 days', value: '2h' }],
 })
 const join = (native: TraceSeries, value: DetailsSupplement) => detailsWithSupplement({ trace: native, overview, supplement: observed({ value }), harness: 'omp', nativeSessionId: '00000000-0000-4000-8000-000000000001' })
 
@@ -77,17 +77,18 @@ describe('independent Details metric composition', () => {
     expect(result.trace.meters.context).toBe(native.meters.context)
     expect(result.trace.subagentCount).toEqual(supplement().subagentCount)
     expect(result.trace.subagentsWindow).toEqual(supplement().subagentsWindow)
-    expect(result.overview.durations?.map(item => item.label)).toEqual(['Managed session elapsed · wall time', 'Root ledger wall span · 7d as reported'])
+    expect(result.overview.durations?.map(item => item.label)).toEqual(['Managed session elapsed · wall time', 'Session wall time · last 7 days'])
     // A cumulative-token substitution must fail the same occupancy criterion.
     expect(() => expect({ ...result.trace.meters.context, reportedPercent: known(480_035_214 / 1_000_000 * 100) }).toEqual(native.meters.context)).toThrow()
   })
-  it('explains independently sourced leaf totals without treating their difference as descendant spend', () => {
+  it('explains independently sourced totals in plain words without treating their difference as subagent spend', () => {
     const native = trace()
     const result = join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: known(6.19) } } }, { ...supplement(), totalUsd: known(9.05), subagentCount: known(0) })
-    expect(result.accountingNote).toContain('Reported traced descendants: 0')
-    expect(result.accountingNote).toContain('separate accounting sources')
-    expect(result.accountingNote).toContain('not a reconciled split')
-    expect(result.accountingNote).toContain('Their difference is not descendant spend')
+    expect(result.accountingNote).toEqual({ summary: accountingNoteSummary, reasons: [spendWindowReason, "No subagents were reported, so the difference isn't subagent spend."] })
+    expect(accountingNoteSummary).toBe('Agent spend and total spend come from separate reports and may not add up.')
+    expect(join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: known(6.19) } } }, supplement()).accountingNote?.reasons).toEqual([spendWindowReason])
+    for (const copy of [result.accountingNote!.summary, ...result.accountingNote!.reasons])
+      expect(copy).not.toMatch(/\b(native\w*|descendants?|incarnations?|provenance|series|ledger|attribution|window-global)\b|root completeness|this source/i)
     expect(result.trace.meters.spend.subagentUsd._tag).toBe('Unknown')
     expect(join(native, { ...supplement(), nativeSessionId: 'unrelated-root' }).accountingNote).toBeUndefined()
     expect(join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: missing } } }, supplement()).accountingNote).toBeUndefined()
@@ -156,10 +157,10 @@ it('keeps elapsed/age acquiring independently and omits missing timing fields', 
   expect(rejected).not.toContain('data-details-duration-pending')
 })
 
-it('labels an unreported descendant role before the full identity without fabricating a model', () => {
+it('labels an unreported subagent role before the full identity without fabricating a model', () => {
   const section = traceSubagentSection({ ...trace(), subagents: known([{
-    sessionId: 'native-child', parentSessionId: missing, label: missing, model: missing,
+    sessionId: 'subagent-session', parentSessionId: missing, label: missing, model: missing,
     usd: 1, requests: 1, firstMs: missing, lastMs: missing,
   }]) })
-  expect(section.items._tag === 'Known' ? section.items.value[0]?.card.label : undefined).toBe('role unreported · native-child')
+  expect(section.items._tag === 'Known' ? section.items.value[0]?.card.label : undefined).toBe('role unreported · subagent-session')
 })

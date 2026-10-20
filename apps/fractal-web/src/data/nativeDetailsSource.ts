@@ -78,7 +78,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
     const projected = Atom.map(raw, (feed): Feed<NativeDeclarations> => {
       if (feed._tag !== 'Observed') return feed
       const value = projectNativeDeclarations({ declaration: feed.value })
-      return value === undefined ? unavailable({ reason: 'failed', detail: 'The native declaration tree is malformed.' }) : { ...feed, value }
+      return value === undefined ? unavailable({ reason: 'failed', detail: 'The agent’s settings could not be read.' }) : { ...feed, value }
     })
     sourceOf.set(projected, raw)
     return projected

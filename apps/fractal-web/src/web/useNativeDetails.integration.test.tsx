@@ -16,7 +16,7 @@ import { observed, type DataSource, type Feed } from '../data/source.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { guardedSessionTiming, useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
 
-const nativeRow = (incarnation: string) => Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Native title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } })
+const nativeRow = (incarnation: string) => Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Session title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } })
 const emptySource = (): DataSource => fixtureSource({ world: { now: 10000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
 
 describe('native Details mounted hook with real getter adapters', () => {
@@ -163,7 +163,7 @@ describe('native Details mounted hook with real getter adapters', () => {
         { label: 'Session age', value: '9s' },
       ])
       expect(last?.overview.age).toBeUndefined()
-      expect(last?.overview.title).toBe('Native title')
+      expect(last?.overview.title).toBe('Session title')
       expect(last?.harness).toBe('claude')
       expect(last?.nativeSessionId).toBeUndefined()
       expect(last?.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', value: 42 })

@@ -74,6 +74,7 @@ export type { EffortControl } from './embrace-composer/EffortPicker.tsx'
 /** Details and resource tabs; application-owned transport observations stay independent of content. */
 export { DetailsPane } from './details/DetailsPane.tsx'
 export type { DetailsVariants, DetailsLayoutIntent, DetailsPaneProps } from './details/DetailsPane.tsx'
+export { DetailsWhy } from './details/DetailsUnavailable.tsx'
 export type { DetailsState, DetailsOverview, DetailsSection, DetailsSectionName, DetailsResource, DetailsValue, DetailsDisplayObservation } from './details/model.ts'
 export type { DetailsPendingShape } from './details/DetailsCharts.tsx'
 export type { TraceSeries, TraceFact, TraceUnknownReason, TraceSpendMeters, TraceSpendScope, TraceAccumulationWindow, TraceCoverage, TraceCoverageState, TraceSubagent, TraceCostSplit, TraceBucket, TraceBuckets, TraceTurns, TraceIncarnation } from './details/trace-series.ts'

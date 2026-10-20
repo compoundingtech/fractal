@@ -316,7 +316,7 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
   if (scopeNote) requireContract(scopeNote.getBoundingClientRect().height <= parseFloat(getComputedStyle(scopeNote).lineHeight) + 0.5, 'Unreported scope note is not one quiet line')
   if (meter.tokensScope._tag === 'Unknown') {
     requireContract(!/including subagents|excludes subagents|this agent|observed agent sessions/i.test(label), 'Unreported total makes an unproven scope claim')
-    if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and descendant spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
+    if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and subagent spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
     requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token scope"]'), 'Unreported token total lacks its exact scope explanation')
   } else {
     requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent sessions' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
@@ -454,7 +454,7 @@ export const SpendScope: Story = { args: { cases: [...scopeCases, ...unreportedS
   assertCraft(pane, item); assertScope(pane, trace)
   if (!scopeControlCases.includes(item.name)) return
   const label = pane.querySelector<HTMLElement>('[data-details-token-label]')!, text = label.textContent
-  try { label.textContent = 'Cumulative tokens · invented attribution'; const reason = trace.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, trace)) } finally { label.textContent = text }
+  try { label.textContent = 'Cumulative tokens · invented session scope'; const reason = trace.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, trace)) } finally { label.textContent = text }
   assertScope(pane, trace)
 }) }
 /**

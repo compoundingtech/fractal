@@ -17,6 +17,8 @@ import type { Feed } from '../data/source.ts'
 import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
+import { ompAgentRef, ompDetailsSource, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from './ompDetailsFixtures.ts'
+import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const row = decodeUnknownSync(Agent)({
@@ -135,10 +137,82 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(registry.get(declaration)).toMatchObject({ _tag: 'Observed', value: { bindings: [{ kind: 'workspace', count: 1 }] } })
   })
   it('keeps the app source registry when kit tab state has its own registry and closes through the host', async () => {
-    await act(async () => registry.set(agents, observed({ value: [{ ...row, name: 'Updated native seat' }] })))
-    expect(host.textContent).toContain('Updated native seat')
+    await act(async () => registry.set(agents, observed({ value: [{ ...row, name: 'Updated Details seat' }] })))
+    expect(host.textContent).toContain('Updated Details seat')
     expect(host.textContent).not.toContain('Synthetic Details seat')
     await act(async () => within(host).getByRole('button', { name: 'Close agent inspector' }).click())
     expect(onClose).toHaveBeenCalledOnce()
+  })
+})
+
+/** Internal vocabulary that must never reach the OMP inspector's text, accessible names or disclosed reasons. */
+const internalWords = /\b(native\w*|descendants?|incarnations?|provenance|series|ledger|attribution|window-global)\b|root completeness|this source/i
+const copyOf = (root: HTMLElement) => [root.textContent ?? '', ...[...root.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label') ?? '')].join(' ')
+
+describe('OMP subagent activity on the production inspector', () => {
+  const mount = async (state?: OmpSupplementState) => {
+    await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} {...(state === undefined ? {} : { detailsSupplement: ompSupplementFeeds[state] })} />
+    </DataSourceProvider>))
+  }
+  const why = (scope: HTMLElement, name: string) => {
+    const trigger = within(scope).getByRole('button', { name })
+    return { trigger, panel: document.getElementById(trigger.getAttribute('aria-controls')!)! }
+  }
+  it('announces loading in plain words, with no technical paragraph', async () => {
+    await mount('loading')
+    const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
+    expect(line.getAttribute('data-details-supplement-state')).toBe('Waiting')
+    expect(within(line).getByRole('status').textContent).toBe('Loading subagent activity…')
+    expect(line.querySelector('button[data-details-why]')).toBeNull()
+    expect(copyOf(host)).not.toMatch(internalWords)
+  })
+  it('keeps the build composition’s unavailable reason plain and behind a collapsed Why?', async () => {
+    await mount()
+    const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
+    expect(within(line).getByRole('status').textContent).toBe("Subagent activity isn't available for this session.")
+    const { trigger, panel } = why(line, 'Why? Subagent activity')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(panel.hidden).toBe(true)
+    expect(panel.textContent).toBe("Subagent activity isn't reported for this session.")
+    expect(copyOf(host)).not.toMatch(internalWords)
+  })
+  it('never renders a source’s technical failure detail', async () => {
+    await mount('unavailable')
+    const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
+    const { trigger, panel } = why(line, 'Why? Subagent activity')
+    await act(async () => trigger.click())
+    expect(panel.hidden).toBe(false)
+    expect(panel.textContent).toBe("Subagent activity couldn't be loaded.")
+    expect(copyOf(host)).not.toMatch(internalWords)
+    expect(copyOf(host)).not.toContain('root not found')
+  })
+  it('states separate spend reports in one plain sentence, with the time window behind Why?', async () => {
+    await mount('reported')
+    expect(host.querySelector('[data-details-supplement]')).toBeNull()
+    const note = host.querySelector<HTMLElement>('[data-details-accounting-note]')!
+    expect(note.querySelector('[data-details-accounting-summary]')?.textContent).toBe(accountingNoteSummary)
+    const { trigger, panel } = why(note, 'Why? Agent and total spend')
+    await act(async () => trigger.click())
+    expect(panel.textContent).toBe(spendWindowReason)
+    expect(copyOf(host)).not.toMatch(internalWords)
+  })
+  it('describes retained activity honestly without the source’s failure detail', async () => {
+    await mount('retained')
+    const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
+    expect(within(line).getByRole('status').textContent).toBe('Subagent activity may be out of date (last updated just now).')
+    const { trigger, panel } = why(line, 'Why? Subagent activity')
+    await act(async () => trigger.click())
+    expect(panel.textContent).toBe("The latest update couldn't be loaded, so earlier activity is shown.")
+    expect(copyOf(host)).not.toMatch(internalWords)
+  })
+  it('opens a subagent’s reported details in plain words', async () => {
+    await mount('reported')
+    const card = [...host.querySelectorAll<HTMLElement>('button')].find(button => button.textContent?.includes(ompSubagent.label))!
+    await act(async () => card.click())
+    const dialog = within(document.body).getByRole('dialog', { name: 'Reported resource details' })
+    expect(dialog.textContent).toContain("Reported details only; this resource can't be opened from here.")
+    expect(dialog.textContent).toContain(`Session ${ompSubagent.sessionId} · 12 requests · $2.86 · ${ompSubagent.model}`)
+    expect(copyOf(dialog)).not.toMatch(internalWords)
   })
 })

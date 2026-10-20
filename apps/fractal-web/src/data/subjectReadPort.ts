@@ -72,7 +72,7 @@ export const subjectReaderFromAtom = <T>({
               new SubjectReadFailure({
                 ref,
                 reason: 'failed',
-                detail: 'The native resource reader closed before observation',
+                detail: 'The resource connection closed before any details arrived',
               }),
             )
           const state = first.value
@@ -88,8 +88,8 @@ export const subjectReaderFromAtom = <T>({
               reason: state._tag === 'Observed' ? (state.error?.reason ?? 'failed') : 'failed',
               detail:
                 state._tag === 'Observed'
-                  ? (state.error?.detail ?? 'The native observation is stale')
-                  : 'No native observation',
+                  ? (state.error?.detail ?? 'The last received details are out of date')
+                  : 'No details received',
             }),
           )
         }),
@@ -295,7 +295,7 @@ const findMissionRun = async ({
 /** Feed consumers must use this captured registry, shared with public reads and streams. */
 export const gatewaySubjectReads = ({
   options,
-  resource = unsupportedSubjectReader('This source has no native resource driver'),
+  resource = unsupportedSubjectReader('Resource details are not supported by this connection'),
   discovery = new St3Client(options),
   registry = AtomRegistry.make(),
 }: {

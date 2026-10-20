@@ -45,7 +45,7 @@ const inclusive: TraceSeries = {
   } },
   subagentCount: known(1),
   subagentsWindow:window,
-  subagents: known([{ sessionId: 'native-child', parentSessionId: known('native-session'), label: known('Research delegate'), model: known('gpt-5.4'), usd: 3.21, requests: 4, firstMs: known(now - 1_800_000), lastMs: known(now - 60_000) }]),
+  subagents: known([{ sessionId: 'subagent-session', parentSessionId: known('main-session'), label: known('Research delegate'), model: known('gpt-5.4'), usd: 3.21, requests: 4, firstMs: known(now - 1_800_000), lastMs: known(now - 60_000) }]),
 }
 const partial: TraceSeries = { ...inclusive, coverage: { _tag: 'Partial', attributedFraction: 0.62 }, subagentCount: known(4),
   meters:{...inclusive.meters,spend:{...inclusive.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:0.62},subagentUsdCoverage:{_tag:'Partial',attributedFraction:0.62}}},
@@ -63,7 +63,7 @@ const percentOnly: TraceSeries = { ...native, meters: { ...native.meters, contex
   compactions: unavailable, lastCompactionMs: unavailable,
 } } }
 const partialFacts: TraceSeries = { ...partial, subagents: known([
-  { sessionId: 'native-child', parentSessionId: unavailable, label: unavailable, model: unavailable, usd: 3.21, requests: 4, firstMs: unavailable, lastMs: known(now - 60_000) },
+  { sessionId: 'subagent-session', parentSessionId: unavailable, label: unavailable, model: unavailable, usd: 3.21, requests: 4, firstMs: unavailable, lastMs: known(now - 60_000) },
 ]) }
 const percentSamples: TraceSeries = { ...percentOnly, turns: known({
   points: [
@@ -244,11 +244,11 @@ function scenarioPane(canvas: HTMLElement, name: keyof typeof scenarios): HTMLEl
 
 /** Coverage copy rounds down, never claims 100% and keeps a legal 0%; each case falsifies its nearest wrong copy. */
 const coverageCases = [
-  { scenario: 'partial', expected: 'Partial · 62% attributed', wrong: ['Complete'] },
-  { scenario: 'boundary', expected: 'Partial · 99% attributed', wrong: ['Partial · 100% attributed'] },
-  { scenario: 'boundary995', expected: 'Partial · 99% attributed', wrong: ['Complete', 'Partial · 100% attributed'] },
-  { scenario: 'zeroCoverage', expected: 'Partial · 0% attributed', wrong: ['Partial · 1% attributed'] },
-  { scenario: 'fullPartial', expected: 'Partial · 99% attributed', wrong: ['Partial · 100% attributed'] },
+  { scenario: 'partial', expected: 'Partial · 62% matched', wrong: ['Complete'] },
+  { scenario: 'boundary', expected: 'Partial · 99% matched', wrong: ['Partial · 100% matched'] },
+  { scenario: 'boundary995', expected: 'Partial · 99% matched', wrong: ['Complete', 'Partial · 100% matched'] },
+  { scenario: 'zeroCoverage', expected: 'Partial · 0% matched', wrong: ['Partial · 1% matched'] },
+  { scenario: 'fullPartial', expected: 'Partial · 99% matched', wrong: ['Partial · 100% matched'] },
 ] as const
 async function checkCoverage(canvasElement: HTMLElement) {
   for (const { scenario, expected, wrong } of coverageCases) {
@@ -338,7 +338,7 @@ function assertSession(root:HTMLElement) {
  requireContract(section.querySelector('[data-details-token-label]')?.textContent === 'Cumulative tokens · this agent', 'Self tokens inherited inclusive monetary scope')
 }
 function assertPartialFacts(root:HTMLElement) {
- const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('native-child'))
+ const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('subagent-session'))
  requireContract(card, 'Unavailable label hid the known descendant identity')
  // Hover is supplementary: the card paints the reported facts, and they describe its open action.
  const facts=card.querySelector<HTMLElement>('[data-resource-detail]')
@@ -347,7 +347,7 @@ function assertPartialFacts(root:HTMLElement) {
  requireContract(!text.includes('Invalid Date')&&!text.includes('NaN')&&!text.includes('First observed')&&!text.includes('Parent ·')&&text.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
  requireContract(root.textContent?.includes('Showing 1 of 4 traced sessions'), 'Missing descendant facts changed the reported descendant count')
  requireContract(!card.textContent?.includes('gpt-5.4'), 'Unavailable model was fabricated')
- requireContract(card.querySelector('[data-details-resource-title]')?.textContent === 'role unreported · native-child', 'Missing descendant role was rendered as a bare identity')
+ requireContract(card.querySelector('[data-details-resource-title]')?.textContent === 'role unreported · subagent-session', 'Missing descendant role was rendered as a bare identity')
 }
 function assertContextSamples(root:HTMLElement) {
  assertPercentOnly(root)
@@ -425,8 +425,8 @@ function assertAllStates(root:HTMLElement) {
     && section.querySelector('button[aria-expanded]')?.textContent === 'Subagents', 'Unknown traced count became zero')
  }
  // Observed st rows precede the traced breakdown, so select the traced card by its session identity.
- const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('native-child'))
- requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · native-child', 'Traced role, model or identity is hidden behind Open')
+ const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('subagent-session'))
+ requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
  const boundedSection = root.querySelector('section[aria-label="boundedCount"] section[aria-label="boundedCount Subagents"]')
  requireContract(boundedSection?.querySelector('button[aria-expanded]')?.textContent === 'Subagents309', 'Reported traced total disappeared from the Subagents heading')
  requireContract(boundedSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 1 of 309 traced sessions', 'Traced heading total became the retained list size')
@@ -448,7 +448,7 @@ async function checkSession(canvasElement: HTMLElement) {
 async function checkPartialDescendantFacts(canvasElement: HTMLElement) {
     const root = scenarioPane(canvasElement, 'partialFacts')
     assertPartialFacts(root)
-    const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('native-child')),facts=card?.querySelector<HTMLElement>('[data-resource-detail]')
+    const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('subagent-session')),facts=card?.querySelector<HTMLElement>('[data-resource-detail]')
     requireContract(card&&facts,'Missing descendant facts negative control target')
     const original=facts.textContent,invented=card.ownerDocument.createElement('span')
     invented.textContent='gpt-5.4'
@@ -466,7 +466,7 @@ async function checkPartialDescendantFacts(canvasElement: HTMLElement) {
       requireContract(title,'Missing role-wording negative control target')
       const titleText=title.textContent
       try {
-        title.textContent='native-child'
+        title.textContent='subagent-session'
         await rejectsControl('Missing descendant role was rendered as a bare identity',()=>assertPartialFacts(root))
       } finally { title.textContent=titleText }
     } finally { invented.remove(); facts.textContent=original; facts.style.removeProperty('visibility') }
@@ -518,7 +518,7 @@ async function checkInvalidCoverage(canvasElement: HTMLElement) {
   const blank=section.cloneNode(true) as HTMLElement
   blank.querySelector('[data-testid="details-pane"]')?.remove()
   await rejectsControl('Invalid row blanked the Details pane',()=>assertInvalidCoverageSurvives(blank,`${name} `))
-  const percentage=falsifyText(section,'[data-details-metric="total-usd"] [data-details-coverage]','Partial · NaN% attributed')
+  const percentage=falsifyText(section,'[data-details-metric="total-usd"] [data-details-coverage]','Partial · NaN% matched')
   await rejectsControl('Invalid fraction fabricated an attribution percentage',()=>assertInvalidCoverageSurvives(percentage,`${name} `))
  }
 }
@@ -538,7 +538,7 @@ export const AllStates: Story = {
     await rejectsControl('Known zero is absent from the Subagents heading',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownZero Subagents"] button[aria-expanded]','Subagents')))
     await rejectsControl('Unknown traced count became zero',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="unknownCount Subagents"] button[aria-expanded]','Subagents0')))
     await rejectsControl('Traced heading total became the retained list size',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 traced sessions')))
-    await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · native-child')))
+    await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · subagent-session')))
     await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertAllStates(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
     await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.remove())))
     await rejectsControl('Settled resource stayed pending',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.setAttribute('aria-busy','true'))))

@@ -57,7 +57,7 @@ export const fullTraceFixture: TraceSeries = {
 
 /** Captured st totals have no child dimension; neither self nor inclusive scope is proven. */
 export const partialTraceFixture: TraceSeries = {
-  agentId: 'agent/worker-1', nativeSessionId: known('native-session-example', 'st'),
+  agentId: 'agent/worker-1', nativeSessionId: known('session-example', 'st'),
   coverage:{_tag:'Unavailable',reason:'no-provider'},
   subagentCount:unknown,
   subagentsWindow:unknown,

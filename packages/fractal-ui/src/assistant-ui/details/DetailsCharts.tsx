@@ -110,7 +110,7 @@ export const accumulationParts = (fact:TraceFact<TraceAccumulationWindow>):reado
 /** Both row props and pending footprints normalize only the malformed row's coverage; unavailable attribution is a Not reported field. */
 const coverageLabel=(coverage:TraceCoverageState):string|undefined=>{
  const state=traceCoverageState(coverage)
- return state._tag==='Complete'||state._tag==='Unavailable'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% attributed`:`Not tracked for ${state.harnessName}`
+ return state._tag==='Complete'||state._tag==='Unavailable'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% matched`:`Not tracked for ${state.harnessName}`
 }
 const notCoveredExplanation = 'Spend is recorded only for OMP sessions today.'
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
@@ -162,9 +162,9 @@ const spendGaps = (trace: TraceSeries): readonly NotReportedField[] => [
   ...spendMetrics(trace).flatMap(row => row.fact._tag === 'Unknown' ? [gap(row.name, missingReason(row.fact))] : [
     ...(row.scope._tag === 'Unknown' ? [gap(`${row.prefix} scope`, traceReasonText(row.scope.reason))] : []),
     ...(row.window._tag === 'Unknown' ? [gap(`${row.prefix} window`, missingReason(row.window))] : []),
-    ...(row.coverage?._tag === 'Unavailable' ? [gap('attribution', traceReasonText(row.coverage.reason))] : []),
+    ...(row.coverage?._tag === 'Unavailable' ? [gap('session matching', traceReasonText(row.coverage.reason))] : []),
   ]),
-  ...(trace.coverage._tag === 'Unavailable' ? [gap('attribution', traceReasonText(trace.coverage.reason))] : []),
+  ...(trace.coverage._tag === 'Unavailable' ? [gap('session matching', traceReasonText(trace.coverage.reason))] : []),
   ...(tracedSubagents(trace).length > 0 && trace.subagentsWindow._tag === 'Unknown' ? [gap('traced-session window', missingReason(trace.subagentsWindow))] : []),
 ]
 
@@ -230,7 +230,7 @@ export const DetailsCharts = ({ trace, context, spend, section, showUnavailableR
   const projection = adaptTrace(trace)
   const seriesReason = trace.series._tag === 'Unknown' ? traceFactReason(trace.series) : 'No historical samples were retained.'
   const spendProjection = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? undefined : projection
-  const spendReason = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? 'Session spend scope is not attributed' : seriesReason
+  const spendReason = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? 'Which sessions this spend covers is not reported.' : seriesReason
   const contextSamples = projection?.lane.turnSamples !== undefined && (context === 'C2' || projection.lane.samples.length === 0) ? projection.lane.turnSamples : projection?.lane.samples
   const contextSeries = context !== 'C1' && contextSamples?.some(sample => sample.contextPercent !== null) === true
   const compactSeries = spend === 'S2' && spendProjection !== undefined && (spendProjection.lane.cumulativeValues.length > 0 || spendProjection.descendantSpend.cumulativeValues.length > 0)
@@ -241,7 +241,7 @@ export const DetailsCharts = ({ trace, context, spend, section, showUnavailableR
     ...(spend !== 'S1' && !compactSeries && !panelSeries ? [gap('spend history', spendReason)] : []),
     ...(compactSeries && spendProjection !== undefined && spendProjection.lane.cumulativeValues.length === 0 ? [gap('main session history', 'Session spend history was not retained.')] : []),
     ...(compactSeries && spendProjection !== undefined && spendProjection.descendantSpend.cumulativeValues.length === 0 ? [gap('subagent history', 'Subagent spend history was not retained.')] : []),
-    ...(spend === 'S3' && !hasReportedSplit(trace) ? [gap('spend split', trace.meters.spend.split._tag === 'Unknown' ? missingReason(trace.meters.spend.split) : 'Valid session-attributed spend components were not supplied.')] : [])])
+    ...(spend === 'S3' && !hasReportedSplit(trace) ? [gap('spend split', trace.meters.spend.split._tag === 'Unknown' ? missingReason(trace.meters.spend.split) : 'A valid breakdown of this session’s spend was not supplied.')] : [])])
   const contextWhole = !hasContextMeterData(trace.meters.context) && !contextSeries
   const spendWhole = !hasSpendMeterData(trace) && !compactSeries && !panelSeries && !splitOnly
   const contextBody = <div {...stylex.props(styles.body)} data-details-chart={context}>

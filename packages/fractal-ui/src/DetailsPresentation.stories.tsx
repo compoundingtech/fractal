@@ -21,6 +21,8 @@ import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import { AgentDetailsPanel } from '../../../apps/fractal-web/src/web/AgentDetailsPanel'
 import { DataSourceProvider } from '../../../apps/fractal-web/src/data/react'
 import { fixtureSource } from '../../../apps/fractal-web/src/data/fixtureSource'
+import { ompAgentRef, ompDetailsSource, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from '../../../apps/fractal-web/src/web/ompDetailsFixtures'
+import { accountingNoteSummary, spendWindowReason } from '../../../apps/fractal-web/src/web/detailsSupplement'
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
 const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),inspector:(width:number)=>({display:'flex',flexDirection:'column',width,maxWidth:'100%',height:720,minHeight:0,overflow:'hidden',backgroundColor:surface.canvas}),canvas:{backgroundColor:surface.canvas},pane:{height:660},comparison:{display:'flex',flexWrap:'wrap',alignItems:'flex-start',gap:space.xl,backgroundColor:surface.canvas},card:{width:440,maxWidth:'100%',height:640},control:{color:text.fg,backgroundColor:surface.controlFill,borderWidth:0,borderRadius:radius.control,paddingInline:space.sm,paddingBlock:space.xs,marginInlineEnd:space.xs,fontFamily:type.fontSans,fontSize:type.metaSize,cursor:'pointer',':focus-visible':{outlineWidth:geometry.focusRing,outlineStyle:'solid',outlineColor:accent.primary}}})
@@ -31,7 +33,7 @@ const meta={title:'Fractal UI/Details Presentation',parameters:{layout:'fullscre
   const [openingOverride,setOpeningOverride]=React.useState<Args['opening']>()
   const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
   const inputs=detailsStoryInputs('partial',detailsTraceFixtures.unknown)
-  const overview={...inputs.overview,title:'Observed agent',since:undefined,age:undefined,mission:'Review the retained session observations without inventing unavailable attribution or timing.',durations:[{label:'Session elapsed (from session start to end or now; wall time, not active)',value:'Unreported'},{label:'Session age (from session start)',value:'Unreported'}]}
+  const overview={...inputs.overview,title:'Observed agent',since:undefined,age:undefined,mission:'Review the retained session observations without inventing unavailable spend or timing.',durations:[{label:'Session elapsed (from session start to end or now; wall time, not active)',value:'Unreported'},{label:'Session age (from session start)',value:'Unreported'}]}
   return <div ref={returnRef} role="region" aria-label="Details host" tabIndex={-1} data-testid="details-return-region" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{showOpener&&<Button onPress={()=>{setOpeningOverride(undefined);setOpen(true)}} {...stylex.props(styles.control)}>Open details</Button>}<Button onPress={()=>{setOpeningOverride('UserOpened');setOpen(true)}} {...stylex.props(styles.control)}>Open as user</Button><Button onPress={()=>setShowOpener(false)} {...stylex.props(styles.control)}>Remove opener</Button>{open&&<div {...stylex.props(styles.pane)}><DetailsPane key={openingOverride??opening} {...inputs} overview={overview} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state="partial" intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} onClose={()=>setOpen(false)} closeFocusTarget={()=>returnRef.current} opening={{_tag:openingOverride??opening}}/></div>}</ThemePortal></div>
 }} satisfies Meta<Args>
 export default meta
@@ -106,7 +108,7 @@ function assertCombined(root:HTMLElement,states:readonly string[]){
   panes.forEach(pane=>{requireContract(!/\bUnknown\b/.test(paintedText(pane)),'Combined AllStates exposed a raw missing-value tag');assertSections(pane as HTMLElement)})
 }
 /** The partial fixture reports only cumulative tokens; every other spend fact is named once, in source order. */
-const partialSpendFields='total spend, main session spend, subagent spend, token scope, token window, attribution'
+const partialSpendFields='total spend, main session spend, subagent spend, token scope, token window, session matching'
 function metricSection(root:HTMLElement,state:string,name:'Context'|'Spend'){const section=root.querySelector<HTMLElement>(`[data-details-all-state="${state}"] section[aria-label$="${name}"]`);requireContract(section,`Missing ${state} ${name} section`);return section}
 function assertMetricLines(root:HTMLElement){
   for(const name of ['Context','Spend'] as const){
@@ -114,7 +116,7 @@ function assertMetricLines(root:HTMLElement){
     requireContract(line?.dataset.detailsNotReported==='group'&&paintedText(line)===`${name}·not reported`&&line.parentElement?.childElementCount===1&&!section.querySelector('[data-details-missing-value],dl,[role="meter"]')&&!paintedText(section).includes('—'),'Unreported group repeats per-field dashes')
   }
   const spend=metricSection(root,'partial','Spend'),summary=spend.querySelectorAll<HTMLElement>('[data-details-not-reported]')
-  requireContract(summary.length===1&&summary[0]?.dataset.detailsNotReported==='fields'&&paintedText(summary[0])===`Not reported: ${partialSpendFields}`&&spend.querySelector('[data-details-token-label]')?.textContent==='Cumulative tokens'&&!spend.querySelector('[data-details-missing-value]')&&!paintedText(spend).includes('—')&&!/Recorded spend|Window|Attribution/.test(paintedText(spend)),'Partial group lacks one Not reported summary')
+  requireContract(summary.length===1&&summary[0]?.dataset.detailsNotReported==='fields'&&paintedText(summary[0])===`Not reported: ${partialSpendFields}`&&spend.querySelector('[data-details-token-label]')?.textContent==='Cumulative tokens'&&!spend.querySelector('[data-details-missing-value]')&&!paintedText(spend).includes('—')&&!/Recorded spend|Window|Session matching/.test(paintedText(spend)),'Partial group lacks one Not reported summary')
   for(const state of ['busy','partial'] as const){
     const context=metricSection(root,state,'Context'),value=context.querySelector<HTMLElement>('[data-details-occupancy]')
     requireContract(value?.dataset.detailsOccupancy==='estimated'&&value.textContent==='6%est.'&&context.querySelector('[role="meter"]')?.getAttribute('aria-valuetext')==='6 percent, estimated from tokens'&&!context.querySelector('[data-details-not-reported]')&&!/reported percentage/i.test(context.textContent??''),'Token-derived occupancy is not marked estimated')
@@ -165,7 +167,7 @@ export const NarrowValueColumns:Story={
   render:function Render({scheme}){
     const inputs=detailsStoryInputs('busy')
     const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
-    const overview={...inputs.overview,status:'Awaiting attribution',machine:'Observed host',harness:'Claude Code',model:'Reported model',since:'Awaiting report',age:'Awaiting report',mission:'Review retained observations',durations:[{label:'Managed-session elapsed',value:'Awaiting attribution'}]}
+    const overview={...inputs.overview,status:'Awaiting session match',machine:'Observed host',harness:'Claude Code',model:'Reported model',since:'Awaiting report',age:'Awaiting report',mission:'Review retained observations',durations:[{label:'Managed-session elapsed',value:'Awaiting session match'}]}
     return <div role="main" aria-label="Narrow Details comparison" {...stylex.props(styles.comparison,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{[240,320].map(width=><div key={width} data-details-narrow-width={width} {...stylex.props(styles.frame(width))}><DetailsLabelContext.Provider value={`${width}px `}><DetailsPane {...inputs} overview={overview} state="busy" variants={{overview:'O3',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}}/></DetailsLabelContext.Provider></div>)}</ThemePortal></div>
   },
   play:async({canvasElement})=>{
@@ -573,12 +575,23 @@ export const DesktopReasonDescriptions:Story={
 }
 
 /** Internal vocabulary and source wording never reach production copy: painted text, accessible names, descriptions and disclosed reasons. */
-const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series)\b|\b(?:by )?this source\b/i
-const internalCopy='Production phone Details exposes internal vocabulary'
+const internalWords=/\b(native\w*|incarnations?|provenance|descendants?|series|ledger|attribution|window-global)\b|\broot completeness\b|\b(?:by )?this source\b/i
+const internalCopy='Production Details exposes internal vocabulary'
 function assertPlainCopy(root:HTMLElement){
   const hidden=[...root.querySelectorAll('[data-details-why-panel],[data-details-reason-description]')].map(node=>node.textContent??'')
   const offenders=[root.innerText,...[...root.querySelectorAll('[aria-label]')].map(node=>node.getAttribute('aria-label')??''),...hidden].flatMap(text=>text.match(internalWords)?.[0]??[])
   requireContract(offenders.length===0,`${internalCopy}: ${offenders.join(', ')}`)
+}
+/** One sample per banned term, so every word in the list has its own negative control. */
+const bannedSamples=['Native session','Traced descendant','Root incarnation','Reported provenance','Spend series','Spend ledger','Cost attribution','Window-global spend','Root completeness','Timing not reported by this source.']
+/** Plain copy holds, and each banned term is rejected at every target: painted lines and collapsed Why? panels alike. */
+async function checkPlainCopy(root:HTMLElement,targets:readonly HTMLElement[]){
+  assertPlainCopy(root)
+  for(const target of targets)for(const sample of bannedSamples){
+    const leak=root.ownerDocument.createElement('span');leak.textContent=` ${sample}`;target.append(leak)
+    try{await rejectsCause(internalCopy,()=>assertPlainCopy(root))}finally{leak.remove()}
+  }
+  assertPlainCopy(root)
 }
 const productionTail=`${tailPrefix}Workspace, Subagents, Declared bindings, Missions, Pull requests, CI runs, Reviews, Files touched, History.`
 const identityGap='Production phone identity paints a missing fact, a dangling separator or a redundant empty mission'
@@ -640,16 +653,9 @@ export const ProductionPhoneDetails: Story = {
     assertProductionIdentity(panel)
     await checkWhyDisclosure(panel)
     await checkTail(panel, true, productionTail)
-    assertPlainCopy(panel)
-    const leak = panel.ownerDocument.createElement('span'); leak.textContent = 'Root incarnation'; identity.append(leak)
-    try { await rejectsCause(internalCopy, () => assertPlainCopy(panel)) } finally { leak.remove() }
-    const sourced = panel.ownerDocument.createElement('span'); sourced.textContent = 'Timing not reported by this source.'; identity.append(sourced)
-    try { await rejectsCause(internalCopy, () => assertPlainCopy(panel)) } finally { sourced.remove() }
     // A collapsed Why? panel is copy too: source wording hidden there is still rejected.
     const tailPanel = panel.ownerDocument.getElementById(panel.querySelector('[data-details-unreported-sections] button[data-details-why]')?.getAttribute('aria-controls') ?? ''); requireContract(tailPanel, 'Missing tail Why? panel')
-    const hiddenSource = panel.ownerDocument.createElement('span'); hiddenSource.textContent = 'This source doesn’t report reviews.'; tailPanel.append(hiddenSource)
-    try { await rejectsCause(internalCopy, () => assertPlainCopy(panel)) } finally { hiddenSource.remove() }
-    assertPlainCopy(panel)
+    await checkPlainCopy(panel, [identity, tailPanel])
     // Disclosed reasons are rendered text too: expanded, they stay plain.
     const whys = [...panel.querySelectorAll<HTMLElement>('button[data-details-why]')]
     for (const why of whys) await userEvent.click(why)
@@ -659,3 +665,89 @@ export const ProductionPhoneDetails: Story = {
     await waitFor(() => { assertWholeGroups(panel); assertTail(panel, true, productionTail) })
   },
 }
+
+/** Each OMP subagent-activity state: the plain line it paints and the reasons its collapsed Why? holds. */
+const ompLines:Record<OmpSupplementState,{readonly line:string;readonly summary:string;readonly why?:string;readonly reasons:readonly string[]}>={
+  loading:{line:'[data-details-supplement]',summary:'Loading subagent activity…',reasons:[]},
+  unavailable:{line:'[data-details-supplement]',summary:"Subagent activity isn't available for this session.",why:'Why? Subagent activity',reasons:["Subagent activity couldn't be loaded."]},
+  reported:{line:'[data-details-accounting-note]',summary:accountingNoteSummary,why:'Why? Agent and total spend',reasons:[spendWindowReason]},
+  retained:{line:'[data-details-supplement]',summary:'Subagent activity may be out of date (last updated just now).',why:'Why? Subagent activity',reasons:["The latest update couldn't be loaded, so earlier activity is shown."]},
+}
+/** The real inspector over an omp-driven seat; its subagent activity flows through the composition's feed seam. */
+function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:boolean;readonly state:OmpSupplementState}){
+  const [registry]=React.useState(()=>AtomRegistry.make())
+  const [source]=React.useState(ompDetailsSource)
+  React.useEffect(()=>()=>registry.dispose(),[registry])
+  return <div role="main" aria-label={narrow?'Production phone inspector':'Production desktop inspector'} {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:narrow?390:440,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
+    <ThemePortal><NarrowLayoutContext.Provider value={narrow}><DataSourceProvider source={source} registry={registry}>
+      <AgentDetailsPanel agentRef={ompAgentRef} width={narrow?'fill':440} scheme={scheme} onClose={()=>undefined} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
+    </DataSourceProvider></NarrowLayoutContext.Provider></ThemePortal>
+  </div>
+}
+const ompShape='Production OMP Details line is not one plain summary behind a collapsed Why?'
+/**
+ * Outside the kit pane: one painted summary; any reasons wait behind one collapsed Why?, 44px on phone and dense on
+ * desktop. A live report paints no activity line; retained activity may keep its spend note, checked as copy.
+ */
+function assertOmpLine(panel:HTMLElement,narrow:boolean,state:OmpSupplementState){
+  const expected=ompLines[state],lines=exposedLines(panel,expected.line),line=lines[0],failures:string[]=lines.length===1?[]:[`${lines.length} lines`]
+  if(state==='reported'&&exposedLines(panel,'[data-details-supplement]').length>0)failures.push('activity line beside a live report')
+  if(line){
+    const summaries=[...line.querySelectorAll<HTMLElement>('[data-details-supplement-summary],[data-details-accounting-summary]')],summary=summaries[0]?.textContent??''
+    if(summaries.length!==1||summary!==expected.summary||line.closest('[data-testid="details-pane"]'))failures.push(`${summaries.length} summaries "${summary}"`)
+    const whys=[...line.querySelectorAll<HTMLElement>('button[data-details-why]')],why=whys[0],whyPanel=why&&panel.ownerDocument.getElementById(why.getAttribute('aria-controls')??'')
+    const reasons=whyPanel?[...whyPanel.querySelectorAll('[data-details-reason-text]')].map(node=>node.textContent??''):[]
+    if(expected.why===undefined?whys.length!==0:whys.length!==1||why?.getAttribute('aria-expanded')!=='false'||!whyPanel||paintedElement(whyPanel)||reasons.join('|')!==expected.reasons.join('|'))failures.push(`Why? ${why?.getAttribute('aria-expanded')??'absent'} "${reasons.join('|')}"`)
+    const box=why?.getBoundingClientRect()
+    if(box&&(box.width>=43.5&&box.height>=43.5)!==narrow)failures.push(`Why? ${box.width.toFixed(1)}×${box.height.toFixed(1)} on ${narrow?'phone':'desktop'}`)
+  }
+  requireContract(failures.length===0,`${ompShape}: ${failures.join('; ')}`)
+}
+function ompPlay(narrow:boolean,state:OmpSupplementState){
+  return async({canvasElement}:{canvasElement:HTMLElement})=>{
+    const panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'}),doc=canvasElement.ownerDocument,expected=ompLines[state]
+    await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+    await waitFor(()=>assertOmpLine(panel,narrow,state))
+    // The pre-fix shape: a second paragraph painted beside the summary.
+    const line=exposedLines(panel,expected.line)[0]!,summary=line.querySelector<HTMLElement>('[data-details-supplement-summary],[data-details-accounting-summary]')!
+    const painted=summary.cloneNode(true) as HTMLElement;summary.after(painted)
+    try{await rejectsCause(ompShape,()=>assertOmpLine(panel,narrow,state))}finally{painted.remove()}
+    assertOmpLine(panel,narrow,state)
+    if(narrow)assertTouch(touchTargets(panel))
+    else for(const tab of panel.querySelectorAll<HTMLElement>('[role="tab"]'))requireContract(tab.getBoundingClientRect().height<44,'Desktop Details adopted phone geometry')
+    const why=expected.why===undefined?undefined:within(line).getByRole('button',{name:expected.why}),whyPanel=why&&doc.getElementById(why.getAttribute('aria-controls')??'')
+    if(why){
+      requireContract(whyPanel,'OMP Why? controls no panel')
+      // Phone loses its 44px target; desktop adopts phone geometry.
+      const minWidth=why.style.minWidth,minHeight=why.style.minHeight
+      try{why.style.minWidth=narrow?'0':'44px';why.style.minHeight=narrow?'24px':'44px';await rejectsCause(ompShape,()=>assertOmpLine(panel,narrow,state))}finally{why.style.minWidth=minWidth;why.style.minHeight=minHeight}
+      why.focus();await userEvent.keyboard('{Enter}')
+      await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='true'&&paintedElement(whyPanel),'OMP Why? did not disclose its reasons from the keyboard'))
+      assertPlainCopy(panel)
+      await userEvent.keyboard('{Enter}')
+      await waitFor(()=>requireContract(why.getAttribute('aria-expanded')==='false'&&!paintedElement(whyPanel),'OMP Why? did not collapse from the keyboard'))
+    }
+    await checkPlainCopy(panel,whyPanel?[summary,whyPanel]:[summary])
+    if(state==='reported'){
+      // A reported subagent opens a plain read-only dialog.
+      const card=[...panel.querySelectorAll<HTMLElement>('button')].find(button=>button.textContent?.includes(ompSubagent.label));requireContract(card,'Missing reported subagent card')
+      await userEvent.click(card)
+      const dialog=await within(doc.body).findByRole('dialog',{name:'Reported resource details'})
+      requireContract(dialog.textContent?.includes("Reported details only; this resource can't be opened from here."),'Subagent dialog lacks its plain read-only line')
+      await checkPlainCopy(dialog,[dialog])
+      assertPlainCopy(panel)
+      await userEvent.click(within(dialog).getByRole('button',{name:'Close'}))
+      await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
+    }
+    assertOmpLine(panel,narrow,state)
+  }
+}
+// The kit gate runs each story at 440/1440 and dark/light; the inspector keeps its phone or desktop width.
+export const ProductionPhoneSubagentLoading:Story={render:args=><ProductionOmpInspector {...args} narrow state="loading"/>,play:ompPlay(true,'loading')}
+export const ProductionPhoneSubagentUnavailable:Story={render:args=><ProductionOmpInspector {...args} narrow state="unavailable"/>,play:ompPlay(true,'unavailable')}
+export const ProductionPhoneAccountingNote:Story={render:args=><ProductionOmpInspector {...args} narrow state="reported"/>,play:ompPlay(true,'reported')}
+export const ProductionPhoneSubagentRetained:Story={render:args=><ProductionOmpInspector {...args} narrow state="retained"/>,play:ompPlay(true,'retained')}
+export const ProductionDesktopSubagentLoading:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="loading"/>,play:ompPlay(false,'loading')}
+export const ProductionDesktopSubagentUnavailable:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="unavailable"/>,play:ompPlay(false,'unavailable')}
+export const ProductionDesktopAccountingNote:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="reported"/>,play:ompPlay(false,'reported')}
+export const ProductionDesktopSubagentRetained:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="retained"/>,play:ompPlay(false,'retained')}
