@@ -14,6 +14,7 @@
 # Exits 0 only when every assertion holds.
 set -Eeuo pipefail
 signal_helper="$(cd "$(dirname "$0")/.." && pwd)/script_process.py"
+python3 "$signal_helper" --check-platform
 
 st3="$(readlink -f "$1")"
 pty="$(readlink -f "$2")"

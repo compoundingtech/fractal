@@ -27,6 +27,7 @@
 set -Eeuo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$here/../script_process.py" --check-platform
 audit="${AUDIT:-/var/tmp/st-images-audit}"
 home="$audit/home"
 instance=images-audit

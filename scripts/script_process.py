@@ -8,6 +8,12 @@ import argparse
 import os
 from pathlib import Path
 import signal
+import sys
+
+
+def require_linux():
+    if sys.platform != 'linux' or not hasattr(os, 'pidfd_open'):
+        raise RuntimeError('Linux only: fixture signalling requires /proc and pidfds')
 
 
 def ancestors():
@@ -29,56 +35,76 @@ def signal_private(pid, sig, *, endpoint=None, root=None, environment=None,
     An exact private endpoint, private root or environment marker is mandatory.
     start_ticks is an additional receipt binding, not a substitute for ownership.
     """
+    require_linux()
+    if parent is not None and parent <= 1:
+        raise ValueError('a parent selector must be greater than 1')
     if not (endpoint or root or environment or parent):
         raise ValueError("a private fixture identity is required")
     if pid <= 1 or pid in ancestors():
         return False
     try:
         fd = os.pidfd_open(pid)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
     try:
-        proc = Path(f"/proc/{pid}")
-        if proc.stat().st_uid != os.getuid():
-            return False
-        stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-        if start_ticks is not None and int(stat[19]) != start_ticks:
-            return False
-        if parent is not None and int(stat[1]) != parent:
-            return False
-        env = dict(item.split(b"=", 1) for item in (proc / "environ").read_bytes().split(b"\0") if b"=" in item)
-        if endpoint is not None:
-            preferred, legacy = env.get(b"FRACTAL_ENDPOINT"), env.get(b"ST3_ENDPOINT")
-            if preferred is not None and legacy is not None and preferred != legacy:
+        # A non-dumpable same-uid process can deny these reads. An unreadable
+        # identity is not ours to signal, but must not abort later fixture cleanup.
+        # Scope this catch to metadata, not resource exhaustion or invalid signals.
+        try:
+            if not matches_private_process(pid, endpoint, root, environment,
+                                           start_ticks, contains, parent):
                 return False
-            if (preferred if preferred is not None else legacy) != os.fsencode(endpoint):
-                return False
-        if environment and any(env.get(os.fsencode(k)) != os.fsencode(v) for k, v in environment.items()):
+        except (OSError, ValueError, IndexError):
             return False
-        argv = (proc / "cmdline").read_bytes().split(b"\0")
-        if contains is not None and os.fsencode(contains) not in b" ".join(argv):
-            return False
-        if root is not None:
-            root = Path(root).resolve()
-            try:
-                cwd = (proc / "cwd").resolve(strict=True)
-                in_root = cwd == root or root in cwd.parents
-            except FileNotFoundError:
-                in_root = False
-            in_root |= any(arg.startswith(os.fsencode(root / "bin") + b"/") for arg in argv)
-            if not in_root:
-                return False
         # The numeric PID can exit/recycle after the checks; the fd still names
         # only the process opened above. A replacement cannot receive the signal.
         signal.pidfd_send_signal(fd, sig)
         return True
-    except (ProcessLookupError, FileNotFoundError):
+    except (ProcessLookupError, PermissionError):
         return False
     finally:
         os.close(fd)
 
 
+def matches_private_process(pid, endpoint, root, environment, start_ticks, contains, parent):
+    proc = Path(f"/proc/{pid}")
+    if proc.stat().st_uid != os.getuid():
+        return False
+    stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+    if start_ticks is not None and int(stat[19]) != start_ticks:
+        return False
+    if parent is not None and int(stat[1]) != parent:
+        return False
+    env = dict(item.split(b"=", 1) for item in (proc / "environ").read_bytes().split(b"\0") if b"=" in item)
+    if endpoint is not None:
+        preferred, legacy = env.get(b"FRACTAL_ENDPOINT"), env.get(b"ST3_ENDPOINT")
+        if preferred is not None and legacy is not None and preferred != legacy:
+            return False
+        if (preferred if preferred is not None else legacy) != os.fsencode(endpoint):
+            return False
+    if environment and any(env.get(os.fsencode(k)) != os.fsencode(v) for k, v in environment.items()):
+        return False
+    argv = (proc / "cmdline").read_bytes().split(b"\0")
+    if contains is not None and os.fsencode(contains) not in b" ".join(argv):
+        return False
+    if root is not None:
+        root = Path(root).resolve()
+        cwd = (proc / "cwd").resolve(strict=True)
+        in_root = cwd == root or root in cwd.parents
+        in_root |= any(arg.startswith(os.fsencode(root / "bin") + b"/") for arg in argv)
+        if not in_root:
+            return False
+    return True
+
+
 def main():
+    try:
+        require_linux()
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        return 2
+    if sys.argv[1:] == ['--check-platform']:
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pid", help="PID, or 'all' to inspect the explicitly selected fixture")
     parser.add_argument("signal", type=int)
@@ -88,12 +114,19 @@ def main():
     parser.add_argument("--contains")
     parser.add_argument("--parent", type=int)
     args = parser.parse_args()
+    if args.parent is not None and args.parent <= 1:
+        parser.error('a parent selector must be greater than 1')
     pids = (int(proc.name) for proc in Path('/proc').glob('[0-9]*')) if args.pid == 'all' else [int(args.pid)]
     for pid in pids:
-        signal_private(pid, args.signal, endpoint=args.endpoint, root=args.root,
-                       environment=dict(value.split("=", 1) for value in args.env),
-                       contains=args.contains, parent=args.parent)
+        try:
+            signal_private(pid, args.signal, endpoint=args.endpoint, root=args.root,
+                           environment=dict(value.split("=", 1) for value in args.env),
+                           contains=args.contains, parent=args.parent)
+        except (ProcessLookupError, PermissionError):
+            # One inaccessible/vanished entry cannot terminate an all-PID sweep.
+            continue
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

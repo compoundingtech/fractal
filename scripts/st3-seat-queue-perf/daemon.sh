@@ -7,6 +7,10 @@
 # space-separated NAME=VALUE pairs to add to the daemon's environment, such as
 # an allocator preload.
 
+# These runners use /proc and verified pidfd cleanup, including when sourced by
+# graceful/no-boot evals. Refuse unsupported hosts before launching fixtures.
+python3 "${BASH_SOURCE[0]%/*}/../script_process.py" --check-platform || return $?
+
 perf_state_dir() {
   if [[ -n ${PERF_DATA:-} ]]; then
     printf '%s/%s\n' "$PERF_DATA" "$(basename "$1")"

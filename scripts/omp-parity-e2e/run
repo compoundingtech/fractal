@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
+python3 "$(dirname "${BASH_SOURCE[0]}")/../script_process.py" --check-platform
 umask 077
 
 usage() {

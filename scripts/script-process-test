@@ -2,6 +2,9 @@
 """Safe host-side signal ownership tests. Orphan parent kills are VM-only."""
 import importlib.machinery
 import importlib.util
+import errno
+from contextlib import redirect_stderr
+import io
 import os
 from pathlib import Path
 import signal
@@ -12,12 +15,101 @@ import unittest
 from unittest.mock import patch
 
 from script_process import signal_private
+import script_process
 
 HERE = Path(__file__).resolve().parent
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux pidfd/subreaper ownership contract')
 class SignalOwnershipTests(unittest.TestCase):
+    def test_non_dumpable_neighbor_does_not_abort_private_fixture_sweep(self):
+        inaccessible = subprocess.Popen([sys.executable, '-c',
+            "import ctypes,time; "
+            "assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; "
+            "print('non-dumpable',flush=True); time.sleep(30)"],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(self.finish, inaccessible)
+        self.addCleanup(inaccessible.stdout.close)
+        self.assertEqual(inaccessible.stdout.readline().strip(), 'non-dumpable')
+        try:
+            Path(f'/proc/{inaccessible.pid}/environ').read_bytes()
+        except PermissionError:
+            pass
+        else:
+            self.skipTest('privileged reader can inspect non-dumpable processes')
+        target = self.child('reachable-after-denied')
+        # Only inspect these owned fixtures; never sweep the host's processes.
+        entries = [Path(f'/proc/{inaccessible.pid}'), Path(f'/proc/{target.pid}')]
+        with patch.object(Path, 'glob', return_value=iter(entries)), \
+             patch.object(sys, 'argv', ['script_process.py', 'all', str(signal.SIGTERM),
+                                      '--env', 'SCRIPT_TEST_OWNER=reachable-after-denied']):
+            self.assertEqual(script_process.main(), 0)
+        self.assertEqual(target.wait(timeout=3), -signal.SIGTERM)
+        self.assertIsNone(inaccessible.poll())
+
+    def test_metadata_io_failure_closes_pidfd_without_signalling(self):
+        child = self.child('metadata-denied')
+        real_close = os.close
+        with patch.object(script_process, 'matches_private_process', side_effect=OSError('metadata unreadable')), \
+             patch('os.close', wraps=real_close) as close, \
+             patch('signal.pidfd_send_signal') as send:
+            self.assertFalse(signal_private(child.pid, signal.SIGTERM,
+                                            environment={'SCRIPT_TEST_OWNER': 'metadata-denied'}))
+            close.assert_called_once()
+            send.assert_not_called()
+        self.assertIsNone(child.poll())
+
+    def test_pidfd_resource_exhaustion_and_invalid_signals_are_not_hidden(self):
+        child = self.child('error-policy')
+        with patch('os.pidfd_open', side_effect=OSError(errno.EMFILE, 'too many open files')):
+            with self.assertRaises(OSError) as error:
+                signal_private(child.pid, signal.SIGTERM, environment={'SCRIPT_TEST_OWNER': 'error-policy'})
+            self.assertEqual(error.exception.errno, errno.EMFILE)
+        with patch('signal.pidfd_send_signal', side_effect=OSError(errno.EINVAL, 'invalid signal')):
+            with self.assertRaises(OSError) as error:
+                signal_private(child.pid, signal.SIGTERM, environment={'SCRIPT_TEST_OWNER': 'error-policy'})
+            self.assertEqual(error.exception.errno, errno.EINVAL)
+        self.assertIsNone(child.poll())
+
+    def test_parent_one_or_lower_cannot_select_orphans(self):
+        for parent in (-1, 0, 1):
+            with self.assertRaisesRegex(ValueError, 'greater than 1'):
+                signal_private(999999, signal.SIGTERM, parent=parent)
+
+    def test_unsupported_platform_refuses_named_and_all_before_reading_proc(self):
+        for target in ('123', 'all'):
+            error = io.StringIO()
+            with patch.object(sys, 'platform', 'darwin'), \
+                 patch.object(sys, 'argv', ['script_process.py', target, '15', '--root', '/private']), \
+                 patch.object(Path, 'glob', side_effect=AssertionError('must not scan /proc')), \
+                 redirect_stderr(error):
+                self.assertEqual(script_process.main(), 2)
+            self.assertIn('Linux only', error.getvalue())
+            self.assertNotIn('Traceback', error.getvalue())
+
+    def test_linux_fixture_entrypoints_refuse_before_creating_resources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            tools = directory / 'bin'
+            tools.mkdir()
+            python = tools / 'python3'
+            python.write_text('#!/bin/sh\n'
+                '[ "$2" = --check-platform ] || exit 97\n'
+                'echo "Linux only: fixture signalling requires /proc and pidfds" >&2\nexit 2\n')
+            python.chmod(0o700)
+            output = directory / 'must-not-exist'
+            for name in ('omp-parity-e2e/run', 'st3-instance-isolation/run',
+                         'st3-work-root-trace/run', 'conversation-images-audit/run',
+                         'st3-no-boot-eval/run', 'st3-graceful-messaging-eval/run',
+                         'st3-seat-queue-perf/startup'):
+                with self.subTest(entrypoint=name):
+                    result = subprocess.run(['bash', str(HERE / name), 'unused', 'unused', str(output)],
+                        env={**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH']},
+                        capture_output=True, text=True, timeout=3)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn('Linux only', result.stderr)
+                    self.assertFalse(output.exists())
+
     def test_shell_suite_replaces_a_stale_supervisor_marker_and_preserves_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp) / 'suite'
