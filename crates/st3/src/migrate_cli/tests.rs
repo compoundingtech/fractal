@@ -114,6 +114,7 @@ impl Fixture {
             home: root.path().to_owned(),
             profiles: Some(vec![root.path().join("profiles"), root.path().join("legacy-profiles")]),
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
+            daemon_state: state.join("st3"),
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
         };
@@ -268,6 +269,89 @@ async fn dry_run_has_no_filesystem_or_service_mutations() -> Result<()> {
     assert_eq!(fixture.snapshot()?, before);
     assert!(!fixture.layout.lock.exists());
     assert!(!fixture.manager.changed_services());
+    Ok(())
+}
+
+#[tokio::test]
+async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pty() -> Result<()> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut fixture = Fixture::new()?;
+    fixture.use_home_manager()?;
+    let (old, new) = fixture.layout.directories[1].clone();
+    let store = old.join("store");
+    fs::create_dir_all(store.join("run"))?;
+    fs::rename(old.join("node-identity.lock"), store.join("node-identity.lock"))?;
+    fs::rename(old.join("logs"), store.join("logs"))?;
+    fs::write(store.join("claims.sqlite3"), b"nested authority")?;
+    fs::create_dir(old.join("pty"))?;
+    fs::write(old.join("pty/session"), b"live PTY registry")?;
+    let store_inode = fs::metadata(&store)?.ino();
+    let pty_inode = fs::metadata(old.join("pty"))?.ino();
+    fixture.layout.configure_state(&store)?;
+    fs::write(fixture.layout.directories[0].0.join("config.toml"), format!(
+        "node = \"test-host\"\nstate_dir = {}\n",
+        serde_json::to_string(&store)?
+    ))?;
+    assert_eq!(fixture.layout.target_daemon_state(), new.join("store"));
+
+    let config = Config {
+        state_dir: store.clone(),
+        socket: store.join("run/st3.sock"),
+        ..Config::default()
+    };
+    let listener = tokio::net::UnixListener::bind(&config.socket)?;
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).await?;
+            ensure!(request[..count].starts_with(b"GET /v1/health "), "unexpected API probe");
+            let body = br#"{"node":"test-host"}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ).as_bytes()).await?;
+            stream.write_all(body).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let mut api = native::Native::new(Endpoint::Unix(config.client_socket()), "test-host".into());
+    api.probe().await?;
+    let before = fixture.snapshot()?;
+    let dry_run = fixture.run(true, false).await?;
+    assert!(dry_run.status.starts_with("dry-run"));
+    assert_eq!(fixture.snapshot()?, before);
+    assert!(!fixture.manager.changed_services());
+
+    let receipt = fixture.run(false, false).await?;
+    assert_eq!(receipt.status, "completed");
+    assert_eq!(fs::read_link(&old)?, new);
+    assert_eq!(fs::metadata(new.join("store"))?.ino(), store_inode);
+    assert_eq!(fs::metadata(new.join("pty"))?.ino(), pty_inode);
+    assert_eq!(fs::read(new.join("store/claims.sqlite3"))?, b"nested authority");
+    assert_eq!(fs::read(old.join("pty/session"))?, b"live PTY registry");
+    assert!(new.join("store/logs").is_dir());
+    assert!(!new.join("node-identity.lock").exists());
+    api.probe().await?;
+    server.await??;
+    Ok(())
+}
+
+#[test]
+fn configured_state_must_remain_within_the_product_root() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new) = fixture.layout.directories[1].clone();
+    for accepted in [&old, &old.join("store"), &new, &new.join("store")] {
+        fixture.layout.configure_state(accepted)?;
+    }
+    for rejected in [
+        fixture.root.path().join("elsewhere"),
+        old.with_file_name("st3-other"),
+        old.join("../outside"),
+    ] {
+        assert!(fixture.layout.configure_state(&rejected).is_err());
+    }
     Ok(())
 }
 
