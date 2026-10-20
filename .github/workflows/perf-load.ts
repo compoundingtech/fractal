@@ -43,6 +43,13 @@ printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_ST
   },
 ]
 
+// The checkout and Nix setup of a cold macOS job. The daily macOS compile check (daily-long.yml) starts
+// from the same steps as the macOS hog run.
+export const macosColdSetupSteps = [
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
+  ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+]
+
 const loadEnv = {
   ...buildEnv,
   SCCACHE_IDLE_TIMEOUT: '0',
@@ -125,8 +132,7 @@ python3 scripts/ci-perf-cache pack`,
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, SCCACHE_IDLE_TIMEOUT: '0' },
       steps: [
-        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
-        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        ...macosColdSetupSteps,
         {
           name: 'Isolate test state',
           run: `home="$RUNNER_TEMP/test-home"
