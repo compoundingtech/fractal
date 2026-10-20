@@ -9,12 +9,14 @@ from the remote (depth 1, into a scratch repository that has nothing else), then
 verifier against the tested tree with the accepted key list. A lane prints `ok` when a trusted,
 signed note for this tree and lane exists on the remote, and `would-reject` with the verifier's reason
 otherwise (a lane this run did not sign, such as one covered by an earlier note, is `would-reject
-no_note`: it is a fact about this run, not a failure).
+no_note`: it is a fact about this run, not a failure). A lane named in --optional is skipped by its own
+paths (fractal-web runs only when web files changed): with no record it reads `n/a not_run` and counts in
+neither ok nor would-reject.
 
 One grep-able line per lane, then one total:
 
-  evidence-shadow v1 check=C result=ok|would-reject reason=R record=ID signer=S kind=K seconds=N
-  evidence-shadow v1 total lanes=N ok=N would_reject=N refs_added=N seconds=N
+  evidence-shadow v1 check=C result=ok|would-reject|n/a reason=R record=ID signer=S kind=K seconds=N
+  evidence-shadow v1 total lanes=N ok=N would_reject=N not_run=N refs_added=N seconds=N
 
 The same lines go to $GITHUB_STEP_SUMMARY as a table. The exit status is 0 whatever the lanes say;
 only a usage error is 2. Take this script and the verifier from the accepted base, not from the
@@ -54,14 +56,14 @@ def token(value):
     return text if TOKEN.match(text) else re.sub(r'[^A-Za-z0-9._:/@+=-]', '_', text)
 
 
-def lane_lines(lanes, published, fetched, scratch, tree, verifier, keys):
+def lane_lines(lanes, published, fetched, scratch, tree, verifier, keys, optional=()):
     """One result per lane: (check, ok, reason, verifier json or {}, seconds)."""
     results = []
     for check in lanes:
         started = time.monotonic()
         record = published.get(check)
         if record is None:
-            results.append((check, False, 'no_note', {}, 0.0))
+            results.append((check, None if check in optional else False, 'not_run' if check in optional else 'no_note', {}, 0.0))
             continue
         if record not in fetched:
             results.append((check, False, 'not_on_remote', {}, time.monotonic() - started))
@@ -83,6 +85,7 @@ def main(argv):
     parser.add_argument('--keys', required=True, help='allowed-signers file from the base commit')
     parser.add_argument('--checks', required=True, help='comma-separated lanes to report')
     parser.add_argument('--verifier', default=str(HERE / 'evidence-verify'))
+    parser.add_argument('--optional', default='', help='lanes that only run when their paths changed: no record reads n/a')
     parser.add_argument('--remote', default='origin')
     parser.add_argument('--repo', default='.')
     args = parser.parse_args(argv)
@@ -118,21 +121,24 @@ def main(argv):
                        f'{refs[record]}:{refs[record]}')
             if done.returncode == 0:
                 fetched.add(record)
-        results = lane_lines(lanes, published, fetched, scratch, tree, args.verifier, args.keys)
-    ok = sum(1 for r in results if r[1])
+        optional = set(filter(None, args.optional.split(',')))
+        results = lane_lines(lanes, published, fetched, scratch, tree, args.verifier, args.keys, optional)
+    ok = sum(1 for r in results if r[1] is True)
+    not_run = sum(1 for r in results if r[1] is None)
     rows = []
     for check, good, reason, result, seconds in results:
         print('evidence-shadow v1 ' + ' '.join(f'{k}={token(v)}' for k, v in (
-            ('check', check), ('result', 'ok' if good else 'would-reject'), ('reason', reason),
+            ('check', check), ('result', 'n/a' if good is None else 'ok' if good else 'would-reject'), ('reason', reason),
             ('record', result.get('record') or published.get(check)), ('signer', result.get('signer')),
             ('kind', result.get('kind')), ('seconds', f'{seconds:.1f}'))))
-        rows.append(f'| `{check}` | {"ok" if good else "**would-reject**"} | `{reason}` | `{result.get("record") or published.get(check) or "-"}` | {result.get("signer") or "-"} |')
+        rows.append(f'| `{check}` | {"n/a" if good is None else "ok" if good else "**would-reject**"} | `{reason}` | `{result.get("record") or published.get(check) or "-"}` | {result.get("signer") or "-"} |')
     elapsed = time.monotonic() - started
-    print(f'evidence-shadow v1 total lanes={len(results)} ok={ok} would_reject={len(results) - ok} refs_added={refs_added} seconds={elapsed:.1f}')
+    lanes_run = len(results) - not_run
+    print(f'evidence-shadow v1 total lanes={lanes_run} ok={ok} would_reject={lanes_run - ok} not_run={not_run} refs_added={refs_added} seconds={elapsed:.1f}')
     path = os.environ.get('GITHUB_STEP_SUMMARY')
     if path:
         with open(path, 'a') as stream:
-            stream.write(f'### Shadow verify (not required, nothing skipped): {ok} of {len(results)} lanes ok, tree `{tree[:12]}`\n\n'
+            stream.write(f'### Shadow verify (not required, nothing skipped): {ok} of {lanes_run} lanes ok{f", {not_run} not run" if not_run else ""}, tree `{tree[:12]}`\n\n'
                          '| lane | result | reason | record | signer |\n| --- | --- | --- | --- | --- |\n' + '\n'.join(rows) + '\n\n'
                          f'{refs_added} refs added by this run; verification took {elapsed:.1f} s.\n')
     return 0

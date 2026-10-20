@@ -43,13 +43,15 @@ export const RosterUnavailable = ({ reason, onRetry }: { readonly reason: keyof 
  * A last-observed roster: the age counts from the source's last actual observation on the shared clock, and
  * nothing here reads as live. A failed newer read keeps these rows and says so, with Retry when supported.
  */
-export const RosterStaleNotice = ({ observedAt, partial, refreshFailed, onRetry }: {
+export const RosterStaleNotice = ({ observedAt, partial, refreshFailed, onRetry, decodeStale = false }: {
   readonly observedAt: number | undefined
   readonly partial: boolean
   readonly refreshFailed: boolean
   readonly onRetry: (() => void) | undefined
+  /** The feed is stale because every row of the latest frame failed to decode, not because the sync lapsed. */
+  readonly decodeStale?: boolean
 }) => <>
-  <p role="status" data-roster-notice="stale" data-system-state="stale" {...stylex.props(styles.notice)}>
+  <p role="status" data-roster-notice="stale" data-wf-roster-stale={decodeStale ? 'decode' : 'sync'} data-system-state="stale" {...stylex.props(styles.notice)}>
     <Icon name="clock" size={12} />
     <span>{observedAt === undefined
       ? partial ? 'Partial roster' : 'Last observed list'

@@ -92,14 +92,23 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'result=ok' in lines['linux-tests'] and 'signer=fleet/ci' in lines['linux-tests'], done.stdout
     assert 'result=would-reject' in lines['linux-clippy'] and 'reason=satisfied' not in lines['linux-clippy'], done.stdout
     assert 'reason=no_note' in lines['linux-fleet-compat'] and 'reason=no_note' in lines['genie-freshness'], done.stdout
-    assert 'total lanes=4 ok=1 would_reject=3 refs_added=2' in done.stdout, done.stdout
+    assert 'total lanes=4 ok=1 would_reject=3 not_run=0 refs_added=2' in done.stdout, done.stdout
     table = summary.read_text()
     assert '1 of 4 lanes ok' in table and '`linux-tests` | ok' in table and '**would-reject**' in table, table
     print('passed: a lane with a trusted signed note on the remote is ok; a failing note, a refused signer and an unsigned lane are would-reject by name')
 
+    # A lane that only runs when its paths changed reads n/a without a record, and a missing required lane still rejects.
+    done = shadow('--optional', 'genie-freshness,linux-fleet-compat')
+    assert 'check=genie-freshness result=n/a reason=not_run' in done.stdout and 'check=linux-fleet-compat result=n/a' in done.stdout, done.stdout
+    assert 'total lanes=2 ok=1 would_reject=1 not_run=2 refs_added=2' in done.stdout, done.stdout
+    done = shadow('--optional', 'linux-tests')
+    assert 'check=linux-tests result=ok' in done.stdout, 'an optional lane that has a record is still verified'
+    print('passed: an optional lane without a record is n/a and counted apart; with a record it is verified like any other')
+
     # The verification reads the remote, not this job's own refs: a record deleted there is not_on_remote.
-    record = next(a['record'] for a in published['accepted'] if a['check'] == 'linux-tests')
-    git(remote, 'update-ref', '-d', f'refs/notes/evidence/{record}')
+    entry = next(a for a in published['accepted'] if a['check'] == 'linux-tests')
+    record = entry['record']
+    git(remote, 'update-ref', '-d', entry.get('ref') or f'refs/notes/evidence/{record}')
     done = shadow()
     assert 'check=linux-tests result=would-reject reason=not_on_remote' in done.stdout, done.stdout
     print('passed: a record absent from the remote is would-reject even when this job still holds the ref')
@@ -112,7 +121,7 @@ with tempfile.TemporaryDirectory() as directory:
         if a['record'] == record:
             a['ref'] = moved
     result_file.write_text(json.dumps(published))
-    # The verifier of this checkout does not read the new layout yet, so a stand-in verifier shows what the scratch repository holds.
+    # A stand-in verifier shows exactly which refs the scratch repository holds.
     stub = tmp / 'stub-verifier'
     stub.write_text('#!/usr/bin/env python3\nimport subprocess, sys\n'
                     'repo = sys.argv[sys.argv.index("--repo") + 1]\n'

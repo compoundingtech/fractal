@@ -46,7 +46,7 @@ PROTECTED = (
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
 )
 
-NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
+NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
 KEYS = '.st/evidence-keys'
@@ -158,7 +158,14 @@ def observe(context, revision='HEAD'):
         return 'unavailable', None, 'could not fetch the accepted base', None
     # --no-filter: choose_tree may have made this a partial clone (history without blobs); the notes' blobs must arrive in this one fetch,
     # not one lazy round trip each when the verifier reads them (that took more than the verifier's 30 seconds on a runner).
-    context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', NOTES).returncode == 0 else 'failed'
+    # Only the records of the tree being asked about (a prefix of one tree), never the whole namespace.
+    tree = run('git', 'rev-parse', '--verify', '--quiet', f'{revision}^{{tree}}')
+    tree_id = tree.stdout.decode().strip() if tree.returncode == 0 else ''
+    if OID.match(tree_id):
+        prefix = f'{NOTES}/{tree_id}'
+        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{prefix}/*:{prefix}/*').returncode == 0 else 'failed'
+    else:
+        context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
         shown = run('git', 'show', f'{base}:{path}')
         context[name] = hashlib.sha256(shown.stdout).hexdigest()[:16] if shown.returncode == 0 else 'none'

@@ -2,6 +2,7 @@
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Exercise the real standalone hook and eval clear boundaries, without starting a daemon.
 set -euo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 repo=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
