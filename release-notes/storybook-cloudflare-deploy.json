@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add Cloudflare deployment for the Fractal UI Storybook with main and pull-request stages",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "No application schema or migration changes." },
+  "rules": { "status": "none", "detail": "No runtime admission or reconciliation rule changes." },
+  "compatibility": { "status": "changed", "detail": "Adds a separate, non-required Storybook deployment workflow and an Alchemy v2 stack with Cloudflare remote state. Main targets https://storybook.compounding.tech by default; same-repository pull requests use isolated pr-N stages that are destroyed on close. Existing required checks are unchanged." },
+  "downtime": { "status": "none", "detail": "Static Storybook hosting is independent of the application and daemon." },
+  "manual": { "status": "changed", "detail": "An administrator must configure CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID for an existing Cloudflare account, authorize remote-state bootstrap and deployment, and configure the custom-domain zone or choose workers.dev. See docs/development.md#storybook-deployment." },
+  "recovery": { "status": "changed", "detail": "Redeploy the desired revision to main to restore Storybook content. Destroy an abandoned preview with pnpm --dir infra/storybook run destroy --stage pr-N using the same Cloudflare account and remote state." }
+}

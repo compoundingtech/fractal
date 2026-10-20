@@ -200,6 +200,100 @@ inventory's read-only permissions (Git does not preserve them).
 [Fractal web implementation](fractal-web.md) documents the app’s security policy, transcript paint,
 captured changes, composer, arrangements, roster and terminal attachment.
 
+### Storybook deployment
+
+The UI component reference targets [storybook.compounding.tech](https://storybook.compounding.tech).
+Its Alchemy v2 stack lives in `infra/storybook` (`@smalltalk/storybook-deploy`).
+The separate [deployment workflow](ci.md#storybook-deployment) is not a required
+check: main deploys stage `main`, non-draft same-repository pull requests deploy
+isolated `pr-N` stages, and closing or merging a pull request destroys its stage,
+even when closed as a draft. Returning to draft keeps an existing preview but
+does not deploy updates; marking ready resumes deployment. Fork pull requests do
+not deploy. Deployment URLs appear in the Actions job summary,
+not PR comments; the workflow needs no repository write permissions.
+If either Cloudflare secret is absent, the workflow succeeds with a skip summary
+without installing, building, deploying or destroying resources.
+
+#### Account and domain setup
+
+Use the **compounding.tech** Cloudflare account. Alchemy creates a new static-asset
+Worker, not a Pages project. An administrator must add the repository
+Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; keep the token
+out of source control, logs and command arguments. Local commands use the same
+environment variables.
+
+Scope the token to that account with **Workers Scripts: Edit**,
+**Account Settings: Read**, and **Secrets Store: Read**. The one-time bootstrap
+also needs **Secrets Store: Edit** and an account/plan that supports Durable
+Objects. For a custom domain, grant **Zone: Read** and **Workers Routes: Edit**
+for its zone; Cloudflare's [custom-domain authorization](https://developers.cloudflare.com/workers/authorization/workers/)
+uses Workers Routes permissions, not just DNS permissions. An administrator
+also needs **DNS: Edit** if changing existing DNS records during domain setup;
+it does not replace Workers Routes access. No zone permissions are needed for
+`workers.dev`-only deployment.
+
+Before the first deployment, bootstrap remote state once from the web shell,
+after installing the isolated infrastructure dependencies, with the same account
+environment:
+
+```sh
+pnpm --dir infra/storybook exec alchemy provider cloudflare bootstrap
+```
+
+Alchemy v2's `Cloudflare.state()` uses the account-wide `alchemy-state-store`
+Worker and its Durable Object, with its encryption key and bearer token held
+in Cloudflare Secrets Store, not Workers KV. CI retrieves state credentials via
+a temporary edge-preview Worker bound to Secrets Store; no additional
+`ALCHEMY_PASSWORD` or state-token GitHub secret is required. Preserve the state
+Worker, Durable Object and Secrets Store across deployments and preview cleanup.
+They are shared bootstrap infrastructure, not resources to destroy with `pr-N`.
+
+`STORYBOOK_DOMAIN` controls the canonical domain for `main` only. Unset defaults
+to `storybook.compounding.tech`; a hostname selects another custom domain, and
+an empty string disables the custom domain and uses the Worker's `workers.dev`
+URL. Set the repository Actions variable `STORYBOOK_DOMAIN` to override CI;
+the workflow distinguishes an absent variable from an explicitly empty one.
+For local commands, `export STORYBOOK_DOMAIN=''` selects `workers.dev`.
+Previews use `workers.dev` rather than attaching the canonical domain. Enable
+the account's Workers subdomain before using these URLs. A custom domain must
+belong to a zone in the configured Cloudflare account.
+
+#### Build, deploy and cleanup
+
+Materialize the pinned `effect-utils` member before installing dependencies,
+as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
+Use the web shell's pnpm 12.7.0, not a separate global install:
+
+```sh
+mr apply --worktree-mode commit
+nix develop .#web
+pnpm install --frozen-lockfile
+pnpm --dir infra/storybook install --frozen-lockfile
+node apps/fractal-web/scripts/changelog-registry.mjs
+pnpm --filter @smalltalk/fractal-ui build-storybook
+pnpm --dir infra/storybook run deploy --stage main
+```
+
+The build writes `packages/fractal-ui/storybook-static`; deployment consumes that
+directory. The infrastructure package has an isolated pnpm dependency root so
+Alchemy dependencies are not installed by the existing required checks.
+Alchemy is pinned exactly to `2.0.0-beta.83` with Effect `4.0.5`; `beta.72` is
+incompatible with Effect 4. The isolated package keeps this deployment-only
+version boundary out of the UI toolchain.
+
+With the same credentials and remote state, deploy a preview or remove an
+abandoned one using its exact stage name:
+
+```sh
+pnpm --dir infra/storybook run deploy --stage pr-N
+pnpm --dir infra/storybook run destroy --stage pr-N
+```
+
+Replace `N` with the pull-request number. Do not destroy `main` to clean up a
+preview. The workflow automates preview cleanup on close; the manual command
+is available if that run fails. These instructions describe the deployment
+configuration, not evidence of a successful live deployment.
+
 ## Continuous integration
 
 Workspace CI runs on pull requests and merge groups. The five required checks are `linux-gate`,

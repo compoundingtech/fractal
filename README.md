@@ -67,6 +67,7 @@ fleet; start with one machine and add others when you need them.
 ## Reference
 
 - [Binary releases](docs/st3/binary-releases.md): archive contents, versions and verification.
+- [UI component Storybook](https://storybook.compounding.tech): Fractal UI stories; [deployment setup](docs/development.md#storybook-deployment).
 - [Nix and Home Manager](docs/getting-started.md#with-nix-and-home-manager)
 - [Daemon details](docs/getting-started.md#daemon-details)
 - [macOS installation and signing](docs/st3/macos-installation.md)

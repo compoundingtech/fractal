@@ -574,6 +574,35 @@ contract/schema tests and both compiler projects, the views' tests and typecheck
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
+### Storybook deployment
+
+The separate [Storybook deployment workflow](../.github/workflows/storybook-deploy.yml),
+authored with `githubWorkflow` in `storybook-deploy.yml.genie.ts`, is not a required
+check and does not change Workspace CI or its gates. It builds
+`packages/fractal-ui/storybook-static` and deploys the Alchemy v2 stack
+`@smalltalk/storybook-deploy` with Cloudflare remote state: `main` for the canonical
+[Storybook](https://storybook.compounding.tech), and `pr-N` for non-draft,
+same-repository pull requests (including `ready_for_review`). Drafts do not
+deploy. An existing preview stays up when its PR goes back to draft; closing or
+merging the PR destroys it even if the PR is a draft. Fork pull requests do not
+receive deployment credentials or previews.
+
+Alchemy apply/destroy runs are serialized per stage without cancellation and
+this workflow alone is excluded from the draft-transition cancellation observer,
+so a draft transition cannot interrupt infrastructure mutation. Only its
+`destroy` job bypasses the normal draft job guard, strictly on same-repo PR close.
+
+The deployment URL is written to the GitHub Actions job summary; the workflow
+does not need repository write permissions or post PR comments. An administrator
+must configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` before deployment.
+If either secret is absent, a credential preflight writes a skip summary and all
+checkout, setup, build, deploy and destroy steps are skipped successfully.
+The `STORYBOOK_DOMAIN` repository variable overrides the main custom domain;
+unset uses `storybook.compounding.tech`, while an explicitly empty value disables
+the custom domain in favor of `workers.dev`. The workflow preserves this
+unset-versus-empty distinction. See [Storybook deployment setup](development.md#storybook-deployment)
+for account permissions, state bootstrap and manual deploy/cleanup commands.
+
 ### Fractal web
 
 The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without

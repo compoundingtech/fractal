@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check every generated PR job refuses drafts, including failure collectors."""
+"""Check PR CI jobs refuse drafts while closed Storybook previews still get destroyed."""
 import ast
 from pathlib import Path
 import re
@@ -21,6 +21,12 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         raw = match[1]
         condition = ast.literal_eval(raw) if raw.startswith(('"', "'")) else raw
         expression = condition.removeprefix('${{ ').removesuffix(' }}')
+        if path.name == 'storybook-deploy.yml' and name == 'destroy':
+            # A deployed preview must be destroyed even when its PR closes as a draft.
+            assert expression == "github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository", condition
+            assert 'run destroy --stage "$STAGE" --yes' in block
+            assert 'run deploy' not in block
+            continue
         prefix = GUARD + ' && ('
         assert expression.startswith(prefix) and expression.endswith(')'), (path.name, name, condition)
         # Evaluate the generated guard with both outcomes of the existing condition.
@@ -35,6 +41,6 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         if path.name == 'fleet.yml' and name == 'linux-gate':
             assert '(always())' in expression, 'dependency failures must still reach the gate on ready PRs'
         count += 1
-    print('passed:', path.name, len(blocks), 'draft jobs suppressed; ready and converted-to-draft events included')
+    print('passed:', path.name, len(blocks), 'PR jobs checked; ready and converted-to-draft events included')
 assert count >= 20, count
 print('passed:', count, 'generated PR job conditions; absent draft identity fails closed')
