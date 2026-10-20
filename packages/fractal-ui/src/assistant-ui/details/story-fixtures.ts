@@ -11,6 +11,14 @@ export const detailsWorkbenchResources: WorkbenchResources = {
   terminals: { state: 'unknown' },
 }
 
+/** Painted copy only: desktop missing-value reasons live in hidden aria-describedby targets, not in the visible line. */
+export function paintedText(node: Element | null | undefined): string {
+  if (!node) return ''
+  const copy = node.cloneNode(true) as Element
+  for (const description of copy.querySelectorAll('[data-details-reason-description]')) description.remove()
+  return copy.textContent ?? ''
+}
+
 /** Explicit host observations for CSF stories; production components never import this module. */
 export function detailsStoryInputs(state: DetailsState, trace?: TraceSeries) {
   const pending = state === 'loading' || state === 'error'

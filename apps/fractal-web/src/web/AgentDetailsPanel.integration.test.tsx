@@ -3,6 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
+import { St3Client } from '@smalltalk/st3-client'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -13,6 +14,8 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed } from '../data/source.ts'
 import type { Feed } from '../data/source.ts'
+import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
+import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -81,7 +84,10 @@ describe('native observations mounted on the production kit Details pane', () =>
       expect(within(host).queryByRole('region', { name })).toBeNull()
     expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('Not supplied:')
     expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('CI runs')
-    expect(host.textContent).not.toContain('CI runs observations are not supplied')
+    const reasonTrigger = host.querySelector<HTMLElement>('[data-details-unreported-section="CI runs"]')!
+    const description = document.getElementById(reasonTrigger.getAttribute('aria-describedby')!)
+    expect(description?.textContent).toBe('CI runs observations are not supplied by this native Details feed.')
+    expect(description?.hasAttribute('hidden')).toBe(true)
     expect(within(host).getByRole('region', { name: 'Attention' }).textContent).toContain('No attention action observed')
   })
   it('preserves Changes as a selectable real captured-changes surface and returns to Details', async () => {
@@ -92,6 +98,36 @@ describe('native observations mounted on the production kit Details pane', () =>
     await act(async () => within(host).getByRole('tab', { name: 'Details' }).click())
     expect(host.querySelector('[data-testid="details-pane"]')).not.toBeNull()
     expect(host.querySelector('aside[aria-label="Changes"]')).toBeNull()
+  })
+  it('re-fetches and re-projects a rejected declaration tree when Retry is pressed', async () => {
+    let declarationReads = 0
+    const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
+      let value: unknown
+      if (url.pathname.endsWith('/usage')) value = { since_ms: 1000, until_ms: 5000, rows: [] }
+      else if (url.pathname.includes('/agent-declarations/')) {
+        declarationReads++
+        value = { id: row.id, revision: '1', revisions: ['1'], kdl: '', tree: declarationReads === 1
+          ? { name: 'not-an-agent', children: [] }
+          : { name: 'agent', children: [{ name: 'workspace', arguments: ['withheld'] }] } }
+      } else throw new TypeError(`Unexpected native request: ${url.pathname}`)
+      return Response.json({ ...recording.cases.agent.payload, value })
+    } }
+    const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents,
+      nativeDetails: gatewayNativeDetails({ options, registry, discovery: new St3Client(options), now: () => 10_000 }),
+    }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef={row.id} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
+    await act(async () => { await vi.waitFor(() => expect(host.querySelector('[data-details-sync-state]')?.getAttribute('data-details-sync-state')).toBe('Failed')) })
+    expect(declarationReads).toBe(1)
+    // A malformed projection remains failed and retryable even though its raw getter succeeded.
+    const declaration = source.nativeDetails.declarations({ agentRef: row.id, revision: row.revision })
+    expect(registry.get(declaration)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
+    await act(async () => within(host).getByRole('button', { name: 'Details for agent details' }).click())
+    await act(async () => within(document.body).getByRole('button', { name: 'Retry' }).click())
+    await act(async () => { await vi.waitFor(() => expect(host.textContent).toContain('Declared workspace')) })
+    expect(declarationReads).toBe(2)
+    expect(registry.get(declaration)).toMatchObject({ _tag: 'Observed', value: { bindings: [{ kind: 'workspace', count: 1 }] } })
   })
   it('keeps the app source registry when kit tab state has its own registry and closes through the host', async () => {
     await act(async () => registry.set(agents, observed({ value: [{ ...row, name: 'Updated native seat' }] })))

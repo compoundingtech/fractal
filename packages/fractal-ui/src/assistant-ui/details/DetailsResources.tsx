@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useDrag } from 'react-aria'
 import { Button as AriaButton, Tooltip as AriaTooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon, type IconName } from '../composition/Icons'
 import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
@@ -12,7 +13,7 @@ import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from
 import type { TraceSeries, TraceSubagent, TraceUnknownReason } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
-import { DetailsAvailabilityState, DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
+import { DescribedTooltipButton, DetailsAvailabilityState, DetailsInlineReason, DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
 import { traceCoverageState } from './trace-series'
 
 export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
@@ -35,6 +36,8 @@ export const DetailsLabelContext=React.createContext('')
 /** One pane-level column; collapse, hover and skeletons stay local, never synced. */
 export function DetailsResources({ state, sections: suppliedSections, trace, now, form = 'R1', empty = 'E1', onOpen, hiddenSections = [], styles: callerStyles }: DetailsResourcesProps) {
   const labelPrefix=React.useContext(DetailsLabelContext)
+  // Phone hosts: section toggles are 44px touch targets and unavailable reasons paint inline.
+  const narrow = React.useContext(NarrowLayoutContext)
   // Pending geometry derives only from the host's supplied observations.
   const observedSubagents = suppliedSections.find(section => section.title === 'Subagents')
   // Known [] is an observed empty st resource list, distinct from an unreported one; it is evidence once the agent has started.
@@ -66,11 +69,11 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
         : section.items._tag === 'Known' && section.items.value.length > 0 ? section.items.value.length : undefined
       const pending = state === 'loading' || section.pending === true
       if (!pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)) return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="unavailable" {...stylex.props(styles.section)}>
-        <div {...stylex.props(styles.header)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.metaLine)}>{section.title}</span><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></div>
+        <div {...stylex.props(styles.header, narrow && styles.headerWrap)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.metaLine)}>{section.title}</span><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></div>
       </section>
       return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
         <div {...stylex.props(styles.header)}>
-          <AriaButton aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton)}>
+          <AriaButton aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton, narrow && styles.touchHeight)}>
             <Icon name={isCollapsed?'chevron-right':'chevron-down'}/>
             <span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span>
             {count !== undefined && (pending
@@ -83,7 +86,10 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
         </div>}
       </section>
     })}
-    {unreported.length > 0 && <p data-details-unreported-sections={reserveUnreported ? undefined : true} data-details-unreported-reserved={reserveUnreported || undefined} aria-hidden={reserveUnreported || undefined} inert={reserveUnreported} {...stylex.props(styles.metaLine, styles.allHidden, reserveUnreported && styles.skeletonHidden)}>Not supplied: {unreported.map((section, index) => <React.Fragment key={section.title}>{index > 0 && ', '}<TooltipTrigger delay={0}><AriaButton data-details-unreported-section={reserveUnreported ? undefined : section.title} {...stylex.props(styles.unreportedTrigger)}>{section.title}</AriaButton><AriaTooltip {...stylex.props(styles.tooltip)}>{unavailableReason(section, trace, empty)}</AriaTooltip></TooltipTrigger></React.Fragment>)}.</p>}
+    {unreported.length > 0 && <p data-details-unreported-sections={reserveUnreported ? undefined : true} data-details-unreported-reserved={reserveUnreported || undefined} aria-hidden={reserveUnreported || undefined} inert={reserveUnreported} {...stylex.props(styles.metaLine, styles.allHidden, reserveUnreported && styles.skeletonHidden)}>Not supplied: {unreported.map((section, index) => <React.Fragment key={section.title}>{index > 0 && ', '}{narrow
+      ? <span data-details-unreported-section={reserveUnreported ? undefined : section.title}>{section.title}</span>
+      : <DescribedTooltipButton data-details-unreported-section={reserveUnreported ? undefined : section.title} description={unavailableReason(section, trace, empty)} tooltipStyle={styles.tooltip} {...stylex.props(styles.unreportedTrigger)}>{section.title}</DescribedTooltipButton>}</React.Fragment>)}.
+      {narrow && <DetailsInlineReason block>{unreported.map(section => <span key={section.title} {...stylex.props(styles.reasonLine)}>{section.title}: {unavailableReason(section, trace, empty)}</span>)}</DetailsInlineReason>}</p>}
     {sections.length === 0 && unreported.length === 0 && state !== 'error' && !(state === 'new' && empty === 'E3') && <p {...stylex.props(styles.metaLine, styles.allHidden)}>Every section is empty or hidden.</p>}
   </div>
 }
@@ -263,6 +269,7 @@ function wrapsIdentity(resource: DetailsResource): boolean {
 
 function SectionItems({ section, now, form, open, pending }: { section: DetailsSection; now: number; form: DetailsResourceForm; open: (uri: string, split: boolean) => void; pending: boolean }) {
   const [expanded,setExpanded]=React.useState(false)
+  const narrow = React.useContext(NarrowLayoutContext)
   const items = section.items._tag === 'Known' ? section.items.value : []
   const capped = form === 'R3' && items.length > 3
   const shown = capped && !expanded ? items.slice(0, 3) : items
@@ -271,7 +278,7 @@ function SectionItems({ section, now, form, open, pending }: { section: DetailsS
   return <>
     {form === 'R2' && <div role="list" aria-label={section.title} {...stylex.props(styles.dense)}>{shown.map(resource => row(resource, <DenseRow resource={resource} now={now} open={open} />))}</div>}
     {form !== 'R2' && shown.map(resource => row(resource, <ResourceEntry resource={resource} now={now} open={open} />))}
-    {capped && <SkeletonLine pending={pending}><AriaButton data-details-quiet-action onPress={()=>setExpanded(value=>!value)} {...stylex.props(styles.splitButton)}>{expanded?'Show fewer':`+${items.length - shown.length} more`}</AriaButton></SkeletonLine>}
+    {capped && <SkeletonLine pending={pending}><AriaButton data-details-quiet-action onPress={()=>setExpanded(value=>!value)} {...stylex.props(styles.splitButton, narrow && styles.touchHeight)}>{expanded?'Show fewer':`+${items.length - shown.length} more`}</AriaButton></SkeletonLine>}
   </>
 }
 
@@ -291,15 +298,16 @@ function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now
   const getItems = React.useCallback(() => [{ [AGENT_DRAG_MIME]: paneKey, 'text/plain': paneKey }], [paneKey])
   const { dragProps } = useDrag({ getItems, getAllowedDropOperations: () => ['copy'] })
   const splitPress=React.useRef(false)
+  const narrow = React.useContext(NarrowLayoutContext)
   const capture=(event:React.MouseEvent|React.PointerEvent|React.KeyboardEvent)=>{splitPress.current=event.metaKey||event.ctrlKey}
   if (resource.agent !== undefined) {
     return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.agentEntry)}>
       <div {...stylex.props(styles.agentRow)}><SidebarAgentRow item={resource.agent} variant="SR-2" reportedStatusOnly now={now} onOpen={row => open(agentPaneKey(row.ref), splitPress.current)} /></div>
-      <AriaButton data-details-quiet-action aria-label={`Open in split: ${resource.card.label}`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit)}>Open in split</AriaButton>
+      <AriaButton data-details-quiet-action aria-label={`Open in split: ${resource.card.label}`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit, narrow && styles.touchHeight)}>Open in split</AriaButton>
     </div>
   }
   // Traced sessions and incarnations carry their reported facts only in the detail, so the card paints it.
-  return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.entry)}>
+  return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.entry, narrow && narrowCardGeometry)}>
     <ResourceCardV1 resource={resource.card} variant="RC-1" titlePriority titleLines={wrapsIdentity(resource) || resource.uri.startsWith('session:') ? 'wrap' : 1} icon={resourceIcon(resource)} detailLine={resource.uri.startsWith('session:')} onOpen={() => open(paneKey, splitPress.current)} />
   </div>
 }
@@ -337,17 +345,28 @@ function DenseRow({ resource, now, open }: { resource: DetailsResource; now: num
   // An absent agent status must not fall back to the card's projected status text; whole meta may be hidden when it does not fit.
   const facts = [...new Set([meta, resource.agent === undefined ? resource.card.detail : undefined, resource.file !== undefined && resource.file.path !== resource.card.label ? resource.file.path : undefined])].filter((fact): fact is string => fact !== undefined && fact !== '')
   const descriptionId = React.useId()
+  const narrow = React.useContext(NarrowLayoutContext)
   return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><TooltipTrigger delay={150}>
-    <AriaButton data-details-resource-row aria-describedby={facts.length > 0 ? descriptionId : undefined} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow)}>
+    <AriaButton data-details-resource-row aria-describedby={facts.length > 0 ? descriptionId : undefined} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow, narrow && styles.touchRow)}>
       <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
       <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>{' '}
       <WholeResourceMeta numeric={resource.file !== undefined} styles={styles.denseMeta}>{meta}</WholeResourceMeta>
     </AriaButton>
     <AriaTooltip placement="left" {...stylex.props(styles.tooltip)}><HoverContent resource={resource} now={now} /></AriaTooltip>
-  </TooltipTrigger>{facts.length > 0 && <VisuallyHidden elementType="span"><span id={descriptionId} data-details-resource-facts>{facts.join(' · ')}</span></VisuallyHidden>}{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit)}><Icon name="panel" /></AriaButton>}</div>
+  </TooltipTrigger>{facts.length > 0 && <VisuallyHidden elementType="span"><span id={descriptionId} data-details-resource-facts>{facts.join(' · ')}</span></VisuallyHidden>}{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit, narrow && styles.touchSquare)}><Icon name="panel" /></AriaButton>}</div>
 }
 
+/** Phone hosts: the shared resource card's open row (footer height) and detail row (control height) become 44px targets. */
+const narrowCardGeometry = stylex.createTheme(g, { footer: g.touchTarget, controlLg: g.touchTarget })
+
 const styles = stylex.create({
+  // Phone hosts (NarrowLayoutContext): every Details action is a 44px touch target; desktop keeps the dense rows.
+  touchHeight: { height: g.touchTarget },
+  touchRow: { minHeight: g.touchTarget },
+  touchSquare: { width: g.touchTarget, height: g.touchTarget },
+  // The unavailable state's reason wraps onto its own row beneath the section title.
+  headerWrap: { flexWrap: 'wrap', paddingBlock: s.xs },
+  reasonLine: { display: 'block' },
   root: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, fontFamily: t.fontSans, color: ink.fg },
   section: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   header: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.md },

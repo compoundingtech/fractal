@@ -1,3 +1,4 @@
+import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
 import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex.ts'
@@ -10,7 +11,8 @@ import { adaptTrace } from './trace/adapter.ts'
 import { CompactSpend, CompactSpendPending } from './trace/CompactSpend.tsx'
 import { ContextPanel, ContextPanelPending, contextPanelFootprint, type ContextPanelFootprint } from './trace/ContextPanel.tsx'
 import { SpendPanel, SpendPanelPending } from './trace/SpendPanel.tsx'
-import { DetailsNotReported, type NotReportedField } from './DetailsUnavailable.tsx'
+import { DescribedTooltipButton, DetailsInlineReason, DetailsNotReported, type NotReportedField } from './DetailsUnavailable.tsx'
+import { NarrowLayoutContext } from '../composition/NarrowLayout.tsx'
 export interface DetailsChartsProps {
   readonly trace: TraceSeries
   readonly context: 'C1' | 'C2' | 'C3'
@@ -54,11 +56,19 @@ const contextGaps = (context: ContextMeters): readonly NotReportedField[] => [
   ...(context.lastCompactionMs._tag === 'Unknown' ? [gap('last compaction', missingReason(context.lastCompactionMs))] : []),
 ]
 
-/** Reported percentages stay plain; estimates carry `est.` and the harness explanation on keyboard focus and hover. */
-const OccupancyValue = ({ occupancy }: { readonly occupancy: ContextOccupancy }): ReactNode => <span data-details-occupancy={occupancy.estimated ? 'estimated' : 'reported'} {...stylex.props(styles.occupancy)}>
-  <strong>{Math.round(occupancy.percent)}%</strong>
-  {occupancy.estimated && <TooltipTrigger delay={0}><Button data-details-occupancy-estimated aria-label="est., estimated from tokens" {...stylex.props(styles.estimate)}>est.</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>{estimatedOccupancyExplanation}</Tooltip></TooltipTrigger>}
-</span>
+/**
+ * Reported percentages stay plain; estimates carry `est.` and the harness explanation on keyboard focus and hover.
+ * Narrow (phone) hosts have no hover: the explanation paints beneath the value.
+ */
+const OccupancyValue = ({ occupancy }: { readonly occupancy: ContextOccupancy }): ReactNode => {
+  const narrow = React.useContext(NarrowLayoutContext)
+  return <span data-details-occupancy={occupancy.estimated ? 'estimated' : 'reported'} {...stylex.props(styles.occupancy, narrow && occupancy.estimated && styles.occupancyNarrow)}>
+    <strong>{Math.round(occupancy.percent)}%</strong>
+    {occupancy.estimated && (narrow
+      ? <><span data-details-occupancy-estimated {...stylex.props(styles.estimateText)}>est.</span><DetailsInlineReason block>{estimatedOccupancyExplanation}</DetailsInlineReason></>
+      : <TooltipTrigger delay={0}><Button data-details-occupancy-estimated aria-label="est., estimated from tokens" {...stylex.props(styles.estimate)}>est.</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>{estimatedOccupancyExplanation}</Tooltip></TooltipTrigger>)}
+  </span>
+}
 
 /** Only reported facts paint; missing ones are named once in the section's Not reported line. */
 const ContextMeter = ({ context }: { readonly context: ContextMeters }): ReactNode => {
@@ -107,10 +117,14 @@ const coverageLabel=(coverage:TraceCoverageState):string|undefined=>{
  const state=traceCoverageState(coverage)
  return state._tag==='Complete'||state._tag==='Unavailable'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% attributed`:`Not tracked for ${state.harnessName}`
 }
+const notCoveredExplanation = 'Spend is recorded only for OMP sessions today.'
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
+ const narrow=React.useContext(NarrowLayoutContext)
  const state=traceCoverageState(coverage)
  if(state._tag==='Complete'||state._tag==='Unavailable')return null
- if(state._tag==='NotCovered')return <TooltipTrigger delay={0}><Button data-details-coverage {...stylex.props(styles.coverageTrigger)}>{coverageLabel(state)}</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>Spend is recorded only for OMP sessions today.</Tooltip></TooltipTrigger>
+ if(state._tag==='NotCovered')return narrow
+  ?<p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(state)}<DetailsInlineReason block>{notCoveredExplanation}</DetailsInlineReason></p>
+  :<DescribedTooltipButton data-details-coverage description={notCoveredExplanation} tooltipStyle={styles.coverageTooltip} {...stylex.props(styles.coverageTrigger)}>{coverageLabel(state)}</DescribedTooltipButton>
  return <p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(state)}</p>
 }
 
@@ -372,6 +386,9 @@ const styles = stylex.create({
   heading: { margin: 0, marginBottom: space.md, fontSize: type.metaSize, lineHeight: type.metaLeading, fontWeight: type.weightMedium, color: text.fg },
   notReported: { margin: 0, color: text.fgMuted, fontSize: type.metaSize, lineHeight: type.metaLeading },
   nowrap: { whiteSpace: 'nowrap' },
+  // Narrow hosts: the estimate's explanation wraps onto its own row beneath the value.
+  occupancyNarrow: { flexWrap: 'wrap' },
+  estimateText: { color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading },
   scopeNote: { margin: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
   coverageTrigger: { appearance:'none', borderWidth:0, padding:0, backgroundColor:surface.transparent, textAlign:'left', color:text.fgSoft, fontSize:type.denseSize, cursor:'help', outlineColor:accent.primary, outlineOffset:2 },
   coverageTooltip: { backgroundColor:surface.canvas, color:text.fg, borderWidth:1, borderStyle:'solid', borderColor:border.borderStrong, padding:space.md, fontSize:type.metaSize, maxWidth:280 },

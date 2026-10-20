@@ -118,7 +118,7 @@ it('shows the reported traced count in the heading, not the bounded list size or
   expect(heading(render(missing))).toBe('Subagents')
 })
 
-it('keeps elapsed/age acquiring independently and preserves the kit tooltip-only missing-value contract', () => {
+it('keeps elapsed/age acquiring independently and describes missing values accessibly without painting desktop prose', () => {
   const render = (durations: DetailsOverview['durations']) => renderToStaticMarkup(createElement(DetailsPane, {
     state: 'partial', overview: { ...overview, durations }, trace: trace(), sections: [], now: 2000,
     variants: { overview: 'O2', context: 'C3', spend: 'S2', resources: 'R1', empty: 'E3' },
@@ -133,7 +133,9 @@ it('keeps elapsed/age acquiring independently and preserves the kit tooltip-only
   const rejected = render(['Managed elapsed', 'Session age'].map(label => ({ label, value: 'Unreported', detail: reason })))
   expect(rejected.match(/aria-label="Managed elapsed: unavailable"/g)).toHaveLength(1)
   expect(rejected.match(/aria-label="Session age: unavailable"/g)).toHaveLength(1)
-  expect(rejected).not.toContain('Session start matches')
+  expect(rejected.split(reason)).toHaveLength(3)
+  expect(rejected).toContain('aria-describedby=')
+  expect(rejected).toContain(reason)
   expect(rejected).not.toContain('data-details-duration-pending')
 })
 

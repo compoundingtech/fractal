@@ -13,7 +13,7 @@ import { resources as sharedResources } from './assistant-ui/details/resource-fi
 import { hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
-import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
+import { detailsStoryInputs, paintedText } from './assistant-ui/details/story-fixtures'
 import { detailsTraceFixtures, traceForDetailsState } from './assistant-ui/details/trace/fixture-provider'
 import { adaptTrace } from './assistant-ui/details/trace/adapter'
 import { sessionTraceFixture } from './assistant-ui/details/trace/fixture'
@@ -131,9 +131,9 @@ function assertMetricGroups(pane: HTMLElement) {
     const section = pane.querySelector<HTMLElement>(`section[aria-label$="${name}"]`)
     if (!section) continue
     const lines = section.querySelectorAll<HTMLElement>('[data-details-not-reported]')
-    requireContract(lines.length <= 1 && !section.querySelector('[data-details-missing-value]') && !(section.textContent ?? '').includes('—'), 'Metric group paints per-field missing values')
+    requireContract(lines.length <= 1 && !section.querySelector('[data-details-missing-value]') && !paintedText(section).includes('—'), 'Metric group paints per-field missing values')
     const line = lines[0]
-    if (line?.dataset.detailsNotReported === 'group') requireContract(line.parentElement?.childElementCount === 1 && line.textContent === `${name}·not reported` && line.querySelector(`button[aria-label="${name}: not reported"]`), 'Unreported metric group paints more than its one line')
+    if (line?.dataset.detailsNotReported === 'group') requireContract(line.parentElement?.childElementCount === 1 && paintedText(line) === `${name}·not reported` && line.querySelector(`button[aria-label="${name}: not reported"]`), 'Unreported metric group paints more than its one line')
     if (line?.dataset.detailsNotReported === 'fields') requireContract(line.textContent?.startsWith('Not reported:') && line.querySelectorAll('button[data-details-not-reported-field]').length === line.getAttribute('data-details-unavailable-subject')?.split(', ').length, 'Partial metric group lacks one keyboard-reachable Not reported summary')
   }
 }
@@ -325,7 +325,7 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
       if (window._tag === 'AllTime') requireContract(period === 'all time', 'Reported all-time window is absent')
       else if (window._tag === 'Interval') { const from = new Date(window.fromMs).toISOString(), to = new Date(window.toMs).toISOString(); requireContract(period.includes(from.slice(0, 10)) && period.includes(from.slice(11, 16)) && period.includes(to.slice(11, 16)) && period.includes('UTC'), 'Reported accumulation interval is absent from its separate date line') }
       else requireContract(period.includes(window.label), 'Reported accumulation window label is absent')
-    } else requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token window"]')&&!spend.textContent?.includes('all time'), 'Unreported accumulation window claims all-time scope')
+    } else requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token window"]')&&!paintedText(spend).includes('all time'), 'Unreported accumulation window claims all-time scope')
   }
 }
 function assertContext(pane: HTMLElement, trace: TraceSeries) {
@@ -438,7 +438,7 @@ export const TraceContracts: Story = { args: { cases: [...traceCases, ...bucketC
       circle.remove(); await rejectsControl('Context plot does not match retained source samples', () => assertContext(pane, trace)); chart.querySelector('svg')!.append(circle)
     }
     if (!item.name.includes('/')) return
-    const spend = pane.querySelector('section[aria-label="Spend"]')!, text = spend.textContent ?? '', amounts = text.match(/\$\d[\d,.]*/g) ?? []
+    const spend = pane.querySelector('section[aria-label="Spend"]')!, text = paintedText(spend), amounts = text.match(/\$\d[\d,.]*/g) ?? []
     const line = spend.querySelector<HTMLElement>('[data-details-not-reported]')
     if (item.name.includes('/unknown/')) requireContract(amounts.length === 0 && line && (line.dataset.detailsNotReported === 'group' || line.querySelector('[data-details-not-reported-field="total spend"]')), 'Unknown spend source renders inferred currency')
     else if (item.name.includes('/zero/')) requireContract(amounts.length > 0 && amounts.every(amount => amount === '$0.00'), 'Known zero spend is absent or fabricated')

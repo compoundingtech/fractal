@@ -3,7 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { userEvent, waitFor, within } from 'storybook/test'
 import { DetailsPane, type DetailsPaneProps } from './assistant-ui/details/DetailsPane'
 import { DetailsLabelContext } from './assistant-ui/details/DetailsResources'
-import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
+import { detailsStoryInputs, paintedText } from './assistant-ui/details/story-fixtures'
 import { fullTraceFixture } from './assistant-ui/details/trace/fixture-provider'
 import type { TraceFact, TraceSeries } from './assistant-ui/details/trace-series'
 import type { DetailsOverview, DetailsSection } from './assistant-ui/details/model'
@@ -169,7 +169,7 @@ async function rejectsControl(cause: string, check: () => void | Promise<void>) 
 function pane(canvas: HTMLElement): HTMLElement {
   const element = canvas.querySelector<HTMLElement>('[data-testid="details-pane"]')
   requireContract(element, 'Missing production DetailsPane')
-  requireContract(!/\bUnknown\b/.test(element.textContent ?? ''), 'Literal Unknown escaped the fact boundary')
+  requireContract(!/\bUnknown\b/.test(paintedText(element)), 'Literal Unknown escaped the fact boundary')
   return element
 }
 function spend(pane: HTMLElement): HTMLElement {
@@ -188,7 +188,7 @@ function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens ·
   requireContract(tokenRow?.querySelector('[data-details-token-label]')?.textContent === tokenLabel, 'Token scope inherited monetary scope')
   requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-not-reported="fields"] button[data-details-not-reported-field="token window"]'), 'Token accumulation window was fabricated')
   // Reported metrics paint; the missing descendant amount and token window share one summary, never per-field dashes.
-  requireContract(section.querySelectorAll('[data-details-not-reported]').length===1&&section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject')==='subagent spend, token window'&&!section.querySelector('[data-details-metric="subagent-usd"],[data-details-missing-value]')&&!/—|Window|Attribution/.test(section.textContent??''), 'Partial spend group repeats per-field missing values')
+  requireContract(section.querySelectorAll('[data-details-not-reported]').length===1&&section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject')==='subagent spend, token window'&&!section.querySelector('[data-details-metric="subagent-usd"],[data-details-missing-value]')&&!/—|Window|Attribution/.test(paintedText(section)), 'Partial spend group repeats per-field missing values')
   const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · self'))?.closest('div')
   const monetaryText = monetaryRow?.textContent
   requireContract(typeof monetaryText === 'string', 'Monetary accumulation window inherited token window')
@@ -198,13 +198,13 @@ function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens ·
 function assertPercentOnly(root: HTMLElement) {
   const section = root.querySelector('[data-details-chart^="C"]')
   requireContract(section, 'Missing context section')
-  requireContract(!/\b\d[\d.,kKmM ]*\s+tokens\b|\bCapacity\b/.test(section.textContent ?? ''), 'Context occupancy rendered token counts')
+  requireContract(!/\b\d[\d.,kKmM ]*\s+tokens\b|\bCapacity\b/.test(paintedText(section)), 'Context occupancy rendered token counts')
   const meter = within(section as HTMLElement).getByRole('meter', { name: 'Context occupancy' })
   requireContract(meter.getAttribute('aria-valuemax') === '100' && meter.getAttribute('aria-valuenow') === '37.4', 'Reported-percent-only context was discarded')
   const value = section.querySelector<HTMLElement>('[data-details-occupancy]')
   requireContract(value?.dataset.detailsOccupancy === 'reported' && value.textContent === '37%' && !section.querySelector('[data-details-occupancy-estimated]') && meter.getAttribute('aria-valuetext') === '37 percent', 'Reported percentage was marked estimated')
   // Unreported token counts are not displayed facts; only the missing compaction facts are named, once.
-  requireContract(section.querySelectorAll('[data-details-not-reported]').length === 1 && section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject') === 'compactions, last compaction' && !section.querySelector('[data-details-missing-value]') && !/—|Used tokens|Context window/.test(section.textContent ?? ''), 'Partial context group lacks one Not reported summary')
+  requireContract(section.querySelectorAll('[data-details-not-reported]').length === 1 && section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject') === 'compactions, last compaction' && !section.querySelector('[data-details-missing-value]') && !/—|Used tokens|Context window/.test(paintedText(section)), 'Partial context group lacks one Not reported summary')
 }
 function falsifyText(root:HTMLElement,selector:string,value:string):HTMLElement {
  const wrong=root.cloneNode(true) as HTMLElement
@@ -400,7 +400,7 @@ function assertTiming(root: HTMLElement) {
   requireContract(elapsed.getAttribute('aria-busy') === 'true' && elapsed.querySelector('[data-details-skeleton="duration"][aria-hidden="true"][inert]') && elapsed.textContent?.endsWith('Loading') && !elapsed.querySelector('[data-details-missing-value]'), 'First-read timing rendered a settled value')
   requireContract(!age.hasAttribute('aria-busy') && !age.querySelector('[data-details-skeleton]') && age.querySelector(`[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`)?.textContent === '—', 'Settled timing stayed pending')
   requireContract(!span.hasAttribute('aria-busy') && [...span.querySelectorAll('button')].some(button => button.textContent === '42m'), 'Known timing lost its value')
-  requireContract(!root.textContent?.includes(timingGuard) && !root.textContent?.includes(timingProvenance), 'Timing guard reason repeats beneath values')
+  requireContract(!paintedText(root).includes(timingGuard) && !paintedText(root).includes(timingProvenance), 'Timing guard reason repeats beneath values')
 }
 function assertAllStates(root:HTMLElement) {
  const names=Object.keys(scenarios)

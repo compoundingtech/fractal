@@ -12,25 +12,32 @@ import { canRetrySyncFailure, syncFailureRecovery } from '../st3-views/sync-line
 import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
 import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry } from '../composition-tokens.stylex'
-import { MissingDetailsValue } from './DetailsUnavailable'
+import { DetailsInlineReason, MissingDetailsValue } from './DetailsUnavailable'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 export interface DetailsVariants {
   overview: 'O1'|'O2'|'O3'; context:'C1'|'C2'|'C3'; spend:'S1'|'S2'|'S3'; resources:'R1'|'R2'|'R3'; empty:'E1'|'E2'|'E3'
 }
-/** A host `detail` is the missing value's provenance, or a known value's provenance beneath it in the tooltip. */
+/**
+ * A host `detail` is the missing value's provenance, or a known value's provenance beneath it in the tooltip.
+ * Narrow (phone) hosts have no hover: the value wraps in full and its provenance paints beneath it.
+ */
 function OverviewValue({label,value,detail}:{label:string;value:string|undefined;detail?:string|undefined}) {
+  const narrow=React.useContext(NarrowLayoutContext)
   if(value===undefined||/\b(unreported|unavailable)\b/i.test(value))return <MissingDetailsValue label={label} reason={detail??value??`${label} is not reported by this source.`}/>
+  if(narrow)return <span data-details-overview-value {...stylex.props(styles.valueText)}>{value}{detail!==undefined&&<DetailsInlineReason block>{detail}</DetailsInlineReason>}</span>
   return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}{detail!==undefined&&<span data-details-value-detail {...stylex.props(styles.tooltipDetail)}>{detail}</span>}</Tooltip></TooltipTrigger>
 }
 export interface DetailsLayoutIntent { readonly hiddenSections: readonly string[] }
 function Section({title,children,hidden}:{title:string;children:React.ReactNode;hidden:boolean}) {
   const labelPrefix=React.useContext(DetailsLabelContext)
+  const narrow=React.useContext(NarrowLayoutContext)
   const [collapsed,setCollapsed]=React.useState(false)
   const id=React.useId()
   if(hidden) return null
   return <section aria-label={`${labelPrefix}${title}`} {...stylex.props(styles.section)}>
     <div {...stylex.props(styles.sectionHeader)}>
-      <Button data-details-heading aria-expanded={!collapsed} aria-controls={id} onPress={()=>setCollapsed(v=>!v)} {...stylex.props(styles.sectionTitle)}><Icon name={collapsed?'chevron-right':'chevron-down'}/>{title}</Button>
+      <Button data-details-heading aria-expanded={!collapsed} aria-controls={id} onPress={()=>setCollapsed(v=>!v)} {...stylex.props(styles.sectionTitle,narrow&&styles.touchRow)}><Icon name={collapsed?'chevron-right':'chevron-down'}/>{title}</Button>
     </div>
     <div id={id} hidden={collapsed}>{children}</div>
   </section>
@@ -59,6 +66,9 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const failureMessage=failureCause?._tag==='Server'?failureCause.message:failureCause?._tag==='Local'?failureCause.detail?.message:undefined
   const retryable=failureCause!==undefined&&canRetrySyncFailure(failureCause)
   const [detailsOpen,setDetailsOpen]=React.useState(false)
+  // Phone hosts: every Details action is a 44px touch target and disclosure-only tooltips become painted text.
+  const narrow=React.useContext(NarrowLayoutContext)
+  const line=[styles.line,narrow&&styles.lineNarrow]
   const paneRef=React.useRef<HTMLDivElement>(null)
   const openerRef=React.useRef<HTMLElement|null>(null)
   const closeButtonRef=React.useRef<HTMLButtonElement>(null)
@@ -138,11 +148,11 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const headerAccessory=<PaneHeaderAccessory inlineFallback={onClose!==undefined}>
     <PaneSyncStatus status={syncStatus} label="agent details" now={now} observedAt={observedAt} detailsOpen={detailsOpen} onDetailsOpenChange={setDetailsOpen} onRetry={retry}/>
     {/* Without settled content the control's slot stays reserved, so the header's action group never resizes. */}
-    {sectionControlsVisible?<DialogTrigger><Button aria-label="Visible sections" data-details-visible-sections {...stylex.props(styles.iconButton)}><Icon name="gear"/></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label="Visible sections" {...stylex.props(styles.sectionSettings)}>{sectionNames.map(title=><Checkbox key={title} isSelected={!intent.hiddenSections.includes(title)} onChange={visible=>onIntentChange({hiddenSections:visible?intent.hiddenSections.filter(section=>section!==title):[...intent.hiddenSections,title]})} {...stylex.props(styles.sectionOption)}>{({isSelected})=><><span aria-hidden="true" {...stylex.props(styles.checkBox)}>{isSelected&&<Icon name="check"/>}</span>{title}</>}</Checkbox>)}</Dialog></Popover></DialogTrigger>:<span aria-hidden="true" {...stylex.props(styles.iconSlot)}/>}
+    {sectionControlsVisible?<DialogTrigger><Button aria-label="Visible sections" data-details-visible-sections {...stylex.props(styles.iconButton,narrow&&styles.touchSquare)}><Icon name="gear"/></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label="Visible sections" {...stylex.props(styles.sectionSettings)}>{sectionNames.map(title=><Checkbox key={title} isSelected={!intent.hiddenSections.includes(title)} onChange={visible=>onIntentChange({hiddenSections:visible?intent.hiddenSections.filter(section=>section!==title):[...intent.hiddenSections,title]})} {...stylex.props(styles.sectionOption,narrow&&styles.touchRow)}>{({isSelected})=><><span aria-hidden="true" {...stylex.props(styles.checkBox)}>{isSelected&&<Icon name="check"/>}</span>{title}</>}</Checkbox>)}</Dialog></Popover></DialogTrigger>:<span aria-hidden="true" {...stylex.props(styles.iconSlot,narrow&&styles.touchSquare)}/>}
   </PaneHeaderAccessory>
   // First-load failure overlays the unchanged pending footprint with a human reason and a direct recovery action.
   return <div ref={paneRef} data-testid="details-pane" data-details-pane-state={state} data-details-sync-state={syncStatus._tag} data-details-has-prior-content={hasPriorContent} aria-label="Agent details" role={noPriorFailure?'group':undefined} onKeyDown={event=>{if(onClose&&event.key==='Escape'&&!event.defaultPrevented&&!detailsOpen){event.preventDefault();event.stopPropagation();close()}}} {...stylex.props(styles.root)}>
-    {onClose?<div data-details-tab-band {...stylex.props(styles.tabBand)}><span {...stylex.props(styles.bandLabel)}><Icon name="panel"/>Details</span><div {...stylex.props(styles.bandActions)}>{headerAccessory}<Button ref={closeButtonRef} aria-label="Close details" onPress={close} {...stylex.props(styles.iconButton)}><Icon name="x"/></Button></div></div>:headerAccessory}
+    {onClose?<div data-details-tab-band {...stylex.props(styles.tabBand)}><span {...stylex.props(styles.bandLabel)}><Icon name="panel"/>Details</span><div {...stylex.props(styles.bandActions)}>{headerAccessory}<Button ref={closeButtonRef} aria-label="Close details" onPress={close} {...stylex.props(styles.iconButton,narrow&&styles.touchSquare)}><Icon name="x"/></Button></div></div>:headerAccessory}
     <div data-details-content-slot {...stylex.props(styles.contentSlot)}>
     <div aria-hidden={noPriorFailure||undefined} inert={noPriorFailure} {...stylex.props(noPriorFailure&&styles.hiddenPending)}>
     <Section title="Overview" hidden={intent.hiddenSections.includes('Overview')}>
@@ -156,28 +166,28 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
           const identity=name==='Machine'?overview.machine:name==='Model'?overview.model:undefined
           return <React.Fragment key={name}><dt aria-hidden={identity===undefined||undefined} {...stylex.props(styles.muted)}>{identity!==undefined?name:<span inert {...stylex.props(styles.pendingText)}>{name}</span>}</dt><dd aria-hidden={identity===undefined||undefined} {...stylex.props(styles.value)}>{identity!==undefined?<span {...stylex.props(styles.pendingIdentity)}>{identity}</span>:<span inert {...stylex.props(styles.pendingText)}>{value}</span>}</dd></React.Fragment>
         })}</dl>:<>
-          <div {...stylex.props(styles.line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/>}<span>{knownIdentity}<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span></span></div>
+          <div {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/>}<span>{knownIdentity}<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span></span></div>
           {variants.overview==='O2'&&<>
-            <div aria-hidden="true" {...stylex.props(styles.line)}><span {...stylex.props(styles.pendingText)}>{pendingOverviewLine}</span></div>
+            <div aria-hidden="true" {...stylex.props(line)}><span {...stylex.props(styles.pendingText)}>{pendingOverviewLine}</span></div>
             <div aria-hidden="true"><span {...stylex.props(styles.muted)}><span {...stylex.props(styles.pendingText)}>{pendingContextLine}</span></span><div {...stylex.props(meterStyles.track)}/></div>
           </>}
         </>}
         </>:<>
         {overview.title!==undefined&&<strong data-details-name {...stylex.props(styles.name)}>{overview.title}</strong>}
         {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=><React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}><OverviewValue label={name} value={value}/></dd></React.Fragment>)}</dl>:<>
-          <div data-details-overview-line {...stylex.props(styles.line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}<OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
+          <div data-details-overview-line {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}<OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
           {variants.overview==='O2'&&<>
-            <div data-details-overview-line {...stylex.props(styles.line)}><OverviewValue label="Harness" value={overview.harness}/><span>·</span><OverviewValue label="Incarnation age" value={overview.age}/>{spend.totalUsd._tag==='Known'&&<> · {spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</>}</div>
+            <div data-details-overview-line {...stylex.props(line)}><OverviewValue label="Harness" value={overview.harness}/><span>·</span><OverviewValue label="Incarnation age" value={overview.age}/>{spend.totalUsd._tag==='Known'&&<> · {spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</>}</div>
             {/* Progressbar children are presentational: the estimate is painted and announced here; the Context section's `est.` trigger carries the explanation. */}
             {occupancy!==undefined&&<ProgressBar aria-label="Context window" value={occupancy.percent} maxValue={100} valueLabel={`${Math.round(occupancy.percent)}%${occupancy.estimated?', estimated from tokens':''}`}>{({percentage})=><><span data-details-occupancy={occupancy.estimated?'estimated':'reported'} {...stylex.props(styles.muted)}>Context {Math.round(percentage??0)}%{occupancy.estimated?' est.':''}</span><div {...stylex.props(meterStyles.track)}><div {...stylex.props(meterStyles.fill(percentage??0))}/></div></>}</ProgressBar>}
           </>}
         </>}
         </>}
-        {(pending?pendingOverview.mission:overview.mission)!==undefined&&<div data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.pendingText)}>Mission</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{pendingOverview.mission}</span></>:<><span {...stylex.props(styles.shortLabel)}>Mission</span><TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{overview.mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{overview.mission}</Tooltip></TooltipTrigger></>}</div>}
+        {(pending?pendingOverview.mission:overview.mission)!==undefined&&<div data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.pendingText)}>Mission</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{pendingOverview.mission}</span></>:<><span {...stylex.props(styles.shortLabel)}>Mission</span>{narrow?<span data-details-overview-value {...stylex.props(styles.valueText)}>{overview.mission}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{overview.mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{overview.mission}</Tooltip></TooltipTrigger>}</>}</div>}
         {(pending?pendingOverview.durations:overview.durations)?.map(duration=>{
           // A first-read field keeps its known label and reserves the host's placeholder value; settled siblings stay readable.
           const fieldPending=!pending&&duration.pending===true
-          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<><TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue label={duration.label} value={duration.value} detail={duration.detail}/>}</>}</div>
+          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue label={duration.label} value={duration.value} detail={duration.detail}/>}</>}</div>
         })}
       </div>
     </Section>
@@ -190,8 +200,8 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
       {overview.title!==undefined&&<strong>{overview.title}</strong>}
       {[overview.machine,overview.harness,overview.model].some(value=>value!==undefined)&&<p {...stylex.props(styles.errorText)}>{[overview.machine,overview.harness,overview.model].filter(Boolean).join(' · ')}</p>}
       <Heading level={2} data-details-error-reason {...stylex.props(styles.errorHeading)}>Couldn't load agent details</Heading>
-      {failureMessage&&<TooltipTrigger delay={0}><Button data-details-error-cause {...stylex.props(styles.errorText,styles.errorCause)}><span {...stylex.props(styles.errorCauseLines)}>{failureMessage}</span></Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{failureMessage}</Tooltip></TooltipTrigger>}
-      {retryable?<div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton)}>Retry</Button></div>:<p data-details-error-recovery {...stylex.props(styles.errorText)}>{syncFailureRecovery(syncStatus.cause)}</p>}
+      {failureMessage&&(narrow?<p data-details-error-cause {...stylex.props(styles.errorText)}>{failureMessage}</p>:<TooltipTrigger delay={0}><Button data-details-error-cause {...stylex.props(styles.errorText,styles.errorCause)}><span {...stylex.props(styles.errorCauseLines)}>{failureMessage}</span></Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{failureMessage}</Tooltip></TooltipTrigger>)}
+      {retryable?<div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,narrow&&styles.touchRow,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton,narrow&&styles.touchRow)}>Retry</Button></div>:<p data-details-error-recovery {...stylex.props(styles.errorText)}>{syncFailureRecovery(syncStatus.cause)}</p>}
     </div>}
     </div>
   </div>
@@ -211,6 +221,12 @@ const styles=stylex.create({
   tooltipDetail:{display:'block',marginTop:s.xs,color:tx.fgMuted},
   iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outline:`2px solid ${ac.primary}`}},
   iconSlot:{flexShrink:0,width:g.controlSm,height:g.controlSm},
+  // Phone hosts (NarrowLayoutContext): 44px touch targets; the reserved gear slot keeps the same footprint.
+  touchSquare:{width:g.touchTarget,height:g.touchTarget},
+  touchRow:{minHeight:g.touchTarget},
+  // Phone overview lines wrap whole values instead of truncating behind a hover-only tooltip.
+  lineNarrow:{whiteSpace:'normal',flexWrap:'wrap',overflow:'visible'},
+  valueText:{minWidth:0,flexShrink:1,color:tx.fgMuted,whiteSpace:'normal',overflowWrap:'normal'},
   popover:{maxWidth:g.tooltipMax,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
   contentSlot:{position:'relative',minWidth:0},
   hiddenPending:{visibility:'hidden',opacity:0,pointerEvents:'none'},

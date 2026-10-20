@@ -140,7 +140,8 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, snapshotCreatedAt: sessionFeed._tag === 'Observed' ? sessionFeed.snapshotCreatedAt : undefined, now })
   const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.detail : undefined)
   const timingPending = rowFeed._tag === 'Waiting' || sessionFeed._tag === 'Waiting'
-  const syncStatus = rowSyncStatus(rowFeed)
+  // A rejected declaration projection must expose the same recovery control as a failed getter.
+  const syncStatus = rowSyncStatus(rowFeed) ?? (declarations._tag === 'Unavailable' && declarations.reason === 'failed' ? rowSyncStatus(declarations) : undefined)
   const statusSince = row === undefined ? undefined : Option.getOrUndefined(row.since)
   const model = contextValid && context?.model !== undefined && context.model.trim().length > 0 && context.model !== '.unknown' ? context.model : undefined
   const work = row?.current_work?.[0]

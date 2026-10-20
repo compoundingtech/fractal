@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { TabList, Tab, TooltipTrigger, Tooltip, Focusable } from 'react-aria-components'
 import { useFocusVisible } from 'react-aria'
 import { Icon, type IconName } from '../composition/Icons'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, geometryNumbers as geo } from '../composition-tokens.stylex'
 import { paneKey, paneKind, type WorkbenchPane } from './workbench-model'
 import { layoutTabStrip, layoutTabStripViewport, type TabStripMode } from './tab-strip-layout'
@@ -161,16 +162,18 @@ export function TabStrip({ items, selectedKey, label = 'Open panes' }: { items: 
     }
   }, [])
   React.useLayoutEffect(() => { refreshRef.current?.(selectedKey) }, [items, selectedKey])
-  return <div ref={attach} onFocusCapture={event => { const tab = (event.target as HTMLElement).closest<HTMLElement>('[role="tab"]'); if (tab) refreshRef.current?.(tab.dataset.tabKey) }} {...stylex.props(styles.root)}>
-    <span aria-hidden="true" data-icon-cell-metric {...stylex.props(styles.metric, styles.iconMetric)} />
+  // Inside a narrow (phone) host every tab is a 44px touch target; a narrow desktop pane keeps desktop density.
+  const narrow = React.useContext(NarrowLayoutContext)
+  return <div ref={attach} onFocusCapture={event => { const tab = (event.target as HTMLElement).closest<HTMLElement>('[role="tab"]'); if (tab) refreshRef.current?.(tab.dataset.tabKey) }} {...stylex.props(styles.root, narrow && styles.rootTouch)}>
+    <span aria-hidden="true" data-icon-cell-metric {...stylex.props(styles.metric, styles.iconMetric, narrow && styles.iconMetricTouch)} />
     <span aria-hidden="true" data-max-cell-metric {...stylex.props(styles.metric, styles.maxMetric)} />
     <TabList data-tab-strip aria-label={label} {...stylex.props(styles.list)}>
-      {items.map(item => <ResourceTab key={item.key} item={item} selected={item.key === selectedKey} />)}
+      {items.map(item => <ResourceTab key={item.key} item={item} selected={item.key === selectedKey} narrow={narrow} />)}
     </TabList>
   </div>
 }
 
-function ResourceTab({ item, selected }: { item: TabStripItem; selected: boolean }) {
+function ResourceTab({ item, selected, narrow }: { item: TabStripItem; selected: boolean; narrow: boolean }) {
   const triggerRef = React.useRef<HTMLDivElement>(null)
   const handlersRef = React.useRef<React.HTMLAttributes<Element> | null>(null)
   const focusFrame = React.useRef<number | undefined>(undefined)
@@ -212,8 +215,8 @@ function ResourceTab({ item, selected }: { item: TabStripItem; selected: boolean
     onPointerDown: event => handlersRef.current?.onPointerDown?.(event),
   }), [])
   const seedTrigger = React.useCallback((element: HTMLSpanElement | null) => { if (element) triggerRef.current = element.closest<HTMLDivElement>('[role="tab"]') }, [])
-  return <Tab ref={triggerRef} id={item.key} aria-label={item.label} data-tab-key={item.key} data-tab-kind={item.kind} data-icon-only data-tab-clipped {...triggerHandlers} {...stylex.props(styles.tab, selected && styles.selected)}>
-    <span ref={seedTrigger} data-tab-label data-icon-only aria-hidden="true" {...stylex.props(styles.label)}>{item.label}</span>
+  return <Tab ref={triggerRef} id={item.key} aria-label={item.label} data-tab-key={item.key} data-tab-kind={item.kind} data-icon-only data-tab-clipped {...triggerHandlers} {...stylex.props(styles.tab, narrow && styles.tabTouch, selected && styles.selected)}>
+    <span ref={seedTrigger} data-tab-label data-icon-only aria-hidden="true" {...stylex.props(styles.label, narrow && styles.labelTouch)}>{item.label}</span>
     <span data-tab-icon data-icon-only aria-hidden="true" {...stylex.props(styles.icon)}><Icon name={item.icon} /></span>
     <span data-tab-minimum aria-hidden="true" {...stylex.props(styles.metric, styles.minimum)}>{minimum}</span>
     <TooltipTrigger delay={350} closeDelay={0}><Focusable><TabTooltipBridge title={item.label} triggerRef={triggerRef} handlersRef={handlersRef} /></Focusable></TooltipTrigger>
@@ -249,6 +252,11 @@ const styles = stylex.create({
   icon: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', visibility: { default: 'hidden', ':is([data-icon-only])': 'visible' }, pointerEvents: 'none' },
   metric: { position: 'fixed', top: 0, left: 0, height: 0, visibility: 'hidden', pointerEvents: 'none' },
   iconMetric: { width: g.controlSm },
+  // Phone hosts: the strip, every cell and the icon-only cell measure as 44px touch targets.
+  rootTouch: { height: g.touchTarget },
+  tabTouch: { width: `var(--tab-cell-width, ${g.touchTarget})`, height: g.touchTarget },
+  labelTouch: { lineHeight: g.touchTarget },
+  iconMetricTouch: { width: g.touchTarget },
   maxMetric: { width: g.tabMax },
   minimum: { width: 'max-content', whiteSpace: 'nowrap' },
   // RAC supplies placement only after measuring the real mounted anchor.

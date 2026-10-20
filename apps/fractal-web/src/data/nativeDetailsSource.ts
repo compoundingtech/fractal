@@ -13,7 +13,7 @@ export interface NativeDetailsSource {
   readonly rawDeclarations: (query: { readonly agentRef: string; readonly revision: string }) => Atom.Atom<Feed<Native.AgentDeclaration>>
   /** Public-safe categories mapped from the same raw getter, never a second read. */
   readonly declarations: (query: { readonly agentRef: string; readonly revision: string }) => Atom.Atom<Feed<NativeDeclarations>>
-  /** Refreshes the underlying getter of failed reads only; refused reads stay refused. */
+  /** Refreshes the getter after read or projection failure so the new value is re-projected; refused reads stay refused. */
   readonly retry: (atom: Atom.Atom<Feed<unknown>>) => void
 }
 const failure = (error: unknown): Feed<never> => unavailable({
@@ -88,7 +88,8 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
     declarations: ({ agentRef, revision }) => declarations(`${agentRef}\n${revision}`),
     retry: atom => {
       const target = sourceOf.get(atom) ?? atom
-      const state = registry.get(target)
+      // The public projection may reject a successful raw read; retryability belongs to the requested feed.
+      const state = registry.get(atom)
       if ((state._tag === 'Unavailable' && state.reason === 'failed') ||
         (state._tag === 'Observed' && state.error?.reason === 'failed')) registry.refresh(target)
     },
