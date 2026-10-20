@@ -17,6 +17,39 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_embedded_cargo_fixture_keys_resolve_after_script_rewrite(self):
+        loader = importlib.machinery.SourceFileLoader(
+            'r15_scripts_test', str(ROOT / 'scripts/r15-rename-scripts.py'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        scripts = importlib.util.module_from_spec(spec)
+        loader.exec_module(scripts)
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            crate = tree / 'crates/fractal-build-stamp'
+            crate.mkdir(parents=True)
+            (crate / 'Cargo.toml').write_text('[package]\nname="fractal-build-stamp"\n')
+            (tree / 'scripts').mkdir()
+            path = tree / 'scripts/fixture'
+            manifest = ('[dependencies]\nst-build-stamp={path="crates/fractal-build-stamp"}\n'
+                        'library={path="crates/library"}\n')
+            source = "(work / 'Cargo.toml').write_text(" + repr(manifest) + ")\n"
+            path.write_text(source)
+            result = proof.embedded_cargo_guard(tree)
+            self.assertEqual(result['result'], 'FAIL')
+            self.assertEqual(result['checked'], 1)
+            self.assertEqual(result['unresolved'][0]['dependency'], 'st-build-stamp')
+            updated = scripts.rewrite(Path('scripts/ci-build-snapshot-test'), source)
+            self.assertNotEqual(updated, source)
+            self.assertEqual(scripts.rewrite(Path('scripts/ci-build-snapshot-test'), updated), updated)
+            path.write_text(updated)
+            self.assertEqual(proof.embedded_cargo_guard(tree)['result'], 'PASS')
+            # Explicit Cargo renames resolve; an incorrect package field does not.
+            for package, expected in (('fractal-build-stamp', 'PASS'), ('missing', 'FAIL')):
+                manifest = ('[dev-dependencies]\nalias={path="./crates/fractal-build-stamp",'
+                            'package="' + package + '"}\n')
+                path.write_text("(work / 'Cargo.toml').write_text(" + repr(manifest) + ")\n")
+                self.assertEqual(proof.embedded_cargo_guard(tree)['result'], expected)
+
     def test_client_rewrite_selects_non_ts_sources_but_not_recorded_data(self):
         source = ast.parse((ROOT / 'scripts/r15-rename-client.py').read_text())
         (ROOT / 'tmp/r15').mkdir(parents=True, exist_ok=True)

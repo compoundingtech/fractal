@@ -145,6 +145,65 @@ def wit_artifacts(tree, crates, packages):
             for path in sorted(tree.rglob('*.wit')) if not path.is_symlink()}
 
 
+def embedded_cargo_guard(tree):
+    """Resolve embedded script fixture dependencies against real source crates.
+
+    Synthetic fixture-only crates are not workspace dependencies. For a path
+    that names a real crate, Cargo requires either that package's name as the
+    dependency key or an explicit matching `package` field.
+    """
+    workspace = {}
+    for manifest in sorted((tree / 'crates').glob('*/Cargo.toml')):
+        data = tomllib.loads(manifest.read_text())
+        if 'package' in data:
+            workspace[manifest.parent.relative_to(tree).as_posix()] = data['package']['name']
+    checked, unresolved = 0, []
+    for script in sorted((tree / 'scripts').rglob('*')):
+        if not script.is_file() or script.is_symlink():
+            continue
+        try:
+            source = script.read_text()
+        except UnicodeError:
+            continue
+        # Python fixture strings also appear inside shell-script heredocs.
+        candidates = []
+        for _, start, end in literals(source, '.py', spans=True):
+            if not re.search(r'''["']Cargo\.toml["']\s*\)\.write_text\(\s*$''',
+                             source[max(0, start - 160):start]):
+                continue
+            try:
+                value = ast.literal_eval(source[start:end])
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(value, str) and re.search(r'\[(?:[^\]\n]*\.)?(?:dev-|build-)?dependencies\]', value):
+                candidates.append((value, source.count('\n', 0, start) + 1))
+        for value, line in candidates:
+            try:
+                manifest = tomllib.loads(value)
+            except tomllib.TOMLDecodeError:
+                continue
+            tables = [manifest]
+            tables.extend(manifest.get('target', {}).values())
+            for table in tables:
+                for section in ('dependencies', 'dev-dependencies', 'build-dependencies'):
+                    for key, dependency in table.get(section, {}).items():
+                        if not isinstance(dependency, dict) or 'path' not in dependency:
+                            continue
+                        path = dependency['path'].removeprefix('./')
+                        if path not in workspace:
+                            continue
+                        checked += 1
+                        package = dependency.get('package', key)
+                        if package != workspace[path]:
+                            unresolved.append({
+                                'path': script.relative_to(tree).as_posix(), 'line': line,
+                                'dependency': key, 'package': package,
+                                'expected': workspace[path], 'source_path': path,
+                            })
+    return {'checked': checked, 'unresolved': unresolved,
+            'result': 'FAIL' if unresolved else 'PASS'}
+
+
 def symlink_guard(tree):
     links = sorted(path for path in tree.rglob('*') if path.is_symlink())
     dangling = []
@@ -618,6 +677,9 @@ def main():
             tree.mkdir()
             snapshot(revision, tree)
         guards = {}
+        guards['embedded_cargo_dependencies'] = embedded_cargo_guard(trees[1])
+        differences.extend({'category': 'embedded_cargo_dependency_resolution', **error}
+                           for error in guards['embedded_cargo_dependencies']['unresolved'])
         guards['npm_references'] = npm_resolution_guard(trees[1], packages, trees[0])
         differences.extend({'category': 'npm_reference_resolution', **error}
                            for error in guards['npm_references']['unresolved'])

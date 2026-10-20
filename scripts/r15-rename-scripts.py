@@ -64,6 +64,9 @@ def rewrite(relative, source):
     # Its source fixtures, Cargo selectors and Rust imports move together.
     source = re.sub(r'\bst-build-stamp\b', 'fractal-build-stamp', source)
     source = re.sub(r'\bst_build_stamp\b', 'fractal_build_stamp', source)
+    # A literal "\n" ends in a word character, so \b cannot see the first
+    # dependency key in a single-line Python-embedded Cargo manifest.
+    source = source.replace(r'\nst-build-stamp', r'\nfractal-build-stamp')
     # Source paths, not executable names, state paths or serialized fixtures.
     if name not in HISTORICAL:
         source = re.sub(r'crates/(st3(?:-[a-z0-9-]+)?|stui|st-(?:drivers|runtime|chatgpt|storage-version|ui-model|terminal-direct)|st2-(?:resource-providers|resource-wasip2|[a-z0-9-]+-component))(?=[/"\' *])',

@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copytree(root / 'crates/fractal-build-stamp', stamp_crate)
     (library / 'src').mkdir(parents=True)
     (work / '.gitignore').write_text('/target/\n')
-    (work / 'Cargo.toml').write_text('[package]\nname="snapshot-fixture"\nversion="0.1.0"\nedition="2024"\n[dependencies]\nst-build-stamp={path="crates/fractal-build-stamp"}\nlibrary={path="crates/library"}\n[workspace]\nmembers=["crates/fractal-build-stamp","crates/library"]\n')
+    (work / 'Cargo.toml').write_text('[package]\nname="snapshot-fixture"\nversion="0.1.0"\nedition="2024"\n[dependencies]\nfractal-build-stamp={path="crates/fractal-build-stamp"}\nlibrary={path="crates/library"}\n[workspace]\nmembers=["crates/fractal-build-stamp","crates/library"]\n')
     (library / 'Cargo.toml').write_text('[package]\nname="library"\nversion="0.1.0"\nedition="2024"\n')
     (library / 'src/lib.rs').write_text('pub const SEPARATOR: &str = "|";\n')
     (work / 'src/main.rs').write_text('fn main() { println!("{}{}{}", fractal_build_stamp::ST_BUILD_STAMP_LOCAL.unwrap(), library::SEPARATOR, fractal_build_stamp::AGENT_SPEC_REVISION); }\n')
