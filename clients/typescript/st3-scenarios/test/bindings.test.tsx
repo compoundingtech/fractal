@@ -1,9 +1,10 @@
+import * as React from 'react'
 import { composeStory } from '@storybook/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { ANCHOR_MS, catalog, foldSlice, loadWorld, manualClock, syncStatusAt, type SliceKind } from '../src/index.ts'
-import { createReadTracker, ScenarioProvider, useScenarioSlice, type WireSlice } from '../src/react/index.ts'
+import { createReadTracker, ScenarioProvider, ScenarioReadBoundary, useScenarioSlice, type WireSlice } from '../src/react/index.ts'
 import { scenarioArgTypes, scenarioGlobalTypes } from '../src/storybook/index.ts'
 import { scenarioStoryCheck, ScenarioStoryCheckError, withScenario, type ScenarioStoryCheckOptions } from '../src/storybook/check.ts'
 import { defaultVariants, worldNames } from '../src/storybook/manifest.ts'
@@ -236,6 +237,13 @@ describe('Storybook scenario binding', () => {
     expect(() => scenarioStoryCheck({ render: () => <p>Fixed</p>, parameters: { scenario: { slices: [] } } }, {})).toThrow('requires a valid _tag')
   })
 
+  it('rejects empty slice declarations in the checker and runtime decorator', () => {
+    const story = { render: () => <p>Fixed</p>, parameters: { scenario: { _tag: 'slices', slices: [] } } }
+    expect(() => scenarioStoryCheck(story, {})).toThrow('requires at least one slice')
+    const Composed = composeStory(story, {}, { decorators: [withScenario] })
+    expect(() => renderToStaticMarkup(<Composed />)).toThrow('requires at least one slice')
+  })
+
   it.each(['contract-fixture', 'primitive'] as const)('rejects changing between slices and %s modes in either direction', (_tag) => {
     const render = () => <p>Fixed</p>
     const slices = { _tag: 'slices', slices: ['roster'] } as const
@@ -295,6 +303,28 @@ describe('Storybook scenario binding', () => {
     const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
     const render = () => <ScenarioProvider world={world}><Consumer /></ScenarioProvider>
     expect(() => scenarioStoryCheck({ render, parameters: { scenario: { _tag, reason: 'Invalid hook exemption' } } }, {})).toThrow('useScenarioSlice is forbidden')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects a forbidden %s read swallowed by an SSR Suspense fallback', (_tag) => {
+    const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
+    const story = {
+      render: () => <React.Suspense fallback={<p>Recovered render</p>}>
+        <ScenarioReadBoundary reason="nested restriction">
+          <ScenarioProvider world={world}><Consumer /></ScenarioProvider>
+        </ScenarioReadBoundary>
+      </React.Suspense>,
+      parameters: { scenario: { _tag, reason: 'Invalid hook exemption' } },
+    }
+    // SSR turns the thrown hook error into a Suspense fallback rather than propagating it.
+    const Composed = composeStory(story, {}, { decorators: [withScenario] })
+    expect(renderToStaticMarkup(<Composed />)).toContain('<p>Recovered render</p>')
+    expect(() => scenarioStoryCheck(story, {})).toThrow('useScenarioSlice is forbidden')
+    expect(() => scenarioStoryCheck(story, {}, { assert: true })).toThrow('useScenarioSlice is forbidden')
+    // A failed check must not contaminate the next independent exemption check.
+    expect(scenarioStoryCheck({
+      render: () => <p>Independent fixture</p>,
+      parameters: { scenario: { _tag, reason: 'No scenario reads' } },
+    }, {})._tag).toBe('Passed')
   })
 
   it('rejects a hook without a declaration through the runtime decorator', () => {

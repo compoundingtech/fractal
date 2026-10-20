@@ -3,9 +3,6 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
-import { useScenarioSlice } from '@smalltalk/st3-scenarios/react'
-import type { SyncStatus } from '@smalltalk/st3-scenarios'
-import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
 import { SyncLine } from './assistant-ui/st3-views/SyncLine'
 import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { syncLine, observeSyncStatus } from './assistant-ui/st3-views/sync-line'
@@ -40,30 +37,6 @@ function ObservationRow({ observation, label }: { observation: typeof syncObserv
   return <div data-testid="sync-observation" data-sync-surface={label ?? 'conversation'} {...stylex.props(styles.observation)}><span {...stylex.props(styles.stateLabel)}>{label ?? observation.id}</span><SyncLine status={status} label={label ?? 'conversation'} now={syncNow} observedAt={retried ? syncNow - 1000 : observation.observedAt} onRetry={retry} /></div>
 }
 const requestedAfterRetry = { _tag: 'Requested', since: syncNow - 1000 } as const
-/** Wire expectation times are offsets; this preview pins their presentation clock. */
-function scenarioStatus(status: SyncStatus): SyncStatus {
-  switch (status._tag) {
-    case 'Connecting': case 'Requested': case 'Live': return { ...status, since: syncNow + status.since }
-    case 'Progress': return { ...status, stageSince: syncNow + status.stageSince, reportedAt: syncNow + status.reportedAt }
-    case 'Failed': return status
-    case 'Stale': return {
-      ...status,
-      ...(status.lastLiveAt === undefined ? {} : { lastLiveAt: syncNow + status.lastLiveAt }),
-      reason: status.reason._tag === 'Reconnecting' ? { ...status.reason, nextAt: syncNow + status.reason.nextAt }
-        : status.reason._tag === 'Quiet' ? { ...status.reason, lastFrameAt: syncNow + status.reason.lastFrameAt } : status.reason,
-    }
-  }
-}
-function ScenarioSyncStory({ scheme }: SyncArgs) {
-  const sync = useScenarioSlice('sync')
-  return <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
-    <h1 {...stylex.props(styles.title)}>Sync · {sync.variant}</h1>
-    {sync.state.expected.map((expected, index) => <section key={`${expected.surface}/${index}`} aria-label={`${expected.surface} at ${expected.at_ms}ms`} {...stylex.props(styles.surface)}>
-      <header {...stylex.props(styles.band)}><strong>{expected.surface}</strong><SyncLine status={scenarioStatus(expected.status)} label={expected.surface.startsWith('conversation:') ? 'conversation' : expected.surface} now={syncNow + expected.at_ms + 3000} observedAt={syncNow + expected.at_ms} /></header>
-      <div {...stylex.props(styles.retained)}>Last-known content stays in place.</div>
-    </section>)}
-  </ThemePortal></main>
-}
 function AllStatesStory() {
   return <main data-testid="sync-all-states" {...stylex.props(styles.allRoot, ...baselineTheme)}><h1 {...stylex.props(styles.title)}>Sync line · all observations</h1><div {...stylex.props(styles.schemes)}>{(['dark', 'light'] as const).map(scheme => <section key={scheme} aria-label={`${scheme} sync observations`} {...stylex.props(styles.themeColumn, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><h2 {...stylex.props(styles.title)}>{scheme}</h2>{syncObservations.map(observation => <ObservationRow key={observation.id} observation={observation} />)}</ThemePortal></section>)}</div></main>
 }
@@ -111,14 +84,10 @@ export const AllStates: Story = { ...contractFixture, tags: ['critical'], render
     if (lineBounds.width <= 0 || lineBounds.left < rowBounds.left || lineBounds.right > rowBounds.right + 1) throw new Error('Each sync line must fit inside its observation row and theme surface')
   }
 } }
-export const Scenario: Story = { ...contractFixture, render: ScenarioSyncStory, parameters: { scenario: { _tag: 'slices', slices: ['sync'] } }, argTypes: { ...scenarioArgTypes(['sync']), sequence: { control: false } } }
 export const UnknownReason: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown') } }
 export const UnknownReasonLastLive: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown · last live') } }
-export const LocalFailure: Story = { ...Scenario, args: { sync: 'subscription-limit-local' } }
 export const LocalFailureWithoutCap: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · no cap') } }
 export const LocalFailureZeroCap: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · zero cap') } }
-export const UnknownFailure: Story = { ...Scenario, parameters: { scenario: { _tag: 'slices', slices: ['sync'], world: 'failed-sync-subscription-limit-legacy' } } }
-export const ServerFailure: Story = { ...Scenario, parameters: { scenario: { _tag: 'slices', slices: ['sync'], world: 'failed-sync-subscription-error' } } }
 export const ServerFailureSubscriptionLimit: Story = { ...contractFixture, args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
 export const SubscriptionLimitsDark: Story = { ...contractFixture, tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
 export const SubscriptionLimitsLight: Story = { ...contractFixture, tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }

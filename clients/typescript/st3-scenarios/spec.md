@@ -1028,7 +1028,7 @@ export const Huge = { parameters: { scenario: { _tag: 'slices', world: 'huge' } 
 ### Consumption check
 
 Every story declares exactly one scenario mode, inherited from its meta or declared on the story.
-`slices` carries the slice declaration, world pin, invariants and optional mounted window.
+`slices` carries a nonempty slice declaration, world pin, invariants and optional mounted window.
 `contract-fixture` covers a specific consumer contract or interaction the scenario catalog or
 component props seam cannot yet express. Such a story must convert to `slices` once scenario
 data can express it. `primitive` covers data-independent visual or interaction primitives.
@@ -1043,18 +1043,35 @@ slice configuration is still rejected by the runtime validator, with the same mo
 
 The consumption check enforces both directions: a missing or invalid declaration fails; a slice
 story must consume its declared slices, and an exempt story must not declare slices or scenario
-args or call `useScenarioSlice`. Exemptions appear in the check output with their reasons.
-The consumer's all-story test pins their count so each new exemption is visible in review.
+args or call `useScenarioSlice`. Forbidden hook reads are recorded out of band as well as thrown,
+so a React error boundary cannot hide a violation. Exemptions appear in the check output with
+their reasons. The consumer pins their sorted `file#export` identities and modes, as well as the
+count, so even a count-neutral exemption swap is visible in review.
 Blocked story files have a separate explicit undeclared-story ratchet with blocking PR numbers;
 the ratchet fails if it grows or retains an entry after the story gains a declaration.
 
-Detection limit: the kit tracks its slice hooks and replay read trackers, not arbitrary JavaScript
-imports, closure values or component props. It cannot generally prove that an exempt story never
-reads hand-authored fixture data. The exemption declaration and its reason remain reviewable
-evidence for those reads, not a claim of static fixture-data analysis.
-The check observes synchronous rendering (and committed effects when a DOM is available), not
-unexecuted conditional branches or asynchronous plays. The decorator's read boundary continues
-to reject forbidden slice hooks during later browser renders.
+The consumer's all-story gate checks each exempt file's transitive runtime TypeScript module
+graph. Exempt files must not reach the kit catalog, worlds, recorded/fixture source directories,
+scenario projection harnesses, or any module exporting the typed domain-fixture marker.
+The kit exposes `scenarioDomainFixture` through `/domain-fixture`; domain sources export
+`scenarioDomainFixtureMarker` with that unique-symbol type. A coverage test requires markers on
+the catalog, worlds, recorded/fixture TypeScript source modules and projection harnesses.
+Data-only recordings remain covered by their marked TypeScript owners; JSON cannot export a marker.
+Erased type-only imports are allowed. Conditional dynamic loader edges are not fixture reads.
+Slice stories and exempt stories live in separate CSF files so this is a file-level proof,
+not fragile attribution of imports to individual exports.
+
+A primitive file additionally must not transitively import any `*fixture*`-named module.
+Inline domain data in primitive files is review-only and must be rejected during review.
+A contract-fixture file may import locally written inputs for its exact contract, but cannot
+reach the forbidden scenario sources. The check output lists the allowed fractal-ui contract-data
+modules and their exempt importers for review. This is not permission to copy scenario fixtures
+into unmarked modules. Inline or closure-held inputs in contract fixtures still require review;
+module reachability cannot prove their provenance or whether the exact contract needs them.
+
+The render check observes synchronous rendering (and committed effects when a DOM is available),
+not unexecuted conditional branches or asynchronous plays. The module graph still checks imports
+from those branches; the decorator's read boundary rejects forbidden hooks on later browser renders.
 
 An annotation alone proves nothing, so the provider records each slice a story reads through
 `useScenarioSlice`, and each slice whose collections an app-level story's replay serves.

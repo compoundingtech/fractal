@@ -5,7 +5,7 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 
 import { ANCHOR_MS, catalog, DEFAULT_WORLD, foldSlice, manualClock, syncStatusAt, type SliceKind, type World } from '../index.ts'
-import { createReadTracker, type ServedSlices } from '../react/index.ts'
+import { createReadTracker, ScenarioReadBoundary, type ServedSlices } from '../react/index.ts'
 import { scenarioGlobalTypes, validateScenarioDeclaration, type ScenarioMountedWindow, type ScenarioStoryExemption, type ScenarioStoryParameter } from './index.ts'
 import { resolveScenarioWorld, withScenario } from './runtime.ts'
 
@@ -184,7 +184,11 @@ export const scenarioStoryCheck = <TArgs extends Args>(
   if (parameter === undefined) throw new Error('Story requires parameters.scenario declaration')
   if (parameter._tag !== 'slices') {
     const Composed = composeStory(story, meta, { decorators: [withScenario] })
-    const element = React.createElement(Composed, baselineArgs)
+    const violations: Error[] = []
+    const element = React.createElement(ScenarioReadBoundary, {
+      reason: `scenario ${parameter._tag} exemption`,
+      onViolation: (error) => { violations.push(error) },
+    }, React.createElement(Composed, baselineArgs))
     if (typeof document === 'undefined') {
       renderToStaticMarkup(element)
     } else {
@@ -204,6 +208,9 @@ export const scenarioStoryCheck = <TArgs extends Args>(
       }
       if (errors.length > 0) throw errors[0]
     }
+    // React error boundaries (client) and Suspense fallbacks (SSR) can swallow the throw.
+    // The enclosing boundary retains evidence independently of error propagation.
+    if (violations.length > 0) throw violations[0]
     return {
       _tag: 'Passed',
       failures: [],

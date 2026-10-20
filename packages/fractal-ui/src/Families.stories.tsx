@@ -7,7 +7,7 @@ const meta = {
   title: 'Fractal UI/Component families',
   component: Families,
   args: { direction: 'folio', scheme: 'light', density: 'comfortable' },
-  parameters: { scenario: { _tag: 'primitive', reason: "Compares visual token families and densities, not scenario domain state." },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Families owns authored changed-file, worktree and actor-state examples without a domain-data props seam; these fixed examples compare component tokens and density. Conversion requires exposing that seam." },
     a11y: {
       options: {
         rules: {

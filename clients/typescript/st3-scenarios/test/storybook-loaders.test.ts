@@ -33,7 +33,7 @@ it('awaits the catalog before rendering and honors pinned worlds, time and slice
 })
 
 it('propagates invalid world errors after loading rather than silently rendering', async () => {
-  const Story = composeStory({ render: () => React.createElement('p'), parameters: { scenario: { _tag: 'slices', slices: [] } } }, {}, {
+  const Story = composeStory({ render: () => React.createElement('p'), parameters: { scenario: { _tag: 'slices', slices: ['roster'] } } }, {}, {
     ...annotations, initialGlobals: { scenario: 'not-a-world' },
   })
   await Story.load()

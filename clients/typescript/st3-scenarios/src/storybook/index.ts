@@ -33,7 +33,10 @@ export const validateScenarioDeclaration = (
   args: Readonly<Record<string, unknown>>,
 ): void => {
   if (parameter === undefined) throw new Error('Story requires parameters.scenario declaration')
-  if (parameter._tag === 'slices') return
+  if (parameter._tag === 'slices') {
+    if (parameter.slices.length === 0) throw new Error('scenario slices requires at least one slice')
+    return
+  }
   if (parameter._tag !== 'contract-fixture' && parameter._tag !== 'primitive') throw new Error('parameters.scenario requires a valid _tag')
   if (typeof parameter.reason !== 'string' || parameter.reason.trim().length === 0) throw new Error(`scenario ${parameter._tag} requires a reason`)
   if ('slices' in parameter || 'world' in parameter || 'invariant' in parameter || 'tracker' in parameter || 'window' in parameter) {

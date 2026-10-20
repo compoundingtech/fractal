@@ -4,13 +4,18 @@ import { scenarioStoryCheck, withScenario } from '@smalltalk/st3-scenarios/story
 import { loadWorld } from '@smalltalk/st3-scenarios'
 import { useScenarioSlice } from '@smalltalk/st3-scenarios/react'
 import { scenarioSections } from './scenario-transcript.story-harness'
+import { scenarioExemptionIds } from './scenario-exemption-ids.ts'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { composeStory, type Meta, type StoryObj } from '@storybook/react'
 import { isExportStory } from 'storybook/internal/csf'
-import meta, { AllStates } from './Markdown.stories.tsx'
+import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
+import * as nodePath from 'node:path'
+import ts from 'typescript'
+import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
+import './scenario-fixture-graph.unit.test.ts'
 
 import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
 import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
@@ -43,6 +48,24 @@ test('browser exemption checks propagate forbidden slice reads from a client roo
     render: ReadsDomain,
     parameters: { scenario: { _tag: 'primitive', reason: 'Planted forbidden domain read' } },
   }, {})).toThrow(/exempt|exemption/)
+})
+
+test('an error boundary cannot hide an exempt story domain read', () => {
+  class CatchesRenderErrors extends React.Component<React.PropsWithChildren, { failed: boolean }> {
+    state = { failed: false }
+    static getDerivedStateFromError(): { failed: boolean } { return { failed: true } }
+    render(): React.ReactNode {
+      return this.state.failed ? React.createElement('span', {}, 'Caught render error') : this.props.children
+    }
+  }
+  const ReadsDomain = () => {
+    useScenarioSlice('roster')
+    return React.createElement('span')
+  }
+  expect(() => scenarioStoryCheck({
+    render: () => React.createElement(CatchesRenderErrors, {}, React.createElement(ReadsDomain)),
+    parameters: { scenario: { _tag: 'primitive', reason: 'Planted swallowed domain read' } },
+  }, {})).toThrow(/exempt|forbidden/)
 })
 
 test('the story mounted window uses the real Transcript and viewport mount constants', () => {
@@ -259,6 +282,7 @@ const storyModules = import.meta.glob<StoryModule>('./**/*.stories.tsx', { eager
 const isStory = (value: unknown): value is StoryObj => typeof value === 'object' && value !== null
 const undeclared: string[] = []
 const exemptions: string[] = []
+const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
 
 for (const [path, module] of Object.entries(storyModules)) {
   const { default: storyMeta, ...exports } = module
@@ -280,7 +304,12 @@ for (const [path, module] of Object.entries(storyModules)) {
       })
       continue
     }
-    if (tag !== 'slices') exemptions.push(id)
+    if (tag !== 'slices') {
+      exemptions.push(`${id}:${tag}`)
+      const modes = exemptFiles.get(path) ?? new Set<ExemptStoryMode>()
+      modes.add(tag)
+      exemptFiles.set(path, modes)
+    }
     test(`${id} validates its scenario mode`, () => {
       const result = scenarioStoryCheck(story, storyMeta)
       expect(result.failures).toEqual([])
@@ -291,6 +320,40 @@ for (const [path, module] of Object.entries(storyModules)) {
   }
 }
 
+test('exempt CSF runtime import graphs cannot reach domain fixture roots', () => {
+  const started = performance.now()
+  const uiSource = nodePath.resolve(process.cwd(), 'src')
+  const kitRoot = nodePath.resolve(uiSource, '../../../clients/typescript/st3-scenarios')
+  const contractDataModules = [
+    ...ts.sys.readDirectory(uiSource, ['.ts', '.tsx'], ['**/*.test.ts', '**/*.test.tsx', '**/*.stories.tsx'])
+      .filter(file => /fixture/i.test(nodePath.basename(file)) && nodePath.basename(file) !== 'scenario-fixture-graph.ts'),
+    ...['Families.tsx', 'Workshop.tsx', 'markdown.story-canvas.tsx'].map(file => nodePath.resolve(uiSource, file)),
+  ]
+  const policy = {
+    uiSource: uiSource.replace(/\/$/, ''),
+    kitSource: `${kitRoot}/src`,
+    projectionHarness: nodePath.resolve(uiSource, 'scenario-transcript.story-harness.ts'),
+    contractDataModules,
+  }
+  const allKitSources = ts.sys.readDirectory(kitRoot, ['.ts', '.tsx'], ['**/node_modules/**', '**/*.test.ts', '**/*.test.tsx'])
+  const markerRoots = [...allKitSources, policy.projectionHarness].filter(file => requiresDomainMarker(file, policy))
+  const entries = new Map([...exemptFiles].map(([file, modes]) => [nodePath.resolve(uiSource, file), modes]))
+  const configPath = nodePath.resolve(uiSource, '../tsconfig.json')
+  const config = ts.readConfigFile(configPath, ts.sys.readFile)
+  if (config.error !== undefined) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'))
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, nodePath.dirname(configPath))
+  expect(parsed.errors.map(error => ts.flattenDiagnosticMessageText(error.messageText, '\n'))).toEqual([])
+  const graph = createTypeScriptGraph([...entries.keys(), ...markerRoots], parsed.options)
+  expect(markerRoots.filter(file => !graph.hasTypedMarker(file)), 'Every domain root exports the public unique-symbol marker').toEqual([])
+  const result = checkFixtureGraph(entries, graph, policy)
+  process.stdout.write('Allowed fractal-ui contract-data modules and exempt importers (transitive):\n')
+  for (const [file, importers] of [...result.contractData].sort(([left], [right]) => left.localeCompare(right))) {
+    process.stdout.write(`${file}\n${importers.length === 0 ? '  (no exempt importers)' : importers.map(importer => `  ${importer}`).join('\n')}\n`)
+  }
+  process.stdout.write(`Fixture graph: ${entries.size} exempt CSF files, ${result.visited} runtime modules, ${markerRoots.length} marker roots, ${Math.round(performance.now() - started)}ms\n`)
+  expect(result.violations, result.violations.join('\n')).toEqual([])
+}, 60_000)
+
 test('undeclared story modes match the exact blocked-PR ratchet (no growth or stale entries)', () => {
   expect(undeclared.sort()).toEqual(Object.keys(deferredStoryModes).sort())
   for (const id of undeclared) process.stdout.write(`${id}: undeclared — blocked by PR #${deferredStoryModes[id]}\n`)
@@ -298,6 +361,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
   expect(exemptions).toHaveLength(262)
+  expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
 test('scenario transcript preserves the active migrator turn without a terminal status', () => {

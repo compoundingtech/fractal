@@ -1,7 +1,11 @@
+import { scenarioDomainFixture } from '@smalltalk/st3-scenarios/domain-fixture'
 import type { WireSlice } from '@smalltalk/st3-scenarios/react'
 import type { TranscriptHistory, TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { Sender, TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
+
 type WireEntry = WireSlice<'conversation'>['state']['threads'][number]['items'][number]
 type ToolResultEntry = Extract<WireEntry, { type: 'tool_result' }>
 type Prompt = TextItem & { readonly role: 'user' }

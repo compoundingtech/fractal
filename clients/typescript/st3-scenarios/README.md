@@ -61,18 +61,28 @@ import { scenarioStoryCheck } from '@smalltalk/st3-scenarios/storybook/check'
 scenarioStoryCheck(Story, meta, { assert: true })
 ```
 
-Every story declares exactly one `parameters.scenario` mode: `slices`, or an exemption
+Every story declares exactly one `parameters.scenario` mode: nonempty `slices`, or an exemption
 `{ _tag: 'primitive', reason }` / `{ _tag: 'contract-fixture', reason }`. Exemptions get no
 scenario args or catalog loaders and cannot read `useScenarioSlice`; missing declarations fail
-the story check. Contract-fixture stories must convert when scenario data can express them.
-The check reports exempt stories with reasons; consumers pin their count. Arbitrary fixture
-imports and closure data cannot be detected by the kit and require review.
+the story check. A scoped violation collector prevents error boundaries from hiding forbidden
+hook reads. Contract-fixture stories must convert when scenario data can express them.
+The check reports exempt stories with reasons; consumers pin sorted export identities and modes.
+
+The consumer's all-story gate checks transitive runtime module imports from exempt files.
+Kit worlds/catalog/recorded sources, scenario projections and typed domain-fixture markers are
+forbidden; erased type imports and conditional loader edges are not data reads. A primitive
+file also cannot import any `*fixture*`-named module. Its inline domain data remains review-only.
+Contract fixtures may use local exact-contract inputs; their allowed contract-data modules and
+exempt importers print in check output. Inline and closure-held contract inputs require review.
+Import `scenarioDomainFixture` from `/domain-fixture` to mark a domain source with the exported
+`scenarioDomainFixtureMarker` unique-symbol value. Marker coverage is checked for kit domain roots.
+
 Declare the mode on the meta for all its stories, or declare it per story. A story must never
 change the mode inherited from its meta, including switching between exemption modes.
-For mixed-mode modules, remove the meta's scenario declaration and declare each story's mode,
-or split the meta. Same-mode slice configuration overrides remain supported. Storybook merges
-parameters recursively, so changing a slice meta to an exemption retains forbidden slice
-configuration; both the checker and runtime validator explain this mode-change error.
+Keep slice and exempt stories in separate CSF files for the file-level import proof.
+Same-mode slice configuration overrides remain supported. Storybook merges parameters
+recursively, so changing a slice meta to an exemption retains forbidden slice configuration;
+both the checker and runtime validator explain this mode-change error.
 
 The preview entry contains only toolbar/control metadata. Its async loaders import worlds and
 recordings only for `slices` stories; install both loaders and decorator. The small static

@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { WorldDefinition } from '../kit/world.ts'
 import { syntheticFleetMidRefactor } from './fleetMidRefactor.ts'
 
@@ -10,3 +11,5 @@ export const failedSyncArrangementsAbsent: WorldDefinition = {
   narrative: 'The refactor fleet stays readable while sidebar discovery refuses the ungranted arrangements feature.',
   selected: { sync: 'arrangements-absent' },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

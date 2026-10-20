@@ -1,0 +1,193 @@
+import * as path from 'node:path'
+import ts from 'typescript'
+
+export type ExemptStoryMode = 'primitive' | 'contract-fixture'
+export interface RuntimeModule {
+  readonly imports: readonly string[]
+  readonly marked: boolean
+}
+export interface RuntimeSourceGraph {
+  readonly read: (file: string) => RuntimeModule
+  readonly resolve: (specifier: string, importer: string) => string | undefined
+  readonly isExternal: (file: string) => boolean
+}
+export interface FixtureGraphPolicy {
+  readonly kitSource: string
+  readonly uiSource: string
+  readonly projectionHarness: string
+  /** Known inline data owners supplement filename detection; inline primitive data remains review-only. */
+  readonly contractDataModules?: readonly string[]
+}
+
+const normalized = (file: string): string => file.replaceAll('\\', '/')
+const within = (file: string, directory: string): boolean => file.startsWith(`${directory}/`)
+const fixtureNamed = (file: string): boolean => /fixture/i.test(path.basename(file))
+
+/** Only domain roots carry markers. Local contract-data modules remain usable by contracts. */
+export const requiresDomainMarker = (file: string, policy: FixtureGraphPolicy): boolean => {
+  if (file === policy.projectionHarness || file === `${policy.kitSource}/index.ts`) return true
+  const kitRoot = path.dirname(policy.kitSource)
+  if (!within(file, kitRoot)) return false
+  const relative = file.slice(kitRoot.length + 1)
+  return relative.startsWith('src/worlds/') || relative.split('/').slice(0, -1).some(part => /^(?:recordings?|fixtures?)$/.test(part))
+}
+
+export interface FixtureGraphResult {
+  readonly violations: readonly string[]
+  readonly contractData: ReadonlyMap<string, readonly string[]>
+  readonly visited: number
+}
+
+/** One traversal per CSF entry/mode; diagnostics retain the complete shortest import path. */
+export const checkFixtureGraph = (
+  entries: ReadonlyMap<string, ReadonlySet<ExemptStoryMode>>,
+  graph: RuntimeSourceGraph,
+  policy: FixtureGraphPolicy,
+): FixtureGraphResult => {
+  const violations: string[] = []
+  const contractData = new Map<string, string[]>()
+  for (const file of policy.contractDataModules ?? []) contractData.set(file, [])
+  const allVisited = new Set<string>()
+  for (const [entry, modes] of entries) {
+    const primitive = modes.has('primitive')
+    const pending: string[][] = [[entry]]
+    const visited = new Set<string>()
+    for (let index = 0; index < pending.length; index++) {
+      const chain = pending[index]!
+      const file = chain.at(-1)!
+      if (visited.has(file)) continue
+      visited.add(file)
+      allVisited.add(file)
+      const domainRoot = requiresDomainMarker(file, policy)
+      let module: RuntimeModule
+      try {
+        module = domainRoot ? { imports: [], marked: false } : graph.read(file)
+      } catch (cause) {
+        violations.push(`${chain.join(' -> ')} (unreadable runtime module: ${String(cause)})`)
+        continue
+      }
+      const forbidden = domainRoot || module.marked || (primitive && fixtureNamed(file))
+      if (forbidden) {
+        violations.push(`${primitive ? 'primitive' : 'contract-fixture'}: ${chain.join(' -> ')} (forbidden domain/fixture module)`)
+        continue
+      }
+      if (within(file, policy.uiSource) && (fixtureNamed(file) || contractData.has(file))) {
+        const importers = contractData.get(file) ?? []
+        importers.push(chain.join(' -> '))
+        contractData.set(file, importers)
+      }
+      for (const specifier of module.imports) {
+        const target = graph.resolve(specifier, file)
+        if (target === undefined) {
+          violations.push(`${chain.join(' -> ')} -> ${specifier} (unresolved runtime import)`)
+        } else if (!graph.isExternal(target)) {
+          pending.push([...chain, target])
+        }
+      }
+    }
+  }
+  return { violations, contractData, visited: allVisited.size }
+}
+
+/** Inspect emitted imports: ordinary imports used only as types disappear exactly as in TS. */
+const emittedImports = (javascript: string): readonly string[] => {
+  const source = ts.createSourceFile('runtime.js', javascript, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  const imports: string[] = []
+  const visit = (node: ts.Node, conditional = false): void => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
+      imports.push(node.moduleSpecifier.text)
+    }
+    // Conditional/lazy loaders do not read domain state merely by being imported.
+    if (ts.isFunctionLike(node)) return
+    const guarded = conditional || ts.isIfStatement(node) || ts.isConditionalExpression(node)
+      || ts.isSwitchStatement(node) || ts.isIterationStatement(node, false)
+      || (ts.isBinaryExpression(node) && [
+        ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(node.operatorToken.kind))
+    if (!guarded && ts.isCallExpression(node)
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      const argument = node.arguments[0]
+      imports.push(argument !== undefined && ts.isStringLiteral(argument) ? argument.text : '<non-literal runtime import>')
+    }
+    ts.forEachChild(node, child => visit(child, guarded))
+  }
+  visit(source)
+  return imports
+}
+
+export interface TypeScriptGraph extends RuntimeSourceGraph {
+  readonly hasMarker: (file: string) => boolean
+  readonly hasTypedMarker: (file: string) => boolean
+}
+
+export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.CompilerOptions, injectedSources?: Readonly<Record<string, string>>): TypeScriptGraph => {
+  const compilerOptions: ts.CompilerOptions = {
+    ...options, noEmit: false, noEmitOnError: false, declaration: false, declarationMap: false,
+    emitDeclarationOnly: false, sourceMap: false, inlineSourceMap: false,
+    module: ts.ModuleKind.ESNext, jsx: ts.JsxEmit.Preserve,
+  }
+  const host = ts.createCompilerHost(compilerOptions)
+  if (injectedSources !== undefined) {
+    const originalReadFile = host.readFile
+    const originalFileExists = host.fileExists
+    host.readFile = file => injectedSources[file] ?? originalReadFile(file)
+    host.fileExists = file => file in injectedSources || originalFileExists(file)
+    host.directoryExists = directory => Object.keys(injectedSources).some(file => file.startsWith(`${directory}/`)) || ts.sys.directoryExists(directory)
+    const originalGetSourceFile = host.getSourceFile
+    host.getSourceFile = (file, languageVersion, onError, shouldCreateNewSourceFile) => {
+      const text = injectedSources[file]
+      return text === undefined
+        ? originalGetSourceFile(file, languageVersion, onError, shouldCreateNewSourceFile)
+        : ts.createSourceFile(file, text, languageVersion, true)
+    }
+  }
+  const program = ts.createProgram([...rootNames], compilerOptions, host)
+  const checker = program.getTypeChecker()
+  const cache = new Map<string, RuntimeModule>()
+  const resolutionCache = ts.createModuleResolutionCache(host.getCurrentDirectory(), file => file, compilerOptions)
+  const hasMarker = (file: string): boolean => {
+    const source = program.getSourceFile(file)
+    if (source === undefined) throw new Error(`Missing graph source: ${file}`)
+    const symbol = checker.getSymbolAtLocation(source)
+    return symbol !== undefined && checker.getExportsOfModule(symbol).some(exported => exported.name === 'scenarioDomainFixtureMarker')
+  }
+  return {
+    hasMarker,
+    hasTypedMarker: file => {
+      const source = program.getSourceFile(file)
+      if (source === undefined) return false
+      const symbol = checker.getSymbolAtLocation(source)
+      const marker = symbol === undefined ? undefined : checker.getExportsOfModule(symbol).find(exported => exported.name === 'scenarioDomainFixtureMarker')
+      if (marker === undefined) return false
+      const type = checker.getTypeOfSymbolAtLocation(marker, source)
+      return (type.flags & ts.TypeFlags.UniqueESSymbol) !== 0
+        && type.symbol?.name === 'scenarioDomainFixture'
+        && (type.symbol.declarations?.some(declaration => normalized(declaration.getSourceFile().fileName).endsWith('/domain-fixture.ts')) ?? false)
+    },
+    read: file => {
+      const previous = cache.get(file)
+      if (previous !== undefined) return previous
+      if (!/\.[cm]?[jt]sx?$/.test(file)) return { imports: [], marked: false }
+      const source = program.getSourceFile(file)
+      if (source === undefined) throw new Error(`Unresolved graph source: ${file}`)
+      let javascript: string | undefined
+      program.emit(source, (name, text) => { if (/\.[cm]?jsx?$/.test(name)) javascript = text })
+      if (javascript === undefined) throw new Error(`No runtime emission for graph source: ${file}`)
+      const module = { imports: emittedImports(javascript), marked: hasMarker(file) }
+      cache.set(file, module)
+      return module
+    },
+    resolve: (specifier, importer) => {
+      if (specifier.startsWith('node:')) return `external:${specifier}`
+      // Non-code assets are runtime leaves, not source graph escape hatches.
+      if (/\.(?:css|svg|png|jpe?g|woff2?|json|jsonl)(?:\?.*)?$/.test(specifier) && specifier.startsWith('.')) {
+        const asset = normalized(path.resolve(path.dirname(importer), specifier.split('?')[0]!))
+        return host.fileExists(asset) ? asset : undefined
+      }
+      const resolved = ts.resolveModuleName(specifier, importer, compilerOptions, host, resolutionCache).resolvedModule
+      if (resolved === undefined) return undefined
+      return normalized(ts.sys.realpath?.(resolved.resolvedFileName) ?? resolved.resolvedFileName)
+    },
+    isExternal: file => file.startsWith('external:') || file.includes('/node_modules/') || file.endsWith('.d.ts'),
+  }
+}
