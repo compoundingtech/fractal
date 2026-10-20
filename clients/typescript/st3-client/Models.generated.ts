@@ -1166,6 +1166,7 @@ export type CollectionFrame = ({
   id: string;
   items: Array<TimelineEntry>;
   kind: "conversation";
+  older_cursor?: string;
   replace: boolean;
   session_id: Id;
 } | {
