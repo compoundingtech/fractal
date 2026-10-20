@@ -10,8 +10,8 @@ use crate::EvidenceStore;
 use super::*;
 use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
 use st3_ui_model::missions::Display;
-pub use st3_api::api::client_v0::summary::*;
-pub use st3_api::api::client_v0::summary::{active, machine_counts, published_attention_alerts, published_machines, refresh_published, working};
+pub use st3_api_core::api::client_v0::summary::*;
+pub use st3_api_core::api::client_v0::summary::{active, machine_counts, published_attention_alerts, published_machines, refresh_published, working};
 #[cfg(test)]
 #[path = "summary/tests.rs"]
 mod tests;

@@ -469,6 +469,22 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
   }
   const socket: CollectionSocketFactory = (address, protocols) => {
     const url = new URL(address)
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both:
+    // accept both names; sunset 60 days after the first release shipping the bridge.
+    const terminalProtocol = protocols.includes('st3.client.terminal.v0') || protocols.includes('fractal.client.terminal.v0')
+    const collectionsProtocol = protocols.includes('st3.client.collections.v0') || protocols.includes('fractal.client.collections.v0')
+    const conversationProtocol = protocols.includes('st3.client.conversation.v0') || protocols.includes('fractal.client.conversation.v0')
+    const capabilities = protocols.flatMap((protocol) =>
+      protocol.startsWith('st3.cap.') ? [protocol.slice(8)]
+        : protocol.startsWith('fractal.cap.') ? [protocol.slice(12)] : [])
+    const invalidProtocols = (protocols.length > 0 && Number(terminalProtocol) + Number(collectionsProtocol) + Number(conversationProtocol) !== 1)
+      || capabilities.some((value) => value.length === 0)
+      || new Set(capabilities).size > 1
+      || protocols.some((protocol) => ![
+        'st3.client.terminal.v0', 'fractal.client.terminal.v0',
+        'st3.client.collections.v0', 'fractal.client.collections.v0',
+        'st3.client.conversation.v0', 'fractal.client.conversation.v0',
+      ].includes(protocol) && !protocol.startsWith('st3.cap.') && !protocol.startsWith('fractal.cap.'))
     const connection: Connection = { socket: {
       onopen: null, onmessage: null, onerror: null, onclose: null,
       close: (code = 1000, reason = '') => finishConnection(connection, code, reason),
@@ -488,11 +504,16 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         connection.subscriptions.set(sub.id, sub)
         first(connection, sub)
       },
-    }, open: false, closed: false, subscriptions: new Map(), legacy: protocols.includes('st3.client.terminal.v0'),
+    }, open: false, closed: false, subscriptions: new Map(), legacy: terminalProtocol,
       recorded_socket_id: world.recording?.socket_ids?.[recordedSocket++] }
     connections.add(connection)
     const open = () => {
       if (connection.closed || connection.open) return
+      if (invalidProtocols) {
+        connection.socket.onerror?.({})
+        finishConnection(connection, 1002, 'Invalid or ambiguous WebSocket protocols')
+        return
+      }
       if (opensHeld) {
         pendingOpens.set(connection, open)
         return
@@ -508,7 +529,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       if (connection.legacy) {
         const terminal = decodeURIComponent(url.pathname.split('/').at(-2) ?? '')
         const sub: Subscription = { id: 'terminal', collection: 'terminal', terminal, incarnation: url.searchParams.get('incarnation') ?? undefined,
-          capability: protocols.find((protocol) => protocol.startsWith('st3.cap.'))?.slice(8), ready: false, filters: {}, limit: 1 }
+          capability: capabilities[0], ready: false, filters: {}, limit: 1 }
         connection.subscriptions.set(sub.id, sub)
         first(connection, sub)
       }

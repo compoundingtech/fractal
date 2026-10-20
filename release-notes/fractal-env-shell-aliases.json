@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Shell installers, hooks, operational scripts, evals and Nix payloads accept preferred FRACTAL_* environment names while retaining legacy ST_*, ST3_* and SMALLTALK_* aliases",
+  "replay": {"status": "none", "detail": "No graph replay; environment selection changes only at process boundaries."},
+  "schema": {"status": "none", "detail": "No stored schema changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read: preferred names win even when explicitly empty; conflicting nonempty preferred identities and present differing legacy aliases fail closed with variable names only. Shell writers and clearers update both aliases."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "Existing legacy environment settings remain readable."},
+  "recovery": {"status": "none", "detail": "Restore matching identity aliases or clear both conflicting aliases before retrying a hook."}
+}

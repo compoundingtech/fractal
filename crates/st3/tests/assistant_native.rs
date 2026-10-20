@@ -1,6 +1,7 @@
 //! Isolated real router/store coverage; no daemon, subprocess, ambient profile, or managed agent.
 use st3::AttentionListStore;
 use st3::PersonWorkStore;
+use st3::MissionsStore as _;
 use st3::{SeatsStore as _, SeatsStoreCore};
 use std::{path::PathBuf, sync::Arc};
 
@@ -19,6 +20,25 @@ const OWNER: &str = "person/ada";
 const AGENT: &str = "agent/native.worker";
 const POLICY: &str = "custom.client.assistant.v1.policy";
 
+
+async fn mcp_call(app: &Router, name: &str, arguments: Value) -> (bool, Value) {
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/mcp")
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-03-26")
+        .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":name,"arguments":arguments}}).to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "MCP {name}: {}", String::from_utf8_lossy(&bytes));
+    let result: Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| panic!("MCP {name} returned invalid JSON: {error}: {}", String::from_utf8_lossy(&bytes)));
+    assert!(result.get("error").is_none(), "{result}");
+    let tool = &result["result"];
+    let output = serde_json::from_str(tool["content"][0]["text"].as_str().unwrap()).unwrap();
+    (tool["isError"].as_bool().unwrap_or(false), output)
+}
 struct Harness {
     root: tempfile::TempDir,
     state: AppState,
@@ -115,7 +135,7 @@ impl Harness {
             api_version: st3_client::API_VERSION.into(), scopes, expires_in_seconds: Some(3600),
             disclosure_consent: true, consent_evidence: "Native owner explicit policy".into(),
             minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
-            recipient_allowlist: Some(vec![AGENT.into()]),
+            recipient_allowlist: Some(vec![]),
         };
         let value = self.owner("POST", &grant_path(paired, "/policy"), &policy).await;
         serde_json::from_value(value["value"].clone()).unwrap()
@@ -172,7 +192,7 @@ async fn request(app: &Router, method: &str, path: &str, bearer: Option<&str>, p
 
 fn scopes() -> Vec<AssistantScope> {
     vec![AssistantScope::Summary, AssistantScope::Attention, AssistantScope::Missions,
-        AssistantScope::Agents, AssistantScope::Conversation, AssistantScope::Messages]
+        AssistantScope::Agents, AssistantScope::Conversation, AssistantScope::Messages, AssistantScope::Answers]
 }
 fn grant_path(paired: &AssistantPairedSession, suffix: &str) -> String {
     format!("/v1/client/assistant/grants/{}{suffix}", paired.grant.id.trim_start_matches("assistant-grant/"))
@@ -218,32 +238,146 @@ async fn pairing_caller_bound_rich_reads_and_budget_do_not_silently_truncate() {
 }
 
 #[tokio::test]
-async fn typed_owner_approval_executes_a_durable_answer_and_stale_episode_is_rejected() {
+async fn mcp_conversation_discovery_reads_agent_ack_and_rejects_another_grants_handle() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let h = Harness::new();
-    let ask = h.ask("answer-ask", "Answer through approval");
     let paired = h.pair().await;
+    let other = h.pair().await;
+    assert_ne!(paired.grant.id, other.grant.id);
+    let incarnation = "native-pty:conversation-readback";
+    h.state.store.append_claim(&ClaimInput {
+        subject: AGENT.into(), kind: "runtime.observed".into(), actor: Some(AGENT.into()),
+        fields: serde_json::from_value(json!({"status":"running",
+            "runtime_id":"conversation-readback", "incarnation_id":incarnation,"terminal":true})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let message = h.message(AGENT, "conversation-readback").await;
+    let (status, sent) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let incoming = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    assert_eq!(incoming.from, "assistant/chatgpt");
+    assert_eq!(incoming.assistant_metadata().unwrap().assistant_grant_id, Some(paired.grant.id.as_str()));
+    let ack = format!("ACK-conversation-readback-{}", uuid::Uuid::new_v4());
+    let reply_text = format!("{ack}\n{}", "Agent reply body. ".repeat(700));
+    let (status, reply) = request(&h.local, "POST", "/v1/messages", None, None, &json!({
+        "idempotency_key":"native-test-conversation-ack", "from":AGENT,
+        "to":incoming.from, "in_reply_to":incoming.subject, "content":reply_text,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let reply = h.state.store.messages(Some("assistant/chatgpt"), true).unwrap().pop().unwrap();
+    assert_eq!(reply.from, AGENT);
+    assert_eq!(reply.to, "assistant/chatgpt");
+    assert!(reply.content.starts_with(&ack));
+    let reply_claim = h.state.store.latest_claim(&reply.subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(reply_claim.body["fields"]["content"], reply.content);
+    assert_eq!(reply_claim.body["fields"]["in_reply_to"], incoming.subject);
+
+
+    let socket = h.root.path().join("st3-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let gateway = h.fabric.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let credential = h.root.path().join("assistant-credential");
+    std::fs::write(&credential, &paired.credential).unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let app = st_chatgpt::http_router(st_chatgpt::Adapter::new(&socket, &credential).unwrap());
+    let other_credential = h.root.path().join("other-assistant-credential");
+    std::fs::write(&other_credential, &other.credential).unwrap();
+    std::fs::set_permissions(&other_credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let other_app = st_chatgpt::http_router(st_chatgpt::Adapter::new(&socket, &other_credential).unwrap());
+
+    let (error, listed) = mcp_call(&app, "st_conversations_list", json!({})).await;
+    assert!(!error, "{listed}");
+    let conversation = listed["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["agent_id"] == AGENT).expect("the managed agent is discovered");
+    let (error, timeline) = mcp_call(&app, "st_conversation_timeline", json!({
+        "agent_id":conversation["agent_id"],"session_id":conversation["session_id"],
+    })).await;
+    assert!(!error, "{timeline}");
+    let handle = timeline["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["text"].as_str().is_some_and(|text| text.contains(&ack)))
+        .expect("the durable agent ACK is present in the actual timeline")["read"].clone();
+    assert!(handle.is_object(), "{timeline}");
+    let (error, content) = mcp_call(&app, "st_conversation_read", handle.clone()).await;
+    assert!(!error, "{content}");
+    assert!(content["value"]["text"].as_str().unwrap().contains(&ack), "{content}");
+    for key in ["agent_id", "session_id", "reference", "revision", "start", "end"] {
+        assert_eq!(content["value"][key], handle[key], "{key}");
+    }
+    let (error, denied) = mcp_call(&other_app, "st_conversation_read", handle).await;
+    assert!(error, "another valid grant must not redeem the first grant's content handle: {denied}");
+    assert_eq!(denied["code"], "daemon-denied");
+    assert!(!denied.to_string().contains(&ack));
+    server.abort();
+}
+
+#[tokio::test]
+async fn direct_answer_executes_without_approval_with_provenance_and_rejects_stale_episode() {
+    let h = Harness::new();
+    let ask = h.ask("answer-ask", "Answer directly");
+    let paired = h.pair().await;
+    h.policy(&paired, scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages && *scope != AssistantScope::Conversation).collect()).await;
     let answer = h.answer(&ask, "yes", "assistant-answer").await;
-    let (status, pending) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
-    assert_eq!(status, StatusCode::OK, "{pending}");
-    assert_eq!(pending["value"]["status"], "approval-required");
-    assert!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.is_empty());
-    let approval = pending["value"]["approval_id"].as_str().unwrap();
-    let approve = h.answer(approval, "approve", "owner-approve").await;
-    h.owner("POST", "/v1/client/actions", &approve).await;
     let (status, result) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
     assert_eq!(status, StatusCode::OK, "{result}");
+    assert!(result["value"]["affected_ids"].as_array().unwrap().iter().any(|id| id.as_str() == Some(ask.as_str())));
+    assert!(result["value"].get("approval_id").is_none(), "{result}");
     let durable = h.state.store.step_run(&ask).unwrap().unwrap();
     assert_eq!(durable.person_answers.len(), 1);
     assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["id"], "yes");
+    assert_eq!(durable.person_answers[0].respondent, "assistant/chatgpt");
+    assert_eq!(durable.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
+    assert_eq!(durable.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));
+    assert_eq!(durable.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(durable.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
+    let shown = h.owner("GET", &format!("/v1/client/work/{ask}"), &()).await;
+    let projected = &shown["value"]["person_answers"][0];
+    assert_eq!(projected["respondent"], "assistant/chatgpt");
+    assert_eq!(projected["assistant_owner"], OWNER);
+    assert_eq!(projected["assistant_session_actor"], paired.session_actor);
+    assert_eq!(projected["sender_class"], "external-assistant");
+    assert_eq!(projected["assistant_grant_id"], paired.grant.id);
+    let decoded: st3_client::Work = serde_json::from_value(shown["value"].clone()).unwrap();
+    assert_eq!(decoded.person_answers[0].respondent, "assistant/chatgpt");
+    assert_eq!(decoded.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
+    assert_eq!(decoded.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));
+    assert_eq!(decoded.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(decoded.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
+    let claim = h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(claim.body["fields"]["assistant_session_actor"], paired.session_actor);
+    assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
+    assert_eq!(claim.body["fields"]["assistant_grant_id"], paired.grant.id);
+    let notification = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    let notification_claim = h.state.store.latest_claim(&notification.subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(notification_claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(notification_claim.body["fields"]["from"], "assistant/chatgpt");
+    assert_eq!(notification_claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(notification_claim.body["fields"]["assistant_session_actor"], paired.session_actor);
+    let metadata = notification.assistant_metadata().unwrap();
+    let ding = st_drivers::ding::st3_notification_with_metadata(
+        &notification.subject, &notification.from, &notification.to, notification.title.as_deref(),
+        &notification.content, "test-body-digest",
+        st_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+    );
+    assert!(ding.contains(st_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
+    assert!(ding.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
+    let notification = serde_json::to_value(notification).unwrap();
+    assert_eq!(notification["sender_class"], "external-assistant");
+    assert_eq!(notification["assistant_grant_id"], paired.grant.id);
+    assert!(h.state.store.attention_items(Some(OWNER)).unwrap().is_empty(), "Answering must not create an approval ask");
+    let (status, replay) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(result["value"]["affected_ids"], replay["value"]["affected_ids"]);
+    assert_eq!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.len(), 1);
+    assert_eq!(h.state.store.messages(Some(AGENT), true).unwrap().len(), 1);
 
     let stale_ask = h.ask("stale-ask", "Stale answer");
     let mut stale = serde_json::to_value(h.answer(&stale_ask, "yes", "stale-answer").await).unwrap();
     stale["parameters"]["episode"] = json!("not-the-current-episode");
     let stale: ActionRequest = serde_json::from_value(stale).unwrap();
-    let (status, pending) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &stale).await;
-    assert_eq!(status, StatusCode::OK, "{pending}");
-    let approve = h.answer(pending["value"]["approval_id"].as_str().unwrap(), "approve", "approve-stale").await;
-    h.owner("POST", "/v1/client/actions", &approve).await;
     let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &stale).await;
     assert!(!status.is_success(), "{denied}");
     assert_eq!(denied["code"], "stale-fence");
@@ -251,10 +385,35 @@ async fn typed_owner_approval_executes_a_durable_answer_and_stale_episode_is_rej
 }
 
 #[tokio::test]
-async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry_fail_closed() {
+async fn direct_answers_require_write_scope_and_current_unexpired_unrevoked_grant() {
+    let h = Harness::new();
+    for refusal in ["missing-scope", "revoked", "expired"] {
+        let ask = h.ask(&format!("answer-{refusal}"), "Answer must be refused");
+        let paired = h.pair().await;
+        let answer = h.answer(&ask, "yes", &format!("answer-{refusal}")).await;
+        match refusal {
+            "missing-scope" => {
+                h.policy(&paired, scopes().into_iter().filter(|scope| *scope != AssistantScope::Answers).collect()).await;
+            }
+            "revoked" => {
+                h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
+            }
+            "expired" => h.expire(&paired),
+            _ => unreachable!(),
+        }
+        let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &answer).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}: {denied}");
+        assert!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.is_empty());
+        assert!(h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().is_none());
+    }
+    assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_revocation_expiry_fail_closed() {
     let h = Harness::new();
     let paired = h.pair().await;
-    let message = h.message(AGENT, "allowlisted-message").await;
+    let message = h.message(AGENT, "broad-agent-message").await;
     let (status, first) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     let (status, replay) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
@@ -295,10 +454,10 @@ async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry
     assert_eq!(projected["from"], "assistant/chatgpt");
     assert_eq!(projected["sender_class"], "external-assistant");
     assert_eq!(projected["assistant_grant_id"], paired.grant.id);
-    let forbidden = h.message("agent/not-allowlisted", "recipient-denied").await;
+    let forbidden = h.message(OWNER, "person-recipient-denied").await;
     let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &forbidden).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(h.state.store.messages(Some("agent/not-allowlisted"), true).unwrap().is_empty());
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(h.state.store.messages(Some(OWNER), true).unwrap().is_empty());
     h.policy(&paired, scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages).collect()).await;
     let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "Even a cached write must require the current scope");
@@ -314,7 +473,7 @@ async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry
 }
 
 #[tokio::test]
-async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() {
+async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation() {
     use st3::store::assistant_write::{AssistantWriteAuthorization, authorize};
     let h = Harness::new();
     let paired = h.pair().await;
@@ -322,21 +481,22 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
     let authorization = AssistantWriteAuthorization {
         grant_subject: grant_subject(&paired), actor: paired.session_actor.clone(), owner: OWNER.into(),
         policy_revision: grant.policy_revision, scope: "write.assistant.messages".into(),
-        recipient: Some(AGENT.into()), approval_subject: None,
+        recipient: Some(AGENT.into()),
     };
     let mut connection = rusqlite::Connection::open(h.root.path().join("store.sqlite")).unwrap();
     let transaction = connection.transaction().unwrap();
     authorize(&transaction, "assistant-native", &authorization).unwrap();
-    let mut wrong_recipient = authorization.clone();
-    wrong_recipient.recipient = Some("agent/not-allowlisted".into());
-    assert!(authorize(&transaction, "assistant-native", &wrong_recipient).is_err());
     let mut wrong_actor = authorization.clone();
     wrong_actor.actor = "assistant/chatgpt/session/another-key".into();
     assert!(authorize(&transaction, "assistant-native", &wrong_actor).is_err());
     assert!(authorize(&transaction, "another-member", &authorization).is_err());
-    let mut missing_approval = authorization.clone();
-    missing_approval.approval_subject = Some("step-run/nonexistent/ask".into());
-    assert!(authorize(&transaction, "assistant-native", &missing_approval).is_err());
+    let mut missing_scope = authorization.clone();
+    missing_scope.scope = "write.assistant.unknown".into();
+    assert!(authorize(&transaction, "assistant-native", &missing_scope).is_err());
+    for recipient in ["agent/does-not-exist", "daemon/runtime", OWNER] {
+        let invalid_recipient = AssistantWriteAuthorization { recipient: Some(recipient.into()), ..authorization.clone() };
+        assert!(authorize(&transaction, "assistant-native", &invalid_recipient).is_err(), "{recipient}");
+    }
     transaction.rollback().unwrap();
     h.policy(&paired, scopes()).await;
     let transaction = connection.transaction().unwrap();
@@ -353,7 +513,7 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
     let expired_authorization = AssistantWriteAuthorization {
         grant_subject: grant_subject(&expired), actor: expired.session_actor.clone(), owner: OWNER.into(),
         policy_revision: grant.policy_revision, scope: "write.assistant.messages".into(),
-        recipient: Some(AGENT.into()), approval_subject: None,
+        recipient: Some(AGENT.into()),
     };
     h.expire(&expired);
     let transaction = connection.transaction().unwrap();
@@ -361,7 +521,7 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commit() {
+async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() {
     let h = Arc::new(Harness::new());
     let paired = h.pair().await;
     let gate = h.root.path().join("mutation-gate");
@@ -373,7 +533,7 @@ async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commi
     for revoke in [false, true] {
         h.policy(&paired, scopes()).await;
         let before = count_messages();
-        let request = h.message(AGENT, if revoke { "held-revoke" } else { "held-recipient" }).await;
+        let request = h.message(AGENT, if revoke { "held-revoke" } else { "held-scope" }).await;
         for name in ["hold", "entered", "release", "done"] {
             let path = gate.join(name);
             if path.exists() { std::fs::remove_file(path).unwrap(); }
@@ -394,9 +554,10 @@ async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commi
             h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
         } else {
             h.owner("POST", &grant_path(&paired, "/policy"), &AssistantGrantPolicy {
-                api_version: st3_client::API_VERSION.into(), scopes: scopes(),
+                api_version: st3_client::API_VERSION.into(),
+                scopes: scopes().into_iter().filter(|scope| *scope != AssistantScope::Messages).collect(),
                 expires_in_seconds: Some(3600), disclosure_consent: true,
-                consent_evidence: "Owner removes recipient during held send".into(),
+                consent_evidence: "Owner removes message scope during held send".into(),
                 minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
                 recipient_allowlist: Some(vec![]),
             }).await;
@@ -439,4 +600,40 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
     assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
+    let h = Harness::new();
+    let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"authored-review\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to \"person/ada\"; goal \"Review release\"; }} }}", h.root.path());
+    h.state.store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "authored-review").unwrap();
+    let run = h.state.store.create_mission_run(&st3::model::MissionRunRequest {
+        mission: "authored-review".into(), revision: None, workspace: h.root.path().to_string_lossy().into_owned(),
+        requester: Some(OWNER.into()), mode: Some("run".into()), inputs: Default::default(), idempotency_key: "authored-review".into(),
+    }).unwrap();
+    h.state.store.set_step_state(&run.steps[0].subject, "ready", Some("test activation")).unwrap();
+    let step = h.state.store.step_run(&run.steps[0].subject).unwrap().unwrap();
+    assert_eq!(step.status, "ready");
+    let paired = h.pair().await;
+    let action = ActionRequest::work_done("action/authored", "native-test-authored-answer", h.fence().await,
+        PersonStepParameters { target_id: step.subject.clone(), summary: "Reviewed".into(),
+            episode: format!("{}:{}:{}", step.generation, step.attempt, step.readiness_epoch),
+            ..Default::default() }).unwrap();
+    let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &action).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert!(h.state.store.step_run(&step.subject).unwrap().unwrap().person_answers.is_empty());
+    h.owner("POST", "/v1/client/actions", &action).await;
+    assert_eq!(h.state.store.step_run(&step.subject).unwrap().unwrap().status, "completed");
+}
+
+#[tokio::test]
+async fn assistant_message_recipient_must_be_a_currently_declared_agent() {
+    let h = Harness::new();
+    let paired = h.pair().await;
+    for (index, recipient) in ["agent/does-not-exist", "daemon/runtime", "person/ada"].iter().enumerate() {
+        let message = h.message(recipient, &format!("invalid-recipient-{index}")).await;
+        let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+        assert!(!status.is_success(), "{recipient}: {denied}");
+        assert!(h.state.store.messages(Some(recipient), true).unwrap().is_empty());
+    }
 }

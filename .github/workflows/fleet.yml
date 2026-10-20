@@ -805,7 +805,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-execution","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -1291,7 +1291,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1443,7 +1443,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1623,7 +1623,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1800,7 +1800,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -1977,7 +1977,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -2546,7 +2546,7 @@ jobs:
         if: (runner.os == 'Linux') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -2789,6 +2789,7 @@ jobs:
       - genie-freshness
       - typescript-client
       - isolation-vm
+      - fractal-web-execution
       - evidence-gate-linux-gate
       - evidence-gate-mail-redelivery-canaries
       - evidence-gate-isolation-vm
@@ -2868,7 +2869,15 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+      - name: Shadow-verify the published notes
+        if: ${{ always() && steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+          [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+          python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --optional "fractal-web" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
@@ -2879,166 +2888,6 @@ jobs:
         env:
           CACHE_REASON: Signs the aggregate gate result from workflow context; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  perf-cost:
-    name: perf-cost
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'merge_group') }}
-    runs-on:
-      [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}",
-        "namespace-features:github.run-id=${{ github.run_id }}",
-      ]
-    timeout-minutes: 120
-    defaults:
-      run:
-        shell: bash
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
-      CI_CACHE_DEV_SHELL: default
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Use the runner's own caches
-        run: |
-          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
-      - id: build-snapshot
-        name: Restore the exact-source build snapshot
-        if: env.CI_LOCAL_CACHES != '1'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" restore'
-      - name: Restore the Cargo target and registry
-        id: cargo-cache
-        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ${{ github.workspace }}/target
-            ${{ runner.temp }}/cargo-home/registry
-            ${{ runner.temp }}/cargo-home/git
-          key: "cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/**/Cargo.toml', '.cargo/config.toml') }}"
-          restore-keys: "cargo-${{ github.job }}-${{ runner.os }}-"
-      - name: Restore the local Nix cache
-        id: nix-cache
-        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
-        uses: actions/cache/restore@v4
-        with:
-          path: "${{ runner.temp }}/st-ci-cache"
-          key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
-          restore-keys: |
-            nix5-${{ github.job }}-${{ runner.os }}-
-            nix4-${{ github.job }}-${{ runner.os }}-
-      - name: Remember genuine source inputs before compiling
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          extra-conf: |
-            experimental-features = nix-command flakes
-            accept-flake-config = true
-            extra-substituters = https://overeng-effect-utils.cachix.org
-            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
-            access-tokens = github.com=${{ github.token }}
-          summarize: true
-      - name: Isolate test home and XDG state
-        run: |
-          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
-          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
-          home="$RUNNER_TEMP/test-home"
-          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
-          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
-      - name: Use the cached Nix outputs
-        if: env.CI_LOCAL_CACHES != '1'
-        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
-      - name: Summarize tested revision
-        run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
-      - name: Restore the generated stores
-        if: env.CI_BUILD_SNAPSHOT_STORES_HIT != '1'
-        uses: actions/cache@v4
-        with:
-          path: "${{ runner.temp }}/st-bench"
-          key: "perf-cost-stores-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
-        id: cache-10
-      - name: Run the cost check
-        shell: bash
-        run: nix develop -c bash scripts/ci-perf cost
-      - name: Save Nix outputs to the local Nix cache
-        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
-        run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
-      - name: Save main cargo-cache
-        if: success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && env.CI_LOCAL_CACHES != '1' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ github.workspace }}/target
-            ${{ runner.temp }}/cargo-home/registry
-            ${{ runner.temp }}/cargo-home/git
-          key: "cargo-${{ github.job }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/**/Cargo.toml', '.cargo/config.toml') }}"
-      - name: Save main nix-cache
-        if: success() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && env.CI_LOCAL_CACHES != '1' && steps.nix-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: "${{ runner.temp }}/st-ci-cache"
-          key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
-      - id: build-snapshot-save
-        name: Keep valid same-source build outputs
-        if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
-        env:
-          CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
-      - id: build-snapshot-upload
-        name: Retain the same-source build snapshot
-        if: "!cancelled() && steps.build-snapshot-save.outputs.publish == 'true'"
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
-          overwrite: true
-      - name: Wait before retrying build snapshot retention
-        if: "!cancelled() && steps.build-snapshot-upload.outcome == 'failure'"
-        timeout-minutes: 1
-        shell: bash
-        run: 'echo "::warning::Build snapshot upload failed; retrying once in 15 seconds."; sleep 15'
-      - name: Retry retaining the same-source build snapshot
-        if: "!cancelled() && steps.build-snapshot-upload.outcome == 'failure'"
-        timeout-minutes: 5
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
-          compression-level: 0
-          retention-days: 3
-          if-no-files-found: error
-          overwrite: true
-      - name: Retain stage logs and timings
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: perf-cost-logs
-          path: |
-            ${{ runner.temp }}/ci-logs/
-            ${{ runner.temp }}/perf/
-          if-no-files-found: ignore
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-10.outcome }}","hit":"${{ steps.cache-10.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   isolation-vm:
     name: isolation-vm
     needs: [pick-runner, linux-test-build, evidence-gate-isolation-vm]
@@ -3108,7 +2957,7 @@ jobs:
         if: (runner.os == 'Linux') && !(needs.evidence-gate-isolation-vm.outputs.skip == 'true')
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
-          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+          printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
       - name: Prepare provider component fixtures
         run: |
           system=$(nix eval --impure --raw --expr builtins.currentSystem)
@@ -3166,6 +3015,10 @@ jobs:
       - name: Run all three systemd-scope tests in the VM
         id: vmtest
         env:
+          FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
+          FRACTAL_ISOLATION_WORKSPACE: ${{ github.workspace }}
+          FRACTAL_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
+          FRACTAL_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
           ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
           ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
           ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
@@ -3174,7 +3027,7 @@ jobs:
           start=$SECONDS
           mkdir -p "$RUNNER_TEMP/vm-out"
           "$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
-          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "${FRACTAL_ISOLATION_TIMINGS-${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
           printf '| VM test driver total | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
         if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
       - name: Build the sekrets VM test driver
@@ -3187,6 +3040,7 @@ jobs:
       - name: Run the sekrets gateway test in the VM
         id: sekrets-test
         env:
+          FRACTAL_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
           ST_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
         run: |
           start=$SECONDS
@@ -3280,6 +3134,13 @@ jobs:
       relevant: ${{ steps.detect.outputs.relevant }}
       kit-inputs: ${{ steps.detect.outputs.kit-inputs }}
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - name: Detect web-relevant changes
         id: detect
         env:
@@ -3321,6 +3182,8 @@ jobs:
               "clients/typescript/st3-client/BUCK*",
               "clients/typescript/st3-views/**",
               "clients/typescript/st3-scenarios/**",
+              # The st3-scenarios recording import reads the client wire schema at runtime.
+              "docs/st3/client-v0/schemas/client-v0.schema.json",
               # Views tests and scenario lanes read committed client/scenario fixtures.
               "fixtures/**",
               "package.json*",
@@ -3339,8 +3202,10 @@ jobs:
               "buck2/**",
               "genie/**",
               "nix/web/**",
+              "nix/web-shell*",
               "nix/fractal-web*.nix",
               "scripts/ci-fractal-web*",
+              "scripts/ci-web-shell*",
               "scripts/ci-typescript-client*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
@@ -3368,6 +3233,7 @@ jobs:
               "apps/fractal-web/src/conversation/fixtures.ts",
               "apps/fractal-web/src/conversation/fromTimeline.ts",
               "apps/fractal-web/src/conversation/model.ts",
+              "apps/fractal-web/src/conversation/q101OmpEnvelopeStopgap.ts",
               "apps/fractal-web/src/conversation/semantics.ts",
               "apps/fractal-web/src/conversation/todos/AgentTodos.tsx",
               "apps/fractal-web/src/conversation/todos/model.ts",
@@ -3455,12 +3321,16 @@ jobs:
               "apps/fractal-web/src/web/ConversationPaneFallback.tsx",
               "apps/fractal-web/src/web/ConversationPane.tsx",
               "apps/fractal-web/src/web/conversationPreferences.ts",
+              "apps/fractal-web/src/web/ConversationStates.tsx",
               "apps/fractal-web/src/web/conversationTranscript.ts",
               "apps/fractal-web/src/web/DeclarationDialog.tsx",
+              "apps/fractal-web/src/web/lastObserved.tsx",
               "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
               "apps/fractal-web/src/web/liveSidebarTree.ts",
               "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
+              "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
+              "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
@@ -3472,6 +3342,8 @@ jobs:
               "apps/fractal-web/src/web/index.html",
               "clients/typescript/st3-scenarios/**",
               "clients/typescript/st3-client/**",
+              # The st3-scenarios recording import reads the client wire schema at runtime.
+              "docs/st3/client-v0/schemas/client-v0.schema.json",
               "package.json*",
               "pnpm-workspace.yaml*",
               "pnpm-lock.yaml",
@@ -3480,6 +3352,8 @@ jobs:
               "flake.nix",
               "flake.lock",
               "scripts/ci-fractal-web*",
+              "scripts/ci-web-shell*",
+              "nix/web-shell*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
           )
@@ -3581,10 +3455,18 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -3600,6 +3482,14 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
+      - name: Check web shell identity invariants
+        run: python3 scripts/ci-web-shell-test
+      - name: Identify the web shell inputs
+        id: web-shell-key
+        shell: bash
+        env:
+          CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
+        run: bash scripts/ci-web-shell key
       - name: Restore the pnpm store
         id: pnpm-store
         uses: actions/cache/restore@v4
@@ -3611,13 +3501,15 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
+          key: ${{ steps.web-shell-key.outputs.key }}
       - name: Run the fractal-web lanes and dependency license check
+        id: run
         shell: bash
         run: bash scripts/ci-web-shell run bash scripts/ci-fractal-web
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
+          CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
           KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
           KIT_SHARD_INDEX: ${{ matrix.shard }}
           KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
@@ -3635,20 +3527,69 @@ jobs:
           name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
           path: "${{ runner.temp }}/kit-play-receipts/receipt.json"
           if-no-files-found: ignore
-      - name: Fill the web shell closure
-        shell: bash
-        run: bash scripts/ci-web-shell fill
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
         env:
-          CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
         continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
-      - name: Save the web shell closure
-        uses: actions/cache/save@v4
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this job result
+        env:
+          STEP_CHECK: fractal-web
+          STEP_COMMAND: '["bash","scripts/ci-fractal-web"]'
+          STEP_OUTCOMES: '{"run":"${{ steps.run.outcome }}"}'
+          STEP_INPUTS: '{"kit_shard":"${{ matrix.shard }}","kit_shard_count":"${{ needs.fractal-web-changes.outputs.kit-inputs == ''true'' && github.event_name != ''pull_request'' && ''2'' || ''1'' }}","kit_play_set":"${{ github.event_name == ''pull_request'' && ''commit'' || ''all'' }}","app_test_set":"${{ github.event_name == ''pull_request'' && ''related'' || ''all'' }}"}'
+          GATE_SKIP: "false"
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STEP_CHECK"
+          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
         with:
-          path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
-        continue-on-error: true
-        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.web-shell.outputs.cache-hit != 'true' }}
+          name: "evidence-note-fractal-web-shard-${{ matrix.shard }}"
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -3664,6 +3605,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - name: Require detection and, for web changes, execution
         env:
           CHANGES_RESULT: ${{ needs.fractal-web-changes.result }}

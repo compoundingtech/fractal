@@ -92,6 +92,7 @@ pub enum ErrorCode {
     CursorGap,
     PageCursorExpired,
     AgentRosterCutNotReady,
+    MessageSelectorsNotReady,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
@@ -3541,9 +3542,20 @@ pub struct PersonAnswerRecord {
     pub ask: String,
     pub status: String,
     pub summary: String,
+    /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
+    /// Server-owned grant owner provenance, not person-delegation authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_owner: Option<String>,
+    /// Grant-bound assistant session audit actor, separate from the respondent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_session_actor: Option<String>,
     pub answered_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswer>,
@@ -3968,6 +3980,8 @@ pub enum AssistantScope {
     Messages,
     #[serde(rename = "write.assistant.custom-reply")]
     CustomReply,
+    #[serde(rename = "write.assistant.answers")]
+    Answers,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -4079,6 +4093,39 @@ pub struct AssistantPageRequest {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct AssistantAgentDetailRequest {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConversationTimelineRequest {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConversationSearchRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AssistantConversationContentRequest {
     pub agent_id: String,
     pub session_id: String,
@@ -4114,6 +4161,10 @@ pub enum AssistantProjection {
     Agents,
     ConversationContent,
     TerminalContent,
+    Conversations,
+    ConversationDetail,
+    ConversationTimeline,
+    ConversationSearch,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ScgReadIdentity {

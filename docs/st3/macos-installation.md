@@ -6,10 +6,15 @@ contains links to these tools, with `st` linking to `st3`. Other tools remain re
 executables in that directory. Python 3 is required on macOS.
 
 The app path and bundle identifier stay stable across updates. The installer registers
-the app with Launch Services and points existing daemon and replication LaunchAgent
-plists at its executable. It preserves their arguments and does not restart services
-or agent seats. For a first daemon install, run `st service install` from the installed
-app executable; for an update, restart the daemon and replication services when ready.
+the app with Launch Services and points existing direct daemon and replication
+LaunchAgent commands at its executable, preserving their remaining arguments.
+Wrapper-based definitions, including staged and completed Home Manager wrappers,
+remain byte-for-byte unchanged: the wrapper owns its guard, config and state paths.
+The installer does not restart services or agent seats. If a direct definition needs
+a different executable path, stop its loaded service before installing; the installer
+refuses to rewrite a loaded definition.
+For a first daemon install, run `st service install` from the installed app executable;
+for an update, restart the daemon and replication services when ready.
 
 When the `--from` directory also holds `StListen.app` (the terminal UI's speech helper, built by
 `apps/macos/listen/build.sh DIR` with Xcode's Swift and the macOS 26 SDK), the installer
@@ -51,7 +56,12 @@ An unchanged payload with the same signing settings keeps its existing signed bu
 A changed app replaces the whole bundle through an atomic directory swap on the same
 filesystem. The installer keeps the prior app, CLI links/files and service plists under
 `~/.local/state/st3/macos-installs/`. The helper restores them if its own installation
-fails, while still holding its shared transaction lock.
+fails, while still holding its shared transaction lock. LaunchAgent backups distinguish
+missing definitions, regular files and symlinks. Rollback and `--restore-app` atomically
+restore a symlink object with its exact original target, including relative or dangling
+Home Manager links, rather than copying the target's bytes into a regular plist.
+Regular definitions retain their saved contents; previously missing definitions are
+removed. Restoring a link neither modifies nor recreates its target and never loads jobs.
 
 The extracted archive caller also keeps prior command files and transaction locks.
 If a later archive step fails after the helper completes its backup, the caller leaves
@@ -71,6 +81,29 @@ certificate fingerprint checks the embedded signature without requiring its priv
 on the receiving machine. Building/signing a candidate still requires the explicitly
 configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+For the default-host Fractal cutover, `st service install --stage-fractal` installs
+`com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
+disabled without loading or starting them. On Linux the same command stages
+`fractal.service` and `fractal-replication.service` disabled. Existing legacy service
+definitions and drop-ins remain untouched. The future definitions use the XDG
+`fractal` config/state directories and retain legacy socket paths; the host migration
+must move state/config, provide the legacy socket symlink bridge, create the target
+log directory, and activate services. Staging rejects loaded macOS targets or active
+Linux targets, named instances, and state/config paths outside the default migration roots.
+The Python bundle helper also accepts `--stage-fractal`: it leaves legacy plists
+unchanged and invokes native staging from the installed app, never bootstrapping it.
+Use the same flag for `--backup-only` when preparing a staged bundle transaction.
+Staging backups record both present and absent target plists and the target labels'
+launchd disabled overrides. Restore removes definitions created by staging, restores
+previous definitions and returns each label to its prior enabled/disabled state,
+without bootstrapping jobs or changing legacy or unrelated services. An absent
+override means enabled by default; because launchctl has no per-label unset operation,
+restore uses an explicit `enable` for that case. Target jobs must still be unloaded
+when restoring a staging transaction.
+Normal installers retain legacy service names until cutover.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts
 the app, commands, bundle identifier and launchd services below `~/.st-instance/NAME` and never

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # JUDGE: coordination — the delegate->report loop is visible on the bus: a gbx.sup -> gbx.fix delegation and a
 # gbx.fix -> gbx.sup report. A completed fix with no worker->sup report is the signature of out-of-band /
 # sup-did-it-itself work. (The run ends on the sup's confirmation to the requester; this judge reproduces
@@ -7,7 +8,8 @@
 # PASS (exit 0): both the delegation and the report are present on the bus.
 set -uo pipefail
 ROOT="${CATALOG:-$PWD}"
-SM="${ST_ROOT:?st2 eval must export ST_ROOT}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+SM="${FRACTAL_ROOT-${ST_ROOT:?st2 eval must export ST_ROOT}}"
 SUP_ID="${SUP_ID:-gbx.sup}"; WORKER_ID="${WORKER_ID:-gbx.fix}"
 
 # Resolve an id to its on-disk bus dir, tolerating a leading team/host prefix.

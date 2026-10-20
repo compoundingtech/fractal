@@ -30,10 +30,10 @@ use std::collections::BTreeSet;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use smallclaims::fifo::{Kind, Queue};
-pub use st3_api::api::client_v0::*;
-pub use st3_api::api::client_v0::{ClientSession, CollectionSubscribe, EXACT_AGENT_SELECTOR_CAPABILITY, EventsQuery, Fence, LOCAL_PERSON_HEADER, NATIVE_PAGE_CURSOR_PREFIX, TIMELINE_PAGE_BYTE_BUDGET, acting_party, administrative_get, agent_todo_value, assistant_mission_list_cards_with};
-pub use st3_api::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
-pub use st3_api::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
+pub use st3_api_core::api::client_v0::*;
+pub use st3_api_core::api::client_v0::{ClientSession, CollectionSubscribe, EXACT_AGENT_SELECTOR_CAPABILITY, EventsQuery, Fence, LOCAL_PERSON_HEADER, NATIVE_PAGE_CURSOR_PREFIX, TIMELINE_PAGE_BYTE_BUDGET, acting_party, administrative_get, agent_todo_value, assistant_mission_list_cards_with};
+pub use st3_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
+pub use st3_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
 pub mod collection_ivm;
@@ -165,6 +165,10 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversations", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
@@ -1251,25 +1255,44 @@ async fn open_terminal_subscription(
     Ok(receiver)
 }
 
+/// A single graph cut supplies routing, session identity and the first local page.
+struct ResolvedConversation {
+    snapshot: ClientSnapshot,
+    local_position: u64,
+    managed: Option<super::ManagedSessionOwner>,
+}
+
+fn resolve_conversation(
+    state: &AppState, target: &str,
+) -> Result<(String, ResolvedConversation), ApiError> {
+    let local_position = local_latest_position(state)?;
+    let snapshot = new_client_snapshot(state);
+    let (session_id, managed) = if target.starts_with("agent/") {
+        let owner = state.store.conversation_owner_at(target, snapshot.store_index)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found(format!("agent `{target}` does not exist")))?;
+        let identity = owner.incarnation.as_deref().or(owner.runtime.as_deref())
+            .ok_or_else(|| validation("the agent has no current session"))?;
+        (client_session_id(target, identity), Some((owner.subject, owner.incarnation, owner.origin)))
+    } else {
+        let session_id = conversation_session_id(state, target)?;
+        let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+            .map_err(ApiError::internal)?;
+        (session_id, managed)
+    };
+    Ok((session_id, ResolvedConversation { snapshot, local_position, managed }))
+}
+
 /// Where a conversation is read: here, or on the host that owns its session.
 fn conversation_owner_host(
     state: &AppState,
     session: &ClientSession,
-    session_id: &str,
-    subject: Option<&str>,
+    managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Option<String>, ApiError> {
-    let index = state.store.index().map_err(ApiError::internal)?;
-    let managed = match subject {
-        Some(subject) => super::managed_session_owner_for_subject_at(
-            &state.store, index, session_id, subject,
-        ),
-        None => super::managed_session_owner_at(&state.store, index, session_id),
-    };
     let remote = managed
-        .map_err(ApiError::internal)?
-        .and_then(|(_, _, origin)| origin)
-        .filter(|origin| origin != state.store.origin())
-        .map(|origin| client_host_id(&origin));
+        .and_then(|(_, _, origin)| origin.as_deref())
+        .filter(|origin| *origin != state.store.origin())
+        .map(client_host_id);
     if let Some(owner) = &remote {
         if !acting_party(session) {
             return Err(forbidden(
@@ -1292,7 +1315,7 @@ async fn open_conversation_subscription(
     session: ClientSession,
     request: CollectionSubscribe,
     permits: ConversationAdmissionPermits,
-) -> Result<(String, Option<String>), ApiError> {
+) -> Result<(String, Option<String>, Option<ResolvedConversation>), ApiError> {
     let subscription_store = state.store.clone();
     let profile = crate::profile::current();
     let queued = profile.as_ref().map(|op| op.wall_span("conversation/owner-read-queue"));
@@ -1303,11 +1326,9 @@ async fn open_conversation_subscription(
         let _permits = permits;
         crate::performance::task("conversation/admission", || {
             let target = request.conversation.as_deref().unwrap_or_default();
-            let session_id = conversation_session_id(&state, target)?;
-            let remote = conversation_owner_host(
-                &state, &session, &session_id, target.starts_with("agent/").then_some(target),
-            )?;
-            Ok((session_id, remote))
+            let (session_id, resolved) = resolve_conversation(&state, target)?;
+            let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+            Ok((session_id, remote, Some(resolved)))
         })
     })
     .await
@@ -1416,6 +1437,7 @@ async fn conversation_open_value(
     session: &ClientSession,
     session_id: &str,
     remote: Option<&str>,
+    resolved: Option<ResolvedConversation>,
 ) -> Result<(Value, Value, Option<ConversationMark>), ApiError> {
     if remote.is_some() {
         let profile = crate::profile::current();
@@ -1433,7 +1455,7 @@ async fn conversation_open_value(
         drop(queued);
         let _entered = crate::profile::enter(profile.as_ref());
         let _open = crate::profile::span("conversation/local-open");
-        conversation_open_local_marked(&state, &session, &session_id)
+        conversation_open_local_marked(&state, &session, &session_id, resolved)
             .map(|(start, page, mark)| (start, page, Some(mark)))
     }).await.map_err(ApiError::internal)?
 }
@@ -1441,22 +1463,27 @@ async fn conversation_open_value(
 /// The first page and its replay cursor, with the mark a follower keeps for its later waits.
 fn conversation_open_local_marked(
     state: &AppState, session: &ClientSession, session_id: &str,
+    resolved: Option<ResolvedConversation>,
 ) -> Result<(Value, Value, ConversationMark), ApiError> {
-    // Local rows follow a graph position. Capture their high-water first: a row newer than
-    // the graph cut must never be excluded from both this page and its replay cursor.
-    let local_position = local_latest_position(state)?;
-    let snapshot = new_client_snapshot(state);
+    let resolved = match resolved {
+        Some(resolved) => resolved,
+        None => resolve_conversation(state, session_id)?.1,
+    };
+    let ResolvedConversation { snapshot, local_position, managed } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
-    let mark = ConversationMark::new(state, session_id)?;
+    let source = conversation_blocks::source(state, session_id, managed.as_ref());
+    let mark = ConversationMark::from_resolved(
+        session_id, snapshot.store_index, local_position, managed.as_ref(), source.as_ref().ok(),
+    );
     #[cfg(test)]
     BEFORE_CONVERSATION_PAGE.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
     let (page, source_generation, suppressed_sequence) =
-        match conversation_first_page_at_generation(state, &snapshot, session, session_id) {
+        match conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok()) {
             Ok((page, generation, _, suppressed)) => (page, generation, suppressed),
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS || error.code == "cursor-gap" => return Err(error),
             // OPEN keeps the established managed-transcript availability notice and stored
@@ -1468,6 +1495,7 @@ fn conversation_open_local_marked(
                     state, &snapshot, session, session_id.to_owned(),
                     &ClientListQuery { limit: Some(200), ..Default::default() },
                     Some(error),
+                    managed.as_ref(),
                 )?.0, 0, 0)
             }
         };
@@ -1545,6 +1573,7 @@ async fn follow_conversation_since(
     (_upgrade, mut first_read): (
         Option<opentelemetry::trace::SpanContext>, Option<tracing::Span>,
     ),
+    mut resolved: Option<ResolvedConversation>,
     mut profile: Option<crate::profile::Op>,
 ) {
     let remote = remote.as_deref();
@@ -1553,7 +1582,7 @@ async fn follow_conversation_since(
     loop {
         let mut opened = conversation_profile_work(profile.as_ref(), "conversation/first-page", first_frame_work(
             first_read.take(),
-            conversation_open_value(&state, &session, &session_id, remote),
+            conversation_open_value(&state, &session, &session_id, remote, resolved.take()),
         )).await;
         if std::mem::take(&mut first_open) && remote.is_some()
             && matches!(&opened, Err(error) if error.code == "remote-unavailable")
@@ -1568,7 +1597,7 @@ async fn follow_conversation_since(
                 // Once admitted, preserve the owner's normal read deadline: a slow
                 // but successful page must not be canceled by the retry-start window.
                 opened = conversation_profile_work(profile.as_ref(), "conversation/first-page",
-                    conversation_open_value(&state, &session, &session_id, remote)).await;
+                    conversation_open_value(&state, &session, &session_id, remote, None)).await;
             }
         }
         let (start, page, mut mark) = match opened {
@@ -1771,7 +1800,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>> + Send,
     A: Fn(AppState, ClientSession, CollectionSubscribe, ConversationAdmissionPermits) -> Admission + Clone + Send + 'static,
-    Admission: Future<Output = Result<(String, Option<String>), ApiError>> + Send + 'static,
+    Admission: Future<Output = Result<(String, Option<String>, Option<ResolvedConversation>), ApiError>> + Send + 'static,
 {
     // Subscribe before the first snapshot, so a commit while building it wakes
     // the next loop and is reflected in a following change frame.
@@ -1930,8 +1959,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                                 drop(admission);
                                 match conversation_profile_work(profile.as_ref(), "conversation/owner-resolution",
                                     admit(state.clone(), session.clone(), request, permits)).await {
-                                    Ok((session_id, remote)) => {
-                                        follow_conversation_since(state, session, id, generation, session_id, remote, outbox, Some(opened), queue, (upgrade, first_read), profile).await;
+                                    Ok((session_id, remote, resolved)) => {
+                                        follow_conversation_since(state, session, id, generation, session_id, remote, outbox, Some(opened), queue, (upgrade, first_read), resolved, profile).await;
                                     }
                                     Err(error) => {
                                         let frame = json!({"kind":"error", "id":id, "collection":"conversation", "code":error.code, "message":error.message});
@@ -4227,18 +4256,20 @@ fn conversation_first_page_at_generation(
     snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
+    managed: Option<&super::ManagedSessionOwner>,
+    source: Option<&crate::external_sessions::ExternalSession>,
 ) -> Result<(Value, u64, bool, u64), ApiError> {
     let query = ClientListQuery { limit: Some(200), ..Default::default() };
-    match conversation_blocks::source(state, session_id) {
+    match source {
         // Replay selects only its newest bounded projection, including for OpenCode.
-        Ok(source) => {
+        Some(source) => {
             // Native replay bypasses timeline_first_page after the incremental-fold cutover.
             #[cfg(test)]
             if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
                 *rebuilds.entry(session_id.to_owned()).or_default() += 1;
             }
             let (page, generation, suppressed_sequence) = native_slice_page_at_generation(
-                state, snapshot, session, session_id, &query, &source,
+                state, snapshot, session, session_id, &query, source, managed,
             )?;
             // OpenCode's generation moves on every append, so it cannot fence rewrites
             // without turning each append into a full reload.
@@ -4249,7 +4280,9 @@ fn conversation_first_page_at_generation(
             };
             Ok((page.0, fence, true, suppressed_sequence))
         }
-        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0, false, 0)),
+        None => crate::performance::task("conversation/first-page", || {
+            Ok((timeline_first_page(state, snapshot, session, session_id.to_owned(), &query, None, managed)?.0, 0, false, 0))
+        }),
     }
 }
 
@@ -4260,8 +4293,11 @@ fn conversation_read_now_unbounded(
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
     let snapshot = new_client_snapshot(state);
+    let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
+        .map_err(ApiError::internal)?;
+    let source = conversation_blocks::source(state, session_id, managed.as_ref());
     let (page, source_generation, native_replay, suppressed_sequence) =
-        conversation_first_page_at_generation(state, &snapshot, session, session_id)?;
+        conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok())?;
     let all = page["items"]
         .as_array()
         .ok_or_else(|| ApiError::internal("the timeline has no items"))?;
@@ -4513,37 +4549,33 @@ impl ConversationMark {
     }
 
     fn new_unbounded(state: &AppState, session_id: &str) -> Result<Self, ApiError> {
+        let (_, resolved) = resolve_conversation(state, session_id)?;
+        let source = conversation_blocks::source(state, session_id, resolved.managed.as_ref());
+        Ok(Self::from_resolved(
+            session_id, resolved.snapshot.store_index, resolved.local_position,
+            resolved.managed.as_ref(), source.as_ref().ok(),
+        ))
+    }
+
+    fn from_resolved(
+        session_id: &str, store_index: u64, local_position: u64,
+        managed: Option<&super::ManagedSessionOwner>,
+        source: Option<&crate::external_sessions::ExternalSession>,
+    ) -> Self {
+        let _ = session_id;
         #[cfg(test)]
         if let Ok(mut resolved) = conversation_marks_resolved().lock() {
             *resolved.entry(session_id.to_owned()).or_default() += 1;
         }
-        let index = state.store.index().map_err(ApiError::internal)?;
-        let managed = super::managed_session_owner_at(&state.store, index, session_id)
-            .map_err(ApiError::internal)?;
-        let (owner, incarnation) = managed
-            .map(|(owner, incarnation, _)| (Some(owner), incarnation))
-            .unwrap_or_default();
-        // Resolve the transcript once: finding it walks the harness's session directories.
-        let transcript = match (&owner, &incarnation) {
-            (Some(owner), Some(incarnation)) => managed_transcript(state, owner, incarnation)?
-                .and_then(|managed| managed.transcript.ok()),
-            _ => crate::external_sessions::find(state.native_session_home.as_deref(), session_id)
-                .map_err(ApiError::internal)?
-                .or(crate::subagent_sessions::resolve_child(
-                    state.native_session_home.as_deref(),
-                    session_id,
-                )
-                .map_err(ApiError::internal)?),
-        }
-        .map(|external| external.transcript);
-        Ok(Self {
+        let transcript = source.map(|source| source.transcript.clone());
+        Self {
             transcript_seen: transcript_seen(transcript.as_deref()),
             transcript,
             resolved_at: std::time::Instant::now(),
-            owner,
-            store_index: index,
-            local_position: local_latest_position(state)?,
-        })
+            owner: managed.map(|(owner, _, _)| owner.clone()),
+            store_index,
+            local_position,
+        }
     }
 
     /// Bring a kept mark up to now without finding its owner or transcript again: the same as a
@@ -6383,6 +6415,8 @@ async fn terminal_stream_socket(
     mut first_frame: Option<FirstFrame>,
 ) {
     let subject = terminal_subject(&id);
+    let mut graph = state.store.subscribe_runtime_authority(&subject);
+    let mut broad_graph = state.event_notify.subscribe();
     let live_store = state.store.clone();
     let live_subject = subject.clone();
     let live_incarnation = expected_incarnation.clone();
@@ -6403,7 +6437,6 @@ async fn terminal_stream_socket(
         }
     };
     let terminal_id = client_detail_id("terminal", &id);
-    let mut graph = state.event_notify.subscribe();
     let mut screens =
         terminal_view::subscribe(&state.pty_root, &live.runtime_id, &live.incarnation_id);
     let first = tokio::time::Instant::now() + TERMINAL_FIRST_SCREEN_TIMEOUT;
@@ -6445,6 +6478,14 @@ async fn terminal_stream_socket(
                     }
                 }
                 changed = graph.changed(), if fence_check_at.is_none() => {
+                    if changed.is_ok() {
+                        let earliest = last_fence_check + TERMINAL_FENCE_CHECK_INTERVAL;
+                        fence_check_at = Some(earliest.max(tokio::time::Instant::now()));
+                    }
+                    None
+                }
+                changed = broad_graph.changed(), if fence_check_at.is_none()
+                    && state.store.runtime_authority_coverage_failed() => {
                     if changed.is_ok() {
                         let earliest = last_fence_check + TERMINAL_FENCE_CHECK_INTERVAL;
                         fence_check_at = Some(earliest.max(tokio::time::Instant::now()));
@@ -8921,7 +8962,7 @@ thread_local! {
 pub fn conversation_open_local(
     state: &AppState, session: &ClientSession, session_id: &str,
 ) -> Result<(Value, Value), ApiError> {
-    conversation_open_local_marked(state, session, session_id).map(|(start, page, _)| (start, page))
+    conversation_open_local_marked(state, session, session_id, None).map(|(start, page, _)| (start, page))
 }
 
 /// Follow a conversation with no subscription time. The collections socket calls
@@ -8941,7 +8982,7 @@ pub async fn follow_conversation(
     ),
 ) {
     follow_conversation_since(
-        state, session, id, generation, session_id, remote, outbox, None, queue, first_frame, None,
+        state, session, id, generation, session_id, remote, outbox, None, queue, first_frame, None, None,
     )
     .await;
 }
@@ -11514,11 +11555,9 @@ mission "differential" state="ready" {
                                         let _ = tokio::runtime::Handle::current()
                                             .block_on(held.wait_for(|released| *released));
                                         let target = request.conversation.as_deref().unwrap_or_default();
-                                        let session_id = conversation_session_id(&state, target)?;
-                                        let remote = conversation_owner_host(
-                                            &state, &session, &session_id, target.starts_with("agent/").then_some(target),
-                                        )?;
-                                        Ok((session_id, remote))
+                                        let (session_id, resolved) = resolve_conversation(&state, target)?;
+                                        let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+                                        Ok((session_id, remote, Some(resolved)))
                                     }).await.unwrap()
                                 }
                             },
@@ -14678,6 +14717,82 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn messages_paging_discovery_does_not_negotiate_the_feature() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for session in [
+            ClientSession::local(None).unwrap(),
+            ClientSession::local(Some("person/alex")).unwrap(),
+            ClientSession::for_tests("client/test", "person/alex", "unix"),
+            ClientSession::for_tests_scoped("client/test", "person/alex", &["read.projections"]),
+            ClientSession::pairing(),
+        ] {
+            assert!(!session.messages_paging);
+            let capability = capabilities(&state, &session).into_iter()
+                .find(|capability| capability["id"] == "messages-paging").unwrap();
+            assert_eq!(capability["version"], 2);
+            assert_eq!(capability["state"], if session.allows("read.projections") {
+                "granted"
+            } else {
+                "ungranted"
+            });
+            assert!(!session.messages_paging);
+        }
+    }
+
+    #[test]
+    fn messages_paging_requires_the_exact_request_feature_token() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            (None, false),
+            (Some(""), false),
+            (Some("conversation-blocks.v1"), false),
+            (Some("messages-paging"), false),
+            (Some("messages-paging.v1"), false),
+            (Some("messages-paging.v20"), false),
+            (Some("prefix-messages-paging.v2"), false),
+            (Some("messages-paging.v2.extra"), false),
+            (Some("Messages-Paging.v2"), false),
+            (Some("messages-paging.v2"), true),
+            (Some("custom-subjects.v1, messages-paging.v2 , conversation-blocks.v1"), true),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/messages");
+            if let Some(features) = features {
+                request = request.header("x-st3-features", features);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            assert_eq!(authenticate(&state, &request, "unix").unwrap().messages_paging,
+                expected, "{features:?}");
+        }
+    }
+
+    #[test]
+    fn messages_paging_repeated_feature_headers_use_only_the_first_value() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (first, second, expected) in [
+            ("conversation-blocks.v1", "messages-paging.v2", false),
+            ("", "messages-paging.v2", false),
+            ("messages-paging.v20", "messages-paging.v2", false),
+            ("messages-paging.v2", "conversation-blocks.v1", true),
+            ("custom-subjects.v1, messages-paging.v2", "", true),
+        ] {
+            let mut request = Request::builder()
+                .uri("/v1/client/messages")
+                .body(Body::empty()).unwrap();
+            request.headers_mut().append("x-st3-features", first.parse().unwrap());
+            request.headers_mut().append("x-st3-features", second.parse().unwrap());
+            assert_eq!(request.headers().get_all("x-st3-features").iter().count(), 2);
+            assert_eq!(
+                authenticate(&state, &request, "unix").unwrap().messages_paging,
+                expected,
+                "only the first feature header negotiates: {first:?}, {second:?}",
+            );
+        }
+    }
+
+    #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -14721,6 +14836,22 @@ subscription "watch/source" {
                 .actor,
             "client/test-session"
         );
+        let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+        assert!(!session.messages_paging);
+        assert!(!revalidate_session(&state, &session).unwrap().messages_paging);
+        let mut negotiated_request = Request::builder()
+            .uri("/v1/client/collections/stream")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .header("x-st3-features", "conversation-blocks.v1, messages-paging.v2")
+            .body(Body::empty())
+            .unwrap();
+        let session = authenticate(&state, &negotiated_request, "fabric-loopback").unwrap();
+        assert!(session.messages_paging);
+        let refreshed = revalidate_session(&state, &session).unwrap();
+        assert!(refreshed.messages_paging);
+        assert!(refreshed.conversation_blocks);
+        negotiated_request.headers_mut().remove("x-st3-features");
+        assert!(!authenticate(&state, &negotiated_request, "fabric-loopback").unwrap().messages_paging);
         state
             .store
             .append_claim(&ClaimInput {
@@ -15587,6 +15718,136 @@ mission "example/zero-run" state="ready" {
             session_file.body["fields"]["discovery_revision"],
             external.revision
         );
+    }
+
+    /// Per-PR contract for the Codex `import` boot canary (scripts/st3-boot-canaries/run,
+    /// `prepare_codex_import` and `prove_codex_import`), in its topology: discovery reaches the
+    /// saved session through a `~/.codex` symlink to the originating home, and a second, stale
+    /// home holds a copy of the same native ID (the canary launches the daemon with
+    /// `CODEX_HOME` set to it). The imported seat must select exactly that ID and pin the
+    /// physical originating home, so a launch overrides any inherited `CODEX_HOME` and the
+    /// provider resolves the origin rollout, never the stale copy. The launch environment
+    /// reaching the spawned process, and the driver's per-incarnation binding claim, stay with
+    /// the canary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn imported_codex_seat_binds_selected_id_and_pinned_codex_home() {
+        let native = "019fae17-c215-7882-a4d9-5f247168ffce";
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let origin = home.join(".codex-origin");
+        let stale = home.join(".codex-stale");
+        for codex_home in [&origin, &stale] {
+            let directory = codex_home.join("sessions/2026/09/21");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join(format!("rollout-2026-09-21T08-00-00-{native}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({"type": "session_meta", "payload": {
+                        "id": native, "cwd": workspace, "source": "test"}})
+                ),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(&origin, home.join(".codex")).unwrap();
+        let origin = std::fs::canonicalize(&origin).unwrap();
+        let stale = std::fs::canonicalize(&stale).unwrap();
+
+        let listed = crate::external_sessions::discover_fresh(Some(&home), true)
+            .unwrap()
+            .sessions
+            .into_iter()
+            .filter(|item| item.native_id == native)
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), 1, "discovery lists the saved session once");
+        let external = listed.into_iter().next().unwrap();
+
+        let mut state = test_state_named(root.path(), "import-canary");
+        state.native_session_home = Some(home.clone());
+        let session = ClientSession::local(Some("person/eval")).unwrap();
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/import-canary".into(),
+            action_type: "session.import".into(),
+            idempotency_key: "session-import-canary-0001".into(),
+            fence: Fence {
+                snapshot_id: new_client_snapshot(&state).id,
+                subject_revisions: BTreeMap::from([(
+                    external.id.clone(),
+                    external.revision.clone(),
+                )]),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: None,
+                runtime_desired_revision: None,
+                terminal_sequence: None,
+                preview_token: None,
+            },
+            parameters: json!({"target_id": external.id}),
+        };
+        let response = action(
+            State(state.clone()),
+            Extension(new_client_snapshot(&state)),
+            Extension(session),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        let subject = response.0["affected_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|id| id.starts_with("agent/import/"))
+            .expect("the import declares an agent/import/ seat")
+            .to_owned();
+
+        let imported = state
+            .store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|desired| desired.subject == subject)
+            .unwrap();
+        let member = imported.member.as_ref().unwrap();
+        // The driver resumes exactly the selected ID through the strict handshake, never through an
+        // authored `resume` argv that would bypass it.
+        assert_eq!(member.environment[crate::suspension::RESUME_ENV], native);
+        let crate::model::LaunchSpec::Argv(argv) = &member.launch else {
+            panic!("the imported seat needs a typed native launch");
+        };
+        assert!(!argv.iter().any(|arg| arg == "resume" || arg == native), "{argv:?}");
+        // The pinned home is the physical originating home: not the discovery symlink, and not the
+        // stale home a launch would otherwise inherit.
+        let pinned = Path::new(&member.environment["CODEX_HOME"]);
+        assert_eq!(pinned, origin);
+        assert_ne!(pinned, home.join(".codex"));
+        assert_ne!(pinned, stale);
+        // Under the pinned home, the selected ID resolves to the origin rollout only.
+        let selected =
+            st_drivers::codex_app_server::latest_codex_transcript_in(pinned, native)
+                .unwrap()
+                .expect("the pinned home holds the selected session");
+        assert!(selected.starts_with(&origin), "{}", selected.display());
+
+        let session_file = state
+            .store
+            .latest_claim(&subject, Some("harness.session-file"))
+            .unwrap()
+            .expect("the selected native ID is durable graph state");
+        assert_eq!(session_file.body["fields"]["session_id"], native);
+        assert_eq!(session_file.body["fields"]["harness"], "codex");
+        assert_eq!(session_file.body["fields"]["agent"], subject.as_str());
+        let bound = std::fs::canonicalize(
+            session_file.body["fields"]["path"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert!(bound.starts_with(&origin), "{}", bound.display());
     }
 
     #[test]
@@ -16516,6 +16777,38 @@ mission "example/zero-run" state="ready" {
     }
 
     #[test]
+    fn conversation_open_keeps_admitted_owner_and_frontier_across_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let observe = |incarnation: &str| {
+            state.store.append_claim(&ClaimInput {
+                subject: "agent/ada".into(), kind: "runtime.observed".into(),
+                actor: Some("agent/ada".into()),
+                fields: serde_json::from_value(json!({
+                    "status":"running", "runtime_id":"runtime", "incarnation_id":incarnation,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        observe("first");
+        let (session_id, resolved) = resolve_conversation(&state, "agent/ada").unwrap();
+        let admitted = resolved.snapshot.store_index;
+        observe("second");
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let (start, page, mark) = conversation_open_local_marked(
+            &state, &session, &session_id, Some(resolved),
+        ).unwrap();
+        assert_eq!(mark.owner.as_deref(), Some("agent/ada"));
+        assert_eq!(mark.store_index, admitted);
+        assert_eq!(page["session_id"], session_id);
+        let cursor = conversation_position(
+            &state, &session_id, start["next_cursor"].as_str().unwrap(),
+        ).unwrap();
+        assert_eq!(cursor.store_index, admitted);
+        assert_ne!(conversation_session_id(&state, "agent/ada").unwrap(), session_id);
+    }
+
+    #[test]
     fn exact_conversation_lookup_preserves_root_and_partial_identity_fields() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16596,10 +16889,41 @@ mission "example/zero-run" state="ready" {
             .unwrap();
         let session_id = managed_session_id(agent, incarnation);
         assert_eq!(conversation_session_id(&owner, agent).unwrap(), session_id);
-        let before_alias = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
-        assert_eq!(conversation_session_id(&owner, agent).unwrap(), session_id);
-        let alias_queries = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before_alias;
-        assert!(alias_queries <= 3, "a warm agent alias must not reduce fleet history: {alias_queries}");
+        let frontier = owner.store.index().unwrap();
+        let before_subject = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+        let subject_owner = owner.store.conversation_owner_at(agent, frontier).unwrap().unwrap();
+        let subject_queries = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before_subject;
+        let canonical_owner = super::super::managed_session_owner_at(&owner.store, frontier, &session_id).unwrap();
+        assert_eq!(canonical_owner, Some((
+            subject_owner.subject, subject_owner.incarnation, subject_owner.origin,
+        )));
+        // The alias may do no more SQL than the direct subject read, even after unrelated
+        // agent history advances the frontier and invalidates a warm fleet-map cache.
+        for grow_fleet in [false, true] {
+            if grow_fleet {
+                for subject in ["agent/tester", "agent/reviewer", "agent/operator", "agent/alex"] {
+                    for _ in 0..32 {
+                        owner.store.append_claim(&ClaimInput {
+                            subject: subject.into(), kind: "runtime.observed".into(),
+                            actor: Some(subject.into()),
+                            fields: BTreeMap::from([
+                                ("status".into(), json!("running")),
+                                ("runtime_id".into(), json!(subject)),
+                            ]),
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }).unwrap();
+                    }
+                }
+            }
+            let before_alias = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+            assert_eq!(conversation_session_id(&owner, agent).unwrap(), session_id);
+            let alias_queries = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before_alias;
+            assert!(alias_queries <= subject_queries,
+                "an agent alias must stay within one subject read: {alias_queries} > {subject_queries}");
+            assert_eq!(super::super::managed_session_owner_for_subject_at(
+                &owner.store, owner.store.index().unwrap(), &session_id, agent,
+            ).unwrap(), canonical_owner);
+        }
         let session = ClientSession::local(Some("person/example")).unwrap();
         let origin = super::super::managed_session_owner_at(
             &follower.store,
@@ -17082,7 +17406,21 @@ mission "example/zero-run" state="ready" {
                 .await.unwrap().0;
             let message_id = result["affected_ids"][0].as_str().unwrap();
             let snapshot = new_client_snapshot(&state);
-            let pending = native_timeline_page(&state, &snapshot, &session, &session_id, &ClientListQuery::default(), Vec::new()).unwrap().0;
+            let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
+            // Advance runtime ownership after admission. Echo suppression on the first page
+            // and every keyset continuation must keep the old snapshot's session fence.
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+                fields: serde_json::from_value(json!({
+                    "status":"running", "runtime_id":"reviewer", "incarnation_id":"reviewer",
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            assert!(managed.is_some());
+            assert!(super::super::managed_session_owner_at(
+                &state.store, state.store.index().unwrap(), &session_id,
+            ).unwrap().is_none(), "the live session has changed, unlike the admitted fence");
+            let pending = native_timeline_page(&state, &snapshot, &session, &session_id, &ClientListQuery::default(), Vec::new(), managed.as_ref()).unwrap().0;
             let graph = pending["items"].as_array().unwrap().iter().find(|item| item["type"] == "message").unwrap().clone();
             assert_eq!(graph["body"]["message_id"], message_id);
             let stamp = graph["timestamp"].as_str().unwrap();
@@ -17113,7 +17451,7 @@ mission "example/zero-run" state="ready" {
                 cwd: None, title: None, started_at_unix_ms: 0, updated_at_unix_ms: 0, process: None,
             };
             let native = conversation_blocks::read(&source, &session, &session_id).unwrap();
-            let reread = native_timeline_page(&state, &snapshot, &session, &session_id, &ClientListQuery::default(), native).unwrap().0;
+            let reread = native_timeline_page(&state, &snapshot, &session, &session_id, &ClientListQuery::default(), native, managed.as_ref()).unwrap().0;
             assert_eq!(reread["items"], pending["items"], "{driver:?}: native echo duplicated the graph send");
             assert_eq!(reread["items"][0], graph);
             // Small keyset pages and negotiated blocks must use the same canonical rows.
@@ -17134,8 +17472,9 @@ mission "example/zero-run" state="ready" {
             }
             // A send can land after capture while its native echo is already readable.
             // Hide only the echo; the next graph delta supplies the canonical rows.
+            let admitted = super::super::managed_session_owner_at(&state.store, snapshot_before_send.store_index, &session_id).unwrap();
             let (raced, _, native_position) = native_slice_page_at_generation(
-                &state, &snapshot_before_send, &session, &session_id, &ClientListQuery::default(), &source,
+                &state, &snapshot_before_send, &session, &session_id, &ClientListQuery::default(), &source, admitted.as_ref(),
             ).unwrap();
             let raced = raced.0;
             assert!(raced["items"].as_array().unwrap().is_empty(), "{driver:?}: {raced:#}");
@@ -17236,7 +17575,8 @@ mission "example/zero-run" state="ready" {
         let snapshot = new_client_snapshot(&state);
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let native = conversation_blocks::read(&source, &session, &session_id).unwrap();
-        let messages = native_session_messages(&state, &snapshot, &session_id).unwrap();
+        let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
+        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
         assert_eq!(native[0]["sequence"], messages[1]["sequence"]);
         assert_eq!(native[0]["timestamp"], messages[1]["timestamp"]);
         let expected = vec![messages[0].clone(), native[1].clone(),
@@ -17710,9 +18050,12 @@ mission "example/zero-run" state="ready" {
         let source = page_test_source(&path, &session_id);
         let snapshot = new_client_snapshot(&state);
         let session = ClientSession::local(Some("person/alex")).unwrap();
+        let managed = super::super::managed_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).unwrap();
         let (newest, _, suppressed) = native_slice_page_at_generation(
             &state, &snapshot, &session, &session_id,
-            &ClientListQuery { limit: Some(200), ..Default::default() }, &source,
+            &ClientListQuery { limit: Some(200), ..Default::default() }, &source, managed.as_ref(),
         ).unwrap();
         let newest = newest.0;
         assert!(!newest["page"]["has_more"].as_bool().unwrap());
@@ -17939,7 +18282,12 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let (state, session_id) = hidden_echo_prefix_fixture(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        conversation_blocks::source(&state, &session_id).expect("the managed transcript is bound");
+        let snapshot = new_client_snapshot(&state);
+        let managed = super::super::managed_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).unwrap();
+        conversation_blocks::source(&state, &session_id, managed.as_ref())
+            .expect("the managed transcript is bound");
         // OPEN keeps the established stored-timeline fallback, with no native generation.
         let (start, opened) = conversation_open_local(&state, &session, &session_id).unwrap();
         assert!(opened["items"].as_array().unwrap().iter().all(|item|
@@ -18461,6 +18809,7 @@ mission "example/zero-run" state="ready" {
                     &state, &new_client_snapshot(&state), &session, session_id.clone(),
                     &ClientListQuery { limit: Some(200), ..Default::default() },
                     Some(native_error),
+                    super::super::managed_session_owner_at(&state.store, state.store.index().unwrap(), &session_id).unwrap().as_ref(),
                 ).unwrap().0;
                 assert!(!fallback["items"].as_array().unwrap().iter()
                     .any(|item| item["body"]["text"] == "Exact managed transcript"
@@ -20881,6 +21230,8 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
+            messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
         };
         let mut remote_request = request.clone();

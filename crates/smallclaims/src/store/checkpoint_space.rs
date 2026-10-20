@@ -136,6 +136,21 @@ fn remove_if_present(path: &Path, failures: &mut Vec<String>) {
     }
 }
 
+/// Another proof holds the directory lock. It is released when that proof finishes, so a caller
+/// that can wait, such as a dry-run plan, may try again.
+#[derive(Debug)]
+pub struct CheckpointProofBusy {
+    pub dir: PathBuf,
+}
+
+impl std::fmt::Display for CheckpointProofBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "another checkpoint proof owns {}", self.dir.display())
+    }
+}
+
+impl std::error::Error for CheckpointProofBusy {}
+
 /// One proof owns the directory lock until its copy and every sidecar have been removed. A
 /// surviving `.owner` file names an orphan; a following process may sweep it only while holding
 /// the lock. An unmarked legacy proof file is refused rather than assumed to be abandoned.
@@ -154,7 +169,11 @@ impl ProofOwnership {
             .open(dir.join("proof.lock"))?;
         // SAFETY: the descriptor stays open for the ownership lifetime.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error())
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(CheckpointProofBusy { dir: dir.to_owned() }.into());
+            }
+            return Err(error)
                 .with_context(|| format!("another checkpoint proof owns {}", dir.display()));
         }
         let ownership = Self {
@@ -376,6 +395,7 @@ pub(super) struct SpaceGuard {
     granule: u128,
     temp_granule: u128,
     copy_bound: u128,
+    clone_cap: u128,
     vacuum_cap: u128,
     vacuum_tree_pages: u128,
     vacuum_pointer_pages: u128,
@@ -443,6 +463,26 @@ impl SpaceGuard {
         };
         let clone_copy = clone_bytes(live_length, wal_length, scratch_fs.granule)?;
         let copy = snapshot_logical.max(clone_copy);
+        // The live writer keeps committing between admission and the clone. As with VACUUM, the
+        // raw clone's hard cap allows the growth the WAL allowance already permits the writer:
+        // its WAL by the allowance, its store file by the pages that WAL can carry. The extra
+        // comes from the guarded remainder, which `check` enforces against the real device.
+        let clone_cap = clone_bytes(
+            live_length
+                .max(snapshot_logical)
+                .checked_add(
+                    vacuum_wal_pages
+                        .checked_mul(page_size)
+                        .context("clone WAL growth bytes overflow")?,
+                )
+                .context("clone store cap overflow")?,
+            wal_length
+                .max(initial_wal_allocated)
+                .checked_add(wal_allowance)
+                .context("clone WAL cap overflow")?,
+            scratch_fs.granule,
+        )?
+        .max(copy);
         let main_pages = live_length
             .checked_add(page_size - 1)
             .context("main page count overflow")?
@@ -597,6 +637,7 @@ impl SpaceGuard {
             granule: scratch_fs.granule,
             temp_granule: temp_fs.granule,
             copy_bound: copy,
+            clone_cap,
             vacuum_cap,
             vacuum_tree_pages,
             vacuum_pointer_pages,
@@ -705,6 +746,16 @@ impl SpaceGuard {
         result
     }
 
+    /// Hold the raw clone to the bytes seen at admission, as before the clone cap existed.
+    #[cfg(test)]
+    pub(super) fn hold_clone_to_admitted_copy(&mut self) {
+        assert!(
+            self.clone_cap > self.copy_bound,
+            "admission allows the writer's WAL growth"
+        );
+        self.clone_cap = self.copy_bound;
+    }
+
     pub(super) fn check_clone_source(&self) -> Result<()> {
         let main = u128::from(fs::metadata(&self.live)?.len());
         let wal = match fs::metadata(&self.live_wal) {
@@ -712,10 +763,12 @@ impl SpaceGuard {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error.into()),
         };
-        if clone_bytes(main, wal, self.granule)? > self.copy_bound {
+        if clone_bytes(main, wal, self.granule)? > self.clone_cap {
             bail!(
-                "checkpoint raw clone exceeds admitted copy bound: main={main} wal={wal} copy_bound={}",
-                self.copy_bound
+                "checkpoint raw clone exceeds admitted clone cap: main={main} wal={wal} copy_bound={} clone_cap={} WAL_allowance={}",
+                self.copy_bound,
+                self.clone_cap,
+                self.wal_allowance
             );
         }
         self.check_now()
@@ -758,10 +811,11 @@ impl SpaceGuard {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error.into()),
         };
-        if clone_bytes(main_len, wal_len, self.granule)? > self.copy_bound {
+        if clone_bytes(main_len, wal_len, self.granule)? > self.clone_cap {
             bail!(
-                "checkpoint cloned files exceed admission: main={main_len} wal={wal_len} copy_bound={}",
-                self.copy_bound
+                "checkpoint cloned files exceed admission: main={main_len} wal={wal_len} copy_bound={} clone_cap={}",
+                self.copy_bound,
+                self.clone_cap
             );
         }
         self.check_now()
@@ -1079,6 +1133,7 @@ mod tests {
             granule: 4096,
             temp_granule: 4096,
             copy_bound: u128::MAX,
+            clone_cap: u128::MAX,
             vacuum_cap: u128::MAX,
             vacuum_tree_pages: 0,
             vacuum_pointer_pages: 0,
@@ -1135,6 +1190,7 @@ mod tests {
             granule: 4096,
             temp_granule: 4096,
             copy_bound: u128::MAX,
+            clone_cap: u128::MAX,
             vacuum_cap: u128::MAX,
             vacuum_tree_pages: 0,
             vacuum_pointer_pages: 0,
@@ -1183,6 +1239,7 @@ mod tests {
             granule: 4096,
             temp_granule: 4096,
             copy_bound: u128::MAX,
+            clone_cap: u128::MAX,
             vacuum_cap: u128::MAX,
             vacuum_tree_pages: 0,
             vacuum_pointer_pages: 0,

@@ -92,6 +92,7 @@ mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
 mod launch_cli;
+mod migrate_cli;
 mod replication_cli;
 mod terminals_cli;
 mod uninstall_cli;
@@ -309,8 +310,18 @@ enum Command {
         #[command(subcommand)]
         command: RepairCommand,
     },
+    /// Maintain an existing store offline, without contacting the daemon.
+    Store {
+        #[command(subcommand)]
+        command: StoreCommand,
+    },
     /// Remove st3 from this machine: leave its fleet, then its services, state, and settings.
     Uninstall(UninstallArgs),
+    /// Cut over this host from legacy directories and services to pre-staged Fractal services.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
     /// Join machines into a fleet: create, invite, join, and inspect members.
     Fleet {
         #[command(subcommand)]
@@ -1915,6 +1926,9 @@ struct AssistantGrantTerms {
     #[arg(long, value_parser = parse_assistant_grant_expiry)]
     expires_in: Option<u64>,
     /// One exact assistant scope; repeat for each scope. Nothing is granted implicitly.
+    /// Add write.assistant.answers to answer supported owner alerts immediately;
+    /// read.assistant.attention only permits reads. write.assistant.messages permits
+    /// messages to any existing agent, never a person.
     #[arg(long = "scope", value_parser = parse_assistant_scope)]
     scopes: Vec<AssistantScope>,
     /// Consent that every assistant read is disclosed to OpenAI.
@@ -1936,7 +1950,7 @@ enum AssistantGrantCommand {
         grant: String,
         #[command(flatten)]
         terms: AssistantGrantTerms,
-        /// Exact agent IDs permitted as low-risk assistant message recipients.
+        /// Stored recipient metadata; does not restrict sends to existing agents.
         #[arg(long = "allow-recipient")]
         recipients: Vec<String>,
     },
@@ -2076,11 +2090,58 @@ enum RepairCommand {
 }
 
 #[derive(Subcommand)]
+enum MigrateCommand {
+    /// Migrate the default host after its Fractal services have been staged disabled.
+    Host(migrate_cli::HostArgs),
+}
+
+#[cfg(test)]
+mod host_migration_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_host_cutover_modes_and_rejects_conflicting_modes() {
+        for flags in [vec![], vec!["--dry-run"], vec!["--rollback"]] {
+            let cli = Cli::try_parse_from(["st", "migrate", "host"].into_iter().chain(flags)).unwrap();
+            assert!(matches!(cli.command, Command::Migrate { command: MigrateCommand::Host(_) }));
+        }
+        assert!(Cli::try_parse_from(["st", "migrate", "host", "--dry-run", "--rollback"]).is_err());
+    }
+
+    #[test]
+    fn service_staging_is_explicit_and_normal_install_remains_the_default() {
+        for (args, expected) in [
+            (vec!["st", "service", "install"], false),
+            (vec!["st", "service", "install", "--stage-fractal"], true),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Service { command: ServiceCommand::Install { stage_fractal, .. } } = cli.command else {
+                panic!("expected service install");
+            };
+            assert_eq!(stage_fractal, expected);
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum StoreCommand {
+    /// Build and verify mandatory owner indexes offline; stop all store writers first.
+    PrepareIndexes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServiceCommand {
     /// Install and start the st user services for this machine.
     Install {
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Install future Fractal definitions disabled without starting or loading services.
+        #[arg(long)]
+        stage_fractal: bool,
     },
     /// Show whether the daemon and replication services are installed and running.
     Status,
@@ -4771,6 +4832,17 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Setup(args) = cli.command {
         return crate::setup::run(args).await.map(|_| ());
     }
+    // Staging must bypass normal service-family conflict checks and all install
+    // initialization: the legacy daemon and definitions intentionally remain live.
+    if let Command::Service {
+        command: ServiceCommand::Install { config, stage_fractal: true },
+    } = &cli.command
+    {
+        return st3::service::stage_fractal(
+            Config::load_unvalidated(config.as_deref())?,
+            config.as_deref(),
+        );
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -4831,6 +4903,11 @@ async fn run(cli: Cli) -> Result<()> {
     // Evidence is portable: repository objects and a caller trust list suffice.
     if let Command::Evidence(args) = cli.command {
         return st3::evidence::cli::run(args);
+    }
+    if let Command::Store {
+        command: StoreCommand::PrepareIndexes { ref store },
+    } = cli.command {
+        return st3::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
@@ -5001,6 +5078,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Doctor(args) => run_doctor(&immediate, args, cli.json, &unknown_config_keys).await,
         Command::Recorder { command } => run_recorder(command, &config, cli.json),
         Command::Repair { command } => run_repair(&client, command, cli.json).await,
+        Command::Store {
+            command: StoreCommand::PrepareIndexes { store },
+        } => st3::owner_indexes::prepare(&store, &mut cli_output::stdout()),
         Command::Backup { command } => match command {
             BackupCommand::Create {
                 file,
@@ -5052,6 +5132,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Uninstall(args) => run_uninstall(&endpoint, args).await,
+        Command::Migrate { command: MigrateCommand::Host(args) } => {
+            migrate_cli::run(&endpoint, args, cli.json).await
+        }
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
@@ -6108,6 +6191,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
             );
             startup.serving();
+            // Index population must not compete with either API's first bind.
+            tokio::spawn(st3::maintenance::run_client_message_selectors(
+                Arc::downgrade(&store), notify.clone(), event_notify.clone(),
+            ));
             eprintln!("st: local API listening at {}", config.socket.display());
             eprintln!(
                 "st: paired client gateway listening at {}",
@@ -10611,7 +10698,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
 
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
     match command {
-        ServiceCommand::Install { config } => {
+        ServiceCommand::Install { config, stage_fractal } => {
+            if stage_fractal {
+                return st3::service::stage_fractal(
+                    Config::load_unvalidated(config.as_deref())?,
+                    config.as_deref(),
+                );
+            }
             st3::service::install_from_config_path(
                 Config::load_with_fleet(config.as_deref())?,
                 config.as_deref(),
@@ -12825,6 +12918,18 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
             "Person answer: {typed}: {} ({}, {})",
             response.summary, response.respondent, response.ask
         );
+        if let Some(sender_class) = &response.sender_class {
+            let _ = writeln!(output, "  Sender class: {sender_class}");
+        }
+        if let Some(grant) = &response.assistant_grant_id {
+            let _ = writeln!(output, "  Assistant grant: {grant}");
+        }
+        if let Some(owner) = &response.assistant_owner {
+            let _ = writeln!(output, "  Assistant owner: {owner}");
+        }
+        if let Some(session_actor) = &response.assistant_session_actor {
+            let _ = writeln!(output, "  Assistant session actor: {session_actor}");
+        }
     }
     if let Some(usage) = &work.usage {
         let _ = writeln!(output, "Usage: {}", render_usage(usage));
@@ -17850,6 +17955,11 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
                 smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
+                smallclaims::sqlite::telemetry::checkpoint_finished(
+                    started.elapsed(),
+                    smallclaims::sqlite::telemetry::CheckpointOperation::Passive,
+                    smallclaims::sqlite::telemetry::CheckpointOutcome::from_report(report),
+                );
                 smallclaims::windows::wal::observe(
                     report,
                     std::fs::metadata(&wal_path).ok().map(|metadata| metadata.len()),
@@ -17994,7 +18104,10 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
 async fn import_retired_identities(store: Arc<Store>) {
     loop {
         let worker = store.clone();
-        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || worker.import_retired_identities_paced(std::thread::sleep))).await;
+        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || {
+            worker.import_retired_identities_paced(std::thread::sleep)?;
+            worker.import_retired_claim_facts_paced(std::thread::sleep)
+        })).await;
         match result {
             Ok(Ok(())) => return,
             error => {
