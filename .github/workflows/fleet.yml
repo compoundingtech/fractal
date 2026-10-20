@@ -1101,6 +1101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -3469,6 +3470,7 @@ jobs:
           printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
