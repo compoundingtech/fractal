@@ -271,6 +271,12 @@ assert "nix develop .#web -c" in (root / "scripts/ci-web-shell").read_text(), "a
 assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in execution
 assert execution.index("kernel.apparmor_restrict_unprivileged_userns=0") < execution.index("bash scripts/ci-web-shell run bash scripts/ci-fractal-web")
 assert workflow.count("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0") == 1, "only the Buck TypeScript execution job changes host namespace policy"
+# The strict Nix sandbox fails the installer on runners that forbid unprivileged user namespaces
+# (every daily lane failed at Install Nix on 10-20): only a job that lifts the restriction may keep it.
+for generated in sorted((root / ".github/workflows").glob("*.yml")):
+    for name, job in re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", generated.read_text(), re.MULTILINE | re.DOTALL):
+        if "sandbox-fallback = false" in job:
+            assert "kernel.apparmor_restrict_unprivileged_userns=0" in job, f"{generated.name} {name}: strict Nix sandbox without enabling user namespaces"
 assert "actions/cache/restore@" in execution
 # Execution only restores: PR-scoped shell copies consume repository quota but
 # cannot warm merge groups. Protected-main upkeep remains the sole shell writer.
