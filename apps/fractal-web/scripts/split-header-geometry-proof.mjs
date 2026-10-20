@@ -117,7 +117,7 @@ try {
         await page.getByRole('button', { name: 'Agent details', exact: true }).click()
         await page.getByRole('button', { name: 'Conversation menu', exact: true }).click()
         for (const label of ['Resources', 'View KDL', 'Show all system events']) {
-          const item = page.getByRole(label === 'Show all system events' ? 'menuitemcheckbox' : 'menuitem', { name: label, exact: true })
+          const item = page.getByRole(label === 'Show all system events' ? 'menuitemcheckbox' : 'menuitem', { name: label === 'Resources' ? /^Resources/ : label, exact: label !== 'Resources' })
           assert.ok((await item.boundingBox()).height >= 44, `Phone menu touch target: ${label}`)
         }
         await page.keyboard.press('Escape')
