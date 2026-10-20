@@ -471,7 +471,7 @@ fn result(
     PublishResult {
         schema: SCHEMA,
         policy_profile: crate::validate::CORE_CATALOG_POLICY_PROFILE,
-        agent_spec_revision: agent_spec::AGENT_SPEC_REVISION,
+        agent_spec_revision: st_build_stamp::AGENT_SPEC_REVISION,
         status,
         bus_id,
         path,

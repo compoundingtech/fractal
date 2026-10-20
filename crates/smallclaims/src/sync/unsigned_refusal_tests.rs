@@ -1,7 +1,7 @@
 //! What a requester reports when a peer answers an exchange without the fleet's signature. The
 //! answer is never trusted as data: a refusal is reported by its status, with a fixed reason only
 //! for this protocol's own unsigned refusals, and an unsigned success still fails authentication.
-//! Signed answers, and answers that carry a signature header at all, keep their earlier results.
+//! Retained diagnostics never quote refusal bodies, signed or unsigned.
 use axum::http::StatusCode as AnswerStatus;
 use axum::response::IntoResponse as _;
 use tokio::net::TcpListener;
@@ -17,7 +17,7 @@ fn auth() -> FleetAuth {
 
 /// Post one exchange-shaped request to a peer that answers every request with `answer`, and
 /// return what the requester reports. The server is stopped and awaited before returning.
-async fn answered(answer: impl Fn(Bytes) -> Response + Clone + Send + Sync + 'static) -> String {
+async fn answered_error(answer: impl Fn(Bytes) -> Response + Clone + Send + Sync + 'static) -> anyhow::Error {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let app = Router::new().route(
@@ -45,10 +45,11 @@ async fn answered(answer: impl Fn(Bytes) -> Response + Clone + Send + Sync + 'st
     .await;
     server.abort();
     let _ = server.await;
-    format!(
-        "{:#}",
-        result.expect_err("none of these answers is accepted")
-    )
+    result.expect_err("none of these answers is accepted")
+}
+
+async fn answered(answer: impl Fn(Bytes) -> Response + Clone + Send + Sync + 'static) -> String {
+    answered_error(answer).await.to_string()
 }
 
 async fn answered_unsigned(status: AnswerStatus, body: &'static str) -> String {
@@ -110,12 +111,16 @@ async fn an_unsigned_success_still_fails_authentication() {
 }
 
 #[tokio::test]
-async fn a_signed_refusal_keeps_its_earlier_report() {
-    let reported = answered(|request: Bytes| {
+async fn a_signed_refusal_retains_only_allowlisted_machine_diagnostics() {
+    let error = answered_error(|request: Bytes| {
         let body = serde_json::to_vec(&PeerResponse::new(
             PEER,
             0,
-            serde_json::json!({"code": "invented-failure"}),
+            serde_json::json!({
+                "code": "replication-exchange-metadata-too-large",
+                "failure": {"phase": "follow-up-export"},
+                "message": "secret request body must not appear in diagnostics"
+            }),
         ))
         .unwrap();
         let headers = auth()
@@ -131,11 +136,14 @@ async fn a_signed_refusal_keeps_its_earlier_report() {
         response
     })
     .await;
-    assert!(
-        reported.starts_with("peer invented-peer returned 500 Internal Server Error: "),
-        "{reported}"
-    );
-    assert!(reported.contains("invented-failure"), "{reported}");
+    let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.code, "replication-exchange-metadata-too-large");
+    assert_eq!(failure.phase, ReplicationFailurePhase::FollowUpExport);
+    assert_eq!(failure.http_status, Some(500));
+    assert!(failure.cause.len() <= 512);
+    let reported = error.to_string();
+    assert!(!reported.contains("secret"));
+    assert!(!failure.cause.contains("secret"));
 }
 
 #[tokio::test]

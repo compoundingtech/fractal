@@ -352,7 +352,52 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('cleanup', env=dict(RUNNER_TEMP=str(runner))).returncode == 0, 'cleanup is safe to repeat'
     print('passed: cleanup overwrites and removes the key, and is safe to run twice')
 
-# --- lint: pushing refs/notes/evidence/* must not start any workflow
+# --- lint: pushing refs/notes/evidence/* (or an evidence tag, refs/tags/evidence/...) must not start any workflow
+EVIDENCE_TAGS = ('evidence/' + 'a' * 40 + '/' + 'b' * 40, 'evidence/x')
+
+
+def glob_regex(pattern):
+    # GitHub filter globs: ** matches anything, * anything but '/', ? one character but '/'.
+    out, i = '', 0
+    while i < len(pattern):
+        if pattern.startswith('**', i):
+            out, i = out + '.*', i + 2
+        elif pattern[i] == '*':
+            out, i = out + '[^/]*', i + 1
+        elif pattern[i] == '?':
+            out, i = out + '[^/]', i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r'\Z')
+
+
+def filter_matches(patterns, name):
+    # In order; a '!' pattern removes a match again; the last pattern that matches decides.
+    matched = False
+    for pattern in patterns:
+        negated = pattern.startswith('!')
+        if glob_regex(pattern[1:] if negated else pattern).match(name):
+            matched = not negated
+    return matched
+
+
+def filter_patterns(block, kind):
+    for index, entry in enumerate(block):
+        if entry.startswith(kind + ':'):
+            rest = entry[len(kind) + 1:].strip()
+            if rest:
+                return json.loads(rest)  # the generator writes flow lists: ["**", "!edge"]
+            items = []
+            for follower in block[index + 1:]:
+                if not follower.startswith('- '):
+                    break
+                items.append(follower[2:].strip().strip('"\''))
+            return items
+    return None
+
+
+assert filter_matches(['**', '!edge'], EVIDENCE_TAGS[0]) and not filter_matches(['**', '!edge', '!evidence/**'], EVIDENCE_TAGS[0])
+assert filter_matches(['v*'], 'v1.2') and not filter_matches(['v*'], 'v1/2') and not filter_matches(['**', '!edge'], 'edge')
 pushes = 0
 for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
     lines = workflow.read_text().splitlines()
@@ -365,9 +410,15 @@ for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
                 block.append(follower.strip())
             filters = [b for b in block if re.match(r'(branches|tags)(-ignore)?:', b)]
             assert filters, f'{workflow.name}: a push trigger without a branches or tags filter would fire on refs/notes pushes'
+            for kind in ('tags', 'tags-ignore'):
+                patterns = filter_patterns(block, kind)
+                if patterns is not None:
+                    for tag in EVIDENCE_TAGS:
+                        fires = filter_matches(patterns, tag) if kind == 'tags' else not filter_matches(patterns, tag)
+                        assert not fires, f'{workflow.name}: pushing the evidence tag {tag} would start this workflow ({kind}: {patterns})'
             pushes += 1
 assert pushes >= 1, 'the lint found no push trigger at all, so it checked nothing'
-print(f'passed: all {pushes} push triggers in the generated workflows are filtered to branches or tags')
+print(f'passed: all {pushes} push triggers in the generated workflows are filtered to branches or tags, and no tag filter fires on an evidence tag')
 
 # --- lint: every job that reaches the evidence-signing environment does so only for the merge queue and main
 text = (ROOT / '.github/workflows/fleet.yml').read_text()

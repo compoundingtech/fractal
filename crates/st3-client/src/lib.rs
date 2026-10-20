@@ -2274,6 +2274,37 @@ impl Client {
     ) -> Result<Envelope<AssistantAgentPage>, ClientError> {
         self.assistant_read("agents", params, proof).await
     }
+    pub async fn assistant_conversations(
+        &self,
+        params: &AssistantPageRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversations", params, proof).await
+    }
+    pub async fn assistant_conversation_detail(
+        &self,
+        params: &AssistantAgentDetailRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-detail", params, proof)
+            .await
+    }
+    pub async fn assistant_conversation_timeline(
+        &self,
+        params: &AssistantConversationTimelineRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-timeline", params, proof)
+            .await
+    }
+    pub async fn assistant_conversation_search(
+        &self,
+        params: &AssistantConversationSearchRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-search", params, proof)
+            .await
+    }
     pub async fn assistant_conversation_content(
         &self,
         params: &AssistantConversationContentRequest,
@@ -2932,6 +2963,22 @@ impl Client {
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
     }
+
+    /// Replace this paired device's local-only push registration. No graph receipt.
+    pub async fn push_register(
+        &self,
+        registration: &PushRegistration,
+    ) -> Result<PushRegistrationResponse, ClientError> {
+        self.post("/v1/client/push-registration", registration)
+            .await
+    }
+
+    /// Remove this paired device's local-only push registration.
+    pub async fn push_unregister(&self) -> Result<PushRegistrationResponse, ClientError> {
+        self.request(Method::DELETE, "/v1/client/push-registration", None)
+            .await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
@@ -4527,6 +4574,27 @@ mod tests {
         );
         assert!(!api(ErrorCode::Forbidden, "no").outcome_unknown());
         assert_eq!(api(ErrorCode::Forbidden, "no").applied(), None);
+    }
+
+    #[test]
+    fn push_request_debug_never_contains_secret_fields() {
+        let registration = PushRegistration {
+            token: "abcdef0123456789".into(),
+            environment: PushEnvironment::Development,
+            bundle_id: "example.push".into(),
+            app_version: "1.0".into(),
+        };
+        let debug = format!("{registration:?}");
+        assert!(!debug.contains(&registration.token));
+        assert!(debug.contains("[REDACTED]"));
+        let safe = PushRegistrationStatus {
+            registered: false,
+            environment: None,
+        };
+        assert_eq!(
+            serde_json::to_value(safe).unwrap(),
+            serde_json::json!({"registered":false})
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
 import { colorVars as color, statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -12,8 +12,8 @@ import { assertDiffTint } from './assistant-ui/composition/diff-tint-assertion'
 
 const diff = ['@@ -1,2 +1,2 @@', ' const rows = [', '-  [PREVIOUS, 1, false, "previous row"],', '+  [RETAINED, 2, true, "retained row"],', ' ]']
 const themes = { neutral: baselineTheme, composition: [], embrace: [...baselineTheme, darkTheme] } as const
-function DiffTintCanvas({ theme = 'neutral', scheme = 'dark' }: { theme?: keyof typeof themes; scheme?: 'dark' | 'light' }) {
-  return <div data-scheme={scheme} {...stylex.props(styles.canvas, ...themes[theme], ...(scheme === 'light' ? lightTheme : []))}><DiffPanel open width="100%" diff={diff} path="sample/rows.ts" added={1} removed={1} /></div>
+function DiffTintCanvas({ theme = 'neutral', scheme = 'dark', captured = false }: { theme?: keyof typeof themes; scheme?: 'dark' | 'light'; captured?: boolean }) {
+  return <div data-scheme={scheme} {...stylex.props(styles.canvas, ...themes[theme], ...(scheme === 'light' ? lightTheme : []))}><DiffPanel open width={captured ? 440 : '100%'} diff={diff} path="sample/rows.ts" added={1} removed={1} scopeLabel={captured ? 'Captured' : undefined} showSurfaceTabs={!captured} info={captured ? <p>Successful-tool captures · loaded transcript window. Reported sender unknown · Tool: Edit · Call: call/edit. Counts cover captured lines, not current repository contents.</p> : undefined} onOpenFile={captured ? () => document.querySelector<HTMLElement>('[data-testid="diff-code"]')?.focus() : undefined} /></div>
 }
 const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
   const receipt = assertDiffTint(canvasElement)
@@ -102,4 +102,27 @@ export const Composition: Story = { args: { theme: 'composition' } }
 export const CompositionLight: Story = { args: { theme: 'composition', scheme: 'light' } }
 export const Embrace: Story = { args: { theme: 'embrace' } }
 export const EmbraceLight: Story = { args: { theme: 'embrace', scheme: 'light' } }
+export const Captured: Story = { args: { captured: true }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const header = canvasElement.querySelector('[data-testid="diff-panel-header"]')!
+  await expect(header.textContent).toBe('Changes')
+  const info = canvasElement.querySelector('[data-testid="diff-panel-info"]')!
+  await expect(info).not.toBeVisible()
+  const disclosure = canvas.getByLabelText('Captured changes information')
+  disclosure.focus()
+  await userEvent.keyboard('{Enter}')
+  await expect(info).toBeVisible()
+  await expect(info).toHaveTextContent('Call: call/edit')
+  await userEvent.keyboard('{Enter}')
+  await expect(info).not.toBeVisible()
+  const toolbar = canvas.getByRole('toolbar', { name: 'Diff options' })
+  await expect(toolbar.getBoundingClientRect().height).toBeLessThanOrEqual(36)
+  const code = canvasElement.querySelector<HTMLElement>('[data-testid="diff-code"]')!
+  await expect(code.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBeLessThanOrEqual(72)
+  await expect(canvasElement.querySelector('[data-diff-kind="removed"] [data-diff-gutter] > span')?.textContent).toBe('')
+  await expect(canvasElement.querySelector('[data-diff-kind="added"] [data-diff-gutter] > span')?.textContent).toBe('2')
+  await userEvent.click(canvas.getByRole('button', { name: /^Open$/ }))
+  await expect(code).toHaveFocus()
+} }
+export const CapturedLight: Story = { ...Captured, args: { captured: true, scheme: 'light' } }
 const styles = stylex.create({ canvas: { height: '100vh', backgroundColor: surface.canvas, color: text.fg, fontFamily: type.fontSans, fontSize: type.uiSize, lineHeight: type.uiLeading } })

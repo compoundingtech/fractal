@@ -213,6 +213,31 @@ const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabili
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
 
+test('push registration commands use paired credentials and a local response without snapshot', async () => {
+    const calls = [];
+    const registration = { token: 'ab'.repeat(32), environment: 'development', bundle_id: 'example.push', app_version: '1.0' };
+    const client = new St3Client({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            return response({
+                api_version: 'st3.client.v0',
+                request_id: 'request/push',
+                value: init.method === 'POST' ? { registered: true, environment: 'development' } : { registered: false },
+            });
+        },
+    });
+    assert.deepEqual((await client.pushRegister(registration)).value, { registered: true, environment: 'development' });
+    assert.deepEqual((await client.pushUnregister()).value, { registered: false });
+    assert.deepEqual(calls.map(([url, init]) => [url, init.method, init.headers.Authorization]), [
+        ['https://example.test/v1/client/push-registration', 'POST', 'Bearer test-credential'],
+        ['https://example.test/v1/client/push-registration', 'DELETE', 'Bearer test-credential'],
+    ]);
+    assert.deepEqual(JSON.parse(calls[0][1].body), registration);
+    assert.equal(calls[1][1].body, undefined);
+});
+
 test('every HTTP API keeps cancellation in transport options, including all manifest reads and actions', async () => {
     const manifest = require('../../../docs/st3/client-v0/schemas/operations.json');
     const methodName = id => {
@@ -263,6 +288,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
         ['putGlass', options => ['glass/example', {}, 'idempotency-key', options]],
         ['deleteGlass', options => ['glass/example', {}, 'idempotency-key', options]],
         ['terminalsListFiltered', options => [{}, options]],
+        ['pushRegister', options => [{ token: 'ab'.repeat(32), environment: 'development', bundle_id: 'example.push', app_version: '1.0' }, options]],
+        ['pushUnregister', options => [options]],
     );
     for (const [method, argumentsFor] of cases) {
         const requests = [];

@@ -3,6 +3,25 @@ const assert = require('node:assert/strict');
 
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
+test('push registration schema bounds secret input and exposes only safe device status', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.PushRegistration, 'strict');
+    const request = { token: 'ab'.repeat(32), environment: 'development', bundle_id: 'example.push', app_version: '1.0' };
+    assert.deepEqual(Schema.encodeSync(Rich.PushRegistration)(decode(request)), request);
+    for (const invalid of ['', 'a', 'abc', 'zz', 'ab'.repeat(257)]) {
+        assert.throws(() => decode({ ...request, token: invalid }));
+    }
+    for (const patch of [{ environment: 'sandbox' }, { bundle_id: '' }, { bundle_id: 'invalid topic' }, { app_version: '' }, { app_version: '\n' }]) {
+        assert.throws(() => decode({ ...request, ...patch }));
+    }
+    const status = Rich.decodeUnknownSync(Rich.PushRegistrationStatus, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.PushRegistrationStatus)(status({ registered: false })), { registered: false });
+    const registered = { registered: true, environment: 'production' };
+    assert.deepEqual(Schema.encodeSync(Rich.PushRegistrationStatus)(status(registered)), registered);
+    assert.throws(() => status({ registered: true }));
+    assert.throws(() => status({ registered: false, environment: 'production' }));
+});
+
 
 test('diagnostic runtime versions match the server metadata grammar in both decode modes', async () => {
     const [{ Schema }, Rich] = await modules;
@@ -52,7 +71,7 @@ test('every wire version receiver accepts exactly the deployed and fractal names
             }
         }
     }
-    assert.equal(receivers, 13);
+    assert.equal(receivers, 14);
     assert.equal(Rich.API_VERSION, 'st3.client.v0');
     assert.equal(contract['x-st-integers'], 'json-safe');
     assert.equal(contract['x-fractal-integers'], undefined);

@@ -220,6 +220,7 @@ fn rust_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
+            let response = if response == "Value" { "serde_json::Value" } else { response };
             writeln!(out, "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}")?;
         } else if id == "capabilities.get" {
             writeln!(
@@ -389,6 +390,7 @@ fn swift_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
+            let response = if response == "Value" { "JSONValue" } else { response };
             writeln!(out, "    public func {method}(_ params: {request}, proof: ScgReadAuthorization) async throws -> Envelope<{response}> {{ try await assistantRead(\"{projection}\", params, proof: proof) }}")?;
         } else if matches!(
             id,
@@ -525,17 +527,13 @@ fn struct_block<'a>(source: &'a str, declaration: &str) -> Result<&'a str> {
     Ok(&tail[..end])
 }
 
-fn schema_properties(definition: &Value) -> Option<&serde_json::Map<String, Value>> {
-    definition
-        .get("properties")
-        .and_then(Value::as_object)
-        .or_else(|| {
-            definition
-                .get("allOf")?
-                .as_array()?
-                .iter()
-                .find_map(|part| part.get("properties").and_then(Value::as_object))
-        })
+fn schema_properties(definition: &Value) -> impl Iterator<Item = &serde_json::Map<String, Value>> {
+    definition.get("properties").and_then(Value::as_object).into_iter().chain(
+        ["allOf", "oneOf"].into_iter().flat_map(move |key| {
+            definition.get(key).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|part| part.get("properties").and_then(Value::as_object))
+        }),
+    )
 }
 
 fn rust_field(name: &str) -> String {
@@ -598,8 +596,10 @@ fn validate_model(
         }
         return Ok(());
     }
-    let properties = schema_properties(model)
-        .with_context(|| format!("client schema `{definition}` has no properties"))?;
+    let mut properties = schema_properties(model).peekable();
+    if properties.peek().is_none() {
+        bail!("client schema `{definition}` has no properties");
+    }
     let rust_block = struct_block(rust, &format!("pub struct {rust_name} {{"))?;
     let swift_block = struct_block(swift, &format!("public struct {swift_name}:"))?;
     // Resource branches may narrow a header field such as `id` to its family reference;
@@ -610,7 +610,7 @@ fn validate_model(
             .any(|branch| branch["$ref"] == "#/$defs/ResourceHeader")
     }) && rust_block.contains("pub header: ResourceHeader,");
     let header = &schema["$defs"]["ResourceHeader"]["properties"];
-    for property in properties.keys().filter(|name| {
+    for property in properties.flat_map(|properties| properties.keys()).filter(|name| {
         name.as_str() != "kind" && !(header_backed && header.get(name.as_str()).is_some())
     }) {
         let rust_field = rust_field(property);
@@ -750,6 +750,9 @@ fn validate_surfaces(
         "ObservationReport",
         "ObservationAccepted",
         "ObservationResponse",
+        "PushRegistration",
+        "PushRegistrationStatus",
+        "PushRegistrationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
@@ -760,6 +763,9 @@ fn validate_surfaces(
         "AssistantReadTrustRequest",
         "AssistantSummaryRequest",
         "AssistantPageRequest",
+        "AssistantAgentDetailRequest",
+        "AssistantConversationTimelineRequest",
+        "AssistantConversationSearchRequest",
         "AssistantContentRequest",
         "ScgReadAuthorization",
         "ScgReadAuthorizationPayload",
@@ -803,6 +809,8 @@ fn validate_surfaces(
     for token in [
         "pub async fn diagnostics_submit",
         "pub async fn observations_report",
+        "pub async fn push_register",
+        "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -821,6 +829,8 @@ fn validate_surfaces(
         "cursor: String?",
         "func events(",
         "func observationsReport(",
+        "func pushRegister(",
+        "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",
@@ -1350,6 +1360,7 @@ fn typescript_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
+            let response = if response == "Value" { "unknown" } else { response };
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
             continue;
         }
@@ -1513,6 +1524,31 @@ mod tests {
         let swift = "public enum Pair: Codable { case person(Person), assistant(Assistant) }\npublic struct Person: Codable { let personID: String }\npublic struct Assistant: Codable { let principal: String }";
         validate_model(&schema, "Pair", "Pair", "Pair", rust, swift).unwrap();
         assert!(validate_model(&schema, "Pair", "Pair", "Pair", &rust.replace("pub principal:", "pub wrong:"), swift).is_err());
+    }
+
+    #[test]
+    fn assistant_conversation_typescript_methods_use_imported_requests_and_loose_json() -> Result<()> {
+        let reads = [
+            ("assistant.conversations", "AssistantPageRequest"),
+            ("assistant.conversation-detail", "AssistantAgentDetailRequest"),
+            ("assistant.conversation-timeline", "AssistantConversationTimelineRequest"),
+            ("assistant.conversation-search", "AssistantConversationSearchRequest"),
+        ];
+        let operations = reads.iter().map(|(id, request)| serde_json::json!({
+            "id": id, "path": format!("/v1/client/assistant/{}", id.strip_prefix("assistant.").unwrap()),
+            "query_model": request, "response": "Value", "proof_header": "x-st3-scg-read-authorization",
+        })).collect::<Vec<_>>();
+        let methods = typescript_operation_methods(&operations, &serde_json::Map::new())?;
+        let template = include_str!("../templates/Client.ts.in");
+        for (id, request) in reads {
+            let method = lower_camel(&pascal(id));
+            assert!(template.lines().take_while(|line| !line.starts_with("} from './Models.generated.ts'")).any(|line| line.contains(request)), "{request} must be imported");
+            assert!(methods.contains(&format!("async {method}(params: {request},")));
+        }
+        assert_eq!(methods.matches("Promise<EnvelopeOf<unknown>>").count(), 4);
+        assert_eq!(methods.matches("this.assistantRead<unknown>").count(), 4);
+        assert!(!methods.contains("<Value>"));
+        Ok(())
     }
 
     #[test]
@@ -1684,5 +1720,16 @@ mod tests {
             std::fs::remove_file(&path)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn union_model_validation_covers_every_branch_field() {
+        let model = serde_json::json!({"oneOf": [
+            {"properties": {"registered": {"const": false}}},
+            {"properties": {"registered": {"const": true}, "environment": {"type": "string"}}}
+        ]});
+        let fields = schema_properties(&model).flat_map(|properties| properties.keys())
+            .map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
     }
 }

@@ -148,9 +148,11 @@ are idle. Preserve the backups above. Do not move named instances or workspace r
    activation. Legacy and staging generations reject receipt-bearing roots. A persistent
    foreign `config.toml -> config.home-manager.toml` symlink also blocks immutable older
    generations at their normal collision check, including backup modes. Completed activation
-   updates only the guarded backing TOML. Home Manager's explicit `force = true` bypasses
-   collision checks using raw string prefixes, so both the module assertion and retained
-   generation preflight reject force prefixes of legacy config/state paths.
+   updates only the guarded backing TOML, including consumer-added TOML settings.
+   Stage turns off `force` for the module-managed legacy config entry; completed disables
+   that linker entry. Other forced legacy config/state prefixes remain rejected by the
+   module. Retained generation preflight still rejects every unsafe forced generation,
+   including older generations created before staging.
 
 The write-ahead journal lives at
 `${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,
@@ -226,6 +228,38 @@ these are observations, not an outage bound. See the [v0.3.15 release notes](htt
 full replay trigger. Backups and restart windows must accommodate the release's stated impact.
 
 Check that local delivery becomes `current`, and read an `outdated` or `stale` reason before deciding a seat needs a restart.
+
+### Retained subject-reference rejections
+
+An older build can retain a signed envelope as `invalid-replicated-claim` because a
+field names a subject family that its schema does not recognize. Installing a newer
+binary alone does not revisit that historical verdict. Normal daemon startup runs
+replication admission before projecting its backlog. It revalidates retained
+`invalid-subject-reference` failures once per local schema digest, including one
+pass for stores without the retry completion marker.
+
+Use the pinned installation and normal service activation above, then check
+`st replication status` and read the existing message and its receipt. Admission
+checks the original envelope's signature and current fleet membership, its hashes
+and every claim field again. Only claims passing normal validation can be admitted;
+unknown or malformed references remain rejected, and unverified signatures remain held.
+The original record reference, claim ID, envelope hash, raw bytes and writer
+provenance are preserved. No resend, replacement record, SQLite edit, marker
+deletion or manual replay is required or supported for this recovery.
+
+The indexed retry is restricted to that historical error class and uses the normal
+bounded admission transactions. Completion is durable, so ordinary receive loops
+and restarts at the same schema do not repeatedly revalidate invalid references.
+An interrupted pass can safely finish at the next startup. A later local schema
+change schedules a new pass; the schema digest is only a retry trigger, never
+authority to admit a claim.
+An eligible historical receipt held by fleet/signature validation returns to the
+ordinary pending admission lifecycle before schema retry completes. A later verified
+signature can therefore unblock it after a restart without another schema change.
+This transition does not change the invalid record's bytes or admit it provisionally.
+Selection retains the existing whole-backlog payload materialization; bounded writer
+transactions do not imply bounded-memory backlog selection.
+
 
 After all members are upgraded and caught up, compare replication digests as [two machines](two-machines.md#check-what-arrived) describes. Mixed builds can exchange signed history while an older member has claims waiting for an upgrade; that does not prove equal projections. Check a real conversation and its message receipt too. The example uses the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat); substitute your own existing seat when upgrading:
 

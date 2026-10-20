@@ -6,8 +6,8 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-// A one-story fixture build. Like Storybook's addon-a11y, it reports an a11y
-// result unless the a11y.manual global is set; `report` overrides that report.
+// A fixture build with the strict policy's aliases and kept bases. Like Storybook's addon-a11y,
+// it reports an a11y result unless the a11y.manual global is set; `report` overrides that report.
 const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
 <script>
   const listeners = new Map()
@@ -23,7 +23,17 @@ const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixtu
   }
 </script>`
 
-const runGate = async ({ env = {}, report } = {}) => {
+// These untagged stories satisfy the complete-index policy without satisfying the per-commit
+// critical inventory: that test must still fail at its own missing-critical-story check.
+const policyFixtureIds = [
+  'fractal-ui-transcript--no-green-all-states-light',
+  'fractal-ui-transcript--no-green-all-states',
+  'fractal-ui-composer--footer-width-budget-light',
+  'fractal-ui-composer--footer-width-budget',
+  'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
+]
+
+const runGate = async ({ env = {}, report, fixtureOverrides } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -31,13 +41,25 @@ const runGate = async ({ env = {}, report } = {}) => {
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: {
       critical: { type: 'story', id: 'kit--critical', importPath: './Kit.stories.tsx', tags: ['dev', 'critical'] },
       other: { type: 'story', id: 'kit--other', importPath: './Kit.stories.tsx', tags: ['dev'] },
+      ...Object.fromEntries(policyFixtureIds.map(id => [id, {
+        type: 'story', id, importPath: './Kit.stories.tsx', tags: ['dev'],
+      }])),
     } }))
     await writeFile(join(build, 'iframe.html'), iframe(report))
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
-      // The one-story fixture index has none of the kit's strict-policy stories.
-      env: { ...inherited, KIT_PLAY_CASE_OVERRIDES: '[]', ...env },
+    const args = fixtureOverrides === undefined
+      ? [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output]
+      : ['--input-type=module', '--eval', `
+          import { runKitPlayGate } from ${JSON.stringify(new URL('./kit-play-gate-runner.mjs', import.meta.url).href)}
+          const receipt = await runKitPlayGate({
+            buildDirectory: ${JSON.stringify(build)}, outputDirectory: ${JSON.stringify(output)},
+            overrides: new Map(${JSON.stringify(fixtureOverrides)}),
+          })
+          if (!receipt.pass) process.exitCode = 1
+        `]
+    const child = spawn(process.execPath, args, {
+      env: { ...inherited, ...env },
       stdio: 'ignore',
     })
     const code = await new Promise((resolve, reject) => {
@@ -55,8 +77,16 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_MAX_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
-  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 2, 8])
+  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 7, 17])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
+})
+
+test('fixture code can inject its policy through the runner parameter, not process environment', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ fixtureOverrides: [] })
+  assert.equal(code, 0)
+  assert.equal(receipt.pass, true)
+  assert.deepEqual(receipt.caseOverrides, {})
+  assert.equal(receipt.cases, 28)
 })
 
 test('a11y on rejects a case whose axe report is missing', { timeout: 60000 }, async () => {

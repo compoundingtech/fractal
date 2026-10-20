@@ -1728,6 +1728,8 @@ pub struct Device {
     pub scopes: Vec<String>,
     pub expires_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushRegistrationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<AssistantPrincipal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_class: Option<AssistantSenderClass>,
@@ -3460,6 +3462,39 @@ pub struct AssistantPageRequest {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct AssistantAgentDetailRequest {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConversationTimelineRequest {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantConversationSearchRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<usize>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AssistantConversationContentRequest {
     pub agent_id: String,
     pub session_id: String,
@@ -3495,6 +3530,10 @@ pub enum AssistantProjection {
     Agents,
     ConversationContent,
     TerminalContent,
+    Conversations,
+    ConversationDetail,
+    ConversationTimeline,
+    ConversationSearch,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ScgReadIdentity {
@@ -3968,3 +4007,42 @@ pub enum ObservationSample {
 pub struct ObservationAccepted { pub accepted: bool }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ObservationResponse {pub api_version: String, pub request_id: String, pub value: ObservationAccepted}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PushEnvironment {
+    Development,
+    Production,
+}
+
+/// Secret-bearing request. Never include its serialized bytes in diagnostics.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushRegistration {
+    pub token: String,
+    pub environment: PushEnvironment,
+    pub bundle_id: String,
+    pub app_version: String,
+}
+
+impl std::fmt::Debug for PushRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushRegistration")
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PushRegistrationStatus {
+    pub registered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<PushEnvironment>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PushRegistrationResponse {
+    pub api_version: String,
+    pub request_id: String,
+    pub value: PushRegistrationStatus,
+}

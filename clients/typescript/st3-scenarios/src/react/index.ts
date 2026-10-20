@@ -1,6 +1,10 @@
 import * as React from 'react'
 
-import { foldSlice, manualClock, syncStatusAt, type Clock, type SliceKind, type SliceStates, type SyncStatus, type SyncSurface, type World } from '../index.ts'
+import { manualClock, type Clock } from '../clock.ts'
+import { foldSlice, syncStatusAt } from '../kit/fold.ts'
+import type { SliceKind, SliceStates, SyncSurface } from '../kit/slice.ts'
+import type { SyncStatus } from '../kit/syncStatus.ts'
+import type { World } from '../kit/world.ts'
 
 export type WireSlice<TKind extends SliceKind> = {
   readonly variant: string

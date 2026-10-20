@@ -2,6 +2,7 @@
 //! Ordinary routes call this on their existing handler worker after its reader loan ends.
 use super::*;
 use axum::body::{Bytes, HttpBody};
+
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use std::convert::Infallible;
 
@@ -22,7 +23,7 @@ pub(super) fn json_size(value: &Value) -> Result<usize, ApiError> {
 pub struct Context {
     pub state: AppState,
     pub client_request: bool,
-    pub observation_report: bool,
+    pub local_only_response: bool,
     pub request_id: String,
     pub client_snapshot: Option<ClientSnapshot>,
     pub server: Option<tracing::Span>,
@@ -52,7 +53,12 @@ impl Context {
         snapshot: &ClientSnapshot,
         page: &ClientResourcePage,
     ) -> Result<usize, ApiError> {
-        let bytes = serde_json::to_vec(page).map_err(ApiError::internal)?;
+        self.value_envelope_size(snapshot, page)
+    }
+
+    /// Exact framing for any assistant projection, using the same codec as delivery.
+    pub fn value_envelope_size<T: serde::Serialize>(&self, snapshot: &ClientSnapshot, value: &T) -> Result<usize, ApiError> {
+        let bytes = serde_json::to_vec(value).map_err(ApiError::internal)?;
         Ok(self.encode(StatusCode::OK, Some(snapshot.clone()), Ok(bytes.into())).len)
     }
     pub async fn wrap(&self, response: Response) -> Result<Response, ApiError> {
@@ -185,7 +191,7 @@ impl Context {
                 },
                 Err(error) => (error_value("response-read-failed", error).into(), None),
             };
-            let metadata = if self.observation_report {
+            let metadata = if self.local_only_response {
                 json!({"api_version": CLIENT_API_VERSION, "request_id": self.request_id})
             } else if self.client_request {
                 json!({
@@ -387,7 +393,7 @@ mod tests {
         Context {
             state: super::super::tests::state(root),
             client_request: client,
-            observation_report: observation,
+            local_only_response: observation,
             request_id: "request/control".into(),
             client_snapshot: client.then(snapshot),
             server: None,

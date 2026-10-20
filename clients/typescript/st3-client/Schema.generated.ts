@@ -1228,6 +1228,18 @@ export const ArrangementPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ArrangementPage = typeof ArrangementPage.Type
 export type ArrangementPageEncoded = typeof ArrangementPage.Encoded
 
+/** Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes. */
+export const AssistantResponseBytes = /*#__PURE__*/ (() => Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ identifier: "AssistantResponseBytes", description: "Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes." }))()
+export type AssistantResponseBytes = typeof AssistantResponseBytes.Type
+export type AssistantResponseBytesEncoded = typeof AssistantResponseBytes.Encoded
+
+export const AssistantAgentDetailRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "max_response_bytes": optionalKey(AssistantResponseBytes)
+}).annotate({ identifier: "AssistantAgentDetailRequest" }))()
+export type AssistantAgentDetailRequest = typeof AssistantAgentDetailRequest.Type
+export type AssistantAgentDetailRequestEncoded = typeof AssistantAgentDetailRequest.Encoded
+
 export const AssistantAgentItem = /*#__PURE__*/ (() => Schema.Struct({
   "current_mission_id": Schema.OptionFromNullOr(Schema.String),
   "current_run_id": Schema.OptionFromNullOr(Schema.String),
@@ -1351,11 +1363,6 @@ export const AssistantContentPage = /*#__PURE__*/ (() => Schema.Union([
 export type AssistantContentPage = typeof AssistantContentPage.Type
 export type AssistantContentPageEncoded = typeof AssistantContentPage.Encoded
 
-/** Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes. */
-export const AssistantResponseBytes = /*#__PURE__*/ (() => Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ identifier: "AssistantResponseBytes", description: "Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes." }))()
-export type AssistantResponseBytes = typeof AssistantResponseBytes.Type
-export type AssistantResponseBytesEncoded = typeof AssistantResponseBytes.Encoded
-
 export const AssistantConversationContentRequest = /*#__PURE__*/ (() => Schema.Struct({
   "agent_id": AgentId,
   "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -1385,6 +1392,31 @@ export const AssistantContentRequest = /*#__PURE__*/ (() => Schema.Union([
 ], { mode: "oneOf" }).annotate({ identifier: "AssistantContentRequest", description: "Disjoint content queries: conversation range or terminal screen; mixing their fields is denied." }))()
 export type AssistantContentRequest = typeof AssistantContentRequest.Type
 export type AssistantContentRequestEncoded = typeof AssistantContentRequest.Encoded
+
+/** Opaque, snapshot-bound page/event cursor. */
+export const Cursor = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLength(8)).check(Schema.isMaxLength(2048)).pipe(Schema.brand("st3/Cursor")).annotate({ identifier: "Cursor", description: "Opaque, snapshot-bound page/event cursor." }))()
+export type Cursor = typeof Cursor.Type
+export type CursorEncoded = typeof Cursor.Encoded
+
+export const AssistantConversationSearchRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": optionalKey(AgentId),
+  "cursor": optionalKey(Cursor),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "text": Schema.String.check(Schema.isMinLength(1))
+}).annotate({ identifier: "AssistantConversationSearchRequest" }))()
+export type AssistantConversationSearchRequest = typeof AssistantConversationSearchRequest.Type
+export type AssistantConversationSearchRequestEncoded = typeof AssistantConversationSearchRequest.Encoded
+
+export const AssistantConversationTimelineRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "cursor": optionalKey(Cursor),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(50))),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "session_id": optionalKey(Id)
+}).annotate({ identifier: "AssistantConversationTimelineRequest" }))()
+export type AssistantConversationTimelineRequest = typeof AssistantConversationTimelineRequest.Type
+export type AssistantConversationTimelineRequestEncoded = typeof AssistantConversationTimelineRequest.Encoded
 
 export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["approval-once","caller-bound-allow"]).annotate({ identifier: "AssistantMinimalReadMode" }))()
 export type AssistantMinimalReadMode = typeof AssistantMinimalReadMode.Type
@@ -1507,11 +1539,6 @@ export const AssistantMissionPage = /*#__PURE__*/ (() => Schema.Struct({
 export type AssistantMissionPage = typeof AssistantMissionPage.Type
 export type AssistantMissionPageEncoded = typeof AssistantMissionPage.Encoded
 
-/** Opaque, snapshot-bound page/event cursor. */
-export const Cursor = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLength(8)).check(Schema.isMaxLength(2048)).pipe(Schema.brand("st3/Cursor")).annotate({ identifier: "Cursor", description: "Opaque, snapshot-bound page/event cursor." }))()
-export type Cursor = typeof Cursor.Type
-export type CursorEncoded = typeof Cursor.Encoded
-
 /** Metadata query. Every value travels as one scalar query string; duplicates and unknown fields are denied; no person parameter exists. */
 export const AssistantPageRequest = /*#__PURE__*/ (() => Schema.Struct({
   "cursor": optionalKey(Cursor),
@@ -1549,7 +1576,18 @@ export const AssistantPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
 export type AssistantPairingBegin = typeof AssistantPairingBegin.Type
 export type AssistantPairingBeginEncoded = typeof AssistantPairingBegin.Encoded
 
-export const AssistantProjection = /*#__PURE__*/ (() => Schema.Literals(["summary","attention","missions","agents","conversation-content","terminal-content"]).annotate({ identifier: "AssistantProjection" }))()
+export const AssistantProjection = /*#__PURE__*/ (() => Schema.Literals([
+  "summary",
+  "attention",
+  "missions",
+  "agents",
+  "conversation-content",
+  "terminal-content",
+  "conversations",
+  "conversation-detail",
+  "conversation-timeline",
+  "conversation-search"
+]).annotate({ identifier: "AssistantProjection" }))()
 export type AssistantProjection = typeof AssistantProjection.Type
 export type AssistantProjectionEncoded = typeof AssistantProjection.Encoded
 
@@ -1971,9 +2009,24 @@ export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
 export type ConnectedClient = typeof ConnectedClient.Type
 export type ConnectedClientEncoded = typeof ConnectedClient.Encoded
 
+/** APNs environment the phone's token was issued for: `development` (sandbox) or `production`. */
+export const PushEnvironment = /*#__PURE__*/ (() => Schema.Literals(["development","production"]).annotate({ identifier: "PushEnvironment", description: "APNs environment the phone's token was issued for: `development` (sandbox) or `production`." }))()
+export type PushEnvironment = typeof PushEnvironment.Type
+export type PushEnvironmentEncoded = typeof PushEnvironment.Encoded
+
+/** Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true. */
+export const PushRegistrationStatus = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "registered": Schema.Literal(false) }),
+  Schema.Struct({ "environment": PushEnvironment, "registered": Schema.Literal(true) })
+], { mode: "oneOf" }).annotate({ identifier: "PushRegistrationStatus", description: "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true." }))()
+export type PushRegistrationStatus = typeof PushRegistrationStatus.Type
+export type PushRegistrationStatusEncoded = typeof PushRegistrationStatus.Encoded
+
 export const Device = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": optionalKey(AssistantMinimalReadMode), "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": Id, "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "principal": optionalKey(Schema.Never), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": optionalKey(Schema.Never), "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp }),
-  Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": AssistantMinimalReadMode, "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal, "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": AssistantSenderClass, "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp })
+  Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": optionalKey(AssistantMinimalReadMode), "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": Id, "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "principal": optionalKey(Schema.Never), /** Push registration state for this pairing. Present only on the member that issued the pairing (registered false when none is stored); omitted by other members. Never includes the token. */
+"push": optionalKey(PushRegistrationStatus), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": optionalKey(Schema.Never), "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp }),
+  Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": AssistantMinimalReadMode, "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal, /** Push registration state for this pairing. Present only on the member that issued the pairing (registered false when none is stored); omitted by other members. Never includes the token. */
+"push": optionalKey(PushRegistrationStatus), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": AssistantSenderClass, "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp })
 ], { mode: "oneOf" }).annotate({ identifier: "Device" }))()
 export type Device = typeof Device.Type
 export type DeviceEncoded = typeof Device.Encoded
@@ -4123,6 +4176,26 @@ export const PairingComplete = /*#__PURE__*/ (() => Schema.Struct({
 export type PairingComplete = typeof PairingComplete.Type
 export type PairingCompleteEncoded = typeof PairingComplete.Encoded
 
+/** A paired phone's APNs device token. The person and device come only from the paired session; any other field, including a person or device identity, is refused. The token is a secret: it is stored only on the member that issued the pairing and never appears in claims, replication, resources, logs or error messages. */
+export const PushRegistration = /*#__PURE__*/ (() => Schema.Struct({
+  /** Printable ASCII. */
+  "app_version": Schema.String.check(Schema.isPattern(new RegExp("^[\\x20-\\x7E]{1,64}$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(64)).annotate({ description: "Printable ASCII." }),
+  "bundle_id": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9.-]{1,255}$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(255)),
+  "environment": PushEnvironment,
+  /** Hex-encoded APNs device token, 1–256 bytes. */
+  "token": Schema.RedactedFromValue(Schema.String.check(Schema.isPattern(new RegExp("^(?:[0-9a-fA-F]{2}){1,256}$", "u"))).check(Schema.isMinLength(2)).check(Schema.isMaxLength(512))).annotate({ description: "Hex-encoded APNs device token, 1–256 bytes." })
+}).annotate({ identifier: "PushRegistration", description: "A paired phone's APNs device token. The person and device come only from the paired session; any other field, including a person or device identity, is refused. The token is a secret: it is stored only on the member that issued the pairing and never appears in claims, replication, resources, logs or error messages." }))()
+export type PushRegistration = typeof PushRegistration.Type
+export type PushRegistrationEncoded = typeof PushRegistration.Encoded
+
+export const PushRegistrationResponse = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
+  "request_id": RequestId,
+  "value": PushRegistrationStatus
+}).annotate({ identifier: "PushRegistrationResponse" }))()
+export type PushRegistrationResponse = typeof PushRegistrationResponse.Type
+export type PushRegistrationResponseEncoded = typeof PushRegistrationResponse.Encoded
+
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
@@ -4197,3 +4270,8 @@ export const ScgReadAuthorization = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ScgReadAuthorization", description: "Sent as unpadded base64url JSON in the `x-st3-scg-read-authorization` header." }))()
 export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
 export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
+
+/** Bounded assistant conversation projection; the daemon allowlists the disclosed fields. */
+export const Value = /*#__PURE__*/ (() => Schema.Unknown.annotate({ identifier: "Value", description: "Bounded assistant conversation projection; the daemon allowlists the disclosed fields." }))()
+export type Value = typeof Value.Type
+export type ValueEncoded = typeof Value.Encoded

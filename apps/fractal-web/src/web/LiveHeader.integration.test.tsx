@@ -119,9 +119,10 @@ describe('live header parity', () => {
         expect(inspector?.textContent).toContain('src/example.ts')
         expect(inspector?.textContent).toContain('beforeCapture')
         expect(inspector?.textContent).toContain('afterCapture')
-        expect(inspector?.querySelector('[data-captured-change]')).not.toBeNull()
-        // Resource chips are named by their visible content (file name and counts), not an "Open <path>" label.
-        expect([...inspector!.querySelectorAll('[data-captured-change] button')].some(button => button.textContent?.startsWith('example.ts'))).toBe(true)
+        expect(inspector?.querySelector('[data-captured-change]')).toBeNull()
+        expect(inspector?.querySelector('button[aria-label="Captured changes information"]')?.getAttribute('aria-expanded')).toBe('false')
+        expect(inspector?.querySelector('[data-testid="diff-panel-info"]')?.hasAttribute('hidden')).toBe(true)
+        expect([...inspector!.querySelectorAll('button')].some(button => button.textContent === 'Open')).toBe(true)
         expect(inspector?.textContent).not.toContain('This web client does not read change data yet')
       }, { timeout: 15_000 })
     } finally {
@@ -153,6 +154,7 @@ describe('live header parity', () => {
     expect(button('Resources')?.closest('[title]')).toBeNull()
     const reason = document.getElementById(button('Resources')!.getAttribute('aria-describedby')!)
     expect(reason?.textContent).toBe('Read access to agent resources has not been granted.')
+    expect(reason?.hidden).toBe(true)
     expect(host.querySelector('[data-testid="thread-header"]')?.textContent).not.toMatch(/raw-denial-code|Unknown/)
   })
   it('opens the agent canonical KDL from the header in a labelled dialog that Escape closes', async () => {
@@ -169,6 +171,20 @@ describe('live header parity', () => {
     await vi.waitFor(() => expect(dialog!.contains(document.activeElement)).toBe(true))
     await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
     expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
+  })
+  it('keeps secondary actions functional in the constrained-header overflow menu', async () => {
+    const choose = async (label: string) => {
+      await click('Conversation menu')
+      const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === label)
+      expect(item, label).toBeDefined()
+      await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    }
+    await choose('View KDL')
+    expect(document.querySelector('[data-testid="declaration-dialog"] h2')?.textContent).toBe(agent.id)
+    await click('Close declaration')
+    await choose('Resources')
+    expect(document.querySelector('[role="dialog"][aria-label="Agent resources"]')?.textContent).toContain('Observed project notes')
+    await click('Close resources')
   })
   it('opens the same declaration from the agent row context menu', async () => {
     await click('Actions for Example Agent')

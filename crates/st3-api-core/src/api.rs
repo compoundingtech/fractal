@@ -104,6 +104,8 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
 mod directive_notes;
 mod request_latency;
 mod client_observations;
+pub mod client_push;
+pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
@@ -225,7 +227,7 @@ impl ClientTransportBoundary {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientSnapshot {
     pub id: String,
-    host_id: String,
+    pub host_id: String,
     pub store_index: u64,
     projection_version: String,
     pub created_at: String,
@@ -507,6 +509,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/observations", post(client_observations::report)
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
+        .route("/v1/client/push-registration", post(client_push::register)
+            .delete(client_push::unregister)
+            .layer(DefaultBodyLimit::max(client_push::MAX_BODY_BYTES)))
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
         .route("/v1/client/attention", get(client_reads::client_attention))
         .route("/v1/client/attention/{*id}", get(client_reads::client_attention_detail))
@@ -710,6 +715,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
+        .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
         .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
@@ -955,7 +961,7 @@ async fn response_envelope_unbounded(
         Some(caller.clone()),
     );
     let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
-    let observation_report = request_route == "/v1/client/observations";
+    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration");
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
     // supplies the envelope snapshot. All other routes keep admission snapshots.
@@ -969,7 +975,11 @@ async fn response_envelope_unbounded(
         && !client_request
         && request.uri().path() != "/v1/health")
         .then(client_v0::fabric_boundary_forbidden);
-    let cursor_snapshot = client_request.then(|| {
+    // Conversation continuations carry projection/grant authentication. Their
+    // readers recover pinned snapshots only after verifying that wrapper.
+    let cursor_snapshot = (client_request
+        && request_path != "/v1/client/assistant/conversations"
+        && !request_path.starts_with("/v1/client/assistant/conversation-")).then(|| {
         request
             .uri()
             .query()
@@ -1017,11 +1027,11 @@ async fn response_envelope_unbounded(
             let authenticate_started = Instant::now();
             let authentication =
                 crate::relay_trace::result(crate::relay_trace::Phase::Authenticate, || {
-                    client_v0::authenticate(&auth_state, &auth_request, transport)
+                    client_push::authenticate(&auth_state, &auth_request, transport)
                 });
             let authenticate_ms = authenticate_started.elapsed().as_millis() as i64;
             drop(authentication_span);
-            let snapshot = (!defer_detail_snapshot && !observation_report).then(|| {
+            let snapshot = (!defer_detail_snapshot && !local_only_response).then(|| {
                 let snapshot_span = crate::profile::span("admission/snapshot");
                 let snapshot_started = Instant::now();
                 let snapshot = crate::relay_trace::work(crate::relay_trace::Phase::Snapshot, || {
@@ -1049,10 +1059,17 @@ async fn response_envelope_unbounded(
     } else {
         (Ok(None), None)
     };
-    if let Ok(Some(session)) = &client_authentication {
-        // The clients connected now: kept in memory, shown by clients.list, never enforced.
-        client_presence::note_request(&state.node, session, request.headers(), client_now_ms());
-        request.extensions_mut().insert(session.clone());
+    if let Ok(Some(authentication)) = &client_authentication {
+        match authentication {
+            client_push::Authentication::Session(session) => {
+                // The clients connected now: kept in memory, shown by clients.list, never enforced.
+                client_presence::note_request(&state.node, session, request.headers(), client_now_ms());
+                request.extensions_mut().insert(session.clone());
+            }
+            client_push::Authentication::Cleanup(proof) => {
+                request.extensions_mut().insert(proof.clone());
+            }
+        }
     }
     if let Some(snapshot) = &client_snapshot {
         request.extensions_mut().insert(snapshot.clone());
@@ -1060,7 +1077,7 @@ async fn response_envelope_unbounded(
     let envelope_context = response_body::Context {
         state: state.clone(),
         client_request,
-        observation_report,
+        local_only_response,
         request_id: request_id.clone(),
         client_snapshot,
         server: otel.clone(),
@@ -1073,7 +1090,7 @@ async fn response_envelope_unbounded(
         // handler on a blocking thread so a busy projection or replication pass cannot
         // occupy an async worker needed to accept another call. Read workers are admitted
         // before taking store locks; nested work reuses the handler's reader.
-        (None, Ok(_)) if request_path == "/v1/health" || observation_report => {
+        (None, Ok(_)) if request_path == "/v1/health" || local_only_response => {
             let handler_started = Instant::now();
             let response = next.run(request).await;
             if let Some(server) = otel.as_ref() {
@@ -1228,7 +1245,7 @@ async fn response_envelope_unbounded(
             }
         }
     };
-    // Authentication errors and the small health/observation bypasses have no handler
+    // Authentication errors and the small health/local-only bypasses have no handler
     // worker. Ordinary handlers already framed their response on that worker.
     let mut response = if response.extensions().get::<response_body::Metrics>().is_some()
         || !response_body::is_json(&response)
@@ -1795,7 +1812,7 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
     })
 }
 
-fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
+pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
     if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
