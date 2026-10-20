@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyWindow, ClientError, St3Client,
@@ -58,6 +59,21 @@ const screens = (frames: CollectionFrame[]) => frames.filter((frame) => frame.ki
 const event = <T extends SyncEvent>(value: T): T => value
 
 describe('WebSocket task ordering', () => {
+  it('keeps a Node process alive for pending deliveries but lets an idle queue exit', () => {
+    const tasksUrl = new URL('../src/replay/tasks.ts', import.meta.url).href
+    const child = spawnSync(process.execPath, ['--experimental-transform-types', '--no-warnings', '--input-type=module', '-e', `
+      import { deliveryTasks } from ${JSON.stringify(tasksUrl)}
+      const deliveries = deliveryTasks()
+      deliveries.enqueue(() => process.stdout.write('delivered\\n'))
+      await deliveries.flush()
+      process.stdout.write('flushed\\n')
+      // Deliberately do not close: an idle queue must not keep the process alive.
+    `], { encoding: 'utf8', timeout: 5_000 })
+    expect(child.error).toBeUndefined()
+    expect(child.status, child.stderr).toBe(0)
+    expect(child.stdout).toBe('delivered\nflushed\n')
+  })
+
   it('delivers a send reply in a later task, after command-sent bookkeeping and microtasks', async () => {
     const h = setup()
     const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})

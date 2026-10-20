@@ -12,12 +12,13 @@ export const deliveryTasks = () => {
     try { task?.() } finally {
       running = false
       if (pending.length === 0) {
+        if ('unref' in channel.port1 && typeof channel.port1.unref === 'function') channel.port1.unref()
         for (const resolve of waiters) resolve()
         waiters.clear()
       }
     }
   }
-  // Node and Bun expose unref; browser MessagePorts do not.
+  // Idle ports must not keep Node/Bun alive; pending work refs the receiving port.
   for (const port of [channel.port1, channel.port2]) {
     if ('unref' in port && typeof port.unref === 'function') port.unref()
   }
@@ -25,6 +26,7 @@ export const deliveryTasks = () => {
     enqueue: (task: () => void): void => {
       if (closed) return
       pending.push(task)
+      if ('ref' in channel.port1 && typeof channel.port1.ref === 'function') channel.port1.ref()
       channel.port2.postMessage(null)
     },
     flush: (): Promise<void> => {

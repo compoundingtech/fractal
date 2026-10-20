@@ -786,8 +786,9 @@ replay.actions  // actions the client submitted, in order, for test assertions
   `close()`. Replies and timeline frames share one FIFO MessageChannel task queue, with one
   event per task (not a microtask). MessageChannel is outside
   [Playwright clock's faked APIs](https://playwright.dev/docs/api/class-clock#clock-install),
-  so delivery works while its timers and Date are paused. Ports are unref'd where supported
-  (Node/Bun) and closed on replay teardown.
+  so delivery works while its timers and Date are paused. Where supported (Node/Bun), idle
+  ports are unref'd; pending work refs the receiving port until the queue becomes idle.
+  Replay teardown closes both ports.
   Opening becomes effective in the open task before `onopen`; closing immediately prevents
   further sends and queues `onclose`. The typed socket seam does not expose `readyState`.
   `replay.close()` cancels pending opens, frames and timeline work, then delivers close
