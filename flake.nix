@@ -71,7 +71,17 @@
               options = {
                 xdg.configHome = lib.mkOption { type = lib.types.str; default = "/home/example/.config"; };
                 xdg.stateHome = lib.mkOption { type = lib.types.str; default = "/home/example/.local/state"; };
-                xdg.configFile = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                xdg.configFile = lib.mkOption {
+                  type = lib.types.attrsOf (lib.types.submodule {
+                    freeformType = lib.types.attrsOf lib.types.anything;
+                    options = {
+                      force = lib.mkOption { type = lib.types.bool; default = false; };
+                      enable = lib.mkOption { type = lib.types.bool; default = true; };
+                      text = lib.mkOption { type = lib.types.lines; default = ""; };
+                    };
+                  });
+                  default = { };
+                };
                 home.homeDirectory = lib.mkOption { type = lib.types.str; default = "/home/example"; };
                 home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 home.activation = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
@@ -82,10 +92,10 @@
               };
               config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
               config.home.file = extraConfig.homeFiles or { };
-              config.xdg.configFile = (extraConfig.configFiles or { })
-                // lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
+              config.xdg.configFile = lib.recursiveUpdate (extraConfig.configFiles or { })
+                (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
-                };
+                });
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
@@ -1076,6 +1086,17 @@
               fractalMigration.phase = "stage";
               environment.FRACTAL_TEST_XML = "<tag>&value";
             }).config;
+            consumer = phase: (mkHmModuleEval {
+              fractalMigration.phase = phase;
+              stateDir = "/home/example/.local/state/st3/store";
+              ptyRoot = "/home/example/.local/state/st3/pty";
+              forceLegacyConfig = true;
+              declarationsApply.enable = false;
+              configFiles."st3/config.toml".text = pkgs.lib.mkAfter ''
+                [checkpoint]
+                enabled = false
+              '';
+            }).config;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
             legacyPreflight = unstaged.home.activation.fractalMigrationPreflight;
@@ -1138,16 +1159,35 @@
           assert builtins.all (item: item.assertion) rendered.assertions;
           assert builtins.all forcedPathsMatch [ "stage" "completed" ];
           assert builtins.all forcedConfigPathsMatch [ "stage" "completed" ];
-          assert !(builtins.all (item: item.assertion) (mkHmModuleEval {
-            fractalMigration.phase = "stage";
-            forceLegacyConfig = true;
-          }).config.assertions);
+          assert builtins.all (phase:
+            let evaluated = consumer phase;
+                file = evaluated.xdg.configFile."st3/config.toml";
+            in builtins.all (item: item.assertion) evaluated.assertions
+              && file.force == (phase == "legacy")
+              && file.enable == (phase != "completed")
+              && pkgs.lib.hasInfix "[checkpoint]" file.text
+              && pkgs.lib.hasInfix (if phase == "completed"
+                then ''state_dir = "/home/example/.local/state/fractal/store"''
+                else ''state_dir = "/home/example/.local/state/st3/store"'') file.text
+              && (phase == "legacy" || (
+                pkgs.lib.hasInfix "/home/example/.local/state/fractal/store/bin/st3"
+                  evaluated.systemd.user.services.fractal.Service.ExecStart
+                && pkgs.lib.hasInfix "/home/example/.local/state/fractal/pty"
+                  evaluated.systemd.user.services.fractal.Service.ExecStart
+              ))
+          ) [ "legacy" "stage" "completed" ];
+          assert builtins.all (stateDir:
+            !(builtins.all (item: item.assertion) (mkHmModuleEval {
+              fractalMigration.phase = "stage";
+              inherit stateDir;
+            }).config.assertions)
+          ) [ "/elsewhere" "/home/example/.local/state/st3-other" "/home/example/.local/state/st3/../other" ];
           assert preflight.before == [ "writeBoundary" ];
           assert preflight.after == [ ];
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
           assert legacyPreflight.data == preflight.data;
-          assert !(completed.xdg.configFile ? "st3/config.toml");
+          assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
           assert pkgs.lib.hasInfix "config.home-manager.toml" completed.home.activation.fractalConfig.data;
