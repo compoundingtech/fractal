@@ -988,8 +988,8 @@ The kit hands out **wire state**, not decoded values:
 
 ```ts
 // .storybook/preview.ts
-import { scenarioGlobalTypes, withScenario } from '@smalltalk/st3-scenarios/storybook'
-export default { globalTypes: scenarioGlobalTypes, decorators: [withScenario] }
+import { scenarioGlobalTypes, scenarioLoaders, withScenario } from '@smalltalk/st3-scenarios/storybook'
+export default { globalTypes: scenarioGlobalTypes, loaders: scenarioLoaders, decorators: [withScenario] }
 
 // Sidebar.stories.tsx
 export default {
@@ -1002,6 +1002,15 @@ export const Huge = { parameters: { scenario: { world: 'huge' } } } // pinned
 
 - `scenarioGlobalTypes` adds the `scenario` toolbar item (the catalog, default
   `fleet-mid-refactor`) and `scenarioNow` (pinned time; default: load time).
+- The preview-facing `storybook` entry MUST stay light: neither its toolbar nor default
+  controls may statically import worlds or recordings. `scenarioLoaders` uses dynamic import
+  only when `parameters.scenario` is declared; stories without that parameter load no catalog.
+  Storybook awaits loaders before the synchronous decorator renders its provider.
+- Toolbar names and default-world variant controls use a small static manifest, with a test
+  comparing it to the catalog. This avoids adding a generation step for a small metadata list.
+- Synchronous Node consumers import `scenarioStoryCheck`, `ScenarioStoryCheckError` and
+  `resolveScenarioWorld` from `@smalltalk/st3-scenarios/storybook/check`. That separate entry
+  may eagerly load the catalog and exports a synchronous `withScenario` for portable SSR.
 - Each declared slice becomes an arg of the same name; its control selects a variant. Default
   arg value `default` means "the world's own slice".
 - Precedence: a story's pinned `parameters.scenario.world` wins over the toolbar; an arg other than
@@ -1137,7 +1146,7 @@ breaks a scenario fails in the same pull request.
 
 | Consumer | Owner | Contract |
 | --- | --- | --- |
-| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
+| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for scenario stories. Every scenario story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
 | `@st3/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
