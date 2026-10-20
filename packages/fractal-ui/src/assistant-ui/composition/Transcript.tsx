@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
@@ -43,6 +44,8 @@ export interface TranscriptProps {
   readonly title: string
   /** Omit when the host already owns the conversation's header band. */
   readonly showHeader?: boolean
+  /** With showHeader=false, preserve sync/run controls in the owning pane header's stable action slot. */
+  readonly headerActionsHost?: HTMLElement | null
   readonly sync: SyncStatus
   /** Omit to subscribe only elapsed/sync labels to the host HumanClockProvider. */
   readonly now?: number
@@ -312,7 +315,7 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true }: TranscriptProps) {
   const scrollId = React.useId()
   const narrow = React.useContext(NarrowLayoutContext)
   const messages = useAuiState(state => state.thread.messages)
@@ -379,12 +382,14 @@ export function Transcript({ turns, title, showHeader = true, sync, now, observe
   const empty = committed.length === 0 && turns.length === 0 && sync._tag === 'Live'
     ? <div aria-label="Empty conversation" data-testid="transcript-empty" {...stylex.props(styles.emptyBody)}><TranscriptEmptyContent emptyState={emptyState} /></div>
     : loadingState ?? <TranscriptSkeleton sync={sync} now={now} observedAt={observedAt} onRetrySync={onRetrySync} />
+  const headerStatus = <>
+    {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
+    {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
+    {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
+  </>
   return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
-    {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
-      {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
-      {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
-      {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
-    </header>}
+    {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
+    {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={2} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       renderHeader={(startIndex, revealRow, materializing) => committed.length > 2 && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - 4)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
       {(startIndex, revealRow) => <>
@@ -400,6 +405,8 @@ const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { t
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  headerStatus: { position: 'relative', display: 'flex', alignItems: 'center', flexShrink: 1, gap: s.md, minWidth: 0, maxWidth: { default: 300, '@container thread-header (max-width: 440px)': 112 }, height: g.controlMd },
+  headerProgress: { minWidth: g.controlLg },
   title: { flex: '1 1 0', minWidth: 0, fontWeight: t.weightMedium, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   lane: { flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
   // The shared reading column keeps rows and a reading-column composer on the same bounds.

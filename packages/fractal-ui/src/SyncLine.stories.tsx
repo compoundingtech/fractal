@@ -3,14 +3,18 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
+import { useScenarioSlice } from '@smalltalk/st3-scenarios/react'
+import type { SyncStatus } from '@smalltalk/st3-scenarios'
+import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
 import { SyncLine } from './assistant-ui/st3-views/SyncLine'
+import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { syncLine, observeSyncStatus } from './assistant-ui/st3-views/sync-line'
 import { syncObservations, syncNow } from './assistant-ui/st3-views/sync-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
-interface SyncArgs { scheme: Scheme; sequence: number }
+interface SyncArgs { scheme: Scheme; sequence: number; sync?: string }
 const surfaces = ['agents', 'conversation', 'terminal', 'missions', 'usage'] as const
 function TransitionPreview({ scheme, sequence, next, retry }: { scheme: Scheme; sequence: number; next: () => void; retry: () => void }) {
   const current = syncObservations[sequence % syncObservations.length]!
@@ -36,6 +40,30 @@ function ObservationRow({ observation, label }: { observation: typeof syncObserv
   return <div data-testid="sync-observation" data-sync-surface={label ?? 'conversation'} {...stylex.props(styles.observation)}><span {...stylex.props(styles.stateLabel)}>{label ?? observation.id}</span><SyncLine status={status} label={label ?? 'conversation'} now={syncNow} observedAt={retried ? syncNow - 1000 : observation.observedAt} onRetry={retry} /></div>
 }
 const requestedAfterRetry = { _tag: 'Requested', since: syncNow - 1000 } as const
+/** Wire expectation times are offsets; this preview pins their presentation clock. */
+function scenarioStatus(status: SyncStatus): SyncStatus {
+  switch (status._tag) {
+    case 'Connecting': case 'Requested': case 'Live': return { ...status, since: syncNow + status.since }
+    case 'Progress': return { ...status, stageSince: syncNow + status.stageSince, reportedAt: syncNow + status.reportedAt }
+    case 'Failed': return status
+    case 'Stale': return {
+      ...status,
+      ...(status.lastLiveAt === undefined ? {} : { lastLiveAt: syncNow + status.lastLiveAt }),
+      reason: status.reason._tag === 'Reconnecting' ? { ...status.reason, nextAt: syncNow + status.reason.nextAt }
+        : status.reason._tag === 'Quiet' ? { ...status.reason, lastFrameAt: syncNow + status.reason.lastFrameAt } : status.reason,
+    }
+  }
+}
+function ScenarioSyncStory({ scheme }: SyncArgs) {
+  const sync = useScenarioSlice('sync')
+  return <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
+    <h1 {...stylex.props(styles.title)}>Sync · {sync.variant}</h1>
+    {sync.state.expected.map((expected, index) => <section key={`${expected.surface}/${index}`} aria-label={`${expected.surface} at ${expected.at_ms}ms`} {...stylex.props(styles.surface)}>
+      <header {...stylex.props(styles.band)}><strong>{expected.surface}</strong><SyncLine status={scenarioStatus(expected.status)} label={expected.surface.startsWith('conversation:') ? 'conversation' : expected.surface} now={syncNow + expected.at_ms + 3000} observedAt={syncNow + expected.at_ms} /></header>
+      <div {...stylex.props(styles.retained)}>Last-known content stays in place.</div>
+    </section>)}
+  </ThemePortal></main>
+}
 function AllStatesStory() {
   return <main data-testid="sync-all-states" {...stylex.props(styles.allRoot, ...baselineTheme)}><h1 {...stylex.props(styles.title)}>Sync line · all observations</h1><div {...stylex.props(styles.schemes)}>{(['dark', 'light'] as const).map(scheme => <section key={scheme} aria-label={`${scheme} sync observations`} {...stylex.props(styles.themeColumn, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><h2 {...stylex.props(styles.title)}>{scheme}</h2>{syncObservations.map(observation => <ObservationRow key={observation.id} observation={observation} />)}</ThemePortal></section>)}</div></main>
 }
@@ -82,16 +110,35 @@ export const AllStates: Story = { tags: ['critical'], render: AllStatesStory, pl
     if (lineBounds.width <= 0 || lineBounds.left < rowBounds.left || lineBounds.right > rowBounds.right + 1) throw new Error('Each sync line must fit inside its observation row and theme surface')
   }
 } }
+export const Scenario: Story = { render: ScenarioSyncStory, parameters: { scenario: { slices: ['sync'] } }, argTypes: { ...scenarioArgTypes(['sync']), sequence: { control: false } } }
 export const UnknownReason: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown') } }
 export const UnknownReasonLastLive: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown · last live') } }
-export const LocalFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · cap') } }
+export const LocalFailure: Story = { ...Scenario, args: { sync: 'subscription-limit-local' } }
 export const LocalFailureWithoutCap: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · no cap') } }
 export const LocalFailureZeroCap: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · zero cap') } }
-export const UnknownFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Unknown') } }
-export const ServerFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed') } }
+export const UnknownFailure: Story = { ...Scenario, parameters: { scenario: { slices: ['sync'], world: 'failed-sync-subscription-limit-legacy' } } }
+export const ServerFailure: Story = { ...Scenario, parameters: { scenario: { slices: ['sync'], world: 'failed-sync-subscription-error' } } }
 export const ServerFailureSubscriptionLimit: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
 export const SubscriptionLimitsDark: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
 export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+/** A host-owned pane header must not reserve standalone hidden retry/detail width. */
+export const InlineHeader: Story = { tags: ['critical'], render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  {(['Live', 'Failed'] as const).map(id => <div key={id} data-testid={`inline-${id}`} {...stylex.props(styles.band)}>
+    <strong>{id}</strong><SyncLine inline status={syncObservations.find(row => row.id === id)!.status} label="conversation" now={syncNow} observedAt={syncNow} onRetry={() => {}} />
+  </div>)}
+  <div data-testid="standalone-live" {...stylex.props(styles.band)}><SyncLine status={{ _tag: 'Live', since: syncNow }} label="conversation" now={syncNow} observedAt={syncNow} /></div>
+</main>, play: async ({ canvasElement }) => {
+  const live = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Live"] [data-testid="sync-line"]')!
+  if (live.getBoundingClientRect().width !== 0 || live.getBoundingClientRect().height !== 0) throw new Error('Live inline status must not reserve header space')
+  const standalone = canvasElement.querySelector<HTMLElement>('[data-testid="standalone-live"] [data-testid="sync-line"]')!
+  if (standalone.getBoundingClientRect().height !== 24) throw new Error('Standalone live status must retain its existing slot')
+  const failed = canvasElement.querySelector<HTMLElement>('[data-testid="inline-Failed"] [data-testid="sync-line"]')!
+  for (const name of ['Retry loading conversation', 'Sync details for conversation']) {
+    const button = failed.querySelector<HTMLButtonElement>(`[aria-label="${name}"]`)!
+    if (button.disabled || button.getBoundingClientRect().width === 0) throw new Error(`Inline failure lost ${name}`)
+  }
+} }
+export const InlineHeaderLight: Story = { ...InlineHeader, args: { scheme: 'light' } }
 export const TransitionSequence: Story = { tags: ['critical'],
   render: StoryRender,
   play: async ({ canvasElement }) => {
@@ -151,6 +198,20 @@ export const TransitionSequence: Story = { tags: ['critical'],
   },
 }
 export const TransitionSequenceLight: Story = { tags: ['critical'], args: { scheme: 'light' }, play: TransitionSequence.play }
+export const NarrowFailure: Story = {
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><ThemePortal><NarrowLayoutContext.Provider value={true}><SyncLine status={{ _tag: 'Failed', cause: { _tag: 'Server', code: 'subscription-limit', message: 'Retained conversation diagnostics remain reachable.' } }} label="conversation" now={syncNow} observedAt={syncNow} onRetry={() => {}} /></NarrowLayoutContext.Provider></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    for (const name of ['Retry loading conversation', 'Sync details for conversation']) {
+      const button = canvasElement.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!
+      const rect = button.getBoundingClientRect()
+      if (rect.width < 44 || rect.height < 44) throw new Error(`${name} must retain a 44px touch target`)
+    }
+    canvasElement.querySelector<HTMLButtonElement>('button[aria-label="Sync details for conversation"]')!.click()
+    for (let frame = 0; frame < 120 && !document.querySelector('[role="dialog"]'); frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    if (!document.querySelector('[role="dialog"]')?.textContent?.includes('Retained conversation diagnostics remain reachable.')) throw new Error('Touch Details must open real diagnostics')
+  },
+}
+export const NarrowFailureLight: Story = { ...NarrowFailure, args: { scheme: 'light' } }
 const styles = stylex.create({
   root: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, allRoot: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, heading: { display: 'flex', alignItems: 'center', gap: s.lg, minHeight: g.band, flexShrink: 0 },
   stateName: { width: g.tooltipMax, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

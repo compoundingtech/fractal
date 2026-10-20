@@ -184,6 +184,23 @@ test('the actual gate rejects stale case policy before browser execution', async
     await rm(directory, { recursive: true, force: true })
   }
 })
+test('the production gate fails closed when the policy environment variable is set, even empty', async () => {
+  for (const value of ['[]', '']) {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), 'unused-build', 'unused-output'], {
+      env: { ...process.env, KIT_PLAY_CASE_OVERRIDES: value, PLAYWRIGHT_MODULE: 'must-not-import-browser-for-policy-env' },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', resolve)
+    })
+    assert.equal(code, 1)
+    assert.match(stderr, /KIT_PLAY_CASE_OVERRIDES is not supported: production kit plays must use the reviewed source policy/)
+    assert.doesNotMatch(stderr, /must-not-import-browser-for-policy-env/)
+  }
+})
 test('shard coverage requires the exact strict case set, including the benchmark corner', () => {
   const fullIds = [benchmarkId, functionalId, ...aliasIds].sort()
   const provenance = { runId: '1234', runAttempt: 1, headSha: 'a'.repeat(40) }

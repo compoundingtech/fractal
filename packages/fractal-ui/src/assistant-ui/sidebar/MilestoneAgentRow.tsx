@@ -8,6 +8,7 @@ import { usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } fro
 import { AgentHoverCard, AgentRowActions, Highlight } from './SidebarAgentRow'
 import { SidebarStatus } from './SidebarStatus'
 import { SidebarTime } from './SidebarTime'
+import { useSidebarHoverIntent } from './useSidebarHoverIntent'
 import { SidebarDuration } from './SidebarDuration'
 
 const spendCount = Intl.NumberFormat('en', { style: 'currency', currency: 'USD', notation: 'compact', maximumSignificantDigits: 2 })
@@ -57,7 +58,7 @@ export const openAgentRowMenu = (element: Element): boolean => {
 export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, frozen = false, now, query, depth = 0, focused = false, chevron, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
-  const [hovered, setHovered] = React.useState(false)
+  const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const fields: React.ReactNode[] = [<span key="status" data-row-field="status-label">{row.statusLabel}</span>, <span key="host" data-row-field="host">{row.host}</span>]
   if (row.usage._tag === 'Known') {
@@ -82,7 +83,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="line2" {...stylex.props(styles.line2, narrow && styles.narrowLine2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
     <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
       menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible]} />
-    {!narrow && hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+    {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
       <AgentHoverCard row={row} now={now} />
     </Popover>}
   </div>

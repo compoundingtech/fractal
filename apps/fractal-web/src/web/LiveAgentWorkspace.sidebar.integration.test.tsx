@@ -7,6 +7,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
+import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -23,11 +24,11 @@ import { ViewportStore } from '../../../../packages/fractal-ui/src/assistant-ui/
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const gateway = 'gateway.example.invalid'
-const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
+const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
-let agents: Atom.Writable<Feed<readonly Agent[]>>
+let agents: Atom.Writable<Feed<readonly DecodedAgent[]>>
 let gatewaySync: Atom.Writable<FeedSyncObservation>
 let source: DataSource
 
@@ -43,14 +44,14 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/?open=resource/example:detail')
   registry = AtomRegistry.make()
   // Live gateway feeds are keepAlive and outlive the roster's subscription; an autoDispose fixture would reset on unmount.
-  agents = Atom.make<Feed<readonly Agent[]>>(waiting).pipe(Atom.keepAlive)
+  agents = Atom.make<Feed<readonly DecodedAgent[]>>(waiting).pipe(Atom.keepAlive)
   gatewaySync = Atom.make<FeedSyncObservation>({ status: { _tag: 'Live', since: 0 }, observedAt: 0 })
   source = {
     ...fixtureSource({ world: { now: 5000, gateway, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }),
     agents,
     sync: {
       gateway: gatewaySync,
-      agents: Atom.make(initialFeedSync<readonly Agent[]>(0)),
+      agents: Atom.make(initialFeedSync<readonly DecodedAgent[]>(0)),
       missions: Atom.make(initialFeedSync<readonly Mission[]>(0)),
       attention: Atom.make(initialFeedSync<readonly Attention[]>(0)),
       conversation: () => Atom.make(initialFeedSync<ConversationPage>(0)),
@@ -168,7 +169,7 @@ it('keeps workspace providers and unchanged roster rows out of the one-second cl
 
 it('keeps tree render callbacks and unchanged rows stable when one agent receives a data frame', async () => {
   const first = { ...agent, last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }
-  const other: Agent = { ...agent, id: 'agent/other', name: 'Other Agent' }
+  const other: DecodedAgent = { ...agent, id: 'agent/other', name: 'Other Agent' }
   registry.set(agents, observed({ value: [first, other] }))
   const rows = vi.spyOn(dataHooks, 'useAgent')
   const folders = vi.spyOn(folderComponents, 'AgentFolders')
@@ -222,7 +223,7 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
-  const timedAgent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:01.000Z', last_activity_at: '1970-01-01T00:00:01.000Z' })
+  const timedAgent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:01.000Z', last_activity_at: '1970-01-01T00:00:01.000Z' }))
   registry.set(agents, observed({ value: [timedAgent] }))
   await mount(1440)
   const time = () => roster().querySelector('[data-row-column="time"] time')!.textContent
@@ -261,7 +262,7 @@ it('renders the RM1 two-line facts and freezes age without replacing the working
 it('reveals a slightly future activity timestamp when only the leaf clock catches up', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
-  const timedAgent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:05.500Z', last_activity_at: '1970-01-01T00:00:05.500Z' })
+  const timedAgent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:05.500Z', last_activity_at: '1970-01-01T00:00:05.500Z' }))
   registry.set(agents, observed({ value: [timedAgent] }))
   const projectedRows = vi.spyOn(rowProjection, 'sidebarRow')
   try {
@@ -280,7 +281,7 @@ it('reveals a future status boundary in ClockedThreadHeader without rendering th
   const now = Atom.make(5000)
   source = { ...source, now }
   const at = '1970-01-01T00:00:05.500Z'
-  const suspended = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'suspended', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: at, suspension: { action: 'suspend', blocking: [], operation_id: 'operation/example', phase: 'suspended', suspended_at: at, updated_at: at } })
+  const suspended = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'suspended', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: at, suspension: { action: 'suspend', blocking: [], operation_id: 'operation/example', phase: 'suspended', suspended_at: at, updated_at: at } }))
   registry.set(agents, observed({ value: [suspended] }))
   window.history.replaceState(null, '', '/w/agent/example')
   const projectedRows = vi.spyOn(rowProjection, 'sidebarRow')
@@ -301,7 +302,7 @@ it('reveals a future status boundary in ClockedThreadHeader without rendering th
 // Both the real data derivation and the kit's SidebarAgentRow DOM participate.
 describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
   it('dismisses the hovered row on navigation while preserving every roster node', async () => {
-    const other: Agent = { ...agent, id: 'agent/other', name: 'Other Agent' }
+    const other: DecodedAgent = { ...agent, id: 'agent/other', name: 'Other Agent' }
     registry.set(agents, observed({ value: [agent, other] }))
     await mount(width)
     const before = [...roster().querySelectorAll('[data-testid="taste-agent-row"]')]
@@ -363,7 +364,7 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
 
 describe('shipped live sidebar search', () => {
   it('applies typed hosts to the real roster, matches free text on names and IDs only, and strips facets from highlights', async () => {
-    const candidates: readonly Agent[] = [
+    const candidates: readonly DecodedAgent[] = [
       { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/synthetic-138/1') },
       { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/SYNTHETIC-138/2') },
       // Text looks like a matching host but must not satisfy a machine facet.

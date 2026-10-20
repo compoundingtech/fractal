@@ -17,7 +17,8 @@ import {
 } from '../src/index.ts'
 import { createReplay, manualClock } from '../src/replay/index.ts'
 import { ScenarioProvider, createReadTracker, useScenarioSlice } from '../src/react/index.ts'
-import { resolveScenarioWorld, scenarioGlobalTypes, scenarioStoryCheck, withScenario } from '../src/storybook/index.ts'
+import { scenarioGlobalTypes } from '../src/storybook/index.ts'
+import { resolveScenarioWorld, scenarioStoryCheck, withScenario } from '../src/storybook/check.ts'
 
 const REBASED_NOW = ANCHOR_MS + 123_456_789
 const WINDOW_LIMIT = 200

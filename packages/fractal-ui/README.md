@@ -46,19 +46,22 @@ The dev server binds to localhost on a fixed port (53705). To view it from anoth
 ### Scenario data
 
 The **Scenario** toolbar uses the shared `@smalltalk/st3-scenarios` catalog.
-`scenario` selects the world and `scenarioNow` fixes its clock. Only Markdown's
-`AllStates` story currently declares a slice (`conversation`) and renders that
-slice's prose through the real `Markdown` component. Other stories retain their
-existing fixtures. Theme, density and Markdown's rendering picker remain
-independent of scenario data.
+`scenario` selects the world and `scenarioNow` fixes its clock. Markdown prose,
+SyncLine's scenario previews, SystemState's roster and connection geometry,
+TranscriptComposer's column examples, TranscriptPress's scenario examples and
+DeclarationPanel's structured mission fallback consume declared slices.
+Composer and connection geometry checks pin populated data; separate scenario
+stories follow the toolbar. Long interaction-contract specimens retain their fixtures because
+tail mounting and held-back replies do not satisfy the all-markers SSR check.
+Theme, density and rendering pickers remain independent of scenario data.
 
 For example, open
 `?path=/story/fractal-ui-markdown--all-states&globals=scenario:fleet-mid-refactor&args=conversation:empty`.
 Slice overrides use `args=<slice>:<variant>`; the world uses
 `globals=scenario:<world>`. The `test:stories` CI lane runs the kit's
-`scenarioStoryCheck` over this real story, checking declared reads, visible data
-dependence, toolbar world changes and URL-state roundtripping. World-pin
-invariance is intentionally skipped because the story follows the toolbar.
+`scenarioStoryCheck` over the converted stories, checking declared reads, visible
+data dependence, toolbar world changes, pinned-world invariance where applicable,
+and URL-state roundtripping.
 The SSR check uses StyleX's Rollup compiler adapter, without the Vite adapter's
 browser stylesheet refresh timer, so Vitest can close its middleware server cleanly.
 
@@ -69,6 +72,7 @@ Every `ci-fractal-web` proof discovers every story from the built `index.json` a
 The runner uses one Chromium with up to six concurrent isolated pages, bounded by the available CPU allowance. The receipt records the actual worker count; every indexed case is still required.
 Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
 The gate also validates every strict case override against the complete story index before selecting cases: unknown story IDs fail closed, and a zero-case exclusion must be a `-light` scheme alias with a kept base story from the same source file. Policy tests pin the allowed IDs and benchmark omissions independently of the policy map.
+The production `kit-play-gate.mjs` entry point always uses the reviewed source policy and rejects `KIT_PLAY_CASE_OVERRIDES` whenever it is set, including an empty value. Gate fixture tests keep a valid policy index; tests that need a custom policy call `runKitPlayGate` in `scripts/kit-play-gate-runner.mjs` with an explicit `overrides` parameter instead of configuring the production process.
 Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.
 Plays look up a tooltip with `tooltipFor(anchor, name)` from `src/story-play.ts`, never with a document-wide `findByRole('tooltip')`. The helper resolves the tooltip through the anchor's `aria-describedby` and asserts its role, exact accessible name and visibility. Its cost does not grow with the page size.
 TranscriptPress and TranscriptComposer wait for the history controls' existing `data-state="complete"` commit signal before checking the exact mounted turn count. Their shared `committedTranscriptHistory` helper observes that attribute directly; scroll and interaction assertions retain their existing bounds.
@@ -241,9 +245,12 @@ Failed-command reason lines select the final top-level named exception from a tr
 
 `ThreadHeader` shows **Toggle terminal drawer** only when `terminalAvailable` is set. A host that knows why the terminal is unavailable passes `terminalDisabledReason?: string`: the toggle then stays visible but disabled, keeps its exact name, and carries the reason as its accessible description and hover title. Without a reason the toggle stays hidden. `@smalltalk/fractal-ui/assistant-ui/shell` also exports `TerminalDrawer`. The `Thread header` stories cover both cases.
 
+Desktop `ThreadHeader` establishes the named `thread-header` inline-size container, so native host controls can progressively collapse labels and move secondary actions into an overflow menu by the actual lane width, without resize-driven React state. Below 560px it omits the folder crumb and truncates the agent title; controls do not shrink or wrap. `ConstrainedLane` and `ConstrainedLaneLight` cover its 360px/32px geometry. Narrow headers retain their separate presentation.
 ### Phone (narrow) geometry
 
 Below its drawer breakpoint a host passes `narrow` to `ThreadHeader` and provides `NarrowLayoutContext` (from `@smalltalk/fractal-ui/assistant-ui/shell`) with `true` around the workspace. The kit then sizes its phone navigation and composer controls as 44px touch targets (`geometryVars.touchTarget`): the narrow header's Expand sidebar and Agent details, the composer's Send, Stop, attach, pickers, queue and suggestion rows, and the Show menu trigger and entries. Agent rows keep their height, status glyph and metric slot but move the actions menu (always visible, since touch has no hover) and the subagent disclosure out of the dense row into their own trailing 44px columns, so the title truncates earlier; SR-1 rows grow to 44px. The composer field uses 16px text (`typeVars.touchInputSize`) so iOS does not zoom on focus. Its height is capped at the smaller of `editorMax` and one third of `--wf-phone-height` (falling back to `100dvh`); a host sets that variable to the visual viewport's height when the keyboard opens. The composer stays in flow under the transcript and is never fixed. A context rather than a viewport media query keeps the same composer dense in a narrow desktop split. Safe-area insets: the host owns top and bottom; the narrow header and composer clear left and right; `NarrowSheet` covers the viewport and clears all four itself. `Thread header/Narrow phone`, `Phone thread`, `Narrow sheet` and `Sidebar/Agent Row/Phone · 44px menu and disclosure columns` cover the geometry, with desktop controls asserted alongside.
+
+Narrow agent rows never schedule hover cards or quick-Open summaries from mouse or focus events; their always-visible action menu provides reported details instead. Sidebar row variants share this policy through `useSidebarHoverIntent`, which reads `NarrowLayoutContext`. Desktop rows retain their delayed hover cards and keyboard-focus disclosure. `PhoneFocusNoHover` holds focus on the narrow parent disclosure beyond the desktop open delay and rejects any hover overlay or quick-Open replacement.
 
 Narrow transcripts keep the textual Running/elapsed status but omit the decorative animated run stripe, which would resemble another tab-selection indicator below a host's tab strip. Desktop transcripts retain the stripe. The row action trigger uses the muted chevron rather than the settings glyph.
 
@@ -286,6 +293,12 @@ Workbench pane identities survive layout changes through persistent pane slots. 
 Overlays — Tooltip, Popover/Menu, Modal/Dialog — must render inside the themed root, where the active scheme's tokens resolve. The web app does this through its workspace portal provider; standalone kit consumers wrap their tree in `ThemePortal`.
 
 `DiffPanel` is exported from `@smalltalk/fractal-ui/assistant-ui`, not from `@smalltalk/fractal-ui/assistant-ui/shell`. Its source highlighting loads the Markdown grammar graph, and the shell entry stays runtime-free. `pnpm check:shell-imports` walks the shell entry's import graph and fails if Markdown, refractor or the assistant-ui runtime becomes reachable.
+
+`DiffPanel` also takes `info?: ReactNode`, disclosed from an accessible toolbar information button (provenance/source controls), `scopeLabel?: string`, `showSurfaceTabs?: boolean`, `onOpenFile?: (path: string) => void`, and `closeLabel?: string` (default `Close ${title}`). Its header is the shared 32px `PaneHeader`.
+
+`@smalltalk/fractal-ui/assistant-ui/shell` exports the pane layout accepted in RM1: `PaneHeader` (the one 32px pane header: leading control, identity, trailing actions), `Pane` (one tab is the title, several are a tab strip), `PaneHeaderButton`, `PaneHeaderToggle`, and `DockedSplit`. `ThreadHeader` uses the same 32px geometry unless `narrow`. `DockedSplit({ persistKey, label, children, dock?, min = 320, max = 720, defaultSize = 440, onCollapse? })` keeps its main pane in one stable node and, when `dock` is supplied, adds a separator and a right-docked panel. The width lives in the `--dock-size` custom property and the separator's `aria-valuenow`, written straight to the DOM: a drag writes them at most once per frame and re-renders nothing; pointerup and each key press store the width under `composition.${persistKey}`, so a workspace-scoped key keeps one width per workspace. ← widens and → narrows by 8px (Shift 32px), Home/End jump to min/max, Enter calls `onCollapse`, double-click resets. **Fractal UI / Docked split** plays cover pointer and keyboard resize, clamping, cancel, persistence across close and remount, workspace isolation and header alignment.
+
+`DockedSplit.minMainSize` optionally reserves a usable main lane. A ResizeObserver measures the actual split container (including sidebar changes), subtracts that lane and the separator, and updates the effective dock bounds/CSS/ARIA directly. End uses the available maximum. When space cannot fit both configured minima, the main lane takes priority and the dock minimum temporarily decreases. Automatic constraint/restoration never rewrites the saved preference: wider containers restore it.
 
 The composer preserves kit send, cancellation, byte-limit and token-history contracts while adding adaptive pill/slab geometry, grouped mention/command popovers, effort selection, and the recipient/model toolbar. `ComposerSession` owns only device-local draft persistence and composer interaction policy; transports and runtime facts remain host-owned. Its toolbar tooltips retain viewport-clamped, wrapping contents; Workbench/DiffPanel use the shared 500ms Controls tooltip.
 

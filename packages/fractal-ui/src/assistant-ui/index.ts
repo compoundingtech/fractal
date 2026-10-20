@@ -17,6 +17,10 @@ export type { Draft, DraftToken, MentionToken, CommandToken, SerializedDraft, Sl
 /** Reusable round-2 live composition primitives; transport stays application-owned. */
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit } from './composition/Shell.tsx'
+export { DockedSplit, dockedSplitBounds, dockedSplitStorageKey, readDockedSize } from './composition/DockedSplit.tsx'
+export type { DockedSplitProps } from './composition/DockedSplit.tsx'
+export { Pane, PaneHeader, PaneHeaderButton, PaneHeaderToggle } from './composition/Pane.tsx'
+export type { PaneProps, PaneTabItem } from './composition/Pane.tsx'
 export { DiffPanel } from './composition/DiffPanel.tsx'
 export type { DiffPanelProps, DiffFile, DiffTurn, DiffRevealRequest } from './composition/DiffPanel.tsx'
 export { Markdown, ResourceChip, HighlightedSource, completeStreamingTail } from './composition/Markdown.tsx'

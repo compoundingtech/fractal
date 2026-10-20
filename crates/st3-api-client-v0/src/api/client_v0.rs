@@ -165,6 +165,10 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversations", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
+        .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
@@ -6411,6 +6415,8 @@ async fn terminal_stream_socket(
     mut first_frame: Option<FirstFrame>,
 ) {
     let subject = terminal_subject(&id);
+    let mut graph = state.store.subscribe_runtime_authority(&subject);
+    let mut broad_graph = state.event_notify.subscribe();
     let live_store = state.store.clone();
     let live_subject = subject.clone();
     let live_incarnation = expected_incarnation.clone();
@@ -6431,7 +6437,6 @@ async fn terminal_stream_socket(
         }
     };
     let terminal_id = client_detail_id("terminal", &id);
-    let mut graph = state.event_notify.subscribe();
     let mut screens =
         terminal_view::subscribe(&state.pty_root, &live.runtime_id, &live.incarnation_id);
     let first = tokio::time::Instant::now() + TERMINAL_FIRST_SCREEN_TIMEOUT;
@@ -6473,6 +6478,14 @@ async fn terminal_stream_socket(
                     }
                 }
                 changed = graph.changed(), if fence_check_at.is_none() => {
+                    if changed.is_ok() {
+                        let earliest = last_fence_check + TERMINAL_FENCE_CHECK_INTERVAL;
+                        fence_check_at = Some(earliest.max(tokio::time::Instant::now()));
+                    }
+                    None
+                }
+                changed = broad_graph.changed(), if fence_check_at.is_none()
+                    && state.store.runtime_authority_coverage_failed() => {
                     if changed.is_ok() {
                         let earliest = last_fence_check + TERMINAL_FENCE_CHECK_INTERVAL;
                         fence_check_at = Some(earliest.max(tokio::time::Instant::now()));
@@ -15707,6 +15720,136 @@ mission "example/zero-run" state="ready" {
         );
     }
 
+    /// Per-PR contract for the Codex `import` boot canary (scripts/st3-boot-canaries/run,
+    /// `prepare_codex_import` and `prove_codex_import`), in its topology: discovery reaches the
+    /// saved session through a `~/.codex` symlink to the originating home, and a second, stale
+    /// home holds a copy of the same native ID (the canary launches the daemon with
+    /// `CODEX_HOME` set to it). The imported seat must select exactly that ID and pin the
+    /// physical originating home, so a launch overrides any inherited `CODEX_HOME` and the
+    /// provider resolves the origin rollout, never the stale copy. The launch environment
+    /// reaching the spawned process, and the driver's per-incarnation binding claim, stay with
+    /// the canary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn imported_codex_seat_binds_selected_id_and_pinned_codex_home() {
+        let native = "019fae17-c215-7882-a4d9-5f247168ffce";
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let origin = home.join(".codex-origin");
+        let stale = home.join(".codex-stale");
+        for codex_home in [&origin, &stale] {
+            let directory = codex_home.join("sessions/2026/09/21");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join(format!("rollout-2026-09-21T08-00-00-{native}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({"type": "session_meta", "payload": {
+                        "id": native, "cwd": workspace, "source": "test"}})
+                ),
+            )
+            .unwrap();
+        }
+        std::os::unix::fs::symlink(&origin, home.join(".codex")).unwrap();
+        let origin = std::fs::canonicalize(&origin).unwrap();
+        let stale = std::fs::canonicalize(&stale).unwrap();
+
+        let listed = crate::external_sessions::discover_fresh(Some(&home), true)
+            .unwrap()
+            .sessions
+            .into_iter()
+            .filter(|item| item.native_id == native)
+            .collect::<Vec<_>>();
+        assert_eq!(listed.len(), 1, "discovery lists the saved session once");
+        let external = listed.into_iter().next().unwrap();
+
+        let mut state = test_state_named(root.path(), "import-canary");
+        state.native_session_home = Some(home.clone());
+        let session = ClientSession::local(Some("person/eval")).unwrap();
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/import-canary".into(),
+            action_type: "session.import".into(),
+            idempotency_key: "session-import-canary-0001".into(),
+            fence: Fence {
+                snapshot_id: new_client_snapshot(&state).id,
+                subject_revisions: BTreeMap::from([(
+                    external.id.clone(),
+                    external.revision.clone(),
+                )]),
+                mission_generation: None,
+                step_definition: None,
+                attempt: None,
+                readiness_epoch: None,
+                runtime_incarnation: None,
+                runtime_desired_revision: None,
+                terminal_sequence: None,
+                preview_token: None,
+            },
+            parameters: json!({"target_id": external.id}),
+        };
+        let response = action(
+            State(state.clone()),
+            Extension(new_client_snapshot(&state)),
+            Extension(session),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        let subject = response.0["affected_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|id| id.starts_with("agent/import/"))
+            .expect("the import declares an agent/import/ seat")
+            .to_owned();
+
+        let imported = state
+            .store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|desired| desired.subject == subject)
+            .unwrap();
+        let member = imported.member.as_ref().unwrap();
+        // The driver resumes exactly the selected ID through the strict handshake, never through an
+        // authored `resume` argv that would bypass it.
+        assert_eq!(member.environment[crate::suspension::RESUME_ENV], native);
+        let crate::model::LaunchSpec::Argv(argv) = &member.launch else {
+            panic!("the imported seat needs a typed native launch");
+        };
+        assert!(!argv.iter().any(|arg| arg == "resume" || arg == native), "{argv:?}");
+        // The pinned home is the physical originating home: not the discovery symlink, and not the
+        // stale home a launch would otherwise inherit.
+        let pinned = Path::new(&member.environment["CODEX_HOME"]);
+        assert_eq!(pinned, origin);
+        assert_ne!(pinned, home.join(".codex"));
+        assert_ne!(pinned, stale);
+        // Under the pinned home, the selected ID resolves to the origin rollout only.
+        let selected =
+            st_drivers::codex_app_server::latest_codex_transcript_in(pinned, native)
+                .unwrap()
+                .expect("the pinned home holds the selected session");
+        assert!(selected.starts_with(&origin), "{}", selected.display());
+
+        let session_file = state
+            .store
+            .latest_claim(&subject, Some("harness.session-file"))
+            .unwrap()
+            .expect("the selected native ID is durable graph state");
+        assert_eq!(session_file.body["fields"]["session_id"], native);
+        assert_eq!(session_file.body["fields"]["harness"], "codex");
+        assert_eq!(session_file.body["fields"]["agent"], subject.as_str());
+        let bound = std::fs::canonicalize(
+            session_file.body["fields"]["path"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert!(bound.starts_with(&origin), "{}", bound.display());
+    }
+
     #[test]
     fn client_events_are_redacted_timestamped_invalidations_with_retention_fences() {
         let root = tempfile::tempdir().unwrap();
@@ -17433,7 +17576,7 @@ mission "example/zero-run" state="ready" {
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let native = conversation_blocks::read(&source, &session, &session_id).unwrap();
         let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
-        let messages = native_session_messages(&state, &snapshot, &session_id, managed.as_ref()).unwrap();
+        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
         assert_eq!(native[0]["sequence"], messages[1]["sequence"]);
         assert_eq!(native[0]["timestamp"], messages[1]["timestamp"]);
         let expected = vec![messages[0].clone(), native[1].clone(),
@@ -21087,6 +21230,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
         };

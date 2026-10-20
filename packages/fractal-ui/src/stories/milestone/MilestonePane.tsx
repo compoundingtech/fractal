@@ -1,13 +1,12 @@
-// Workshop-only composition. One 32px pane header owns identity: the title appears once, the run state appears once at the
+// RM1 reference thread parts on the kit `Pane`: one 32px pane header owns identity, the run state appears once at the
 // stream tail, and the kit Transcript renders without its own title band (`showHeader={false}`).
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Tab, TabList, TabPanel, Tabs, ToggleButton } from 'react-aria-components'
+import { Button } from 'react-aria-components'
 import { Transcript, type TranscriptProps } from '../../assistant-ui/composition/Transcript'
 import { Composer, type ComposerProps } from '../../assistant-ui/composition/Composer'
 import { TranscriptSkeleton } from '../../assistant-ui/composition/TranscriptSkeleton'
 import { EmbraceRuntimeProvider } from '../../assistant-ui/EmbraceRuntime'
-import { Icon } from '../../assistant-ui/composition/Icons'
 import { SidebarStatus } from '../../assistant-ui/sidebar/SidebarStatus'
 import type { AgentStatus } from '../../assistant-ui/sidebar/model'
 import type { ThreadResource } from '../../assistant-ui/workbench/workbench-model'
@@ -16,54 +15,10 @@ import { accentVars as accent, borderVars as border, geometryVars as g, radiusVa
 /** A pane tab: an agent conversation carries a status glyph; a tool surface (Changes) does not. */
 export interface PaneTab { readonly key: string; readonly title: string; readonly status?: AgentStatus; readonly statusLabel?: string }
 
-/** Workshop proposal: wide enough that a typical agent title is readable before it truncates. */
-const tabMax = '240px'
-
-/** Pane tabs use the roster's glyph (SG-1 · G3), so a status reads the same in the roster, palette, tabs and cards. */
+/** Pane tabs use the roster's glyph (SG-1 · G3), so status reads consistently across surfaces. */
 export function PaneGlyph({ tab }: { readonly tab: PaneTab }) {
   if (tab.status === undefined) return null
   return <SidebarStatus status={tab.status} statusLabel={tab.statusLabel} variant="SG-1" discRefinement="G3" iconOnly />
-}
-
-export interface MilestonePaneProps {
-  readonly tabs: readonly PaneTab[]
-  readonly activeKey: string
-  readonly onSelectTab: (key: string) => void
-  /** Sidebar toggle while the sidebar is hidden (collapsed, or the closed narrow drawer). */
-  readonly leading?: React.ReactNode
-  readonly actions?: React.ReactNode
-  readonly children: React.ReactNode
-}
-
-/** Same anatomy with one tab or many: a lone tab is the title, several are a tab strip; actions sit at the end. */
-export function MilestonePane({ tabs, activeKey, onSelectTab, leading, actions, children }: MilestonePaneProps) {
-  const active = tabs.find(tab => tab.key === activeKey) ?? tabs[0]!
-  if (tabs.length === 1) return <section aria-label={active.title} data-milestone-pane={active.key} {...stylex.props(styles.pane)}>
-    <header data-testid="milestone-pane-header" {...stylex.props(styles.header)}>
-      {leading}
-      <span {...stylex.props(styles.identity)}><PaneGlyph tab={active} /><span title={active.title} {...stylex.props(styles.title)}>{active.title}</span></span>
-      <span {...stylex.props(styles.actions)}>{actions}</span>
-    </header>
-    <div {...stylex.props(styles.body)}>{children}</div>
-  </section>
-  return <Tabs selectedKey={active.key} onSelectionChange={key => onSelectTab(String(key))} data-milestone-pane={active.key} {...stylex.props(styles.pane)}>
-    <header data-testid="milestone-pane-header" {...stylex.props(styles.header)}>
-      {leading}
-      <TabList aria-label="Open conversations" {...stylex.props(styles.tabs)}>
-        {tabs.map(tab => <Tab key={tab.key} id={tab.key} {...stylex.props(styles.tab, tab.status === undefined && styles.toolTab)}><PaneGlyph tab={tab} /><span title={tab.title} {...stylex.props(styles.tabLabel)}>{tab.title}</span></Tab>)}
-      </TabList>
-      <span {...stylex.props(styles.actions)}>{actions}</span>
-    </header>
-    {/* One panel per tab with a stable id: re-using a single panel under a changing id leaves the selected tab's aria-controls pointing at nothing. */}
-    {tabs.map(tab => <TabPanel key={tab.key} id={tab.key} {...stylex.props(styles.body)}>{tab.key === active.key ? children : null}</TabPanel>)}
-  </Tabs>
-}
-
-export function HeaderToggle({ label, icon, shortcut, onPress }: { readonly label: string; readonly icon: 'panel' | 'chevrons-left'; readonly shortcut?: string; readonly onPress: () => void }) {
-  return <Button aria-label={label} aria-keyshortcuts={shortcut} onPress={onPress} {...stylex.props(styles.iconButton)}><Icon name={icon} size={14} /></Button>
-}
-export function ChangesToggle({ isSelected, onChange }: { readonly isSelected: boolean; readonly onChange: (selected: boolean) => void }) {
-  return <ToggleButton aria-label="Show changes" isSelected={isSelected} onChange={onChange} {...stylex.props(styles.iconButton, styles.toggle)}><Icon name="panel" size={14} /></ToggleButton>
 }
 
 export type ThreadView =
@@ -139,24 +94,12 @@ export function AgentResultCard({ tab, summary, onOpen }: { readonly tab: PaneTa
 const dockTheme = stylex.createTheme(g, { blur: '0px' })
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
 const styles = stylex.create({
-  pane: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  header: { display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlLg, flexShrink: 0, boxSizing: 'border-box', paddingInline: s.sm, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border, minWidth: 0 },
-  identity: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, flex: '0 1 auto', paddingInline: s.sm },
-  title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, fontWeight: t.weightMedium, color: ink.fg },
-  tabs: { display: 'flex', alignItems: 'center', gap: s.xs2, minWidth: 0, flex: '0 1 auto' },
-  tab: { display: 'inline-flex', alignItems: 'center', gap: s.sm, height: g.controlSm, minWidth: 0, maxWidth: tabMax, paddingInline: s.sm, borderRadius: r.control, color: ink.fgMuted, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
-  tabLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  // Tool tabs (Changes) have a short fixed label; agent titles give way first when the strip is tight.
-  toolTab: { flexShrink: 0 },
+  glyph: { display: 'inline-flex', flexShrink: 0 },
   unavailable: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },
   unavailableText: { display: 'flex', flexDirection: 'column', gap: s.xs2, flex: '1 1 0', minWidth: 0, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
   unavailableTitle: { color: tone.dangerFg, fontWeight: t.weightMedium },
   unavailableDetail: { color: ink.fgSoft, overflowWrap: 'anywhere' },
   actionButton: { flexShrink: 0, height: g.controlSm, paddingInline: s.md, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.denseSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': focusRing },
-  actions: { display: 'flex', alignItems: 'center', gap: s.xs2, marginInlineStart: 'auto', flexShrink: 0 },
-  iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': focusRing },
-  toggle: { ':is([data-selected])': { color: ink.fg, backgroundColor: surface.rowActive } },
-  body: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0, outline: 'none' },
   frame: { flex: '1 1 0', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
   notice: { paddingBlock: s.lg },
   dock: { flexShrink: 0, paddingBlock: s.sm, backgroundColor: surface.canvas },

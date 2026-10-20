@@ -11,6 +11,7 @@ import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './Sidebar
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
 import { SidebarRowSignals, attachSidebarLine1Fit } from './SidebarRowSignals'
+import { useSidebarHoverIntent } from './useSidebarHoverIntent'
 
 export type RowVariant = 'SR-1' | 'SR-2' | 'SR-3'
 export type RowLayout = 'SR2-A' | 'SR2-B' | 'SR2-C'
@@ -192,24 +193,18 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const menuOpen = React.useRef(false)
   const tooltipAnchor = React.useRef<HTMLDivElement>(null)
-  const [hoverOpen, setHoverOpen] = React.useState(false)
+  const { hoverEnabled, hoverOpen, setHoverOpen, hoverIntent: scheduleHover } = useSidebarHoverIntent()
   const [rowHovered, setRowHovered] = React.useState(false)
-  const hoverTimer = React.useRef<number | undefined>(undefined)
-  const hoverLifetime = React.useCallback((node: HTMLDivElement | null) => {
-    if (node === null) return
-    return () => { clearTimeout(hoverTimer.current) }
-  }, [])
   // The hover card anchors to the measured row frame so it follows the row, not its hidden trigger.
   const rowAnchor = React.useCallback((node: HTMLDivElement | null) => { tooltipAnchor.current = node; return attachSidebarLine1Fit(node) }, [])
   const hoverIntent = (open: boolean) => {
-    clearTimeout(hoverTimer.current)
     // Portalled menu focus bubbles through the row; it must not open a second overlay that consumes Escape.
     if (open && menuOpen.current) return
-    hoverTimer.current = window.setTimeout(() => setHoverOpen(open), open ? 150 : 300)
+    scheduleHover(open)
   }
   const prefetch = () => { if (!inTree) callbacks?.prefetch?.(item.ref) }
   const open = () => openRow(item, callbacks, onOpen)
-  const quickOpen = canOpen && rowHovered
+  const quickOpen = hoverEnabled && canOpen && rowHovered
   const spendFields = item.usage._tag === 'Unknown' ? null : <span {...stylex.props(styles.metric)}>{usd !== undefined && <span data-row-field="total-usd" aria-label={`${usageScope}: $${usd}`}>{spendCount.format(usd)}</span>}<span data-row-field="total-tokens" data-line1-drop={usd === undefined ? undefined : 'tokens'} aria-label={`${usageScope}: ${tokens} tokens`}>{tokenCount.format(item.usage.tokens)}</span></span>
   const durationField = item.duration._tag === 'Unknown' ? null : <span data-row-field="total-duration"><SidebarDuration duration={item.duration} /></span>
   const lastTurnField = item.lastTurn._tag === 'Unknown' ? null : <span data-row-field="last-turn"><SidebarTime at={item.lastTurn.at} {...clock} kind={item.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>
@@ -231,7 +226,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
     <span {...stylex.props(styles.metadata, narrow && styles.metadataNarrow, variant !== 'SR-3' && styles.hidden)}>{[item.description, item.harness, item.model, item.branch, item.worktree, item.pullRequest === undefined ? undefined : `PR #${item.pullRequest.number}`].filter((part): part is string => part !== undefined).join(' / ')}</span>
   </>
   const rowStyle = stylex.props(styles.row, narrow && styles.rowNarrow)
-  return <div ref={hoverLifetime} data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') { clearTimeout(hoverTimer.current); setHoverOpen(false) }; if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() } }}>
+  return <div data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') setHoverOpen(false); if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); setHoverOpen(false); menuTrigger.current?.click() } }}>
     <div ref={rowAnchor} data-testid="taste-agent-row" data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-narrow={narrow || undefined} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} {...stylex.props(styles.rowWrap, variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, styles[variant], narrow && (item.children.length === 0 ? styles.rowWrapNarrowLeaf : styles.rowWrapNarrowParent), narrow && variant === 'SR-1' && styles.singleNarrow, active && styles.active)}>
       <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
@@ -241,7 +236,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       {subtitle}
       <VisuallyHidden><span id={descriptionId} data-row-description>{metadata}</span></VisuallyHidden>
       <div {...stylex.props(styles.actions)}>
-        <AgentRowActions row={item} {...clock} actions={callbacks} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={tooltipAnchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHoverOpen(false)} onMenuOpenChange={isOpen => { menuOpen.current = isOpen; clearTimeout(hoverTimer.current); if (isOpen) setHoverOpen(false) }}
+        <AgentRowActions row={item} {...clock} actions={callbacks} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={tooltipAnchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHoverOpen(false)} onMenuOpenChange={isOpen => { menuOpen.current = isOpen; setHoverOpen(false) }}
           menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle]}
           wrapDetailsTrigger={trigger => <TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}>{trigger}<Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger>} />
         {item.children.length > 0 && <Button data-row-column="children" slot={inTree ? 'chevron' : undefined} isDisabled={!inTree && onToggleChildren === undefined} aria-labelledby="" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${item.children.length} subagents`} aria-expanded={expanded} onPress={inTree ? undefined : () => onToggleChildren?.(item.ref)} {...stylex.props(styles.iconButton, styles.childrenToggle, variant === 'SR-2' && styles.childrenTop, variant === 'SR-1' && styles.childrenSingle, narrow && styles.childrenNarrow)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} />{extraSignals.includes('X-subs') && <span data-row-signal="X-subs" data-line1-drop="subs">{item.children.length}</span>}</Button>}

@@ -1,6 +1,8 @@
 /** Runtime-free workbench presentation. Conversation runtimes load with the thread surface. */
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
+export { DockedSplit, dockedSplitBounds, dockedSplitStorageKey, readDockedSize, type DockedSplitProps } from './composition/DockedSplit.tsx'
+export { Pane, PaneHeader, PaneHeaderButton, PaneHeaderToggle, type PaneProps, type PaneTabItem } from './composition/Pane.tsx'
 export { ChromeControl } from './composition/ChromeControl.tsx'
 export type { ChromeControlProps } from './composition/ChromeControl.tsx'
 export { NarrowSheet, NarrowActionRow, NarrowLayoutContext } from './composition/NarrowLayout.tsx'

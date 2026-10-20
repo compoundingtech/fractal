@@ -17,6 +17,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("agents-rich", "read.assistant.agents"),
     ("missions", "read.assistant.missions"), ("agents", "read.assistant.agents"),
     ("conversation-content", "read.assistant.conversation"),
+    ("conversations", "read.assistant.conversation"),
+    ("conversation-detail", "read.assistant.conversation"),
+    ("conversation-timeline", "read.assistant.conversation"),
+    ("conversation-search", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
 ];
 
@@ -235,10 +239,30 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
     Ok((granted,receipt))
 }
 
+/// The future of one assistant projection.
+pub type ProjectFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(ClientSnapshot, Value), ApiError>> + Send + 'a>>;
+
+/// Serves one named projection. st3-api serves its own; the client-v0 layer above it passes one
+/// that also serves the projections which need the layer's search and conversation readers.
+pub type Projector = for<'a> fn(&'a AppState, &'a ClientSnapshot, &'a str, &'a BTreeMap<String, String>, usize, &'a str, &'a response_body::Context) -> ProjectFuture<'a>;
+
+fn lower_projector<'a>(state: &'a AppState, snapshot: &'a ClientSnapshot, projection: &'a str,
+                       parameters: &'a BTreeMap<String, String>, max_bytes: usize, binding: &'a str,
+                       context: &'a response_body::Context) -> ProjectFuture<'a> {
+    Box::pin(super::reads::project_with_context(state, snapshot, projection, parameters, max_bytes, binding, context))
+}
+
 pub async fn read(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                                Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
                                headers: HeaderMap, Extension(context): Extension<response_body::Context>) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
-    let result=read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers, &context).await;
+    read_with(State(state), Extension(session), Extension(snapshot), OriginalUri(uri), headers, Extension(context), lower_projector).await
+}
+
+pub async fn read_with(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+                               Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
+                               headers: HeaderMap, Extension(context): Extension<response_body::Context>,
+                               project: Projector) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+    let result=read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers, &context, project).await;
     if result.is_err() {
         let granted=session.pairing_grant.as_deref().map(|subject| latest(&state,subject,GRANTED)).transpose()?.flatten();
         let grant_id=granted.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")).and_then(Value::as_str);
@@ -249,10 +273,14 @@ pub async fn read(State(state): State<AppState>, Extension(session): Extension<C
 
 pub async fn read_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                         Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
-                        headers: HeaderMap, context: &response_body::Context) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+                        headers: HeaderMap, context: &response_body::Context, project: Projector) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
     let grant_subject = session.pairing_grant.as_deref().ok_or_else(|| forbidden("assistant grant absent"))?;
     let granted = latest(&state, grant_subject, GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
     let policy = effective(&state, &granted)?;
+    let binding = credential_digest(&serde_json::to_string(&(
+        fields(&policy)?["grant_id"].as_str().ok_or_else(|| forbidden("assistant grant id absent"))?,
+        fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
+    )).map_err(ApiError::internal)?);
     if fields(&policy)?["minimal_read_mode"] == "caller-bound-allow" {
         let parameters = parameters(&uri)?;
         let requested = parameters.get("max_response_bytes").map(|v| v.parse::<usize>())
@@ -272,8 +300,7 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
             grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
             policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
             proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
-        let binding = format!("{}:{}", receipt.grant_subject, receipt.policy_revision);
-        let (snapshot,value) = super::reads::project_with_context(&state,&snapshot,projection,&parameters,requested,&binding,context).await?;
+        let (snapshot,value) = project(&state,&snapshot,projection,&parameters,requested,&binding,context).await?;
         return Ok((Extension(receipt),Extension(snapshot),Json(value)));
     }
     let authorization = proof(&headers)?;
@@ -291,8 +318,7 @@ pub async fn read_inner(State(state): State<AppState>, Extension(session): Exten
     }),None).map_err(|error| if error.code=="stale-subject" {
         forbidden("the SCG read approval has already been consumed") } else {error})?;
     receipt.consumed_claim=consumed.id.clone();
-    let binding = format!("{}:{}", receipt.grant_subject, receipt.policy_revision);
-    let (snapshot,value) = match super::reads::project_with_context(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding,context).await {
+    let (snapshot,value) = match project(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding,context).await {
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
