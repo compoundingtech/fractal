@@ -6,12 +6,13 @@ export type IconName =
   | 'search' | 'plus' | 'pencil' | 'gear' | 'swap' | 'clock'
   | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer'
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
-  | 'spinner' | 'folder' | 'message' | 'dot'
+  | 'spinner' | 'folder' | 'message' | 'dot' | 'info'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
   | 'person' | 'checklist' | 'gauge' | 'filter' | 'sort' | 'bell'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
+  info: <><circle cx="8" cy="8" r="6" /><path d="M8 7v4" /><circle cx="8" cy="4.5" r=".5" fill="currentColor" /></>,
   plus: <path d="M8 3v10M3 8h10" />,
   pencil: <path d="M11.5 2.5 13.5 4.5 5 13H3v-2z" />,
   gear: <><circle cx="8" cy="8" r="2.25" /><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.06 1.06M11.34 11.34l1.06 1.06M12.4 3.6l-1.06 1.06M4.66 11.34 3.6 12.4" /></>,

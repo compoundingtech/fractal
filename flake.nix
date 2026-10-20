@@ -7,12 +7,12 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/063ff7f9d6ef099f76c31752b2eb52c5bba94c17";
+    pty.url = "github:compoundingtech/pty/e237afa8587fb953cc589c35e0c9a252f7192444";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
-    # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
+    # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b";
+      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
   };
 
   outputs =
@@ -71,7 +71,17 @@
               options = {
                 xdg.configHome = lib.mkOption { type = lib.types.str; default = "/home/example/.config"; };
                 xdg.stateHome = lib.mkOption { type = lib.types.str; default = "/home/example/.local/state"; };
-                xdg.configFile = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                xdg.configFile = lib.mkOption {
+                  type = lib.types.attrsOf (lib.types.submodule {
+                    freeformType = lib.types.attrsOf lib.types.anything;
+                    options = {
+                      force = lib.mkOption { type = lib.types.bool; default = false; };
+                      enable = lib.mkOption { type = lib.types.bool; default = true; };
+                      text = lib.mkOption { type = lib.types.lines; default = ""; };
+                    };
+                  });
+                  default = { };
+                };
                 home.homeDirectory = lib.mkOption { type = lib.types.str; default = "/home/example"; };
                 home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 home.activation = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
@@ -82,10 +92,10 @@
               };
               config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
               config.home.file = extraConfig.homeFiles or { };
-              config.xdg.configFile = (extraConfig.configFiles or { })
-                // lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
+              config.xdg.configFile = lib.recursiveUpdate (extraConfig.configFiles or { })
+                (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
-                };
+                });
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
@@ -543,6 +553,8 @@
             "stui"
             "-p"
             "st-chatgpt"
+            "-p"
+            "st-fabric-adapter"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -678,6 +690,22 @@
             homepage = "https://github.com/compoundingtech/smalltalk";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-chatgpt";
+          };
+        };
+
+        stFabricAdapter = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-fabric-adapter";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "st-fabric-adapter" "--bin" "st-fabric-adapter" ];
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          # The shared daemon check runs the adapter's Rust tests.
+          doCheck = false;
+          meta = {
+            description = "External Smalltalk fleet to Fabric runtime-peers adapter";
+            homepage = "https://github.com/compoundingtech/smalltalk";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "st-fabric-adapter";
           };
         };
 
@@ -979,6 +1007,7 @@
         packages.st3 = st3;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
+        packages.st-fabric-adapter = stFabricAdapter;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
@@ -1086,6 +1115,17 @@
               fractalMigration.phase = "stage";
               environment.FRACTAL_TEST_XML = "<tag>&value";
             }).config;
+            consumer = phase: (mkHmModuleEval {
+              fractalMigration.phase = phase;
+              stateDir = "/home/example/.local/state/st3/store";
+              ptyRoot = "/home/example/.local/state/st3/pty";
+              forceLegacyConfig = true;
+              declarationsApply.enable = false;
+              configFiles."st3/config.toml".text = pkgs.lib.mkAfter ''
+                [checkpoint]
+                enabled = false
+              '';
+            }).config;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
             legacyPreflight = unstaged.home.activation.fractalMigrationPreflight;
@@ -1148,16 +1188,35 @@
           assert builtins.all (item: item.assertion) rendered.assertions;
           assert builtins.all forcedPathsMatch [ "stage" "completed" ];
           assert builtins.all forcedConfigPathsMatch [ "stage" "completed" ];
-          assert !(builtins.all (item: item.assertion) (mkHmModuleEval {
-            fractalMigration.phase = "stage";
-            forceLegacyConfig = true;
-          }).config.assertions);
+          assert builtins.all (phase:
+            let evaluated = consumer phase;
+                file = evaluated.xdg.configFile."st3/config.toml";
+            in builtins.all (item: item.assertion) evaluated.assertions
+              && file.force == (phase == "legacy")
+              && file.enable == (phase != "completed")
+              && pkgs.lib.hasInfix "[checkpoint]" file.text
+              && pkgs.lib.hasInfix (if phase == "completed"
+                then ''state_dir = "/home/example/.local/state/fractal/store"''
+                else ''state_dir = "/home/example/.local/state/st3/store"'') file.text
+              && (phase == "legacy" || (
+                pkgs.lib.hasInfix "/home/example/.local/state/fractal/store/bin/st3"
+                  evaluated.systemd.user.services.fractal.Service.ExecStart
+                && pkgs.lib.hasInfix "/home/example/.local/state/fractal/pty"
+                  evaluated.systemd.user.services.fractal.Service.ExecStart
+              ))
+          ) [ "legacy" "stage" "completed" ];
+          assert builtins.all (stateDir:
+            !(builtins.all (item: item.assertion) (mkHmModuleEval {
+              fractalMigration.phase = "stage";
+              inherit stateDir;
+            }).config.assertions)
+          ) [ "/elsewhere" "/home/example/.local/state/st3-other" "/home/example/.local/state/st3/../other" ];
           assert preflight.before == [ "writeBoundary" ];
           assert preflight.after == [ ];
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
           assert legacyPreflight.data == preflight.data;
-          assert !(completed.xdg.configFile ? "st3/config.toml");
+          assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
           assert pkgs.lib.hasInfix "config.home-manager.toml" completed.home.activation.fractalConfig.data;
@@ -1735,8 +1794,7 @@
         devShells.genie = pkgs.mkShell {
           packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
           shellHook = ''
-            mkdir -p repos
-            ln -sfn ${effect-utils} repos/effect-utils
+            [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root

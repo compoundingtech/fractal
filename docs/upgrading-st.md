@@ -148,9 +148,11 @@ are idle. Preserve the backups above. Do not move named instances or workspace r
    activation. Legacy and staging generations reject receipt-bearing roots. A persistent
    foreign `config.toml -> config.home-manager.toml` symlink also blocks immutable older
    generations at their normal collision check, including backup modes. Completed activation
-   updates only the guarded backing TOML. Home Manager's explicit `force = true` bypasses
-   collision checks using raw string prefixes, so both the module assertion and retained
-   generation preflight reject force prefixes of legacy config/state paths.
+   updates only the guarded backing TOML, including consumer-added TOML settings.
+   Stage turns off `force` for the module-managed legacy config entry; completed disables
+   that linker entry. Other forced legacy config/state prefixes remain rejected by the
+   module. Retained generation preflight still rejects every unsafe forced generation,
+   including older generations created before staging.
 
 The write-ahead journal lives at
 `${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,

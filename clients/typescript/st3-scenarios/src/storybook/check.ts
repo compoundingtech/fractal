@@ -4,7 +4,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { ANCHOR_MS, catalog, DEFAULT_WORLD, foldSlice, manualClock, syncStatusAt, type SliceKind, type World } from '../index.ts'
 import { createReadTracker, type ServedSlices } from '../react/index.ts'
-import { resolveScenarioWorld, scenarioGlobalTypes, withScenario, type ScenarioParameter } from './index.ts'
+import { scenarioGlobalTypes, type ScenarioParameter } from './index.ts'
+import { resolveScenarioWorld, withScenario } from './runtime.ts'
+
+export { resolveScenarioWorld, withScenario } from './runtime.ts'
 
 export type ScenarioCheck = 1 | 2 | 3 | 4 | 5
 export interface ScenarioCheckFailure {
