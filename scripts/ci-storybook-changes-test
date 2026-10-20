@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Exercise deployment scope; PR close cleanup must never depend on this result."""
+import ast
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('storybook_changes', str(ROOT / 'scripts/ci-storybook-changes'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+patterns = ['packages/fractal-ui/**', '**/package.json*', '.github/workflows/storybook-deploy.yml*']
+
+
+def scope(files, expected=None):
+    event = {'pull_request': {'changed_files': len(files) if expected is None else expected}}
+    return m.changed(event, patterns, lambda page: files[(page - 1) * 100:page * 100])
+
+
+assert m.changed({}, patterns, lambda page: (_ for _ in ()).throw(AssertionError('push queried PR files')))
+assert scope([{'filename': 'packages/fractal-ui/src/kit.tsx'}])
+assert scope([{'filename': 'package.json'}])
+assert scope([{'filename': 'infra/storybook/package.json'}])
+assert scope([{'filename': '.github/workflows/storybook-deploy.yml.genie.ts'}])
+assert scope([{'filename': 'docs/moved.tsx', 'previous_filename': 'packages/fractal-ui/src/kit.tsx'}])
+assert not scope([{'filename': 'docs/ci.md'}])
+assert not scope([])  # Storybook changes deployed earlier, then entirely reverted.
+assert not scope([{'filename': 'docs/ci.md'}])  # Reverted Storybook changes leave only unrelated changes.
+assert scope([{'filename': f'docs/{i}.md'} for i in range(100)] + [{'filename': 'package.json'}])
+assert not scope([{'filename': f'docs/{i}.md'} for i in range(201)])
+assert scope([], expected=1)  # Incomplete or concurrently changing inventory cannot suppress deployment.
+assert scope([{'filename': f'docs/{i}.md'} for i in range(3000)], expected=3001)
+print('passed: main, relevant/unrelated/reverted inputs, renames, pagination and incomplete inventory')
+
+workflow = (ROOT / '.github/workflows/storybook-deploy.yml').read_text()
+triggers, jobs = workflow.split('\njobs:\n', 1)
+assert not re.search(r'^    paths(?:-ignore)?:', triggers, re.M)
+blocks = dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', jobs))
+assert '    needs:' not in blocks['destroy']
+
+
+def allowed(job, event, action, draft, same_repo, relevant):
+    expression = re.search(r'^    if: (.+)$', blocks[job], re.M)[1]
+    if expression.startswith(('"', "'")):
+        expression = ast.literal_eval(expression)
+    for source, target in [
+        ('github.event.pull_request.head.repo.full_name == github.repository', 'same_repo'),
+        ('github.event.pull_request.draft', 'draft'),
+        ("needs.changes.outputs.changed == 'true'", 'relevant'),
+        ('github.event_name', 'event'),
+        ('github.event.action', 'action'),
+    ]:
+        expression = expression.replace(source, target)
+    expression = expression.replace('&&', ' and ').replace('||', ' or ').replace('false', 'False')
+    return eval(expression, {'__builtins__': {}}, locals())
+
+
+for event, action, draft, same_repo, relevant, deploy, destroy in [
+    ('push', '', False, True, True, True, False),
+    ('pull_request', 'opened', True, True, True, False, False),
+    ('pull_request', 'ready_for_review', False, True, True, True, False),
+    ('pull_request', 'synchronize', False, True, True, True, False),
+    ('pull_request', 'synchronize', False, True, False, False, False),
+    ('pull_request', 'converted_to_draft', True, True, True, False, False),
+    ('pull_request', 'closed', True, True, True, False, True),
+    ('pull_request', 'closed', False, True, True, False, True),
+    ('pull_request', 'closed', False, True, False, False, True),  # Previously deployed changes reverted.
+    ('pull_request', 'closed', True, True, False, False, True),  # Reverted and returned to draft.
+    ('pull_request', 'synchronize', False, False, True, False, False),
+    ('pull_request', 'closed', False, False, False, False, False),
+]:
+    assert allowed('deploy', event, action, draft, same_repo, relevant) == deploy
+    assert allowed('destroy', event, action, draft, same_repo, relevant) == destroy
+print('passed: 12 generated workflow lifecycle cases, including close after reverting all Storybook changes')

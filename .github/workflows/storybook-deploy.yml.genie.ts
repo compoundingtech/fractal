@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { defaultActionlintConfig, githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { megarepoApplyStep, readOnlyBinaryCaches } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
@@ -85,15 +86,31 @@ export default githubWorkflow(auditCaches({
   name: 'Storybook deploy',
   on: {
     push: { branches: ['main'] },
-    pull_request: { types: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'converted_to_draft', 'closed'], paths },
+    // Close must always be delivered, even after all Storybook changes are reverted.
+    pull_request: { types: ['opened', 'synchronize', 'reopened', 'ready_for_review', 'converted_to_draft', 'closed'] },
   },
   permissions: { contents: 'read' },
   // Never interrupt an apply/destroy; a close queues cleanup behind an in-flight deploy.
   concurrency: { group: `storybook-deploy-${stage}`, 'cancel-in-progress': false },
   jobs: {
+    changes: {
+      name: 'storybook-changes',
+      if: "(github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository))",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      permissions: { contents: 'read', 'pull-requests': 'read' },
+      outputs: { changed: '${{ steps.scope.outputs.changed }}' },
+      steps: [{
+        name: 'Detect Storybook input changes',
+        id: 'scope',
+        env: { GH_TOKEN: '${{ github.token }}', STORYBOOK_PATHS: JSON.stringify(paths) },
+        run: `python3 - <<'STORYBOOK_CHANGES_PY'\n${readFileSync(new URL('../../scripts/ci-storybook-changes', import.meta.url), 'utf8')}\nSTORYBOOK_CHANGES_PY`,
+      }],
+    },
     deploy: {
       name: 'storybook-deploy',
-      if: "(github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository))",
+      needs: ['changes'],
+      if: "(github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (needs.changes.outputs.changed == 'true' && (github.event_name == 'push' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)))",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 30,
       defaults: { run: { shell: 'bash' } },
@@ -166,6 +183,7 @@ printf '## Storybook preview removed\\n\\nStage: %s\\n' "$STAGE" >> "$GITHUB_STE
     },
   },
 }, {
+  changes: 'Reads GitHub PR file metadata only; no checkout, install or build.',
   deploy: 'Storybook uses a clean static build and read-only upstream Nix caches; no Actions build cache is configured.',
   destroy: 'Destroys remote infrastructure only; no Storybook build or build cache.',
 }))

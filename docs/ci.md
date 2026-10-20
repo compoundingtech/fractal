@@ -587,6 +587,14 @@ deploy. An existing preview stays up when its PR goes back to draft; closing or
 merging the PR destroys it even if the PR is a draft. Fork pull requests do not
 receive deployment credentials or previews.
 
+The PR trigger has **no event-level path filter**. A cheap, metadata-only
+`changes` job reads the paginated PR file inventory with a read-only GitHub token
+and gates only `deploy` on Storybook inputs; main always deploys. `destroy` has
+no dependency on that job or its result. Cleanup therefore still runs if a PR
+previously deployed a preview, then reverted every Storybook-input change (or
+has only unrelated changes remaining) before close. An incomplete file
+inventory selects deployment rather than silently suppressing it.
+
 Alchemy apply/destroy runs are serialized per stage without cancellation and
 this workflow alone is excluded from the draft-transition cancellation observer,
 so a draft transition cannot interrupt infrastructure mutation. Only its

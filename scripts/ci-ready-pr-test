@@ -14,6 +14,8 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         continue
     for event in ('ready_for_review', 'converted_to_draft'):
         assert event in triggers, (path.name, event)
+    if path.name == 'storybook-deploy.yml':
+        assert 'closed' in triggers and not re.search(r'^    paths(?:-ignore)?:', triggers, re.M), 'close cleanup must survive reverted Storybook changes'
     blocks = re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow.split('\njobs:\n', 1)[1])
     for name, block in blocks:
         match = re.search(r'^    if: (.+)$', block, re.M)
@@ -26,7 +28,10 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
             assert expression == "github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository", condition
             assert 'run destroy --stage "$STAGE" --yes' in block
             assert 'run deploy' not in block
+            assert '    needs:' not in block, 'cleanup must not depend on deployment scope'
             continue
+        if path.name == 'storybook-deploy.yml' and name == 'deploy':
+            assert "needs.changes.outputs.changed == 'true'" in expression, 'only deploy is gated by changed inputs'
         prefix = GUARD + ' && ('
         assert expression.startswith(prefix) and expression.endswith(')'), (path.name, name, condition)
         # Evaluate the generated guard with both outcomes of the existing condition.
