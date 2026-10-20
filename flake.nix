@@ -533,6 +533,8 @@
             "stui"
             "-p"
             "st-chatgpt"
+            "-p"
+            "st-fabric-adapter"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -668,6 +670,22 @@
             homepage = "https://github.com/compoundingtech/smalltalk";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-chatgpt";
+          };
+        };
+
+        stFabricAdapter = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-fabric-adapter";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "st-fabric-adapter" "--bin" "st-fabric-adapter" ];
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          # The shared daemon check runs the adapter's Rust tests.
+          doCheck = false;
+          meta = {
+            description = "External Smalltalk fleet to Fabric runtime-peers adapter";
+            homepage = "https://github.com/compoundingtech/smalltalk";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "st-fabric-adapter";
           };
         };
 
@@ -969,6 +987,7 @@
         packages.st3 = st3;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
+        packages.st-fabric-adapter = stFabricAdapter;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;

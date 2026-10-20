@@ -4591,6 +4591,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "st-fabric-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "st-resource-protocol"
 version = "0.1.0"
 dependencies = [
