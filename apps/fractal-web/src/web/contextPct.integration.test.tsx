@@ -3,6 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
+import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,19 +17,19 @@ vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, define
 // jsdom has no Range layout; the kit row measures retained text with it.
 Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() })
 Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
-const makeRow = (change: Partial<AgentEncoded> = {}) => decodeUnknownSync(Agent)({
+const makeRow = (change: Partial<AgentEncoded> = {}) => openAgent(decodeUnknownSync(Agent)({
   kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: [],
   reachability: 'reachable', state: 'running', revision: '1', incarnation_id: 'first', updated_at: '1970-01-01T00:00:04.000Z',
   usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: { used_tokens: 61_206, window_tokens: 1_000_000, used_percent: 6.1206, observed_at_unix_ms: 3000 } },
   ...change,
-})
+}))
 function ContextRows() {
   const fleet = useFleet(), now = useNow()
   if (fleet._tag !== 'Observed') return null
   return <div>{fleet.value.agents.map(agent => <SidebarAgentRow key={agent.ref} item={sidebarRow({ agent, stale: fleet.freshness === 'stale', now })} now={now} extraSignals={[]} onOpen={() => undefined} />)}</div>
 }
 let registry: AtomRegistry.AtomRegistry
-let agents: Atom.Writable<Feed<readonly Agent[]>>
+let agents: Atom.Writable<Feed<readonly DecodedAgent[]>>
 let host: HTMLDivElement
 let root: Root
 beforeEach(async () => {
@@ -37,7 +38,7 @@ beforeEach(async () => {
   vi.stubGlobal('requestAnimationFrame', () => 1)
   vi.stubGlobal('cancelAnimationFrame', () => undefined)
   registry = AtomRegistry.make()
-  agents = Atom.make(observed<readonly Agent[]>({ value: [makeRow()] }))
+  agents = Atom.make(observed<readonly DecodedAgent[]>({ value: [makeRow()] }))
   const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
   host = document.createElement('div')
   document.body.append(host)

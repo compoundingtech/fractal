@@ -333,7 +333,8 @@ export const PhoneTouchTargets: Story = { tags: ['critical'], name: 'Phone · 44
   const items = await waitFor(() => { const found = document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]'); expect(found.length).toBeGreaterThan(0); return found })
   // The standard popover scales during entry; measure the settled touch geometry.
   for (const item of items) await waitFor(() => expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44))
-  await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  // A hover card the pointer left behind (the expanded row it just collapsed) closes on its own 300ms delay; the menu opening must leave none.
+  await waitFor(() => expect(document.querySelector('[role="tooltip"]')).toBeNull())
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
   await waitFor(() => expect(document.activeElement).toBe(trigger))

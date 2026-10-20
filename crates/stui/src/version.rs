@@ -1,13 +1,14 @@
 //! This build's identity, by the shared build-versioning contract: the same stamp and
 //! formatting as st2 and st-drivers (`crates/st-drivers/src/version.rs`, compiled here as is),
-//! fed by the workspace `build.rs` for a plain `cargo build` and by the flake's
+//! fed at startup by the binary that links this library (`set_build_stamps`) with the stamps
+//! crates/st-build-stamp bakes: the LocalStamp for a plain `cargo build`, the flake's
 //! `CLI_BUILD_STAMP` for a Nix build.
 
 #[allow(dead_code)]
 #[path = "../../st-drivers/src/version.rs"]
 mod shared;
 
-pub use shared::display_version;
+pub use shared::{display_version, set_build_stamps};
 
 /// For the footer: the machineVersion and how long ago its commit was, `0.1.0+local.ab12cd3 ·
 /// 3 hours ago`.

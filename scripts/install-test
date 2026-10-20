@@ -2,6 +2,7 @@
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Prove scripts/install leaves `st` as a symlink to the installed `st3` in every starting state.
 set -Eeuo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 
 install="$(cd "$(dirname "$0")" && pwd)/install"
 work=$(mktemp -d)

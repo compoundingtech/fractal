@@ -1,4 +1,4 @@
-import type { UsageSummary } from '@smalltalk/st3-client/schema'
+import type { DecodedUsageSummary } from '@st3/sdk/effect'
 import * as DateTime from 'effect/DateTime'
 import type { Known } from './source.ts'
 
@@ -13,7 +13,7 @@ export type ContextOccupancy = {
 
 /** The native UsageContext is exclusively folded from semantics=context_occupancy. */
 export const contextOccupancy = ({ usage, now, observedAfter }: {
-  readonly usage: Known<UsageSummary>
+  readonly usage: Known<DecodedUsageSummary>
   readonly now: number
   /** Incarnation transition fence: only a newer occupancy observation may restore the claim. */
   readonly observedAfter?: number

@@ -1,4 +1,5 @@
-import { Agent as NativeAgent, decodeUnknownSync, UsageSummary, type UsageSummaryEncoded } from '@smalltalk/st3-client/schema'
+import { decodeUnknownSync, UsageSummary, type UsageSummaryEncoded } from '@smalltalk/st3-client/schema'
+import { decodeResourceRows } from '@st3/sdk/effect'
 import { describe, expect, it } from 'vitest'
 import * as Option from 'effect/Option'
 import { contextOccupancy } from './contextOccupancy.ts'
@@ -11,7 +12,7 @@ const usage = (context?: UsageSummaryEncoded['context']) => ({ _tag: 'Known' as 
   ...(context === undefined ? {} : { context }),
 }) })
 const reading = { used_tokens: 61_206, window_tokens: 1_000_000, used_percent: 6.1206, observed_at_unix_ms: 3000 }
-const native = decodeUnknownSync(NativeAgent)({ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1', updated_at: '1970-01-01T00:00:04.000Z', incarnation_id: 'first', usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: reading } })
+const native = decodeResourceRows([{ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1', updated_at: '1970-01-01T00:00:04.000Z', incarnation_id: 'first', usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: reading } }]).items.find(row => row.kind === 'agent')!
 
 describe('reported context occupancy', () => {
   it('uses the occupancy numerator/window, never cumulative tokens', () => {

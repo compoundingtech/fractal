@@ -10,6 +10,8 @@ const config: StorybookConfig = {
     '../../../apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx',
     '../../../apps/fractal-web/src/web/SidebarLayoutC.stories.tsx',
     '../../../apps/fractal-web/src/web/SidebarChrome.stories.tsx',
+    // The live roster story replays captured daemon payloads through the SDK decode.
+    '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx',
   ],
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',

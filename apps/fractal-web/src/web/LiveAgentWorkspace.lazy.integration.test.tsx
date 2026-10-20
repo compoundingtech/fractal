@@ -12,6 +12,7 @@ import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { Feed, Fleet } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { openAgent } from '@st3/sdk/effect'
 import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -38,6 +39,7 @@ vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
   // Rows read their own agent feed; serve it from the mocked roster.
   useAgent: (ref: string) => rosterFeed._tag === 'Observed' ? { ...rosterFeed, value: rosterFeed.value.agents.find(row => row.ref === ref) } : rosterFeed,
+  useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
@@ -189,7 +191,7 @@ describe('gateway connection banner', () => {
 describe('terminal import intent', () => {
   const terminalRoster = () => {
     const row = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: ['runtime/example'], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
-    rosterFeed = { _tag: 'Observed', freshness: 'live', value: fleetFromAgents([row]) }
+    rosterFeed = { _tag: 'Observed', freshness: 'live', value: fleetFromAgents([openAgent(row)]) }
   }
   it('warms code and fonts only after paint and idle, never data without header intent', async () => {
     const idle: (() => void)[] = []

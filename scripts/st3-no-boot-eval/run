@@ -279,7 +279,8 @@ for harness in "${harnesses[@]}"; do
       }
     ' || continue
     { tr '\0' ' ' <"$proc/cmdline"; } 2>/dev/null | grep -q " driver $harness " || continue
-    kill -TERM "${proc#/proc/}" 2>/dev/null || true
+    python3 "$repo/scripts/script_process.py" "${proc#/proc/}" 15 \
+      --endpoint "$socket" --contains " driver $harness "
   done
   restarted_at[$harness]=$(now_ms)
   if wait_idle "$harness" "$old"; then restart_ok[$harness]=1; else restart_ok[$harness]=0; fi

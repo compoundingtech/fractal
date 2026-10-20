@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
 dependencies = [
  "libc",
  "pty-core",
@@ -3373,7 +3373,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
 dependencies = [
  "indexmap",
  "libc",
@@ -3388,7 +3388,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -4537,6 +4537,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "st-build-stamp"
+version = "0.1.0"
+
+[[package]]
 name = "st-chatgpt"
 version = "0.1.0"
 dependencies = [
@@ -4636,6 +4640,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-build-stamp",
  "st-drivers",
  "st-resource-protocol",
  "st-wire",
@@ -4766,6 +4771,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st-build-stamp",
+ "st-chatgpt",
  "st-drivers",
  "st-runtime",
  "st3",
@@ -4801,6 +4808,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "hmac",
  "hyper",
  "hyper-util",
  "jsonschema",
