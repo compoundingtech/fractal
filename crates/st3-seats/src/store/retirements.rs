@@ -553,7 +553,9 @@ mod tests {
             VALUES('record/pending','birch',1,'pending',0,'{}','unknown',?1,'agent.retired','1')",[SUBJECT]).unwrap();
         let error = store.append_claim(&send("incomplete")).unwrap_err();
         assert_eq!(error.code, "lifecycle-unavailable");
-        assert_eq!(error.details["refusal"]["reason"], "unavailable");
+        assert_eq!(error.details["reason"], "pending-replication");
+        assert_eq!(error.details["subject"], SUBJECT);
+        assert_eq!(error.details["applied"], "none");
         assert!(store.message("message/incomplete").unwrap().is_none());
     }
 

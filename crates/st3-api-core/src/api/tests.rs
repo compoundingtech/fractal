@@ -2330,18 +2330,21 @@ async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_f
     use http_body_util::{BodyExt as _, Full};
 
     fn ancestor(_pid: u32) -> Option<String> {
-        Some("agent/example-bound-original".into())
+        Some("agent/example-bound-original/worker".into())
     }
 
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let source = "version 2\nagent \"example-bound-original\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example-bound-other\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let source = "version 2\nagent \"example-bound-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example-bound-other/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
     let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
-    state.store.apply(&intent, &BTreeMap::new(), "bound-declare").unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "bound-declare").unwrap();
     let app = router(state.clone());
     for (from, to) in [
-        ("agent/example-bound-original", "agent/example-bound-current"),
-        ("agent/example-bound-other", "agent/example-bound-foreign"),
+        ("agent/example-bound-original/worker", "agent/example-bound-current/worker"),
+        ("agent/example-bound-other/worker", "agent/example-bound-foreign/worker"),
     ] {
         let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
             "from":from,"to":to,"actor":"person/robin",
@@ -2373,8 +2376,8 @@ async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_f
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await.unwrap();
     let connection = tokio::spawn(async move { connection.await.unwrap() });
-    let old = "agent/example-bound-original";
-    let current = "agent/example-bound-current";
+    let old = "agent/example-bound-original/worker";
+    let current = "agent/example-bound-current/worker";
     for actor in [old, current] {
         for header in [old, current] {
             let response = sender.send_request(Request::builder()
@@ -2394,7 +2397,7 @@ async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_f
         }
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
-    for foreign in ["agent/example-bound-other", "agent/example-bound-foreign", "person/other"] {
+    for foreign in ["agent/example-bound-other/worker", "agent/example-bound-foreign/worker", "person/other"] {
         for field in ["actor", "requester", "header"] {
             let before = state.store.index().unwrap();
             let mut body = json!({
@@ -11485,56 +11488,70 @@ fn native_rename_request_accepts_optional_compare_and_swap() {
 async fn native_rename_routes_show_and_send_keep_storage_identity() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let source = "version 2\nagent \"example-original\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let source = "version 2\nagent \"example-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
     let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
-    state.store.apply(&intent, &BTreeMap::new(), "example-declare").unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "example-declare").unwrap();
     let app = router(state.clone());
     let rename = json!({
-        "from": "agent/example-original", "to": "agent/example-renamed",
+        "from": "agent/example-original/worker", "to": "agent/example-renamed/worker",
         "actor": "person/robin", "reason": "Clarify responsibility",
         "idempotency_key": "example-rename"
     });
     let (status, receipt) = json_request(app.clone(), "/v1/agents/rename-id", rename.clone()).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
-    assert_eq!(receipt["identity"], "agent/example-original");
-    assert_eq!(receipt["canonical_id"], "agent/example-renamed");
+    assert_eq!(receipt["identity"], "agent/example-original/worker");
+    assert_eq!(receipt["canonical_id"], "agent/example-renamed/worker");
     assert_eq!(receipt["replication"]["state"], "local-durable");
     let (_, replay) = json_request(app.clone(), "/v1/agents/rename-id", rename).await;
     assert_eq!(replay["applied"], "already-applied");
     assert_eq!(replay["claim_id"], receipt["claim_id"]);
-    for requested in ["agent/example-original", "agent/example-renamed"] {
-        let Json(detail) = client_agents_detail(
-            State(state.clone()), Extension(new_client_snapshot(&state)),
-            AxumPath(requested.into()), Query(ClientListQuery::default()),
-        ).await.unwrap();
-        assert_eq!(detail["requested_id"], requested);
-        assert_eq!(detail["id"], "agent/example-renamed");
-        assert_eq!(detail["identity"], "agent/example-original");
-        assert_eq!(detail["renamed_to"], if requested == "agent/example-original" {
-            json!("agent/example-renamed")
-        } else { Value::Null });
+    for requested in ["agent/example-original/worker", "agent/example-renamed/worker"] {
+        let (status, client_detail) = get_request(
+            app.clone(), &format!("/v1/client/agents/{requested}"),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{client_detail}");
+        assert_eq!(client_detail["id"], "agent/example-original/worker");
+        for field in ["requested_id", "identity", "renamed_to", "naming_revision"] {
+            assert!(client_detail.get(field).is_none(), "native field leaked into client-v0: {field}");
+        }
     }
     let (status, sent) = json_request(app, "/v1/messages", json!({
-        "from": "person/robin", "to": "agent/example-original", "content": "Continue.",
+        "from": "person/robin", "to": "agent/example-original/worker", "content": "Continue.",
         "idempotency_key": "example-send"
     })).await;
     assert_eq!(status, StatusCode::OK, "{sent}");
-    assert_eq!(sent["requested_recipient"], "agent/example-original");
-    assert_eq!(sent["recipient"], "agent/example-renamed");
-    assert_eq!(sent["recipient_identity"], "agent/example-original");
+    assert_eq!(sent["requested_recipient"], "agent/example-original/worker");
+    assert_eq!(sent["recipient"], "agent/example-renamed/worker");
+    assert_eq!(sent["recipient_identity"], "agent/example-original/worker");
 }
 
 #[tokio::test]
 async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let subject = "agent/example-rollout-original";
+    let subject = "agent/example-rollout-original/worker";
     let source = format!(
-        "version 2\nagent \"example-rollout-original\" {{ rollout \"manual\"; host {:?}; workspace \"/tmp\"; harness \"claude\" {{ model \"fixture\"; }} }}\n",
+        "version 2\nagent \"example-rollout-original/worker\" {{ rollout \"manual\"; host {:?}; workspace \"/tmp\"; harness \"claude\" {{ model \"fixture\"; }} }}\n",
         state.node,
     );
-    let intent = crate::graph::parse_test_intent(&source, state.store.origin()).unwrap();
-    state.store.apply(&intent, &BTreeMap::new(), "rollout-declare").unwrap();
+    let intent = crate::graph::parse_owned_set_intent(&source, state.store.origin()).unwrap();
+    let mut options = crate::store::owned_sets::Options {
+        set: "example-rollout".into(),
+        source: crate::store::owned_sets::Source {
+            repository: "fixture/rollout".into(), r#ref: "refs/heads/main".into(),
+            sha: format!("{:040x}", 1), sequence: 1,
+        },
+        expected_set: "absent".into(), rollout: None, adopt: Default::default(),
+        allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+    };
+    let preview = state.store.owned_set_preview(&intent, &options).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    options.confirm_retire = Some(preview.digest);
+    options.expected_subjects = preview.expected_subjects;
+    state.store.apply_owned_set(&intent, &options, "rollout-declare", "person/robin").unwrap();
     let token = state.store.selected_desired_token(subject).unwrap().unwrap();
     for (kind, fields) in [
         ("runtime.observed", json!({"status":"running","runtime_id":subject,
@@ -11549,13 +11566,13 @@ async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity()
     ).unwrap().unwrap();
     let app = router(state.clone());
     let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
-        "from":subject,"to":"agent/example-rollout-renamed","actor":"person/robin",
+        "from":subject,"to":"agent/example-rollout-renamed/worker","actor":"person/robin",
         "reason":"Clarify seat","idempotency_key":"rollout-rename"
     })).await;
     assert_eq!(status, StatusCode::OK, "{renamed}");
     let mut claim_id = Value::Null;
     // New name first catches literal launch-receipt lookup; old name must replay it.
-    for requested in ["example-rollout-renamed", "agent/example-rollout-original", "agent/example-rollout-renamed"] {
+    for requested in ["example-rollout-renamed/worker", "agent/example-rollout-original/worker", "agent/example-rollout-renamed/worker"] {
         let (status, claim) = json_request(app.clone(), "/v1/agents/rollout", json!({
             "subject":requested,"actor":"person/robin","expected_desired":token,
             "expected_incarnation":"rollout-incarnation",
@@ -11574,38 +11591,41 @@ async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity()
 async fn renamed_agent_restart_and_native_report_resolve_aliases_before_lookup() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let source = "version 2\nagent \"example-restart-original\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let source = "version 2\nagent \"example-restart-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
     let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
-    state.store.apply(&intent, &BTreeMap::new(), "restart-declare").unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "restart-declare").unwrap();
     let app = router(state.clone());
     let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
-        "from":"agent/example-restart-original","to":"agent/example-restart-renamed","actor":"person/robin",
+        "from":"agent/example-restart-original/worker","to":"agent/example-restart-renamed/worker","actor":"person/robin",
         "reason":"Clarify seat","idempotency_key":"restart-rename"
     })).await;
     assert_eq!(status, StatusCode::OK, "{renamed}");
     let mut claim_id = Value::Null;
-    for requested in ["agent/example-restart-renamed", "agent/example-restart-original"] {
+    for requested in ["agent/example-restart-renamed/worker", "agent/example-restart-original/worker"] {
         let (status, claim) = json_request(app.clone(), "/v1/agents/restart", json!({
             "subject":requested,"actor":"person/robin","idempotency_key":"restart-alias-retry"
         })).await;
         assert_eq!(status, StatusCode::OK, "{claim}");
-        assert_eq!(claim["subject"], "agent/example-restart-original");
+        assert_eq!(claim["subject"], "agent/example-restart-original/worker");
         if claim_id.is_null() { claim_id = claim["id"].clone(); }
         assert_eq!(claim["id"], claim_id);
     }
     let mut report_id = Value::Null;
     for (subject, actor) in [
-        ("agent/example-restart-renamed", "agent/example-restart-original"),
-        ("agent/example-restart-original", "agent/example-restart-renamed"),
+        ("agent/example-restart-renamed/worker", "agent/example-restart-original/worker"),
+        ("agent/example-restart-original/worker", "agent/example-restart-renamed/worker"),
     ] {
         let (status, report) = json_request(app.clone(), "/v1/agents/native-session", json!({
             "subject":subject,"actor":actor,"incarnation_id":"native-incarnation",
             "harness":"claude","session_id":"native-alias-session"
         })).await;
         assert_eq!(status, StatusCode::OK, "{report}");
-        assert_eq!(report["subject"], "agent/example-restart-original");
-        assert_eq!(report["actor"], "agent/example-restart-original");
-        assert_eq!(report["body"]["fields"]["agent"], "agent/example-restart-original");
+        assert_eq!(report["subject"], "agent/example-restart-original/worker");
+        assert_eq!(report["actor"], "agent/example-restart-original/worker");
+        assert_eq!(report["body"]["fields"]["agent"], "agent/example-restart-original/worker");
         if report_id.is_null() { report_id = report["id"].clone(); }
         assert_eq!(report["id"], report_id);
     }

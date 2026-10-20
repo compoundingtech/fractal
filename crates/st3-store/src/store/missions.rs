@@ -1,5 +1,5 @@
 use super::*;
-use super::identities::{IdentityKind, resolve_identity_conn};
+use super::identities;
 
 /// Mission tables and revision hashes always address the original, bare identity.
 /// Unknown names remain usable by declaration/planning readers before publication.
@@ -9,13 +9,8 @@ pub fn mission_storage_id(connection: &Connection, id: &str) -> Result<String, S
     } else {
         format!("mission/{id}")
     };
-    match resolve_identity_conn(connection, IdentityKind::Mission, &subject) {
-        Ok(resolved) => Ok(resolved.identity.trim_start_matches("mission/").to_owned()),
-        Err(error) if error.code == "identity-unknown" => {
-            Ok(subject.trim_start_matches("mission/").to_owned())
-        }
-        Err(error) => Err(error),
-    }
+    let identity = identities::resolve_reference_conn(connection, &subject)?;
+    Ok(identity.strip_prefix("mission/").unwrap_or(&identity).to_owned())
 }
 
 pub fn mission_public_id(connection: &Connection, id: &str) -> Result<String, St3Error> {
@@ -24,11 +19,11 @@ pub fn mission_public_id(connection: &Connection, id: &str) -> Result<String, St
     } else {
         format!("mission/{id}")
     };
-    match resolve_identity_conn(connection, IdentityKind::Mission, &subject) {
-        Ok(resolved) => Ok(resolved.canonical_id),
-        Err(error) if error.code == "identity-unknown" => Ok(subject),
-        Err(error) => Err(error),
-    }
+    let identity = identities::resolve_reference_conn(connection, &subject)?;
+    connection.query_row(
+        "SELECT canonical_id FROM identity_heads WHERE identity=?1",
+        [&identity], |row| row.get(0),
+    ).optional().map_err(internal).map(|canonical| canonical.unwrap_or(subject))
 }
 
 /// Normalize newly authored declarations only; existing signed revisions are never rewritten.
@@ -102,11 +97,13 @@ impl Store {
     ) -> Result<Option<MissionSpec>> {
         smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
         let connection = self.readers.get();
-        let mission_id = mission_storage_id(&connection, mission_id)?;
+        // Stored run metadata already contains physical mission keys. Resolve any public
+        // spelling in the revision query rather than adding a separate lookup per run.
+        let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
         let body = if let Some(revision) = revision {
             connection
                 .query_row(
-                    "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
+                    "SELECT body FROM mission_revisions WHERE mission_id=COALESCE((SELECT substr(identity,9) FROM identity_names WHERE name='mission/'||?1),?1) AND revision=?2",
                     params![mission_id, revision],
                     |row| row.get::<_, String>(0),
                 )
@@ -114,8 +111,8 @@ impl Store {
         } else {
             connection
                 .query_row(
-                    "SELECT r.body FROM mission_definitions d JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision WHERE d.mission_id=?1",
-                    [&mission_id],
+                    "SELECT r.body FROM mission_definitions d JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision WHERE d.mission_id=COALESCE((SELECT substr(identity,9) FROM identity_names WHERE name='mission/'||?1),?1)",
+                    [mission_id],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?
@@ -143,17 +140,17 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!(
-            "SELECT r.body, c.accepted_at_unix_ms FROM mission_definitions d
+        let bare: Vec<_> = ids.iter().map(|id| id.strip_prefix("mission/").unwrap_or(id)).collect();
+        let mut statement = connection.prepare(
+            "SELECT r.body, c.accepted_at_unix_ms FROM json_each(?1) requested
+             LEFT JOIN identity_names names ON names.name='mission/'||requested.value
+             JOIN mission_definitions d ON d.mission_id=CASE WHEN names.identity IS NULL
+                 THEN requested.value ELSE substr(names.identity,9) END
              JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision
-             JOIN claims c ON c.id=d.claim_id WHERE d.mission_id IN ({placeholders})"
-        );
-        let bare = ids.iter().map(|id| mission_storage_id(&connection, id))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he8c8a96f10dc owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?;
+             JOIN claims c ON c.id=d.claim_id"
+        )?;
         statement
-            .query_map(rusqlite::params_from_iter(bare), |row| {
+            .query_map([serde_json::to_string(&bare)?], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .map(|row| {
@@ -669,6 +666,8 @@ impl Store {
         declared_agents: &BTreeSet<String>,
     ) -> Result<MissionResponse, St3Error> {
         let connection = self.readers.get();
+        let normalized_intent = identities::normalize_intent(&connection, intent)?;
+        let intent = normalized_intent.as_ref();
         let current_index = current_index(&connection).map_err(internal)?;
         let store_index = selected_index(current_index, at_index)?;
         let mut changes = Vec::new();

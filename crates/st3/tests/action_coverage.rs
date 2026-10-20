@@ -2689,6 +2689,44 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(
+        &format!(
+            "version 2\nagent \"example-rename/worker\" {{ host {:?}; workspace {:?}; command \"true\" }}\nmission \"example-rename-work\" state=\"ready\" {{ goal \"Preserve identity.\"; step \"work\" {{ assigned-to \"agent/example-rename/worker\" }} }}",
+            NODE,
+            daemon.root.path().display().to_string(),
+        ),
+        "coverage-rename-declarations",
+    );
+    for (family, from, to, kind) in [
+        ("agents", "agent/example-rename/worker", "agent/example-renamed/worker", "agent.renamed"),
+        ("missions", "mission/example-rename-work", "mission/example-renamed-work", "mission.renamed"),
+    ] {
+        let key = format!("coverage-{family}-rename");
+        let arguments = [
+            family, "rename-id", from, to, "--as", "person/robin",
+            "--reason", "Clarify responsibility", "--idempotency-key", &key,
+        ];
+        let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
+        assert_eq!(receipt["identity"], from);
+        assert_eq!(receipt["canonical_id"], to);
+        assert_eq!(receipt["applied"], "renamed");
+        let claims = daemon.store().claims_for(from, None).unwrap();
+        assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let index = daemon.store().index().unwrap();
+        daemon.restart().await;
+        let replay = cli_value(daemon.cli("person/robin", &arguments).await);
+        assert_eq!(replay["claim_id"], receipt["claim_id"]);
+        assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_metadata_documents_blobs_and_rules_survive_restart() {
     if st3::test_support::supervise_test() {
         return;

@@ -94,7 +94,7 @@ mod identifier_query_tests {
 fn public_mission_spec(connection: &Connection, body: &str) -> Result<MissionSpec> {
     let mut mission: MissionSpec = serde_json::from_str(body)?;
     mission.subject = mission_public_id(connection, &mission.subject)?;
-    mission.id = mission.subject.trim_start_matches("mission/").to_owned();
+    mission.id = mission.subject.strip_prefix("mission/").unwrap_or(&mission.subject).to_owned();
     Ok(mission)
 }
 
@@ -2093,10 +2093,6 @@ impl MissionsStore for Store {
     ) -> Result<Vec<(String, u128)>> {
         let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
-        let after = after.map(|(time, id)| {
-            mission_storage_id(&connection, id).map(|id| (*time, id))
-        }).transpose()?;
-        let after = after.as_ref();
         // Seek once per distinct mission, not once per historical run. Latest and live
         // state are indexed probes; only shallow mission keys reach the final sort.
         let mut statement = connection.prepare(
@@ -2110,11 +2106,7 @@ impl MissionsStore for Store {
                     offset as i64,
                     ended_since as i64,
                     after.map(|key| key.0 as i64),
-                    after.map(|key| if assistant_identifiers_only {
-                        key.1.strip_prefix("mission/").unwrap_or(&key.1)
-                    } else {
-                        key.1.trim_start_matches("mission/")
-                    }),
+                    after.map(|key| key.1.strip_prefix("mission/").unwrap_or(&key.1)),
                     assistant_identifiers_only
                 ],
                 |row| {
@@ -2126,7 +2118,7 @@ impl MissionsStore for Store {
             )?
             .map(|row| {
                 let (id, time) = row?;
-                Ok((mission_public_id(&connection, &id)?, time.parse()?))
+                Ok((id, time.parse()?))
             })
             .collect()
     }
@@ -4409,13 +4401,16 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         let sql = MISSION_RUN_HEADER_SELECT.replace(
             "ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
-            "WHERE mission_runs.mission_id IN (SELECT value FROM json_each(?1))
+            "WHERE mission_runs.mission_id IN (
+                 SELECT CASE WHEN names.identity IS NULL THEN requested.value
+                     ELSE substr(names.identity,9) END FROM json_each(?1) requested
+                 LEFT JOIN identity_names names ON names.name='mission/'||requested.value)
              ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
         );
         let ids = ids
             .iter()
-            .map(|id| mission_storage_id(&connection, id))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|id| id.strip_prefix("mission/").unwrap_or(id))
+            .collect::<Vec<_>>();
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h580d8608ff7c owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map([serde_json::to_string(&ids)?], mission_run_header_from_row)?

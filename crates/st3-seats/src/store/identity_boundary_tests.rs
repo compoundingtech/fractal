@@ -3,13 +3,13 @@ use super::*;
 use crate::DeliveryStore as _;
 use st3_store::store::identities::{IdentityKind, IdentityStore as _, RenameRequest};
 
-const ORIGINAL: &str = "agent/example-old";
+const ORIGINAL: &str = "agent/example-old/worker";
 const CANONICAL: &str = "agent/example-privileged/new";
 
 fn fixture() -> Store {
     let store = Store::open_memory("fixture").unwrap();
     let intent = crate::graph::parse_internal_intent(
-        "version 2\nagent \"example-old\" { command \"true\"; }\nmission \"example-work\" state=\"ready\" { goal \"Preserve custody\"; step \"work\" { assigned-to \"agent/example-old\"; goal \"Keep working\"; } }",
+        "version 2\nagent \"example-old/worker\" { command \"true\"; }\nmission \"example-work\" state=\"ready\" { goal \"Preserve custody\"; step \"work\" { assigned-to \"agent/example-old/worker\"; goal \"Keep working\"; } }",
         "fixture",
     ).unwrap();
     store.apply_internal(&intent, "initial-declaration").unwrap();
@@ -55,7 +55,7 @@ fn rename_keeps_mailbox_capability_and_delivers_sends_to_both_spellings() {
     stale.incarnation = "stale".into();
     assert!(store.check_mailbox(&stale).is_err());
     for (subject, recipient) in [("message/example-old-send", ORIGINAL), ("message/example-new-send", CANONICAL)] {
-        append(&store, subject, "message.sent", json!({"from":"person/robin","to":recipient,"content":"Still the same mailbox"}), subject);
+        append(&store, subject, "message.sent", json!({"from":"person/robin","to":recipient,"content":"Still the same mailbox","status":"sent"}), subject);
     }
     let old = store.messages(Some(ORIGINAL), false).unwrap();
     let new = store.messages(Some(CANONICAL), false).unwrap();
@@ -91,10 +91,17 @@ fn rename_retains_work_lease_and_canonical_declaration_updates_original_row() {
         assert_eq!(current.attempt, before.attempt);
         assert_eq!(current.claimant, before.claimant);
         assert_eq!(current.claim_incarnation, before.claim_incarnation);
+        let reconciled = st3_store::store::reconcile_work_context::read(&store, spelling, now_ms()).unwrap();
+        assert!(reconciled.iter().any(|step| step.subject == subject));
     }
     let intent = crate::graph::parse_internal_intent(
         "version 2\nagent \"example-privileged/new\" { command \"false\"; }", "fixture",
     ).unwrap();
+    let preview = store.mission(&intent, IntentInput {
+        kdl: String::new(), source_name: None,
+    }).unwrap();
+    assert!(!preview.subject_tokens[ORIGINAL].is_empty());
+    assert!(!preview.subject_tokens.contains_key(CANONICAL));
     store.apply_internal(&intent, "canonical-redeclaration").unwrap();
     let connection = store.readers.get();
     let rows: u64 = connection.query_row("SELECT COUNT(*) FROM desired WHERE subject IN (?1,?2)", params![ORIGINAL,CANONICAL], |row| row.get(0)).unwrap();
@@ -148,14 +155,14 @@ fn partition_collision_replay_preserves_fenced_identity_historical_placement() {
     const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     let left = fixture();
     let right = Store::open_memory("example-right").unwrap();
-    let other = "agent/example-other";
+    let other = "agent/example-other/worker";
     let target = "agent/example-target";
     let arrangement = "arrangement/person/robin/019a0000-0000-7000-8000-000000000002";
     for store in [&left, &right] {
         store.bind_fleet(FLEET).unwrap();
     }
     let intent = crate::graph::parse_internal_intent(
-        "version 2\nagent \"example-other\" { command \"true\"; }", "example-right",
+        "version 2\nagent \"example-other/worker\" { command \"true\"; }", "example-right",
     ).unwrap();
     right.apply_internal(&intent, "independent-declaration").unwrap();
     let sync = |from: &Store, to: &Store| {
@@ -235,14 +242,17 @@ fn alias_authored_placement_keeps_signed_identity_when_partition_collision_wins(
     let right = Store::open_memory("example-right").unwrap();
     let naming_first = Store::open_memory("example-naming-first").unwrap();
     let collision_first = Store::open_memory("example-collision-first").unwrap();
-    let other = "agent/example-other";
+    let other = "agent/example-other/worker";
     let target = "agent/example-target";
     let arrangement = "arrangement/person/robin/019a0000-0000-7000-8000-000000000003";
+    for store in [&left, &right] {
+        store.set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    }
     for store in [&left, &right, &naming_first, &collision_first] {
         store.bind_fleet(FLEET).unwrap();
     }
     let intent = crate::graph::parse_internal_intent(
-        "version 2\nagent \"example-other\" { command \"true\"; }", "example-right",
+        "version 2\nagent \"example-other/worker\" { command \"true\"; }", "example-right",
     ).unwrap();
     right.apply_internal(&intent, "independent-declaration").unwrap();
     let sync = |from: &Store, to: &Store| {

@@ -954,8 +954,11 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
 }
 
 /// Tables projected from claims, children before the tables their foreign keys name.
-pub const PROJECTION_TABLES: [&str; 26] = [
+pub const PROJECTION_TABLES: [&str; 29] = [
     "operations",
+    "identity_names",
+    "identity_heads",
+    "identity_dirty",
     "arrangement_registers",
     "arrangements",
     "resource_observations",
@@ -1005,6 +1008,7 @@ pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
         }
     }
     rebuild_operations_tx(transaction)?;
+    identities::rebuild(transaction)?;
     project_replicated_base_claims(transaction)?;
     project_replicated_mission_runs(transaction)?;
     projectors::run_hooks(projectors::REBUILD, transaction)?;

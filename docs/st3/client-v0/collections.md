@@ -46,6 +46,13 @@ card nor emit a change frame. They do not build a fleet roster.
 The selected card folds apart from the fleet roster: a warm fleet projection neither
 answers an exact window nor is narrowed or evicted by one.
 
+Client-v0 agent rows keep immutable storage IDs and the same schema across HTTP
+projections, published rosters, and collection windows. Renaming does not add native
+`identity`, `naming_revision`, `requested_id`, or `renamed_to` fields to those rows.
+This includes the HTTP `/v1/client/agents` list and detail routes. Alias lookup
+still selects the same underlying agent; native rename receipts expose its
+canonical name and naming revision separately.
+
 The existing HTTP `GET /v1/client/agents/{id}` detail read folds only that agent's card; it does
 not require a fleet list read first.
 A daemon that serves exact selectors advertises capability

@@ -45,13 +45,19 @@ pub struct RenameReplication {
     pub frontier: u64,
 }
 
+// Native routes use the st3.v1 value envelope, not the client-v0 snapshot envelope.
+#[derive(Deserialize)]
+struct RenameResponse {
+    value: RenameReceipt,
+}
+
 impl Client {
     pub async fn agent_rename_id(&self, request: &RenameRequest) -> Result<RenameReceipt, ClientError> {
-        self.post("/v1/agents/rename-id", request).await
+        Ok(self.post::<RenameResponse>("/v1/agents/rename-id", request).await?.value)
     }
 
     pub async fn mission_rename_id(&self, request: &RenameRequest) -> Result<RenameReceipt, ClientError> {
-        self.post("/v1/missions/rename-id", request).await
+        Ok(self.post::<RenameResponse>("/v1/missions/rename-id", request).await?.value)
     }
 }
 
@@ -88,6 +94,14 @@ mod tests {
         });
         let receipt: RenameReceipt = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(receipt.identity, "agent/example-old");
+        let response: RenameResponse = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.v1",
+            "request_id": "request/example-rename",
+            "snapshot_host": "example",
+            "store_index": 7,
+            "value": value,
+        })).unwrap();
+        assert_eq!(response.value, receipt);
         assert_eq!(serde_json::to_value(receipt).unwrap(), value);
     }
 }

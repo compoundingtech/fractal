@@ -5225,18 +5225,28 @@ impl Store {
     /// `selected_desired_token` of each of `subjects` that has a declaration, in one statement.
     pub fn selected_desired_tokens(&self, subjects: &[&str]) -> Result<BTreeMap<String, String>> {
         let connection = self.readers.get();
-        for subject in subjects { identities::resolve_reference_conn(&connection, subject).map_err(anyhow::Error::new)?; }
         connection
             .prepare_cached(
-                "SELECT requested.value, desired.claim_id FROM json_each(?1) requested
+                "SELECT requested.value, desired.claim_id,CASE WHEN h.identity IS NOT NULL THEN COALESCE(h.unavailable,
+                    (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                     FROM replica_records WHERE subject_hint=desired.subject AND state IN ('unknown','invalid')
+                     AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
+                 FROM json_each(?1) requested
                  LEFT JOIN identity_names names ON names.name=requested.value
+                 LEFT JOIN identity_heads h ON h.identity=names.identity
                  JOIN desired ON desired.subject=COALESCE(names.identity,requested.value)",
             )?
             .query_map([serde_json::to_string(subjects)?], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
             })?
-            .collect::<Result<BTreeMap<_, _>, _>>()
-            .map_err(Into::into)
+            .map(|row| {
+                let (subject, token, blocked) = row?;
+                if let Some(reason) = blocked {
+                    return Err(anyhow::Error::new(identities::unavailable(&subject, &reason)));
+                }
+                Ok((subject, token))
+            })
+            .collect()
     }
 
     pub fn selected_desired_revision(&self, subject: &str) -> Result<Option<String>> {
@@ -7073,15 +7083,17 @@ pub fn enforce_mission_run_capacity(
 }
 
 pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
-    let identity = identities::resolve_reference_conn(connection, subject).map_err(anyhow::Error::new)?;
-    let subject = identity.as_str();
-    connection
+    let row = connection
         .prepare_cached(
-            "SELECT kind, revision, claim_id, body, member, owner_run, owner_generation
-             FROM desired WHERE subject=?1",
+            "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
+                 CASE WHEN h.identity IS NOT NULL THEN COALESCE(h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                     FROM replica_records WHERE subject_hint=d.subject AND state IN ('unknown','invalid')
+                     AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
+             FROM desired d LEFT JOIN identity_heads h ON h.identity=d.subject
+             WHERE d.subject=COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1)",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h876472f3d008 owner=st3_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
-            Ok(DesiredRow {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h961b36ed9824 owner=st3_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
+            Ok((DesiredRow {
                 kind: row.get(0)?,
                 revision: row.get(1)?,
                 claim_id: row.get(2)?,
@@ -7089,10 +7101,16 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
                 member: row.get(4)?,
                 owner_run: row.get(5)?,
                 owner_generation: row.get(6)?,
-            })
+            }, row.get::<_, Option<String>>(7)?))
         })
         .optional()
-        .map_err(Into::into)
+        .map_err(anyhow::Error::from)?;
+    row.map(|(desired, blocked)| {
+        if let Some(reason) = blocked {
+            return Err(anyhow::Error::new(identities::unavailable(subject, &reason)));
+        }
+        Ok(desired)
+    }).transpose()
 }
 
 pub fn normalize_message_party(value: &str) -> String {

@@ -103,12 +103,21 @@ pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &s
 /// Normalize references without making previously permissible undeclared references invalid.
 /// A known alias with missing/conflicting lifecycle evidence is never allowed through.
 pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<String, St3Error> {
-    let Some(kind) = IdentityKind::of(id) else { return Ok(id.into()); };
-    match resolve_identity_conn(connection, kind, id) {
-        Ok(resolved) => Ok(resolved.identity),
-        Err(error) if error.code == "identity-unknown" => Ok(id.into()),
-        Err(error) => Err(error),
-    }
+    let Some(_) = IdentityKind::of(id) else { return Ok(id.into()); };
+    // Reference readers also encounter historical storage keys that predate today's
+    // declaration grammar. Admission validates new names; reading an old key must not.
+    let (identity, blocked, pending): (String, Option<String>, Option<String>) = connection.query_row(
+        "SELECT COALESCE(n.identity,?1),h.unavailable,
+            (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1
+                THEN 'conflict' ELSE 'pending-replication' END FROM replica_records
+             WHERE subject_hint=COALESCE(n.identity,?1) AND state IN ('unknown','invalid')
+             AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))
+         FROM (SELECT 1) LEFT JOIN identity_names n ON n.name=?1
+         LEFT JOIN identity_heads h ON h.identity=n.identity",
+        [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(internal)?;
+    if let Some(reason) = blocked.or(pending) { return Err(unavailable(&identity, &reason)); }
+    Ok(identity)
 }
 
 pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput) -> Result<std::borrow::Cow<'a, ClaimInput>, St3Error> {
@@ -161,7 +170,7 @@ pub fn claim_operation(input: &ClaimInput) -> Result<Option<(String,String)>, St
 }
 
 fn request_digest(kind: &str, request: &Value) -> Result<String, St3Error> {
-    canonical_hash(&("st3.identity-rename-request.v1",kind,request)).map_err(internal)
+    canonical_hash(&("st3.identity-rename-request.v1",kind,canonical_json_value(request))).map_err(internal)
 }
 
 /// Check immutable request/effect binding before a replicated fact enters the projection.

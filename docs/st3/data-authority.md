@@ -205,6 +205,9 @@ order from the same admitted claims.
 | `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
 | `held_keys` | Local | Which principal each key this node holds belongs to, and its delegation chain; the private keys are files in `STATE/keys`. |
 | `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry and remain. |
+| `identity_dirty` | Local cache | Transaction-local naming-fold invalidation marker; excluded from replicated digests and cleared during projection replay. |
+| `identity_heads` | Shared projection | Immutable storage identity, canonical public ID, naming revision and lifecycle availability derived from declaration and naming facts. All columns participate in projection digests and shuffle/restart/checkpoint coverage. |
+| `identity_names` | Shared projection | Reserved historical names and their immutable identity and naming claim. All columns participate in projection digests; replay reconstructs reservations from durable facts. |
 | `local_agent_message_pending` | Local cache | Rebuildable eligible-message timestamps and daily recipient counts, plus a deduplicated queue of changed messages, over this node's retained send claims. They accelerate the daily usage estimate, are not replicated, and do not add shared identities to projection digests. |
 | `local_blob_uploads` | Local | Who uploaded an attachment file, for the per-actor quota and for who may read it before a message names it. Never replicated; the bytes are files under `<state_dir>/blobs`, see [Attachments](attachments.md). |
 | `local_blobs` | Local | Staged upload bytes awaiting a durable claim reference. Promotion into `blobs` commits with the referencing claim. |

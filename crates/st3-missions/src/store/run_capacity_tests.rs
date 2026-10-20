@@ -125,6 +125,8 @@ fn mission_rename_keeps_revision_generation_and_schedule_occurrence() {
     let before = store.create_scheduled_mission_run(
         &request, None, "schedule/example", 7,
     ).unwrap();
+    // Release the default single-run capacity before creating the independent retry fixture.
+    store.set_mission_run_state(&before.id, "completed", "terminal", None).unwrap();
     let mut retry_request = request.clone();
     retry_request.idempotency_key = "example-retry".into();
     let original = store.create_mission_run(&retry_request).unwrap();
@@ -159,6 +161,7 @@ fn mission_rename_keeps_revision_generation_and_schedule_occurrence() {
     assert_eq!(definitions[0].mission.subject, "mission/example-after");
     assert_eq!(definitions[0].mission.revision, mission.revision);
     // The same current spelling also starts a new run against the original rows.
+    store.set_mission_run_state(&original.id, "completed", "terminal", None).unwrap();
     request.idempotency_key = "example-next-run".into();
     let next = store.create_mission_run(&request).unwrap();
     assert_eq!(next.mission, "mission/example-before");

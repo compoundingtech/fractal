@@ -2,14 +2,17 @@ use super::*;
 use proptest::prelude::*;
 use crate::store::fleet_admission_tests_shared_seats::{node, sync};
 
-const ORIGINAL: &str = "agent/example-original";
-const RENAMED: &str = "agent/example-renamed";
+const ORIGINAL: &str = "agent/example-original/worker";
+const RENAMED: &str = "agent/example-renamed/worker";
 
 fn declare(store: &Store, name: &str) -> String {
     let name = name.strip_prefix("agent/").unwrap();
     let source = format!("version 2\nagent \"{name}\" {{ command \"true\"; workspace \"/tmp\"; restart \"never\"; }}\n");
     let intent = crate::parse_intent(&source, store.origin()).unwrap();
-    store.apply(&intent, &BTreeMap::new(), &format!("declare-{name}")).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    store.apply(&intent, &expected, &format!("declare-{name}")).unwrap();
     store.selected_desired_token(&format!("agent/{name}")).unwrap().unwrap()
 }
 
@@ -19,6 +22,27 @@ fn request(from: &str, to: &str, key: &str) -> RenameRequest {
         reason: "Clarify responsibility".into(), expected_naming_revision: None,
         expected_declaration: None, idempotency_key: key.into(),
     }
+}
+
+#[test]
+fn replicated_rename_request_digest_survives_canonical_json_field_order() {
+    for kind in [IdentityKind::Agent, IdentityKind::Mission] {
+        let input = request(ORIGINAL, RENAMED, "canonical-request");
+        let request = serde_json::to_value(input).unwrap();
+        let canonical = canonical_json_value(&request);
+        assert_eq!(
+            request_digest(kind.claim_kind(), &request).unwrap(),
+            request_digest(kind.claim_kind(), &canonical).unwrap(),
+        );
+    }
+    let store = Store::open_memory("example").unwrap();
+    declare(&store, ORIGINAL);
+    let receipt = store.rename_identity(
+        IdentityKind::Agent, &request(ORIGINAL, RENAMED, "canonical-replication"), &[],
+    ).unwrap();
+    let mut claim = store.claim_by_id(&receipt.claim_id).unwrap().unwrap();
+    claim.body = canonical_json_value(&claim.body);
+    validate_replicated(&claim).unwrap();
 }
 
 #[test]
@@ -74,10 +98,10 @@ fn unknown_cross_kind_occupied_cycle_and_fleet_refusals() {
     let error = store.rename_identity(IdentityKind::Agent, &request(ORIGINAL, RENAMED, "unknown"), &[]).unwrap_err();
     assert_eq!(error.code, "identity-unknown");
     declare(&store, ORIGINAL);
-    declare(&store, "agent/example-occupied");
+    declare(&store, "agent/example-occupied/worker");
     let error = store.rename_identity(IdentityKind::Agent, &request(ORIGINAL, "mission/example-other", "cross-kind"), &[]).unwrap_err();
     assert_eq!(error.code, "identity-cross-kind");
-    let error = store.rename_identity(IdentityKind::Agent, &request(ORIGINAL, "agent/example-occupied", "occupied"), &[]).unwrap_err();
+    let error = store.rename_identity(IdentityKind::Agent, &request(ORIGINAL, "agent/example-occupied/worker", "occupied"), &[]).unwrap_err();
     assert_eq!(error.code, "identity-occupied");
     let error = store.rename_identity(IdentityKind::Agent, &request(ORIGINAL, RENAMED, "fleet"), &["example-peer".into()]).unwrap_err();
     assert_eq!(error.code, "lifecycle-unavailable");
@@ -164,7 +188,7 @@ fn partition_target_collision_has_same_winner_in_both_arrival_orders() {
     let right = node("example-right", None, None);
     let first = node("example-first", None, None);
     let second = node("example-second", None, None);
-    let other = "agent/example-other";
+    let other = "agent/example-other/worker";
     let target = "agent/example-target";
     declare(&left, ORIGINAL);
     declare(&right, other);
@@ -314,9 +338,9 @@ fn repaired_naming_fact_does_not_release_historical_name_reservation() {
     peer.replay_replication_graph().unwrap();
     let replayed = peer.resolve_identity(IdentityKind::Agent, RENAMED).unwrap();
     assert_eq!(replayed, resolved);
-    declare(&peer, "agent/example-other");
+    declare(&peer, "agent/example-other/worker");
     let refused = peer.rename_identity(
-        IdentityKind::Agent, &request("agent/example-other", RENAMED, "never-reuse"), &[],
+        IdentityKind::Agent, &request("agent/example-other/worker", RENAMED, "never-reuse"), &[],
     ).unwrap_err();
     assert_eq!(refused.code, "identity-occupied");
 }

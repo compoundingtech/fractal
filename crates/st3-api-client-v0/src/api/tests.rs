@@ -13,17 +13,20 @@ use st3_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_r
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
     fn own_seat(_pid: u32) -> Option<String> {
-        Some("agent/example-own".into())
+        Some("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("api.sock");
     let server_socket = socket.clone();
     let state = state(root.path());
     let intent = crate::graph::parse_test_intent(
-        "version 2\nagent \"example-own\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        "version 2\nagent \"example-own/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
         state.store.origin(),
     ).unwrap();
-    state.store.apply(&intent, &BTreeMap::new(), "bound-declare").unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "bound-declare").unwrap();
     // Reaching the handler would succeed. The listener must reject the foreign actor first.
     let app = Router::new().route(
         "/v1/client/glasses/{id}",
