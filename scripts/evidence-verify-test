@@ -126,6 +126,45 @@ class Verifier(unittest.TestCase):
         self.assertEqual(code, 1, result)
         return result['reason']
 
+
+    def test_receipt_mirror_prints_observation_but_never_satisfies_execution(self):
+        key = self.f.key('receipt-observer', 'agent/example-observer')
+        observed = {
+            'kind': 'receipt_mirror', 'check': 'receipt-mirror.check-quick',
+            'receipt_sha256': 'c' * 64, 'host': 'other', 'head': self.commit, 'tree': self.tree,
+            'outcome': 'passed', 'claim': 'no_execution',
+        }
+
+        def mirror(body):
+            statement = json.loads(body)
+            statement['predicate']['observed'] = observed
+            return json.dumps(statement).encode()
+
+        record = self.f.note(self.commit, self.tree, key, 'agent/example-observer', mutate=mirror)
+        for check in ('check-quick', 'receipt-mirror.check-quick'):
+            code, stdout, stderr = self.f.cli('--tree', self.tree, '--check', check, '--keys', str(self.f.keys))
+            self.assertEqual((code, stderr), (1, ''))
+            result = json.loads(stdout)
+            self.assertFalse(result['satisfied'])
+            self.assertEqual(result['reason'], 'observation_only')
+            self.assertEqual(result['observations'], [
+                {'record': record, 'signer': 'agent/example-observer', **observed},
+            ])
+        # A mirror does not participate in execution selection.
+        tests = self.f.note(self.commit, self.tree, key, 'agent/example-observer', check='check-quick')
+        code, result = self.f.verify(self.tree, check='check-quick')
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['record'], tests)
+        blob = mirror(self.f.git('show', f'{tests}:{self.tree}').encode())
+        for field, value in [('claim', 'execution'), ('check', 'check-quick'),
+                             ('receipt_sha256', 'bad'), ('head', 'a' * 40), ('tree', 'a' * 40)]:
+            statement = json.loads(blob)
+            statement['predicate']['observed'][field] = value
+            self.assertIsNone(evidence_verify.statement_of(json.dumps(statement), self.tree))
+        statement = json.loads(blob)
+        del statement['predicate']['observed']['claim']
+        self.assertIsNone(evidence_verify.statement_of(json.dumps(statement), self.tree))
+
     def test_a_trusted_note_satisfies_the_check_and_reports_signer_and_trust_level(self):
         record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
         code, result = self.f.verify(self.tree)

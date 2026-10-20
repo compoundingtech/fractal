@@ -66,6 +66,16 @@ pub struct Observation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Fact {
+    /// An observed receipt only: never execution evidence, even when its outcome passed.
+    ReceiptMirror {
+        check: ReceiptMirrorCheck,
+        receipt_sha256: String,
+        host: String,
+        head: String,
+        tree: String,
+        outcome: ReceiptMirrorOutcome,
+        claim: ReceiptMirrorClaim,
+    },
     Tests {
         runner: String,
         /// The observer records each required check, including failures, from its own run.
@@ -83,6 +93,26 @@ pub enum Fact {
         /// Immutable signed notes commit IDs of the tests the reviewer considered.
         tests: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum ReceiptMirrorCheck {
+    #[serde(rename = "receipt-mirror.check-quick")]
+    CheckQuick,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptMirrorOutcome {
+    Passed,
+    Failed,
+}
+
+/// The sole claim this kind can encode; missing or execution claims fail decoding.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptMirrorClaim {
+    NoExecution,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -367,6 +397,20 @@ impl Statement {
         chrono::DateTime::parse_from_rfc3339(&observation.observed_at)
             .context("invalid observation timestamp")?;
         match &observation.fact {
+            Fact::ReceiptMirror {
+                receipt_sha256,
+                host,
+                head,
+                tree,
+                ..
+            } => {
+                sha256(receipt_sha256)?;
+                ensure!(!host.trim().is_empty(), "missing receipt host");
+                ensure!(
+                    *head == subject.name && tree == observed_tree,
+                    "receipt head/tree must match the observation subject"
+                );
+            }
             Fact::Tests {
                 runner,
                 checks,
@@ -645,8 +689,11 @@ pub fn verify_record(repo: &Path, id: &str, trusted_signers: &Path) -> Result<St
 /// Validate first, then create the immutable ref. Distinct writers never share a ref;
 /// importing the same record twice is idempotent, including simultaneous imports.
 pub fn put(repo: &Path, id: &str, trusted_signers: &Path) -> Result<String> {
-    verify_record(repo, id, trusted_signers)?;
-    let name = format!("{NOTES_PREFIX}{id}");
+    let statement = verify_record(repo, id, trusted_signers)?;
+    let name = match &statement.predicate.fact {
+        Fact::ReceiptMirror { tree, .. } => format!("{NOTES_PREFIX}{tree}/{id}"),
+        _ => format!("{NOTES_PREFIX}{id}"),
+    };
     let existing = git_text(
         repo,
         &["for-each-ref", "--format=%(objectname)", &name],
