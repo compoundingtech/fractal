@@ -1,8 +1,16 @@
 import { defineConfig } from 'vitest/config'
 
+// Only the app's Vite build supplies `virtual:build-identity`. jsdom suites transform modules for the
+// web, where import analysis must resolve it before `vi.mock` replaces it; suites mock the values.
+const buildIdentity = {
+  name: 'test:build-identity',
+  enforce: 'pre' as const,
+  resolveId: (id: string) => id === 'virtual:build-identity' ? '\0test-build-identity' : undefined,
+  load: (id: string) => id === '\0test-build-identity' ? `export const buildIdentity = ${JSON.stringify({ displayVersion: 'test', machineVersion: 'test', dirty: false })};\nexport const deploymentId = undefined;\n` : undefined,
+}
+
 export default defineConfig({
-  // jsdom's Vite import analysis needs a resolved id before vi.mock supplies its test value.
-  plugins: [{ name: 'test-build-identity', resolveId: (id) => id === 'virtual:build-identity' ? id : undefined }],
+  plugins: [buildIdentity],
   test: {
     globalSetup: ['scripts/changelog-registry-setup.mjs'],
     setupFiles: ['src/testEnvironment.ts'],

@@ -1005,6 +1005,13 @@ jobs:
       - name: Use the cached Nix outputs
         if: (env.CI_LOCAL_CACHES != '1') && needs.evidence-gate-genie-freshness.outputs.skip != 'true'
         run: bash scripts/ci-nix-cache use
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Check license coverage, runner selection and generated files
         shell: bash
         run: "nix develop '.#genie' -c bash scripts/ci-genie-freshness"
@@ -1103,6 +1110,26 @@ jobs:
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - uses: actions/setup-node@v4
         with:
           node-version: 24.18.0
@@ -1121,16 +1148,16 @@ jobs:
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Install the frozen workspace
+        shell: bash
+        run: "nix develop '.#web' -c pnpm install --frozen-lockfile"
         id: install
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Check the client, shared views and iOS consumers
+        shell: bash
+        run: "nix develop '.#web' -c bash scripts/ci-typescript-client"
         id: client
-        run: bash scripts/ci-typescript-client
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - if: (always()) && needs.evidence-gate-typescript-client.outputs.skip != 'true'
         continue-on-error: true
@@ -3492,7 +3519,15 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
+            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
+            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - name: Check web shell identity invariants
         run: python3 scripts/ci-web-shell-test
       - name: Identify the web shell inputs
@@ -3507,6 +3542,8 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+      - name: Enable user namespaces for Buck TypeScript sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Restore the web shell closure
         id: web-shell
         uses: actions/cache/restore@v4

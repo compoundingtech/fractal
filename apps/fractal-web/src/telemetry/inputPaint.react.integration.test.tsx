@@ -8,7 +8,7 @@ import { inputPaintRegionMounted, registerInputPaintRegions, installInputPaint, 
 import { PortalContainerRegistrationContext, RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { App as RealAppShell } from '../web/App.tsx'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, defineConsts: (constants: unknown) => constants, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 vi.mock('virtual:build-identity', () => ({ buildIdentity: { machineVersion: 'test', dirty: false }, deploymentId: undefined }))
 vi.mock('./meters.tsx', () => ({ acquireMeasurementEngine: () => () => {}, getDebug: () => 0 }))
 vi.mock('../web/liveRuntime.ts', () => ({ live: {}, telemetry: { onCommit: () => {}, ux: undefined } }))
@@ -42,6 +42,7 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   const frames = new Map<number, FrameRequestCallback>()
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   let nextFrame = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = ++nextFrame; frames.set(id, callback); return id })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
@@ -257,8 +258,12 @@ it.each([
 
 it('uses the registered app-shell host for the real status-bar changelog and excludes its stopped no-op timer', async () => {
   const run = setup({ appShell: true })
-  const changes = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('Changes'))
-  expect(changes).toBeDefined()
+  // The diagnostics bar is a lazy chunk (App.tsx), so its status-bar changelog trigger mounts after the import settles.
+  let changes: HTMLButtonElement | undefined
+  await vi.waitFor(() => {
+    changes = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('Changes'))
+    expect(changes).toBeDefined()
+  }, { timeout: 10_000 })
   // Opening is setup, not a measured trusted input.
   flushSync(() => changes!.click())
   await new Promise<void>((resolve) => setTimeout(resolve, 0))

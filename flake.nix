@@ -10,9 +10,9 @@
     pty.url = "github:compoundingtech/pty/063ff7f9d6ef099f76c31752b2eb52c5bba94c17";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
-    # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
+    # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b";
+      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
   };
 
   outputs =
@@ -533,6 +533,8 @@
             "stui"
             "-p"
             "st-chatgpt"
+            "-p"
+            "st-fabric-adapter"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -668,6 +670,22 @@
             homepage = "https://github.com/compoundingtech/smalltalk";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-chatgpt";
+          };
+        };
+
+        stFabricAdapter = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-fabric-adapter";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "st-fabric-adapter" "--bin" "st-fabric-adapter" ];
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          # The shared daemon check runs the adapter's Rust tests.
+          doCheck = false;
+          meta = {
+            description = "External Smalltalk fleet to Fabric runtime-peers adapter";
+            homepage = "https://github.com/compoundingtech/smalltalk";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "st-fabric-adapter";
           };
         };
 
@@ -969,6 +987,7 @@
         packages.st3 = st3;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
+        packages.st-fabric-adapter = stFabricAdapter;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
@@ -1716,8 +1735,7 @@
         devShells.genie = pkgs.mkShell {
           packages = [ effect-utils.packages.${system}.genie pkgs.nodejs ];
           shellHook = ''
-            mkdir -p repos
-            ln -sfn ${effect-utils} repos/effect-utils
+            [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
