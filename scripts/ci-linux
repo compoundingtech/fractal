@@ -3,6 +3,7 @@
 # Run one Linux gate stage inside the pinned devShell: tests, clippy, or fleet-compat.
 # Each stage is its own GitHub Actions job on its own runner; `linux-gate` requires all three.
 set -euo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 stage=${1:?usage: scripts/ci-linux tests|clippy|fleet-compat|mail-redelivery-canaries|conversation-model}
 # Logs stay outside the checkout: the public-content test scans untracked files.
 logs="$RUNNER_TEMP/ci-logs"
@@ -79,8 +80,7 @@ scratch_diagnostic_start() {
 }
 scratch_diagnostic_finish() {
   # The poller holds no pipe of the stage (its output is /dev/null), so the stage never waits for it.
-  pkill -P "$scratch_poller" 2>/dev/null || true
-  kill "$scratch_poller" 2>/dev/null || true
+  python3 scripts/script_process.py "$scratch_poller" 15 --parent "$BASHPID"
   echo "Test scratch: TMPDIR=$scratch on $(stat -f -c %T "$scratch"), filesystem $(df -Pm "$scratch" | awk 'NR==2 {print $2}') MiB, peak du of TMPDIR $(cat "$scratch_peak_file") MiB; /dev/shm $(stat -f -c %T /dev/shm 2>/dev/null || echo absent), $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $2}') MiB, $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $3}') MiB used at the end; memory $(awk '/MemTotal/ {printf "%d", $2 / 1024}' /proc/meminfo) MiB, peak RSS of the tests not measured"
   rm -f "$scratch_peak_file"
 }
