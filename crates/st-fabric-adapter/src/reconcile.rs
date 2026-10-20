@@ -213,13 +213,11 @@ async fn snapshot(socket: &Path) -> Result<Snapshot> {
     }
 }
 
+/// Client-only access: the replication carrier and the client API. A verified member is never
+/// granted the terminal (`st3/pty/<fleet-id>`) protocol here; terminal access over Fabric stays an
+/// explicit operator grant in static policy, which this owner never edits.
 fn grants(fleet_id: &str) -> BTreeSet<String> {
-    [
-        format!("st3/fleet/{fleet_id}"),
-        format!("st3/pty/{fleet_id}"),
-        "st3-client-v0".into(),
-    ]
-    .into()
+    [format!("st3/fleet/{fleet_id}"), "st3-client-v0".into()].into()
 }
 
 fn desired(

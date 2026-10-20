@@ -120,7 +120,6 @@ fn endpoint_protocol_cannot_inject_non_st_grants() {
         grants(FLEET),
         BTreeSet::from([
             "st3/fleet/test-fleet".into(),
-            "st3/pty/test-fleet".into(),
             "st3-client-v0".into()
         ])
     );
@@ -159,7 +158,7 @@ async fn adds_peer_and_replaces_exact_grants_in_one_atomic_batch() {
         batch["operations"],
         json!([
             {"op":"add_peer", "node_id":"peer-node"},
-            {"op":"set_grants", "node_id":"peer-node", "grants":["st3-client-v0", "st3/fleet/test-fleet", "st3/pty/test-fleet"]}
+            {"op":"set_grants", "node_id":"peer-node", "grants":["st3-client-v0", "st3/fleet/test-fleet"]}
         ])
     );
 }
@@ -243,7 +242,6 @@ async fn already_exact_policy_needs_no_mutation() {
         &[
             "st3-client-v0",
             "st3/fleet/test-fleet",
-            "st3/pty/test-fleet",
         ],
     );
     let (socket, server) = serve(root.path(), vec![Some(list(vec![exact], 7))]);
@@ -364,11 +362,26 @@ async fn removal_reports_residual_static_access_even_after_previous_owner_remova
 #[tokio::test]
 async fn repeated_withdrawal_cannot_hide_other_owner_access() {
     let root = tempfile::tempdir().unwrap();
-    let retained = peer("peer-node", "other-tool", &["st3/pty/test-fleet"]);
+    let retained = peer("peer-node", "other-tool", &["st3-client-v0"]);
     let (socket, server) = serve(root.path(), vec![Some(list(vec![retained.clone()], 7))]);
     assert_eq!(
         withdraw(root.path(), &socket, FLEET).await.unwrap().state,
         "residual_access"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn an_operator_terminal_grant_is_neither_managed_nor_reported_as_residual() {
+    let root = tempfile::tempdir().unwrap();
+    // Client-only access: the adapter never grants the terminal protocol, so an operator's own
+    // `st3/pty/<fleet-id>` grant on another owner is outside this owner's policy. Withdrawal
+    // leaves it alone and does not call it residual access, and sends no mutation.
+    let retained = peer("peer-node", "static", &["st3/pty/test-fleet"]);
+    let (socket, server) = serve(root.path(), vec![Some(list(vec![retained.clone()], 7))]);
+    assert_eq!(
+        withdraw(root.path(), &socket, FLEET).await.unwrap().state,
+        "applied"
     );
     server.await.unwrap();
 }
@@ -456,7 +469,6 @@ async fn restart_resolves_lost_commit_before_accepting_an_empty_diff() {
         &[
             "st3-client-v0",
             "st3/fleet/test-fleet",
-            "st3/pty/test-fleet",
         ],
     );
     let (socket, server) = serve(
@@ -534,7 +546,6 @@ async fn rekey_residual_warning_survives_later_polling_and_restart() {
         &[
             "st3-client-v0",
             "st3/fleet/test-fleet",
-            "st3/pty/test-fleet",
         ],
     );
     let (socket, server) = serve(
@@ -793,7 +804,6 @@ async fn local_and_remote_leave_keep_only_replication_carrier_until_receipt() {
             &[
                 "st3-client-v0",
                 "st3/fleet/test-fleet",
-                "st3/pty/test-fleet",
             ],
         );
         let carrier = peer("peer-node", OWNER, &["st3/fleet/test-fleet"]);
