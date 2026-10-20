@@ -86,6 +86,14 @@ describe('story-declared mounted conversation window', () => {
     }
   })
 
+  it.each(['empty', 'default'])('treats all and omitted windows identically for a %s baseline', conversation => {
+    const story = { render: () => <Rows />, args: { conversation } }
+    const omitted = scenarioStoryCheck({ ...story, parameters: { scenario: { ...scenario, window: undefined } } }, meta)
+    const all = scenarioStoryCheck({ ...story, parameters: { scenario: { ...scenario, window: { _tag: 'all' } } } }, meta)
+    expect(omitted._tag).toBe('Passed')
+    expect(all).toEqual(omitted)
+  })
+
   it('does not waive declared/read mismatches', () => {
     const result = scenarioStoryCheck({ render: () => <p>Fixed</p> }, meta)
     expect(result.failures).toContainEqual(expect.objectContaining({ _tag: 'Reads', check: 1 }))

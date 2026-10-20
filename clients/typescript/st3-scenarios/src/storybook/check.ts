@@ -220,13 +220,13 @@ export const scenarioStoryCheck = <TArgs extends Args>(
   const initialMarkup = render(scenario)
   const activeKinds = parameter.slices.filter((kind) => parameter.invariant?.[kind] === undefined)
   const baseWorld = resolveScenarioWorld(parameter, { scenario, scenarioNow: now }, baselineArgs)
-  if (parameter.window !== undefined) {
+  if (parameter.window?._tag === 'tail') {
     const window = parameter.window
     const atMs = options.atMs ?? 0
     const items = foldSlice(baseWorld.slices.conversation, atMs).state.threads.flatMap((thread) => mountedEntries(thread.items, window))
     const message = !declared.has('conversation') ? 'mounted window requires a declared conversation slice'
-      : window._tag === 'tail' && (!Number.isSafeInteger(window.turns) || window.turns <= 0) ? 'tail window turns must be a positive safe integer'
-      : window._tag === 'tail' && (!Number.isSafeInteger(window.historyBatch) || window.historyBatch < 0) ? 'tail window historyBatch must be a non-negative safe integer'
+      : !Number.isSafeInteger(window.turns) || window.turns <= 0 ? 'tail window turns must be a positive safe integer'
+      : !Number.isSafeInteger(window.historyBatch) || window.historyBatch < 0 ? 'tail window historyBatch must be a non-negative safe integer'
       : items.length === 0 ? 'mounted window selects zero conversation entries'
       : markers(baseWorld, 'conversation', atMs).length > 0 && markers(baseWorld, 'conversation', atMs, window).length === 0 ? 'mounted window excludes every conversation marker'
       : undefined

@@ -1069,7 +1069,8 @@ Stories whose consumer initially mounts only part of a conversation may declare
 window: { _tag: 'tail', turns: 2, historyBatch: 4 }
 ```
 
-The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window.
+The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window,
+including for empty or loading baselines; vacuity validation applies only to tail windows.
 The check derives each thread's turns from folded wire entries: user text content opens a
 turn; an assistant-content/tool-call prefix is one turn. It selects the final N turns per
 thread, not the final N entries; threads with at most N + historyBatch turns mount whole,
@@ -1078,8 +1079,11 @@ Other slices retain their full marker contract. World-switch contrast selection 
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
+Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
+Transcript's initial tail count and EmbraceScrollViewport's history batch size. Stories
+can use this shared value instead of copying the counts; a consumer-side test guards it.
 
-`MountedWindow` failures reject invalid tail counts/history batches, a baseline window
+`MountedWindow` failures reject invalid tail counts/history batches, a baseline tail window
 selecting zero entries, or one excluding every marker from a marker-bearing conversation.
 Genuinely empty/loading contrast sides still participate as contentless contrasts.
 Without a window, the all-source marker contract is unchanged. The mounted check does not
