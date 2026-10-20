@@ -114,6 +114,58 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   const changes = within(sheet).getByRole('complementary', { name: 'Changes' })
   await expect(changes.getBoundingClientRect().width).toBeLessThanOrEqual(sheet.getBoundingClientRect().width)
 } }
+/** A real 1100px workspace freezes Changes when the dock opens, without unmounting its split component. */
+export const ChangesRangeFreezeCleanup: Story = {
+  parameters: { viewport: { options: { changes1100: { name: 'Changes resize regression', styles: { width: '1100px', height: '900px' }, type: 'desktop' } } } },
+  globals: { viewport: { value: 'changes1100', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const doc = canvasElement.ownerDocument, canvas = within(doc.body), user = userEvent.setup({ document: doc })
+    await expect(window.innerWidth).toBe(1100)
+    await openWideDetails(canvasElement)
+    // Changes starts with the sidebar present: its existing split is frozen.
+    const track = doc.querySelector<HTMLElement>('[data-resizer-track="live-change-panel"]')!
+    await expect(track).toHaveAttribute('aria-hidden', 'true')
+    await user.click(canvas.getByRole('button', { name: 'Collapse agents' }))
+    const splitter = await canvas.findByRole('separator', { name: 'Change panel width' })
+    const before = Number(splitter.getAttribute('aria-valuenow'))
+    let held = false
+    Object.defineProperties(splitter, {
+      setPointerCapture: { configurable: true, value: () => { held = true } },
+      hasPointerCapture: { configurable: true, value: () => held },
+      releasePointerCapture: { configurable: true, value: () => { held = false } },
+    })
+    const add = doc.addEventListener, remove = doc.removeEventListener
+    const captureKeys = new Set<EventListenerOrEventListenerObject>()
+    const capture = (options: boolean | EventListenerOptions | undefined) => options === true || typeof options === 'object' && options.capture === true
+    doc.addEventListener = function (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+      if (type === 'keydown' && capture(options)) captureKeys.add(listener)
+      return add.call(this, type, listener, options)
+    }
+    doc.removeEventListener = function (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) {
+      if (type === 'keydown' && capture(options)) captureKeys.delete(listener)
+      return remove.call(this, type, listener, options)
+    }
+    try {
+      splitter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0, clientX: 500 }))
+      splitter.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 484 }))
+      await waitFor(() => expect(splitter).toHaveAttribute('aria-valuenow', String(before + 16)))
+      await expect(captureKeys.size).toBe(1)
+      await user.keyboard('{Control>}b{/Control}')
+      await waitFor(() => expect(canvas.queryByRole('separator', { name: 'Change panel width' })).toBeNull())
+      await expect(doc.querySelector('[data-resizer-track="live-change-panel"]')).toBe(track)
+      await expect(held).toBe(false)
+      await expect(captureKeys.size).toBe(0)
+      await user.click(canvas.getByRole('button', { name: 'Conversation menu' }))
+      await expect(await canvas.findByRole('menu')).toBeVisible()
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
+      await user.keyboard('{Control>}b{/Control}')
+      await expect(await canvas.findByRole('separator', { name: 'Change panel width' })).toHaveAttribute('aria-valuenow', String(before + 16))
+      await expect(captureKeys.size).toBe(0)
+    } finally { doc.addEventListener = add; doc.removeEventListener = remove }
+  },
+}
+
 /** Keyboard path through both sheets: each opens with focus inside, Escape or the backdrop closes it, and focus returns to its opener. */
 export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)

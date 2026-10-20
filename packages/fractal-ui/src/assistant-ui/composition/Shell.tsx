@@ -27,8 +27,10 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
 }) {
   const canResize = Number.isFinite(min) && Number.isFinite(max) && max > min
   const activeDrag = React.useRef<(() => void) | undefined>(undefined)
-  // Commit the last dragged size before the separator leaves the DOM; no capture listener may outlive it.
-  React.useLayoutEffect(() => () => activeDrag.current?.(), [])
+  // Commit before any separator removal, including a frozen range while the split stays mounted.
+  const separatorRef = React.useCallback((node: HTMLDivElement | null) => {
+    if (node === null) activeDrag.current?.()
+  }, [])
   const save = React.useCallback((next: number) => {
     const clamped = Math.min(max, Math.max(min, Math.round(next)))
     onChange(clamped)
@@ -94,6 +96,7 @@ export function ResizableSplit({ id, value, min, max, onChange, onToggle, onRese
   }
   return <div data-resizer-track={id} aria-hidden={canResize ? undefined : true} {...stylex.props(orientation === 'vertical' ? styles.splitVertical : styles.splitHorizontal)}>
     {canResize && <div
+    ref={separatorRef}
     role="separator"
     aria-label={label}
     aria-orientation={orientation}
