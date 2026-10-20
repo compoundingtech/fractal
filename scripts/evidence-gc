@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Garbage-collect the evidence notes: keep what a run can still ask about, bound the rest, and report.
+"""Garbage-collect the evidence records (tags and notes): keep what a run can still ask about, bound the rest, and report.
 
   scripts/evidence-gc [--repo .] [--remote origin] [--apply] [--fetch]
                       [--main origin/main] [--keep-main-days 3] [--grace-hours 24] [--soft 3000] [--cap 5000]
                       [--head COMMIT ...] [--heads-from FILE] [--github OWNER/NAME] [--policy-from REV]
 
-Dry run by default: it reads the notes in --repo (with --fetch it first fetches all of `refs/notes/evidence/*` and
-`refs/notes/evidence-input/*` from the remote: this is the one tool that pays for the whole namespace), prints what it would
+Dry run by default: it reads the records in --repo (with --fetch it first fetches all of `refs/tags/evidence/*`,
+`refs/notes/evidence/*` and `refs/notes/evidence-input/*` from the remote: this is the one tool that pays for the whole
+namespace), prints what it would
 do, and changes nothing. With --apply it migrates and deletes locally, and with --remote also on the remote
 (EVIDENCE_PUSH_TOKEN, if set, is sent as an authorization header and never printed), in batches of at most 500 refs.
 
@@ -14,16 +15,19 @@ THE KEEP SET (a note applies to the exact tree it is about, so a superseded head
   open-pr-head    records of the CURRENT head tree of each open pull request, and of each merge-queue tip while it is queued
                   (--head / --heads-from FILE, or --github OWNER/NAME to list them with `gh` and `git ls-remote`)
   main-window     records of the trees of main's first-parent commits of the last --keep-main-days
-  input-key       an input-index ref (`refs/notes/evidence-input/<check>/<key>/<record>`) whose key still equals the key a
+  input-key       an input-index ref (`refs/tags/evidence/input/<check>/<key>/<record>` or
+                  `refs/notes/evidence-input/<check>/<key>/<record>`) whose key still equals the key a
                   protected head tree projects to for that check, so unchanged-input reuse keeps working. The index ref is what
                   keeps its record alive; index refs of any other key are removed.
 Everything else is unprotected: kept for --grace-hours (a note written moments ago for a head the listing raced with), then deleted.
-If more refs remain than --soft, the OLDEST unprotected ones go first. Protected refs are never deleted for size: if the protected set
-alone is over --cap the tool prints it and exits 3 so a job summary or an alert shows it.
+A record filed both as a tag and as a note (producers write both while gates on older bases read only notes) is one record: both
+names get the same decision, and it counts once against --soft and --cap. If more records remain than --soft, the OLDEST
+unprotected ones go first. Protected records are never deleted for size: if the protected set alone is over --cap the tool prints
+it and exits 3 so a job summary or an alert shows it.
 
 The FIRST LAYOUT (`refs/notes/evidence/<record>`, no tree in the name): its tree is read from the note. A protected one is MIGRATED
 (the tree-prefixed ref `refs/notes/evidence/<tree>/<record>` is created, then the old name removed); an unprotected one is
-deleted by the same rules. Refs that are not well-formed records, and everything outside the two namespaces, are never touched.
+deleted by the same rules. Refs that are not well-formed records, and everything outside the evidence namespaces, are never touched.
 
 FAILS CLOSED: if a head commit named by --head/--github cannot be turned into a tree, --apply refuses to delete anything (exit 1).
 
@@ -47,6 +51,8 @@ sys.dont_write_bytecode = True
 
 NOTES = 'refs/notes/evidence/'
 INPUT_NOTES = 'refs/notes/evidence-input/'
+TAGS = 'refs/tags/evidence/'
+INPUT_TAGS = 'refs/tags/evidence/input/'
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 CHECK = re.compile(r'^[A-Za-z0-9._-]+$')
 BATCH = 500
@@ -80,24 +86,29 @@ def verifier_module():
 
 
 def read_refs(repo):
-    """Every ref of both namespaces: (records, index) where record = (ref, oid, layout, tree or None, unix date) and index = (ref, check, key, oid)."""
-    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname) %(committerdate:unix)', 'refs/notes/evidence', 'refs/notes/evidence-input').stdout.decode()
+    """Every ref of the namespaces: (records, index) where record = (ref, oid, layout, tree or None, unix date) and index = (ref, check, key, oid)."""
+    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname) %(committerdate:unix)', 'refs/tags/evidence', 'refs/notes/evidence',
+              'refs/notes/evidence-input').stdout.decode()
     records, index = [], []
     for line in out.splitlines():
         oid, _, rest = line.partition(' ')
         name, _, date = rest.rpartition(' ')
         if not OID.match(oid) or not date.isdigit():
             continue
-        if name.startswith(NOTES):
+        if name.startswith(INPUT_TAGS) or name.startswith(INPUT_NOTES):
+            parts = name[len(INPUT_TAGS if name.startswith(INPUT_TAGS) else INPUT_NOTES):].split('/')
+            if len(parts) == 3 and CHECK.match(parts[0]) and OID.match(parts[1]) and parts[2] == oid:
+                index.append((name, parts[0], parts[1], oid, int(date)))
+        elif name.startswith(TAGS):
+            parts = name[len(TAGS):].split('/')
+            if len(parts) == 2 and OID.match(parts[0]) and parts[1] == oid:
+                records.append((name, oid, 'tag', parts[0], int(date)))
+        elif name.startswith(NOTES):
             parts = name[len(NOTES):].split('/')
             if len(parts) == 1 and parts[0] == oid:
                 records.append((name, oid, 'legacy', None, int(date)))
             elif len(parts) == 2 and OID.match(parts[0]) and parts[1] == oid:
                 records.append((name, oid, 'tree', parts[0], int(date)))
-        elif name.startswith(INPUT_NOTES):
-            parts = name[len(INPUT_NOTES):].split('/')
-            if len(parts) == 3 and CHECK.match(parts[0]) and OID.match(parts[1]) and parts[2] == oid:
-                index.append((name, parts[0], parts[1], oid, int(date)))
     return records, index
 
 
@@ -191,6 +202,10 @@ def plan(repo, args, heads, now, policy_text, repository):
     tip = git(repo, 'rev-parse', '--verify', '--quiet', f'{args.main}^{{tree}}', check=False).stdout.decode().strip()
     keys = protected_keys(repo, heads_set | ({tip} if OID.match(tip) else set()), policy_text, repository) if policy_text else set()
     grace_cutoff = now - int(args.grace_hours * 3600)
+    # One record may have several names (its tag, its note, a first-layout note): they share a unit, which is what is counted.
+    unit_of = {ref: ('record', oid) for ref, oid, _, _, _ in records}
+    unit_of.update({ref: ('index', check, key, oid) for ref, check, key, oid, _ in index})
+    protected_units = set()
     reasons = collections.Counter()
     delete, migrate, keep_unprotected = [], [], []  # delete: (ref, date); migrate: (old ref, new ref)
     protected_refs = 0
@@ -200,11 +215,13 @@ def plan(repo, args, heads, now, policy_text, repository):
         if tree is None:
             reasons['kept: no readable tree'] += 1
             protected_refs += 1
+            protected_units.add(unit_of[ref])
             continue
         why = 'open-pr-head' if tree in heads_set else 'main-window' if tree in main_set else None
         if why:
             reasons[f'kept: {why}'] += 1
             protected_refs += 1
+            protected_units.add(unit_of[ref])
             if layout == 'legacy':
                 new = f'{NOTES}{tree}/{oid}'
                 if new in seen_new:
@@ -225,26 +242,35 @@ def plan(repo, args, heads, now, policy_text, repository):
         if (check, key) in keys:
             reasons['kept: input-key'] += 1
             protected_refs += 1
+            protected_units.add(unit_of[ref])
         elif date >= grace_cutoff:
             keep_unprotected.append((ref, date))
             reasons['kept: grace'] += 1
         else:
             delete.append((ref, date))
             reasons['deleted: input-key no longer used'] += 1
-    total_after = len(records) + len(index) - len(delete)  # a migration renames a ref: the count is unchanged
+    deleted = {ref for ref, _ in delete}
+    records_after = len({unit_of[ref] for ref in unit_of if ref not in deleted})  # a migration renames a ref: the count is unchanged
     evicted = []
-    if total_after > args.soft:
-        for ref, date in sorted(keep_unprotected, key=lambda item: item[1]):
-            if total_after <= args.soft:
+    if records_after > args.soft:
+        groups = {}
+        for ref, date in keep_unprotected:
+            groups.setdefault(unit_of[ref], []).append((ref, date))
+        for unit, names in sorted(groups.items(), key=lambda item: (min(date for _, date in item[1]), item[0])):
+            if records_after <= args.soft:
                 break
-            evicted.append((ref, date))
-            total_after -= 1
+            if unit in protected_units:
+                continue
+            evicted += names
+            records_after -= 1
         reasons['deleted: over the soft limit (oldest first)'] += len(evicted)
     names_before = [len(r[0]) for r in records] + [len(i[0]) for i in index]
     doomed = {ref for ref, _ in delete} | {ref for ref, _ in evicted}
     names_after = [len(r[0]) for r in records if r[0] not in doomed] + [len(i[0]) for i in index if i[0] not in doomed]
-    summary = {'refs_before': len(names_before), 'refs_after': total_after, 'advertised_bytes_before': advertised_bytes(names_before),
+    summary = {'refs_before': len(names_before), 'refs_after': len(names_after), 'records_before': len(set(unit_of.values())),
+               'records_after': records_after, 'advertised_bytes_before': advertised_bytes(names_before),
                'advertised_bytes_after': advertised_bytes(names_after), 'reasons': dict(sorted(reasons.items())), 'protected_refs': protected_refs,
+               'protected_records': len(protected_units),
                'soft': args.soft, 'cap': args.cap, 'unresolved_heads': unresolved,
                'protected_trees': {'open_pr_heads': len(heads_set), 'main_window': len(main_set)}}
     return summary, sorted(doomed), migrate
@@ -324,7 +350,7 @@ def main(argv):
             if not args.remote:
                 raise Refused('--fetch needs --remote')
             token, header = header_for_token()
-            git(args.repo, 'fetch', '--no-tags', '-q', args.remote, f'+{NOTES}*:{NOTES}*', f'+{INPUT_NOTES}*:{INPUT_NOTES}*', header=header)
+            git(args.repo, 'fetch', '--no-tags', '-q', args.remote, f'+{TAGS}*:{TAGS}*', f'+{NOTES}*:{NOTES}*', f'+{INPUT_NOTES}*:{INPUT_NOTES}*', header=header)
             remote_main = args.main.split('/', 1)[-1]
             git(args.repo, 'fetch', '--no-tags', '-q', '--filter=tree:0', f'--shallow-since={int(args.keep_main_days) + 1}.days.ago', args.remote, f'+refs/heads/{remote_main}:refs/remotes/{args.main}')
         heads = list(args.head)
@@ -355,8 +381,8 @@ def main(argv):
             else:
                 apply_local(args.repo, migrate, doomed)
                 summary['applied'] = True
-        if status == 0 and summary['protected_refs'] > args.cap:
-            summary['alert'] = f'the protected set ({summary["protected_refs"]} refs) is over the cap ({args.cap}); nothing protected was deleted'
+        if status == 0 and summary['protected_records'] > args.cap:
+            summary['alert'] = f'the protected set ({summary["protected_records"]} records) is over the cap ({args.cap}); nothing protected was deleted'
             status = 3
         print(json.dumps(summary, indent=2))
         return status

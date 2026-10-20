@@ -52,11 +52,18 @@ for workflow in ['fleet.yml', 'perf.yml', 'public-repo.yml']:
 assert policy('fleet.yml', 'pull_request', 100, 42)[0] == 'workspace-42-pull_request'
 assert policy('perf.yml', 'pull_request', 100, 42)[0] == 'perf-42'
 
-for workflow in ['main-upkeep.yml', 'perf.yml', 'public-repo.yml']:
+for workflow in ['main-upkeep.yml', 'public-repo.yml']:
     old = policy(workflow, 'push', 100)
     latest = policy(workflow, 'push', 101)
     assert old == latest and latest[1], (workflow, 'main pushes must replace obsolete work')
     print('passed:', workflow, 'only latest main push remains')
+
+# Performance is manual dispatch only (the daily long lanes run its load jobs on main): no push trigger,
+# and no run, whatever its event, replaces another outside a PR's own group.
+performance = (ROOT / '.github/workflows/perf.yml').read_text()
+assert re.search(r'^on:\n  workflow_dispatch: \{\}\n\n', performance, re.M), 'Performance runs only by dispatch'
+assert policy('perf.yml', 'push', 100) != policy('perf.yml', 'push', 101) and not policy('perf.yml', 'push', 100)[1]
+print('passed: perf.yml runs only by dispatch and never cancels another run')
 
 for workflow in ['fleet.yml', 'main-upkeep.yml', 'perf.yml', 'public-repo.yml']:
     for event in ['workflow_dispatch', 'schedule', 'merge_group']:
