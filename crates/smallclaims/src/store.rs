@@ -791,6 +791,8 @@ pub struct Store {
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
+    /// Fixed local schema identity, initialized lazily before the first admission pass.
+    admission_schema_digest: std::sync::OnceLock<String>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
     /// Read-only sealed view; never populated with the client's local-signer fallback.
@@ -1092,6 +1094,7 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             admission: Mutex::new(()),
+            admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
@@ -6879,7 +6882,10 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let _timing = time_stage(&self.replication_timers.admission);
-        let (retry_hash_mismatches, envelopes) = {
+        let schema_digest = self
+            .admission_schema_digest
+            .get_or_init(|| self.runtime.schema_digest());
+        let (retry_hash_mismatches, retry_subject_references, envelopes) = {
             // This query does not mutate source or authority. Fetch the pending payloads on a
             // reader and release its lease before queueing any admission writer transaction.
             let connection = self.readers.get();
@@ -6893,7 +6899,19 @@ impl Store {
                 )
                 .optional()?
                 .is_none();
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h55b8fe49e68a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &admission_retry_query(retry_hash_mismatches))?;
+            // Historical validators rejected references to subject families added by a newer
+            // registry. Recheck that narrow error class once per local schema identity, using
+            // the same meta completion pattern as the legacy hash retry. A missing marker
+            // includes databases last opened by builds that did not record this identity.
+            let retry_subject_references = connection
+                .query_row(
+                    "SELECT 1 FROM meta WHERE key='subject_reference_retry_schema' AND value=?1",
+                    [schema_digest],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_none();
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0305bf110f81 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &admission_retry_query(retry_hash_mismatches, retry_subject_references))?;
             let envelopes = statement
                 .query_map([], |row| {
                     Ok((
@@ -6917,7 +6935,7 @@ impl Store {
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            (retry_hash_mismatches, envelopes)
+            (retry_hash_mismatches, retry_subject_references, envelopes)
         };
         let mut outcome = ReplicationAdmission::default();
         // Prepare the authority fold off the writer in one reader snapshot. A generation
@@ -7018,6 +7036,23 @@ impl Store {
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
+                        // A historical degraded receipt selected by a schema retry must remain
+                        // discoverable after that retry's marker completes. Waiting for verified
+                        // authority uses the ordinary pending lifecycle, not another schema scan.
+                        if retry_subject_references {
+                            pass.execute(
+                                /* sqlite-large-value: allow-for-now lv-hf42544a3dbab owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
+                                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                                   AND receipt_state='degraded'
+                                   AND EXISTS (
+                                       SELECT 1 FROM replica_records
+                                       WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                                         AND state='invalid' AND error_code='invalid-replicated-claim'
+                                         AND error_message LIKE '%violates invalid-subject-reference:%'
+                                   )",
+                                params![envelope.writer, envelope.sequence, envelope.hash],
+                            )?;
+                        }
                         held.push((envelope.clone(), row));
                         continue;
                     }
@@ -7076,13 +7111,21 @@ impl Store {
         self.replication_timers
             .verify
             .fetch_add(outcome.verify.as_nanos() as u64, Ordering::Relaxed);
-        if retry_hash_mismatches {
+        if retry_hash_mismatches || retry_subject_references {
             let mut connection = self.connection.write_background();
             let transaction = connection.transaction()?;
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h61f70922c425 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
-                [now_ms().to_string()],
-            )?;
+            if retry_hash_mismatches {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h61f70922c425 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
+                    [now_ms().to_string()],
+                )?;
+            }
+            if retry_subject_references {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h954536850f67 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('subject_reference_retry_schema', ?1)",
+                    [schema_digest],
+                )?;
+            }
             transaction.commit()?;
         }
         // Admitted claims, and any change to membership's trust roots, get their verdicts once
@@ -8685,12 +8728,21 @@ pub fn normalize_actor(value: &str, default_kind: &str) -> String {
 /// or failed for a reason a newer build may fix. One index seek per branch. A single
 /// `WHERE state='unknown' OR (state='invalid' ...)` made SQLite scan every replica record, and the
 /// join then scanned every envelope: seconds on the writer, on every receive, with nothing
-/// pending. The hash-mismatch branch exists only until its one-time retry has run.
-pub fn admission_retry_query(retry_hash_mismatches: bool) -> String {
+/// pending. Historical reference failures are retried only after the local schema changes;
+/// hash mismatches only until their one-time retry has run. Neither branch relaxes validation.
+pub fn admission_retry_query(retry_hash_mismatches: bool, retry_subject_references: bool) -> String {
     let hash_mismatches = if retry_hash_mismatches {
         "UNION
              SELECT writer, sequence, envelope_hash FROM replica_records
              WHERE state='invalid' AND error_code='claim-hash-mismatch'"
+    } else {
+        ""
+    };
+    let subject_references = if retry_subject_references {
+        "UNION
+             SELECT writer, sequence, envelope_hash FROM replica_records
+             WHERE state='invalid' AND error_code='invalid-replicated-claim'
+               AND error_message LIKE '%violates invalid-subject-reference:%'"
     } else {
         ""
     };
@@ -8706,6 +8758,7 @@ pub fn admission_retry_query(retry_hash_mismatches: bool) -> String {
              WHERE state='invalid' AND error_code='invalid-replicated-claim'
                AND error_message LIKE '%violates unknown-claim-field:%'
              {hash_mismatches}
+             {subject_references}
          )
          SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
                 envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload,
