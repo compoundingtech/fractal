@@ -68,6 +68,8 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
   const retainedFailure = conversation._tag === 'Observed' && conversation.value.items.length > 0 && sync?.status._tag === 'Failed'
   const [opening, setOpening] = React.useState<OpenOperation>()
   const [cache, setCache] = React.useState<'retained' | 'cold'>('cold')
+  // A recovered failure must not leave the details open, or the next failure reopens them unasked.
+  React.useEffect(() => { if (!retainedFailure) setSyncDetailsOpen(false) }, [retainedFailure])
   // The header control and the narrow overflow item share this one transition, so reopening an
   // already open panel from the menu never restarts its open measurement.
   const changeResourcesOpen = (open: boolean) => {

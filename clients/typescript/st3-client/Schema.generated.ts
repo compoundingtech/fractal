@@ -3581,6 +3581,11 @@ export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
 export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 
+/** Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority. */
+export const TimelineRecipientRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "TimelineRecipientRef", description: "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority." }))()
+export type TimelineRecipientRef = typeof TimelineRecipientRef.Type
+export type TimelineRecipientRefEncoded = typeof TimelineRecipientRef.Encoded
+
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   /** The assistant grant that authorized the send, with sender_class. */
   "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
@@ -3595,7 +3600,7 @@ export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),
   "tags": optionalKey(Schema.Array(Schema.String)),
   "title": optionalKey(Schema.String),
-  "to": optionalKey(ParticipantRef)
+  "to": optionalKey(TimelineRecipientRef)
 }).annotate({ identifier: "TimelineMessageBody" }))()
 export type TimelineMessageBody = typeof TimelineMessageBody.Type
 export type TimelineMessageBodyEncoded = typeof TimelineMessageBody.Encoded
@@ -3680,7 +3685,8 @@ export const CollectionFrame = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(Resource) }),
   Schema.Struct({ "collection": Schema.Literal("terminal"), "id": Schema.String, "kind": Schema.Literal("screen"), "snapshot": Snapshot, "value": TerminalScreen }),
   Schema.Struct({ "collection": Schema.Literal("conversation"), "has_more": optionalKey(Schema.Boolean), /** Present when conversation-blocks.v1 is negotiated and at least one header field is available */
-"header": optionalKey(ConversationHeader), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), "replace": Schema.Boolean, "session_id": Id }),
+"header": optionalKey(ConversationHeader), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), /** Replacement frames only, present whenever has_more is true: the timeline cursor (GET /v1/client/sessions/{id}/timeline?cursor=...) for the entries just before this frame's oldest entry. */
+"older_cursor": optionalKey(Schema.String).annotate({ description: "Replacement frames only, present whenever has_more is true: the timeline cursor (GET /v1/client/sessions/{id}/timeline?cursor=...) for the entries just before this frame's oldest entry." }), "replace": Schema.Boolean, "session_id": Id }),
   Schema.Struct({ "code": optionalKey(Schema.String), "collection": optionalKey(Schema.String), "id": Schema.String, "kind": Schema.Literal("resync"), "message": optionalKey(Schema.String), "retryable": optionalKey(Schema.Boolean) }),
   Schema.Struct({ "code": optionalKey(Schema.String), "collection": optionalKey(Schema.String), "id": optionalKey(Schema.String), "kind": Schema.Literal("error"), "message": Schema.String, "retryable": optionalKey(Schema.Boolean) })
 ], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "CollectionFrame" }))()

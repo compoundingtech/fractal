@@ -381,7 +381,7 @@ function assertFixtureFacts() {
   }
 }
 
-export const Interactions: Story = { play: async ({ canvasElement }) => {
+export const Interactions: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed Session terminal and src/ resource rows prove painted accessible names/descriptions and exact terminal:sample/1 and diff:sample/ callback identities, alongside controlled visibility-intent write counts.' } }, play: async ({ canvasElement }) => {
   await ready(canvasElement)
   const pane = paneFor(canvasElement), root = canvasElement.querySelector<HTMLElement>('[data-testid="resource-gates"]')!, canvas = within(canvasElement)
   const writes = () => Number(root.dataset.intentWrites), before = writes(), overview = within(pane).getByRole('button', { name: 'Overview' })
@@ -417,12 +417,12 @@ export const Interactions: Story = { play: async ({ canvasElement }) => {
   await rejectsControl('Details modified resource open loses split intent', () => requireContract(events().at(-1)?.split, 'Details modified resource open loses split intent'))
   await humanControl(pane)
 } }
-export const PresentationMatrix: Story = { args: { cases: presentationCases }, play: async ({ canvasElement, args }) => {
+export const PresentationMatrix: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The authored trace/resource availability matrix exercises all Details presentation variants, exact 90% → 13% compaction occupancy, known spend rows and missing-field copy with human-copy and contrast negative controls.' } }, args: { cases: presentationCases }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, (pane, item) => assertCraft(pane, item)); await humanControl(paneFor(canvasElement)); await contrastControl(paneFor(canvasElement), args.cases.at(-1)!)
 } }
 const traceCases = [...sourceCases, example('turn-only context', 400, 'busy', {}, { ...full, series: missing }), example('null-turn context', 400, 'busy', {}, full.turns._tag === 'Known' ? { ...full, turns: { ...full.turns, value: { ...full.turns.value, points: full.turns.value.points.map((point, index) => index === 0 ? { ...point, contextTokens: null, contextPercent: null } : point) } } } : full)]
 const bucketCases = widths.map(width => example(`bucket/${width}`, width, 'busy', {}, detailsTraceFixtures.bucketOnly))
-export const TraceContracts: Story = { args: { cases: [...traceCases, ...bucketCases] }, play: async ({ canvasElement, args }) => {
+export const TraceContracts: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local trace buckets, turns, null context samples and unknown/positive/zero spend meters prove numeric projection and retention contracts; catalog details exposes missions/work, not these trace-series inputs.' } }, args: { cases: [...traceCases, ...bucketCases] }, play: async ({ canvasElement, args }) => {
   assertFixtureFacts()
   const bucketProjection = adaptTrace(detailsTraceFixtures.bucketOnly)
   requireContract(bucketProjection !== undefined, 'Retained buckets lack a chart projection')
@@ -457,7 +457,7 @@ const scopeCases = widths.flatMap(width => [example(`including/${width}`, width,
 const unreportedScopeCases = widths.map(width => example(`unreported/${width}`, width, 'partial', {}, detailsTraceFixtures.partial))
 /** Reported and unreported token scopes each falsify their inline label on their widest pane. */
 const scopeControlCases = [scopeCases.at(-1)!.name, unreportedScopeCases.at(-1)!.name]
-export const SpendScope: Story = { args: { cases: [...scopeCases, ...unreportedScopeCases] }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
+export const SpendScope: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Authored attributed and unreported trace spend scopes prove exact local main/subagent/session meter relationships and prevent presenting an unattributed total as an attributed value.' } }, args: { cases: [...scopeCases, ...unreportedScopeCases] }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
   const trace = item.trace!
   assertCraft(pane, item); assertScope(pane, trace)
   if (!scopeControlCases.includes(item.name)) return
@@ -471,7 +471,7 @@ export const SpendScope: Story = { args: { cases: [...scopeCases, ...unreportedS
  * R3 never wraps identities, so the 240px column covers R1/R2 only.
  */
 const geometryCases = resourceCases(['R1', 'R2', 'R3'], ['busy', 'partial'], [240, ...widths]).filter(item => item.width !== 240 || item.variants.resources !== 'R3')
-export const ResourceGeometry: Story = { args: { cases: geometryCases }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
+export const ResourceGeometry: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local file diff counts, CI labels and PR statuses probe whole-or-absent metadata fitting, title priority and intrinsic-probe containment across R1/R2/R3 widths; replacing labels would change the measured geometry contract.' } }, args: { cases: geometryCases }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
   const form = item.variants.resources, fitted = widths.includes(item.width)
   if (fitted) { assertFit(pane, item); assertCraft(pane, item) }
   if (fitted && item.state === 'busy') await containmentGate(pane)
@@ -506,7 +506,7 @@ export const ResourceGeometry: Story = { args: { cases: geometryCases }, play: (
     assertFit(pane, item)
   }
 }) }
-export const OrientationAnchor: Story = { args: { cases: widths.map(width => example(`orientation/${width}`, width, 'idle')) }, play: async ({ canvasElement, args }) => {
+export const OrientationAnchor: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Host-controlled idle/new/absent Details fixtures isolate first-section anchoring and placement of new-agent orientation inside Overview, with a 4px margin negative control; catalog details has no equivalent presentation-state lifecycle.' } }, args: { cases: widths.map(width => example(`orientation/${width}`, width, 'idle')) }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, async pane => {
     const top = () => { pane.scrollTop = 0; return pane.querySelector('section')!.getBoundingClientRect().top - pane.getBoundingClientRect().top }
     const assertAnchor = () => requireContract(Math.abs(top()) <= 0.1, 'Orientation displaces the first Details section')
@@ -516,7 +516,7 @@ export const OrientationAnchor: Story = { args: { cases: widths.map(width => exa
     assertAnchor()
   })
 } }
-export const AllStates: Story = { args: { cases: allStatesCases, comparison: true }, play: async ({ canvasElement, args }) => {
+export const AllStates: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The fixed R1/R2/R3 by busy/partial/new/unknown/idle/absent comparison retains exact trace/resource availability and compaction/spend assertions plus copy, contrast and containment negative controls.' } }, args: { cases: allStatesCases, comparison: true }, play: async ({ canvasElement, args }) => {
   await ready(canvasElement)
   const panes = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="details-pane"]')]
   requireContract(panes.length === args.cases.length, 'AllStates omits a production Details state')
@@ -530,7 +530,7 @@ const e3Traces: readonly { name: string; trace: TraceSeries }[] = [
   { name: 'unattributed', trace: { ...full, subagents: missing, meters: { ...full.meters, spend: { ...full.meters.spend, usdScope: { _tag: 'Unknown', reason: 'not-attributed' }, mainUsd: missing, subagentUsd: missing } } } },
 ]
 const e3Cases = e3Traces.flatMap(({ name, trace }) => (['C1', 'C2', 'C3'] as const).flatMap((context, index) => (['S1', 'S2', 'S3'] as const).map(spend => example(`${name}/${context}/${spend}`, widths[index]!, 'busy', { context, spend }, trace))))
-export const E3ChartMatrix: Story = { args: { cases: e3Cases }, play: async ({ canvasElement, args }) => {
+export const E3ChartMatrix: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact full, partial, unknown, bucket-only and unattributed local traces cross C1/C2/C3 and S1/S2/S3 to prove known chart rows survive and unavailable fields retain explanations; these trace availability/scope inputs are absent from catalog details.' } }, args: { cases: e3Cases }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, (pane, item) => {
     assertHuman(pane)
     assertContext(pane, item.trace!)
@@ -548,6 +548,7 @@ export const E3ChartMatrix: Story = { args: { cases: e3Cases }, play: async ({ c
 } }
 
 export const SharedResourceActionNames:Story={
+  parameters:{scenario:{_tag:'contract-fixture',reason:'Fixed PR #42, +10/−2 totals and src/rows.ts +1/−1 file data prove painted accessible-name order, basename/full-path descriptions and exact file-open identity across resource cards and chips.'}},
   render:function Render({scheme}){
     const resource=sharedResources[1];requireContract(resource,'Missing shared resource fixture')
     const file=resource.files[0];requireContract(file,'Missing shared file fixture')

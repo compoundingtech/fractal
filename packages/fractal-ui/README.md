@@ -67,6 +67,7 @@ Slice overrides use `args=<slice>:<variant>`; the world uses
 `scenarioStoryCheck` over the converted stories, checking declared reads, visible
 data dependence, toolbar world changes, pinned-world invariance where applicable,
 and URL-state roundtripping.
+Details interaction specimens declare their scenario mode explicitly: fixed missing-data, numeric, recovery and resource-identity checks are contract fixtures with a specific reason; shell-only Side panel and ancestor-clipping checks are primitives. Their export identities are included in the sorted exemption ratchet checked by `test:stories`.
 The SSR check uses StyleX's Rollup compiler adapter, without the Vite adapter's
 browser stylesheet refresh timer, so Vitest can close its middleware server cleanly.
 

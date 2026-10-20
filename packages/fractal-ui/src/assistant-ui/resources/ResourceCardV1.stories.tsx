@@ -22,7 +22,7 @@ const resource: ResourceData = {
 interface Args { scheme: 'dark' | 'light' }
 const meta = {
   title: 'Fractal UI/Resources/Resource Card',
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact two-file diff pins the visible and accessible name "2 changed files" while keyboard focus, Escape and Enter prove one tooltip, no native titles and full-detail dialog description; catalog diffs vary those counts and descriptions.' }, layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
   args: { scheme: 'dark' },
   argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } },
 } satisfies Meta<Args>

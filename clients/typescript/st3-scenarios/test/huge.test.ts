@@ -318,15 +318,17 @@ describe('real client paging', () => {
     }
     expect(await at()).toMatchObject({ revision: 1, final: false })
     clock.advance(world.now + 1_000 - clock.now())
+    await replay.flush()
     expect(await at()).toMatchObject({ revision: 2, final: false })
     clock.advance(world.now + 2_000 - clock.now())
+    await replay.flush()
     const revised = await at()
     expect(revised).toMatchObject({ revision: 3, final: true })
     const older = (await client.timelineList(thread.session_id, { limit: 200, cursor: 'scenario-cursor/27500' })).value
     expect(older.items).toEqual(range(12_301, 12_500))
   })
 
-  it('shows native socket readers only the committed live window, never the history metadata', () => {
+  it('shows native socket readers only the committed live window, never the history metadata', async () => {
     const frames: unknown[] = []
     const isConversationFrame = (value: unknown): value is { readonly kind: string; readonly items: TimelineEntry[]; readonly has_more: boolean } =>
       typeof value === 'object' && value !== null && 'kind' in value && 'items' in value && 'has_more' in value
@@ -336,7 +338,9 @@ describe('real client paging', () => {
       frames.push(JSON.parse(event.data))
     }
     clock.advance(0)
+    await replay.flush()
     socket.send(JSON.stringify({ kind: 'subscribe', collection: 'conversation', id: 'live', conversation: thread.agent }))
+    await replay.flush()
     expect(frames).toHaveLength(1)
     if (!isConversationFrame(frames[0])) throw new Error('expected a conversation frame')
     const frame = frames[0]

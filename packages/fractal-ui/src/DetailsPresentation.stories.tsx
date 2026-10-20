@@ -26,7 +26,7 @@ import { accountingNoteSummary, spendWindowReason } from '../../../apps/fractal-
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
 const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),inspector:(width:number)=>({display:'flex',flexDirection:'column',width,maxWidth:'100%',height:720,minHeight:0,overflow:'hidden',backgroundColor:surface.canvas}),canvas:{backgroundColor:surface.canvas},pane:{height:660},comparison:{display:'flex',flexWrap:'wrap',alignItems:'flex-start',gap:space.xl,backgroundColor:surface.canvas},card:{width:440,maxWidth:'100%',height:640},control:{color:text.fg,backgroundColor:surface.controlFill,borderWidth:0,borderRadius:radius.control,paddingInline:space.sm,paddingBlock:space.xs,marginInlineEnd:space.xs,fontFamily:type.fontSans,fontSize:type.metaSize,cursor:'pointer',':focus-visible':{outlineWidth:geometry.focusRing,outlineStyle:'solid',outlineColor:accent.primary}}})
-const meta={title:'Fractal UI/Details Presentation',parameters:{layout:'fullscreen'},args:{scheme:'dark',width:440,opening:'UserOpened'},render:function Render({scheme,width,opening}:Args){
+const meta={title:'Fractal UI/Details Presentation',parameters:{scenario:{_tag:'contract-fixture',reason:'Fixed omitted overview/timing facts and wholly unreported trace groups isolate one-line identity, single missing-group copy, opening focus, removed-opener fallback and section-visibility contracts. Host-owned open/intent state and these exact gaps must remain controlled rather than follow catalog agent data.'},layout:'fullscreen'},args:{scheme:'dark',width:440,opening:'UserOpened'},render:function Render({scheme,width,opening}:Args){
   const [open,setOpen]=React.useState(false)
   const [showOpener,setShowOpener]=React.useState(true)
   const returnRef=React.useRef<HTMLDivElement>(null)
@@ -181,6 +181,7 @@ async function checkMetricLines(canvasElement:HTMLElement){
   await waitFor(()=>requireContract(panel.hidden&&why.getAttribute('aria-expanded')==='false','Partial group reasons are not collapsed'))
 }
 export const AllStates:Story={
+  parameters:{scenario:{_tag:'contract-fixture',reason:'The exact eight-state pane matrix pins 6% estimated occupancy, ordered partial-spend missing fields and approved whole-group Why? summaries, including falsifying controls; catalog details missions/work do not supply these TraceSeries states.'}},
   args:{opening:'Restored',width:1440},
   render:function Render({scheme}:Args){
     const [visible,setVisible]=React.useState<readonly (typeof combinedStates)[number][]>(combinedStates)
@@ -201,6 +202,7 @@ export const AllStates:Story={
 }
 
 export const NarrowValueColumns:Story={
+  parameters:{scenario:{_tag:'contract-fixture',reason:'Fixed long overview values, four spend rows, two description rows and two subagent rows at 240/320px pin stacked geometry, word wrapping and label-in-name accessibility; catalog variation would change the measured row and copy contracts.'}},
   render:function Render({scheme}){
     const inputs=detailsStoryInputs('busy')
     const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
@@ -260,6 +262,7 @@ export const NarrowValueColumns:Story={
 }
 
 export const StandaloneRetainedFailure:Story={
+  parameters:{scenario:{_tag:'contract-fixture',reason:'A locally controlled retained timeout and Retry transition pin exact failure/recovery announcements and preservation of the same pane; catalog data cannot drive this host-owned acknowledgement state.'}},
   render:function Render({scheme,width}){
     const inputs=detailsStoryInputs('busy')
     const [failed,setFailed]=React.useState(true),[open,setOpen]=React.useState(true)
@@ -414,6 +417,7 @@ async function checkPartialGroups(root:HTMLElement,narrow:boolean){
   assertPartialGroups(root,narrow)
 }
 export const PhoneDetails:Story={
+  parameters:{scenario:{_tag:'contract-fixture',reason:'Three fixed unreported, retained-timeout and first-load-failed inspectors pin exact omission/Why? copy, 44px phone targets and keyboard behavior; their controlled trace gaps and retention reasons are not catalog details missions/work.'}},
   render:inspectorRender(true,390),
   play:async({canvasElement})=>{
     const doc=canvasElement.ownerDocument,body=within(doc.body)
@@ -615,6 +619,7 @@ function assertDescribed(triggers:readonly HTMLElement[]){
   requireContract(failing.length===0,`${undescribed}: ${failing.map(trigger=>`${describeControl(trigger)} describedby="${trigger.getAttribute('aria-describedby')??''}" → "${descriptionOf(trigger)}"`).join('; ')}`)
 }
 export const DesktopReasonDescriptions:Story={
+  parameters:{scenario:{_tag:'contract-fixture',reason:'Fixed unreported and retained-timeout inspectors pin exact collapsed Why? reason grouping, accessible descriptions and desktop disclosure geometry; catalog details missions/work do not supply these trace gaps or retention reasons.'}},
   render:inspectorRender(false,440),
   play:async({canvasElement})=>{
     const unreported=inspector(canvasElement,'unreported'),retained=inspector(canvasElement,'retained')
@@ -730,6 +735,7 @@ function ProductionPhoneInspector({ scheme }: Args) {
   </DataSourceProvider>
 }
 export const ProductionPhoneDetails: Story = {
+  parameters:{scenario:{_tag:'contract-fixture',reason:'The minimal running agent deliberately has no runtime, usage, mission or resource observations and uses a near-epoch clock to falsify leaked placeholder dates; this exact omission fixture pins production phone identity, missing-group copy and the sole 44px sheet close.'}},
   render: ProductionPhoneInspector,
   play: async ({ canvasElement }) => {
     const { opener, sheet, panel } = await openPhoneSheet(canvasElement)
@@ -915,12 +921,13 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
   }
 }
+const ompContractFixture={parameters:{scenario:{_tag:'contract-fixture',reason:'Controlled OMP loading, unavailable, reported and retained supplements pin exact accounting summaries, 99% attribution, unknown main-session period, last-7-days subagents and absence of epoch dates, with phone/desktop Why? geometry. Catalog details slices do not supply these supplemental feeds or their accounting facts.'}}} satisfies Story
 // The kit gate runs each story at 440/1440 and dark/light; the inspector keeps its phone or desktop width.
-export const ProductionPhoneSubagentLoading:Story={render:args=><ProductionOmpInspector {...args} narrow state="loading"/>,play:ompPlay(true,'loading')}
-export const ProductionPhoneSubagentUnavailable:Story={render:args=><ProductionOmpInspector {...args} narrow state="unavailable"/>,play:ompPlay(true,'unavailable')}
-export const ProductionPhoneAccountingNote:Story={render:args=><ProductionOmpInspector {...args} narrow state="reported"/>,play:ompPlay(true,'reported')}
-export const ProductionPhoneSubagentRetained:Story={render:args=><ProductionOmpInspector {...args} narrow state="retained"/>,play:ompPlay(true,'retained')}
-export const ProductionDesktopSubagentLoading:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="loading"/>,play:ompPlay(false,'loading')}
-export const ProductionDesktopSubagentUnavailable:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="unavailable"/>,play:ompPlay(false,'unavailable')}
-export const ProductionDesktopAccountingNote:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="reported"/>,play:ompPlay(false,'reported')}
-export const ProductionDesktopSubagentRetained:Story={render:args=><ProductionOmpInspector {...args} narrow={false} state="retained"/>,play:ompPlay(false,'retained')}
+export const ProductionPhoneSubagentLoading:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="loading"/>,play:ompPlay(true,'loading')}
+export const ProductionPhoneSubagentUnavailable:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="unavailable"/>,play:ompPlay(true,'unavailable')}
+export const ProductionPhoneAccountingNote:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="reported"/>,play:ompPlay(true,'reported')}
+export const ProductionPhoneSubagentRetained:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="retained"/>,play:ompPlay(true,'retained')}
+export const ProductionDesktopSubagentLoading:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow={false} state="loading"/>,play:ompPlay(false,'loading')}
+export const ProductionDesktopSubagentUnavailable:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow={false} state="unavailable"/>,play:ompPlay(false,'unavailable')}
+export const ProductionDesktopAccountingNote:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow={false} state="reported"/>,play:ompPlay(false,'reported')}
+export const ProductionDesktopSubagentRetained:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow={false} state="retained"/>,play:ompPlay(false,'retained')}

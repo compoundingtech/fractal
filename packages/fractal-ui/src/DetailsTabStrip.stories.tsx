@@ -41,6 +41,7 @@ const meta = {
   title: 'Fractal UI/Details Tab Strip',
   component: Workbench,
   parameters: {
+    scenario: { _tag: 'contract-fixture', reason: 'The fixed eight pane identities and labels pin duplicate resource routing, 159/160px containment thresholds, focus recovery and zero layout shifts; catalog resource counts and labels would change those contracts.' },
     layout: 'fullscreen',
     docs: { description: { component: 'Production Workbench with deterministic thread and diff resources and the real Details pane. Terminal, directory, link and document tabs exercise resource identities through Workbench’s existing placeholder surface: they do not claim available renderer bodies, live terminal sessions or loaded document contents.' } },
   },

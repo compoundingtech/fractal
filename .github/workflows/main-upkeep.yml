@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: "main-upkeep-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}"
-  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+  cancel-in-progress: false
 
 jobs:
   main-checks:
@@ -114,8 +114,22 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
         run: |
@@ -315,8 +329,22 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
         run: |
@@ -494,8 +522,22 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
         run: |
@@ -657,8 +699,22 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+        if: success() && (steps.nix-probe.outputs.cache-hit != 'true') && (success())
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
         run: |
@@ -776,8 +832,22 @@ jobs:
           fi
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Use the runner's own caches
         run: |
@@ -913,6 +983,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 24.18.0
@@ -928,12 +1016,11 @@ jobs:
           path: "${{ runner.temp }}/pnpm-store"
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
       - name: Fill missing dependencies
+        shell: bash
+        run: "nix develop '.#web' -c pnpm fetch"
         if: steps.typescript-cache.outputs.cache-hit != 'true'
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
-        run: |
-          corepack enable
-          pnpm fetch
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1061,8 +1148,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1128,7 +1228,7 @@ jobs:
         with:
           path: "${{ runner.temp }}/st-bench"
           key: "perf-cost-stores-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
-        id: cache-10
+        id: cache-11
       - name: Run the cost check
         shell: bash
         run: nix develop -c bash scripts/ci-perf cost
@@ -1198,5 +1298,5 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-10.outcome }}","hit":"${{ steps.cache-10.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
+          CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-11.outcome }}","hit":"${{ steps.cache-11.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'

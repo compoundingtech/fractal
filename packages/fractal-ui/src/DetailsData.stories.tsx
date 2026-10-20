@@ -139,7 +139,7 @@ const styles = stylex.create({
 const meta = {
   title: 'Fractal UI/Details Data',
   component: DetailsPane,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact TraceSeries matrix pins independent spend/token windows, 0.9949/0.995 and invalid attribution fractions, missing versus zero subagent counts, and first-read resource/timing skeletons. Catalog details slices contain missions and work, not these trace facts or pending-field contracts.' }, layout: 'fullscreen' },
   args: {
     ...detailsStoryInputs('busy', native),
     variants: { overview: 'O2', context: 'C1', spend: 'S1', resources: 'R1', empty: 'E3' },
@@ -221,6 +221,7 @@ const activityOverviews = {
   unreported: { ...detailsStoryInputs('busy').overview, activity: undefined },
 } satisfies Record<string, DetailsOverview>
 export const PartialActivity: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'The same partially observed pane must compare reported idle, reported working and omitted activity without changing sibling facts; this controlled three-way omission contract is not a catalog agent lifecycle.' } },
   args: { state: 'partial' },
   render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(activityOverviews).map(([name, overview]) => <section key={name} aria-label={`${name} activity`} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-activity-${name}`} scheme={scheme}
@@ -500,6 +501,7 @@ async function checkIndependentSummary(canvasElement: HTMLElement) {
     await rejectsControl('Partial spend group repeats per-field missing values', () => assertIndependent(wrong))
 }
 export const ContextSamplesPercentOnly: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact 18.2% and 37.4% retained context samples with unavailable token counts pin percentage-only meter semantics and chart titles; catalog details slices do not provide TraceSeries context observations.' } },
   args: { scenario: 'percentSamples', variants: { overview: 'O2', context: 'C3', spend: 'S1', resources: 'R1', empty: 'E3' } },
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
@@ -574,6 +576,7 @@ function assertReportedNarrow(root: HTMLElement) {
   requireContract(amount?.textContent === '$100.00' && unclipped(amount) && amount.getBoundingClientRect().right <= row.getBoundingClientRect().right + 1, 'Reported spend amount is clipped beside its description')
 }
 export const ReportedWindowNarrow: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'An exact long reported accumulation-window sentence beside $100.00 at 240px proves word wrapping and unclipped values; catalog data would change this copy-and-geometry probe.' } },
   args: { scenario: 'reportedLong', width: 240 },
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)

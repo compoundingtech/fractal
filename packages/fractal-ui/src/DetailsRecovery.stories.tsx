@@ -543,10 +543,10 @@ async function nonRetryablePlay({ canvasElement: canvas }: Play) {
   record(canvas, 'non-retryable', measurements)
 }
 
-export const AllStates: Story = { play: anchorPlay }
-export const PendingFootprints: Story = { args: { initialState: 'loading' }, play: pendingPlay }
-export const FailureTransitions: Story = { play: failurePlay }
-export const KeyboardRecovery: Story = { args: { initialState: 'error' }, play: keyboardPlay }
-export const HeaderFeedback: Story = { play: feedbackPlay }
-export const KnownLoadingIdentity: Story = { args: { initialState: 'loading' }, play: identityPlay }
-export const NonRetryableFailures: Story = { args: { initialState: 'error' }, play: nonRetryablePlay }
+export const AllStates: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local busy, partial, new, timeout and loading observations exercise 32px header geometry, skeleton ink and verbatim failure/cause copy across 118–520px widths; catalog details contains mission/work data rather than these trace and recovery fixtures.' } }, play: anchorPlay }
+export const PendingFootprints: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Paired local loading/busy fixtures preserve identical chart bodies and resource-row identities across all overview/context/spend variants, with 0.1px geometry and zero-layout-shift negative controls.' } }, args: { initialState: 'loading' }, play: pendingPlay }
+export const FailureTransitions: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Controlled local first-load and retained-content timeout transitions compare exact pre-failure text and reserved geometry in the same mounted pane; recovery must restore that same fixture without layout shift.' } }, play: failurePlay }
+export const KeyboardRecovery: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact local timeout cause and first-load/retained failure lifecycle prove one exposed retry, dialog name and description, Escape focus restoration and retry focus across 118–520px widths.' } }, args: { initialState: 'error' }, play: keyboardPlay }
+export const HeaderFeedback: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Host-controlled loading, timeout and recovery edges isolate the 300ms glyph delay, exact polite-announcement counts/text and fixed header geometry, including duplicate-speech and early-glyph negative controls.' } }, play: feedbackPlay }
+export const KnownLoadingIdentity: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Paired local busy/loading fixtures carry the same known title, machine and model across O1/O2/O3 so painted identity and accessibility-tree exposure can be compared while pending placeholders remain hidden.' } }, args: { initialState: 'loading' }, play: identityPlay }
+export const NonRetryableFailures: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact forbidden and unsupported host failures, each with and without retained content, prove specific administrator/unavailable guidance and absence of Retry in both body and details dialog.' } }, args: { initialState: 'error' }, play: nonRetryablePlay }
