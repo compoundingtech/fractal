@@ -3233,6 +3233,7 @@ jobs:
               "apps/fractal-web/src/conversation/fixtures.ts",
               "apps/fractal-web/src/conversation/fromTimeline.ts",
               "apps/fractal-web/src/conversation/model.ts",
+              "apps/fractal-web/src/conversation/q101OmpEnvelopeStopgap.ts",
               "apps/fractal-web/src/conversation/semantics.ts",
               "apps/fractal-web/src/conversation/todos/AgentTodos.tsx",
               "apps/fractal-web/src/conversation/todos/model.ts",
