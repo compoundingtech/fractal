@@ -1369,6 +1369,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-mission-ui"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "st3-conversation-ui",
+ "st3-ui-model",
+]
+
+[[package]]
 name = "fraction"
 version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5683,6 +5692,7 @@ dependencies = [
  "clap",
  "crossterm",
  "flate2",
+ "fractal-mission-ui",
  "image",
  "libc",
  "portable-pty",
