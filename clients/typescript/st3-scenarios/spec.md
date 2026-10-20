@@ -792,7 +792,8 @@ replay.actions  // actions the client submitted, in order, for test assertions
   Opening becomes effective in the open task before `onopen`; closing immediately prevents
   further sends and queues `onclose`. The typed socket seam does not expose `readyState`.
   `replay.close()` cancels pending opens, frames and timeline work, then delivers close
-  notifications asynchronously and disposes the ports.
+  notifications asynchronously and disposes the ports. Already-queued close notifications
+  survive teardown and are delivered exactly once, including `socket.close(); replay.close()`.
 - **Test synchronization:** after `clock.advance(ms)` or a subscribe/send, await
   `replay.flush()` before asserting socket output. It waits until the delivery queue is idle,
   including replies queued by handlers, but neither advances the clock nor releases future

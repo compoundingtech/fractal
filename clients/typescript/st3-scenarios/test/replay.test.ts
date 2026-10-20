@@ -59,6 +59,23 @@ const screens = (frames: CollectionFrame[]) => frames.filter((frame) => frame.ki
 const event = <T extends SyncEvent>(value: T): T => value
 
 describe('WebSocket task ordering', () => {
+  it('preserves exactly one queued socket close notification during immediate replay teardown', async () => {
+    const h = setup()
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    const closes: { code?: number; reason?: string }[] = []
+    socket.onclose = (event) => closes.push(event)
+    await h.replay.flush()
+    socket.close(1000, 'client closed')
+    h.replay.close()
+    expect(closes).toEqual([])
+    await h.replay.flush()
+    expect(closes).toEqual([{ code: 1000, reason: 'client closed' }])
+    socket.close()
+    h.replay.close()
+    await h.replay.flush()
+    expect(closes).toHaveLength(1)
+  })
+
   it('keeps a Node process alive for pending deliveries but lets an idle queue exit', () => {
     const tasksUrl = new URL('../src/replay/tasks.ts', import.meta.url).href
     const child = spawnSync(process.execPath, ['--experimental-transform-types', '--no-warnings', '--input-type=module', '-e', `

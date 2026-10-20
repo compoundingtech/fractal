@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Deliver scenario replay socket events asynchronously in WebSocket task order",
-  "replay": {"status": "none", "detail": "No daemon claim replay or recovery changes. Scenario sockets queue replies, timeline frames and lifecycle notifications with MessageChannel, preserving FIFO without relying on timers. Replay teardown cancels pending deliveries."},
+  "replay": {"status": "none", "detail": "No daemon claim replay or recovery changes. Scenario sockets queue replies, timeline frames and lifecycle notifications with MessageChannel, preserving FIFO without relying on timers. Pending work keeps Node/Bun alive; idle ports do not. Replay teardown cancels pending opens and frames while preserving exactly-once close notifications."},
   "schema": {"status": "none", "detail": "No wire schema or fixture changes."},
   "rules": {"status": "none", "detail": "No checkpoint or rule changes."},
   "compatibility": {"status": "none", "detail": "Socket callbacks now follow native WebSocket task ordering instead of running inside send or close. Tests can await replay.flush() after releasing clock work or sending commands."},

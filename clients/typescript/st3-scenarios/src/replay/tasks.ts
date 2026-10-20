@@ -2,14 +2,14 @@
  * deliveries still run while Playwright's clock is paused. */
 export const deliveryTasks = () => {
   const channel = new MessageChannel()
-  const pending: (() => void)[] = []
+  let pending: { run: () => void; preserveOnClear: boolean }[] = []
   const waiters = new Set<() => void>()
   let running = false
   let closed = false
   channel.port1.onmessage = () => {
     const task = pending.shift()
     running = true
-    try { task?.() } finally {
+    try { task?.run() } finally {
       running = false
       if (pending.length === 0) {
         if ('unref' in channel.port1 && typeof channel.port1.unref === 'function') channel.port1.unref()
@@ -23,9 +23,9 @@ export const deliveryTasks = () => {
     if ('unref' in port && typeof port.unref === 'function') port.unref()
   }
   return {
-    enqueue: (task: () => void): void => {
+    enqueue: (run: () => void, { preserveOnClear = false }: { preserveOnClear?: boolean } = {}): void => {
       if (closed) return
-      pending.push(task)
+      pending.push({ run, preserveOnClear })
       if ('ref' in channel.port1 && typeof channel.port1.ref === 'function') channel.port1.ref()
       channel.port2.postMessage(null)
     },
@@ -34,7 +34,7 @@ export const deliveryTasks = () => {
       // This package targets ES2022, before Promise.withResolvers.
       return new Promise<void>((resolve) => { waiters.add(resolve) })
     },
-    clear: (): void => { pending.length = 0 },
+    clear: (): void => { pending = pending.filter((task) => task.preserveOnClear) },
     close: (): void => {
       closed = true
       channel.port1.close()

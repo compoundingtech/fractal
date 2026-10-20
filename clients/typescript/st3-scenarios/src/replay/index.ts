@@ -279,7 +279,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     connection.subscriptions.clear()
     connections.delete(connection)
     pendingOpens.delete(connection)
-    deliveries.enqueue(() => connection.socket.onclose?.({ code, reason }))
+    deliveries.enqueue(() => connection.socket.onclose?.({ code, reason }), { preserveOnClear: true })
   }
   const dispatch = (kind: SliceKind, event: TimelineEvent) => {
     if (world.recording !== undefined && kind !== 'sync') return
