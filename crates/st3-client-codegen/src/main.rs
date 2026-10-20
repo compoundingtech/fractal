@@ -220,6 +220,7 @@ fn rust_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
+            let response = if response == "Value" { "serde_json::Value" } else { response };
             writeln!(out, "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}")?;
         } else if id == "capabilities.get" {
             writeln!(
@@ -389,6 +390,7 @@ fn swift_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
+            let response = if response == "Value" { "JSONValue" } else { response };
             writeln!(out, "    public func {method}(_ params: {request}, proof: ScgReadAuthorization) async throws -> Envelope<{response}> {{ try await assistantRead(\"{projection}\", params, proof: proof) }}")?;
         } else if matches!(
             id,
@@ -756,6 +758,9 @@ fn validate_surfaces(
         "AssistantReadTrustRequest",
         "AssistantSummaryRequest",
         "AssistantPageRequest",
+        "AssistantAgentDetailRequest",
+        "AssistantConversationTimelineRequest",
+        "AssistantConversationSearchRequest",
         "AssistantContentRequest",
         "ScgReadAuthorization",
         "ScgReadAuthorizationPayload",
@@ -1348,6 +1353,7 @@ fn typescript_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
+            let response = if response == "Value" { "unknown" } else { response };
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
             continue;
         }
@@ -1511,6 +1517,31 @@ mod tests {
         let swift = "public enum Pair: Codable { case person(Person), assistant(Assistant) }\npublic struct Person: Codable { let personID: String }\npublic struct Assistant: Codable { let principal: String }";
         validate_model(&schema, "Pair", "Pair", "Pair", rust, swift).unwrap();
         assert!(validate_model(&schema, "Pair", "Pair", "Pair", &rust.replace("pub principal:", "pub wrong:"), swift).is_err());
+    }
+
+    #[test]
+    fn assistant_conversation_typescript_methods_use_imported_requests_and_loose_json() -> Result<()> {
+        let reads = [
+            ("assistant.conversations", "AssistantPageRequest"),
+            ("assistant.conversation-detail", "AssistantAgentDetailRequest"),
+            ("assistant.conversation-timeline", "AssistantConversationTimelineRequest"),
+            ("assistant.conversation-search", "AssistantConversationSearchRequest"),
+        ];
+        let operations = reads.iter().map(|(id, request)| serde_json::json!({
+            "id": id, "path": format!("/v1/client/assistant/{}", id.strip_prefix("assistant.").unwrap()),
+            "query_model": request, "response": "Value", "proof_header": "x-st3-scg-read-authorization",
+        })).collect::<Vec<_>>();
+        let methods = typescript_operation_methods(&operations, &serde_json::Map::new())?;
+        let template = include_str!("../templates/Client.ts.in");
+        for (id, request) in reads {
+            let method = lower_camel(&pascal(id));
+            assert!(template.lines().take_while(|line| !line.starts_with("} from './Models.generated.ts'")).any(|line| line.contains(request)), "{request} must be imported");
+            assert!(methods.contains(&format!("async {method}(params: {request},")));
+        }
+        assert_eq!(methods.matches("Promise<EnvelopeOf<unknown>>").count(), 4);
+        assert_eq!(methods.matches("this.assistantRead<unknown>").count(), 4);
+        assert!(!methods.contains("<Value>"));
+        Ok(())
     }
 
     #[test]

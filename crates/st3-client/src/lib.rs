@@ -2274,6 +2274,37 @@ impl Client {
     ) -> Result<Envelope<AssistantAgentPage>, ClientError> {
         self.assistant_read("agents", params, proof).await
     }
+    pub async fn assistant_conversations(
+        &self,
+        params: &AssistantPageRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversations", params, proof).await
+    }
+    pub async fn assistant_conversation_detail(
+        &self,
+        params: &AssistantAgentDetailRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-detail", params, proof)
+            .await
+    }
+    pub async fn assistant_conversation_timeline(
+        &self,
+        params: &AssistantConversationTimelineRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-timeline", params, proof)
+            .await
+    }
+    pub async fn assistant_conversation_search(
+        &self,
+        params: &AssistantConversationSearchRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-search", params, proof)
+            .await
+    }
     pub async fn assistant_conversation_content(
         &self,
         params: &AssistantConversationContentRequest,

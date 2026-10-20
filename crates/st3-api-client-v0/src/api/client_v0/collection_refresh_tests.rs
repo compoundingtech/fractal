@@ -1183,6 +1183,7 @@ fn paired_session() -> ClientSession {
         local_peer: false,
         custom_forms: false,
         conversation_blocks: false,
+        assistant_content_handles: false,
         messages_paging: false,
         scopes: ["read.projections".into()].into_iter().collect(),
     }

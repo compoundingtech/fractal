@@ -19,6 +19,7 @@ pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
     envelope_tombstoned,
 };
+pub use super::checkpoint_space::CheckpointProofBusy;
 
 pub const DAY_MS: u128 = 86_400_000;
 
@@ -1900,6 +1901,17 @@ pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
     super::checkpoint_completion::reclaim_stats()
 }
 
+/// Hold the proof lock on `scratch`, as a running proof does, until dropped.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_space::ProofOwnership);
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
+    super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
+}
+
 #[cfg(test)]
 mod memory_tests {
     use super::*;
@@ -2045,5 +2057,115 @@ mod proof_position_tests {
             assert_eq!(proof_order(&guarded, &sealed, Some(&vfs)), sealed);
         }
         vfs.check_closed().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clone_growth_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const ROW: &str = "INSERT INTO growth VALUES (randomblob(64 * 1024))";
+
+    fn store_with_rows(dir: &Path, rows: usize) -> Store {
+        fs::create_dir(dir.join("proofs")).unwrap();
+        let store = Store::open(&dir.join("store.sqlite3"), "writer", Arc::new(Plain)).unwrap();
+        let writer = store.connection.write();
+        writer.execute_batch("CREATE TABLE growth(body BLOB)").unwrap();
+        for _ in 0..rows {
+            writer.execute(ROW, []).unwrap();
+        }
+        drop(writer);
+        store
+    }
+
+    fn wal_len(store: &Store) -> u64 {
+        fs::metadata(format!("{}-wal", store.path.display())).map_or(0, |metadata| metadata.len())
+    }
+
+    fn rows(copy: &Path) -> i64 {
+        Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT count(*) FROM growth", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Copy through the guarded VFS the way a proof does, after `space` was admitted.
+    fn guarded_copy(store: &Store, space: &SpaceGuard, proofs: &Path, during: impl Fn() + Sync) -> Result<PathBuf> {
+        let ownership = ProofOwnership::acquire(proofs).unwrap();
+        let vfs = ProofVfs::register(space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = proofs.join("proof-growth.sqlite3");
+        ownership.mark(&copy).unwrap();
+        let stop = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    during();
+                }
+            });
+            let result = store.copy_store_to_guarded(&copy, Some(&vfs));
+            stop.store(true, Ordering::Release);
+            result
+        });
+        vfs.check_closed().unwrap();
+        result.map(|_| copy)
+    }
+
+    // A proof is admitted, then its lock and VFS self-test run while the daemon keeps writing.
+    // The raw clone used to be held to the exact main+WAL bytes seen at admission, so one commit
+    // in that window failed `replication checkpoint plan` with a 500.
+    #[test]
+    fn a_wal_grown_after_admission_still_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let admitted_wal = wal_len(&store);
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+        assert!(wal_len(&store) > admitted_wal, "the live WAL grew after admission");
+
+        let copy = guarded_copy(&store, &space, &proofs, || {}).unwrap();
+        assert_eq!(rows(&copy), 16, "the copy is the store as of the copy, not of admission");
+    }
+
+    #[test]
+    fn a_writer_committing_throughout_the_copy_does_not_fail_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let written = AtomicUsize::new(0);
+
+        let copy = guarded_copy(&store, &space, &proofs, || {
+            store.connection.write().execute(ROW, []).unwrap();
+            written.fetch_add(1, Ordering::AcqRel);
+        })
+        .unwrap();
+        let copied = rows(&copy);
+        assert!(copied >= 8, "the copy holds at least the admitted rows: {copied}");
+        assert!(
+            copied <= 8 + i64::try_from(written.load(Ordering::Acquire)).unwrap(),
+            "the copy holds no row that was never committed: {copied}"
+        );
+    }
+
+    #[test]
+    fn growth_past_the_clone_cap_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let mut space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        space.hold_clone_to_admitted_copy();
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+
+        let error = guarded_copy(&store, &space, &proofs, || {}).unwrap_err().to_string();
+        assert!(error.contains("checkpoint raw clone exceeds admitted clone cap"), "{error}");
     }
 }

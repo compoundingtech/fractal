@@ -2,6 +2,7 @@
 //! Ordinary routes call this on their existing handler worker after its reader loan ends.
 use super::*;
 use axum::body::{Bytes, HttpBody};
+
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use std::convert::Infallible;
 
@@ -52,7 +53,12 @@ impl Context {
         snapshot: &ClientSnapshot,
         page: &ClientResourcePage,
     ) -> Result<usize, ApiError> {
-        let bytes = serde_json::to_vec(page).map_err(ApiError::internal)?;
+        self.value_envelope_size(snapshot, page)
+    }
+
+    /// Exact framing for any assistant projection, using the same codec as delivery.
+    pub fn value_envelope_size<T: serde::Serialize>(&self, snapshot: &ClientSnapshot, value: &T) -> Result<usize, ApiError> {
+        let bytes = serde_json::to_vec(value).map_err(ApiError::internal)?;
         Ok(self.encode(StatusCode::OK, Some(snapshot.clone()), Ok(bytes.into())).len)
     }
     pub async fn wrap(&self, response: Response) -> Result<Response, ApiError> {

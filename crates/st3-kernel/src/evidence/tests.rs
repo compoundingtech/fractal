@@ -359,6 +359,21 @@ fn partial_review_and_extra_current_paths_are_rejected() {
 }
 
 #[test]
+fn tree_prefixed_refs_from_the_ci_scripts_are_not_records_of_this_module_and_not_an_error() {
+    let f = Fixture::new();
+    let id = f.put(&f.tests("fixture-runner", 0));
+    // The CI scripts file a record under refs/notes/evidence/<tree>/<record>; listing and verifying here must carry on.
+    let tree = "a".repeat(40);
+    git(
+        f.repo(),
+        &["update-ref", &format!("{NOTES_PREFIX}{tree}/{id}"), &id],
+        None,
+    )
+    .unwrap();
+    assert_eq!(records(f.repo()).unwrap(), vec![id]);
+}
+
+#[test]
 fn simultaneous_writers_keep_every_record_and_same_import_is_idempotent() {
     let f = Fixture::new();
     let ids: Vec<_> = std::thread::scope(|scope| {

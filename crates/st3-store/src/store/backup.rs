@@ -805,6 +805,129 @@ mod tests {
     }
 
     #[test]
+    fn version_one_backup_resumes_a_simulated_old_reader_reference_rejection() {
+        // v0.3.17 (f4cec96e414fee2a780910730b019fe6bdbddc1d) used this same v1
+        // Header/Envelope/Signatures/End wire shape. This is NOT an old-binary archive:
+        // keep the real source_build and simulate only the interrupted reader's registry.
+        for case in ["ack", "invalid-reference", "undecodable"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = Store::open_memory("alder").unwrap();
+            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            source.bind_fleet("test-fleet").unwrap();
+            source.set_member_key(Some(key.clone())).unwrap();
+            let claim = source.append_claim(&ClaimInput {
+                subject: "message/ack".into(), kind: "message.sent".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("from".into(), json!("agent/example/worker")),
+                    ("to".into(), json!("assistant/chatgpt")),
+                    ("content".into(), json!("ACK")), ("status".into(), json!("sent")),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let archive_path = root.path().join("version-one.jsonl");
+            let mut header = archive(&source, &archive_path);
+            assert_eq!(header.version, 1);
+            backup::verify_file(&archive_path).unwrap();
+            let mut envelopes: Vec<ReplicaEnvelope> = fs::read_to_string(&archive_path).unwrap()
+                .lines().filter_map(|line| match serde_json::from_str::<Record>(line).unwrap() {
+                    Record::Envelope(envelope) => Some(envelope),
+                    Record::Header(_) | Record::Signatures(_) | Record::End { .. } => None,
+                    _ => panic!("fixture must use the v0.3.17 version-one record vocabulary"),
+                }).collect();
+            let envelope = envelopes.iter_mut().find(|envelope| {
+                let payload: smallclaims::claim::ReplicaEnvelopePayload =
+                    ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+                payload.batch.claims.iter().any(|candidate| candidate.id == claim.id)
+            }).unwrap();
+            if case == "invalid-reference" {
+                *envelope = crate::store::tests::rewrite_envelope(envelope, |payload| {
+                    let candidate = &mut payload.batch.claims[0];
+                    candidate.body["fields"]["to"] = json!("future/unknown");
+                    candidate.id = smallclaims::hash::claim_hash(&candidate.batch_id,
+                        &candidate.subject, &candidate.kind, &candidate.origin,
+                        candidate.actor.as_deref(), &candidate.body, &candidate.predecessors).unwrap();
+                });
+            } else if case == "undecodable" {
+                let bytes = b"not a CBOR envelope".to_vec();
+                envelope.hash = smallclaims::hash::replica_envelope_hash(&envelope.writer,
+                    envelope.sequence, envelope.previous_hash.as_deref(),
+                    envelope.accepted_at_unix_ms, &bytes);
+                envelope.payload = bytes.into();
+            }
+            envelope.signature = Some(key.sign(&crate::fleet::envelope_signature_message(
+                "test-fleet", &envelope.writer, envelope.sequence, &envelope.hash)));
+            // Keep transport identity/checksum consistent after each negative mutation.
+            // The original claim-source expectation deliberately remains: a rejected claim
+            // must not silently satisfy the archive's promised admitted source graph.
+            let mut log = Sha256::new();
+            log.update(INVENTORY_DIGEST_DOMAIN);
+            for envelope in &envelopes {
+                update_identity_digest(&mut log, &envelope.writer, envelope.sequence, &envelope.hash);
+            }
+            header.log_digest = hex::encode(log.finalize());
+            rewrite(&archive_path, |records| {
+                let mut replacements = envelopes.iter();
+                for record in records {
+                    match record {
+                        Record::Header(stored) => *stored = header.clone(),
+                        Record::Envelope(stored) => *stored = replacements.next().unwrap().clone(),
+                        Record::Signatures(signatures) => signatures.clear(),
+                        _ => {}
+                    }
+                }
+            });
+            backup::verify_file(&archive_path).unwrap();
+            let path = root.path().join("interrupted-restore.db");
+            let older = Store::open(&path, "restored").unwrap();
+            let mut registry = st3_schema::registry().clone();
+            registry.subjects.remove("assistant");
+            older.set_claim_registry(registry);
+            older.prepare_backup_restore(&header, "restored").unwrap();
+            older.receive_backup_page(&header, &envelopes).unwrap();
+            assert_eq!(older.admit_restored_backlog().unwrap().invalid, 1, "{case}");
+            let marker = fleet_meta(&older.readers.get(), "subject_reference_retry_schema")
+                .unwrap().unwrap();
+            drop(older);
+            let upgraded = Store::open(&path, "restored").unwrap();
+            let admission = upgraded.admit_restored_backlog().unwrap();
+            assert_eq!(admission.held, 0, "{case}: restore must not reopen membership holds");
+            assert_eq!(admission.valid, usize::from(case == "ack"), "{case}");
+            assert_eq!(admission.invalid, usize::from(case == "invalid-reference"), "{case}");
+            let completed = fleet_meta(&upgraded.readers.get(), "subject_reference_retry_schema")
+                .unwrap().unwrap();
+            assert_ne!(completed, marker, "{case}: the upgraded schema completes its own pass");
+            let result = upgraded.finish_backup_restore(&header, "restored",
+                envelopes.len() as u64, None);
+            if case == "ack" {
+                assert!(result.unwrap().projections_match);
+                assert_eq!(upgraded.latest_claim(&claim.subject, Some(&claim.kind))
+                    .unwrap().unwrap().id, claim.id);
+            } else if case == "invalid-reference" {
+                // A decoded envelope is admitted even when its claim is rejected. The
+                // unchanged source-graph check, not the unadmitted-envelope guard, fails.
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("restored claim source digest/count differs from backup"),
+                    "{case}: {error}");
+                assert!(upgraded.latest_claim(&claim.subject, Some(&claim.kind)).unwrap().is_none());
+                let rejected = upgraded.replica_records(true).unwrap();
+                assert!(rejected.iter().any(|record|
+                    record.error_code.as_deref() == Some("invalid-replicated-claim")
+                    && record.error_message.as_deref().unwrap_or_default()
+                        .contains("violates invalid-subject-reference:")));
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("unadmitted envelopes"), "{case}: {error}");
+            }
+            drop(upgraded);
+            let reopened = Store::open(&path, "restored").unwrap();
+            let converged = reopened.admit_restored_backlog().unwrap();
+            assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0), "{case}");
+            assert_eq!(fleet_meta(&reopened.readers.get(), "subject_reference_retry_schema")
+                .unwrap().as_deref(), Some(completed.as_str()));
+        }
+    }
+
+    #[test]
     fn a_backup_reapplies_replicated_repairs_before_comparing_digests() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();

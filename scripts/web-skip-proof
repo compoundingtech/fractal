@@ -19,13 +19,14 @@ record is trusted (reason=no-record), so the check runs. Any failure computes no
   web-skip-proof inputs <check> [--base REF]    print the derived literal input list
   web-skip-proof claims PATH... [--base REF]    owned:<checks> or not-mine, per path (the plugin's claims())
 
-Fetch the evidence notes first (`git fetch origin '+refs/notes/evidence*:refs/notes/evidence*'`);
-`--fetch` does it.
+Fetch the head tree's evidence notes first (`git fetch origin '+refs/notes/evidence/<tree>/*:refs/notes/evidence/<tree>/*'`, plus
+`refs/notes/evidence-input/<check>/<key>/*` for a check with a key); `--fetch` does it. Never the whole namespace.
 """
 
 import argparse
 import hashlib
 import json
+import re
 import runpy
 import subprocess
 import sys
@@ -89,6 +90,9 @@ def derived_inputs(selector, base, head):
     return sorted(directories | files)
 
 
+FETCH = {'origin': False}
+
+
 def decide(name, selector, base, head, repository, policy_inputs, scratch):
     inputs = policy_inputs if policy_inputs is not None else derived_inputs(selector, base, head)
     digest = hashlib.sha256('\n'.join(inputs).encode()).hexdigest()
@@ -104,6 +108,8 @@ def decide(name, selector, base, head, repository, policy_inputs, scratch):
     if not key:
         return line
     line['key'] = key
+    if FETCH['origin'] and re.fullmatch(r'[0-9a-f]{40,64}', key) and re.fullmatch(r'[A-Za-z0-9._-]+', name):
+        subprocess.run(['git', 'fetch', '-q', 'origin', f'+refs/notes/evidence-input/{name}/{key}/*:refs/notes/evidence-input/{name}/{key}/*'], capture_output=True)
     if policy_inputs is None:
         line['reason'] = 'no-record'  # no declared policy: no record is trusted for this check yet
         return line
@@ -130,9 +136,11 @@ def main(argv):
     parser.add_argument('--explain', action='store_true', help='also list the changed paths each check owns')
     parser.add_argument('--fetch', action='store_true', help='fetch the evidence notes from origin first')
     args = parser.parse_args(argv[1:])
-    if args.fetch:
-        git('fetch', '-q', 'origin', '+refs/notes/evidence*:refs/notes/evidence*')
     base, head = git('rev-parse', '--verify', f'{args.base}^{{commit}}').strip(), git('rev-parse', '--verify', f'{args.head}^{{commit}}').strip()
+    if args.fetch:  # this head tree's own records (one prefix); the input-keyed ones are fetched per check below
+        tree = git('rev-parse', '--verify', f'{head}^{{tree}}').strip()
+        git('fetch', '-q', 'origin', f'+refs/notes/evidence/{tree}/*:refs/notes/evidence/{tree}/*')
+        FETCH['origin'] = True
     with tempfile.TemporaryDirectory() as scratch:
         select = selectors(base, scratch)
         if args.command == 'inputs':

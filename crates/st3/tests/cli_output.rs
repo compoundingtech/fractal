@@ -134,8 +134,10 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
         .unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let observed = cancelled.clone();
+        let worker_state = state_dir.clone();
         let app = axum::Router::new().fallback(move |axum::extract::OriginalUri(uri): axum::extract::OriginalUri| {
             let observed = observed.clone();
+            let worker_state = worker_state.clone();
             async move {
                 let value = match uri.path() {
                     "/v1/client/machines" => json!({"items": []}),
@@ -148,11 +150,20 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
                         "unhealthy_projections": 0,
                         "peers": [{"peer": "orchid-peer", "status": "reachable", "authority_digest": "same"}],
                     }),
-                    "/v1/internal/fleet/leave/claim" => json!({
-                        "id": "claim/leave", "store_index": 1, "batch_id": "batch/leave",
-                        "subject": "fleet-member/orchid", "kind": "fleet.member-left", "origin": "orchid",
-                        "actor": "person/avery", "body": {}, "predecessors": [], "accepted_at_unix_ms": 0,
-                    }),
+                    "/v1/internal/fleet/leave/claim" => {
+                        // The worker publishes this only after its authenticated receipt ACK.
+                        let mut settings = st3::config::FleetFile::load(&worker_state).unwrap().unwrap();
+                        settings.removed = Some(st3::config::FleetRemoval {
+                            reported_by: "orchid-peer".into(),
+                            code: "member-left".into(),
+                        });
+                        settings.save(&worker_state).unwrap();
+                        json!({
+                            "id": "claim/leave", "store_index": 1, "batch_id": "batch/leave",
+                            "subject": "fleet-member/orchid", "kind": "fleet.member-left", "origin": "orchid",
+                            "actor": "person/avery", "body": {}, "predecessors": [], "accepted_at_unix_ms": 0,
+                        })
+                    },
                     "/v1/internal/fleet/leave/cancel" => {
                         observed.store(true, Ordering::Relaxed);
                         json!({})

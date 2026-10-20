@@ -114,6 +114,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/internal/fleet/leave-state",
+        "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
+    ),
+    (
         "GET /v1/internal/fleet/admission-residue",
         "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
     ),
@@ -230,6 +234,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/conversation-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
+    ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
+    ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),

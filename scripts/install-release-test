@@ -2,6 +2,8 @@
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+. "$repo/scripts/script-test-supervisor"
+install_fixture() { python3 "$repo/scripts/test-signal-target" "$work/package/install.sh" "$@"; }
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 # These fixtures test regular-file installation; native macOS app transactions
@@ -21,7 +23,7 @@ for binary in st3 pty; do
 done
 ln -s /missing/old-st "$work/installed/st"
 ln -s /missing/old-ui "$work/installed/stui"
-"$work/package/install.sh" --bin-dir "$work/installed"
+install_fixture --bin-dir "$work/installed"
 test "$(readlink "$work/installed/st")" = st3
 test "$("$work/installed/st")" = new-st3
 test "$(readlink "$work/installed/fractal")" = st3
@@ -32,11 +34,11 @@ test ! -e "$work/installed/stui"
 test ! -L "$work/installed/stui"
 # Missing payload and directory collisions must fail before replacing installed files.
 rm "$work/package/bin/pty"
-if "$work/package/install.sh" --bin-dir "$work/installed"; then exit 1; fi
+if install_fixture --bin-dir "$work/installed"; then exit 1; fi
 test "$("$work/installed/st")" = new-st3
 cp "$work/package/bin/st3" "$work/package/bin/pty"
 mkdir -p "$work/blocked/st"
-if "$work/package/install.sh" --bin-dir "$work/blocked"; then exit 1; fi
+if install_fixture --bin-dir "$work/blocked"; then exit 1; fi
 test ! -e "$work/blocked/st3"
 # Existing fractal commands are not ours, even if their target happens to be st3 elsewhere.
 for kind in file link dangling directory; do
@@ -48,7 +50,7 @@ for kind in file link dangling directory; do
     dangling) ln -s /missing/fractal "$bin/fractal" ;;
     directory) mkdir "$bin/fractal" ;;
   esac
-  "$work/package/install.sh" --bin-dir "$bin" --quiet > "$work/collision.out" 2> "$work/collision.err"
+  install_fixture --bin-dir "$bin" --quiet > "$work/collision.out" 2> "$work/collision.err"
   test ! -s "$work/collision.out"
   test "$("$bin/st")" = new-st3
   grep -q 'leaving fractal unchanged:.*use st' "$work/collision.err"
@@ -60,11 +62,11 @@ for kind in file link dangling directory; do
   esac
 done
 ln -sfn "$work/installed/st3" "$work/installed/fractal"
-"$work/package/install.sh" --bin-dir "$work/installed" --quiet
+install_fixture --bin-dir "$work/installed" --quiet
 test "$(readlink "$work/installed/fractal")" = st3
 mkdir -p "$work/foreign-path"
 cp "$work/package/bin/st3" "$work/foreign-path/fractal"
-PATH="$work/foreign-path:$PATH" "$work/package/install.sh" --bin-dir "$work/path-collision" --quiet 2> "$work/path.err"
+PATH="$work/foreign-path:$PATH" install_fixture --bin-dir "$work/path-collision" --quiet 2> "$work/path.err"
 test ! -e "$work/path-collision/fractal"
 test ! -L "$work/path-collision/fractal"
 test "$("$work/path-collision/st")" = new-st3
@@ -81,12 +83,12 @@ if os.environ.get('INSTALL_HELPER_FAIL'):
     raise SystemExit(1)
 print('app receipt')
 PY
-FRACTAL_INSTANCE= ST_INSTANCE=masked-old "$work/package/install.sh" --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
+FRACTAL_INSTANCE= ST_INSTANCE=masked-old install_fixture --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
 test ! -s "$work/quiet.out"
 test ! -s "$work/quiet.err"
-"$work/package/install.sh" --bin-dir "$work/installed" > "$work/notices.out"
+install_fixture --bin-dir "$work/installed" > "$work/notices.out"
 grep -q 'app receipt' "$work/notices.out"
-if INSTALL_HELPER_FAIL=1 "$work/package/install.sh" --bin-dir "$work/installed" --quiet > "$work/failure.out" 2> "$work/failure.err"; then exit 1; fi
+if INSTALL_HELPER_FAIL=1 install_fixture --bin-dir "$work/installed" --quiet > "$work/failure.out" 2> "$work/failure.err"; then exit 1; fi
 test ! -s "$work/failure.out"
 grep -q 'helper failure' "$work/failure.err"
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
@@ -97,7 +99,12 @@ cat > "$work/platform-bin/mv" <<'SH'
 set -eu
 if [[ ${!#} == "$INSTALL_FAIL_DEST" && ! -e $INSTALL_FAIL_MARKER ]]; then
   : > "$INSTALL_FAIL_MARKER"
-  if [[ ${INSTALL_FAIL_MODE:-error} == signal ]]; then kill -TERM "$PPID"; fi
+  if [[ ${INSTALL_FAIL_MODE:-error} == signal ]]; then
+    python3 - <<'PYTERM'
+import os
+os.write(int(os.environ['INSTALL_TEST_SIGNAL_FD']), b'T')
+PYTERM
+  fi
   if [[ ${INSTALL_FAIL_MODE:-error} == foreign ]]; then
     python3 - "$INSTALL_FOREIGN_APP" "$INSTALL_APP_FIXTURE" <<'PY'
 from pathlib import Path
@@ -123,7 +130,7 @@ chmod 0700 "$work/prior/st3" "$work/prior/pty" "$work/prior/stui"
 rm "$work/prior/st"
 ln -s /previous/st3 "$work/prior/st"
 export INSTALL_FAIL_DEST="$work/prior/pty"
-if "$work/package/install.sh" --bin-dir "$work/prior" --quiet; then exit 1; fi
+if install_fixture --bin-dir "$work/prior" --quiet; then exit 1; fi
 for name in st3 pty stui; do
   test "$(cat "$work/prior/$name")" = "previous-$name"
   test -x "$work/prior/$name"
@@ -133,18 +140,18 @@ test ! -e "$work/prior/.smalltalk-install.lock"
 python3 -c 'import os,sys; assert sorted(os.listdir(sys.argv[1])) == ["pty", "st", "st3", "stui"]' "$work/prior"
 rm "$INSTALL_FAIL_MARKER"
 export INSTALL_FAIL_DEST="$work/fresh/pty"
-if "$work/package/install.sh" --bin-dir "$work/fresh" --quiet; then exit 1; fi
+if install_fixture --bin-dir "$work/fresh" --quiet; then exit 1; fi
 test -z "$(ls -A "$work/fresh")"
 # An existing transaction lock is never removed by a second installer.
 mkdir -p "$work/locked/.smalltalk-install.lock"
 printf 'unchanged' > "$work/locked/st3"
-if "$work/package/install.sh" --bin-dir "$work/locked" --quiet > "$work/locked.out" 2> "$work/locked.err"; then exit 1; fi
+if install_fixture --bin-dir "$work/locked" --quiet > "$work/locked.out" 2> "$work/locked.err"; then exit 1; fi
 test -d "$work/locked/.smalltalk-install.lock"
 grep -q "Another install may be running" "$work/locked.err"
 grep -q "rmdir .*/locked/.smalltalk-install.lock" "$work/locked.err"
 test "$(cat "$work/locked/st3")" = unchanged
 rm "$INSTALL_FAIL_MARKER"
-if INSTALL_FAIL_MODE=signal "$work/package/install.sh" --bin-dir "$work/fresh" --quiet; then exit 1; else test "$?" = 143; fi
+if INSTALL_FAIL_MODE=signal install_fixture --bin-dir "$work/fresh" --quiet; then exit 1; else test "$?" = 143; fi
 test -z "$(ls -A "$work/fresh")"
 # After the helper commits, late failures retain app/links/jobs without restore.
 printf '#!/bin/sh\necho Darwin\n' > "$work/platform-bin/uname"
@@ -164,7 +171,7 @@ state = Path(os.environ['INSTALL_APP_FIXTURE'])
 assert Path(a.home).resolve() == Path(os.environ.get('FRACTAL_MACOS_INSTALL_HOME', os.environ.get('ST_MACOS_INSTALL_HOME'))).resolve()
 assert Path(a.bin_dir).is_absolute() and Path(a.app).is_absolute()
 if os.environ.get('INSTALL_INCOMPLETE_SIGNAL'):
-    os.kill(os.getppid(), signal.SIGTERM)
+    os.write(int(os.environ['INSTALL_TEST_SIGNAL_FD']), b'T')
     raise SystemExit(0)
 if a.restore_app:
     state.write_bytes((job / 'old-fixture').read_bytes())
@@ -222,7 +229,7 @@ for mode in owner-read error signal foreign; do
   owner_read=0
   if [[ $mode == owner-read ]]; then failure_mode=error; owner_read=1; fi
   if INSTALL_OWNER_READ_RACE=$owner_read INSTALL_FAIL_MODE=$failure_mode \
-      "$work/package/install.sh" --bin-dir "$work/mac-$mode" --quiet \
+      install_fixture --bin-dir "$work/mac-$mode" --quiet \
       > "$work/mac-$mode.out" 2> "$work/mac-$mode.err"; then exit 1; else test "$?" = 1; fi
   test ! -s "$work/mac-$mode.out"
   if [[ $mode == foreign ]]; then
@@ -249,7 +256,7 @@ assert len(backups) == 1 and backups[0].read_text() == 'previous-st3\n'
 jobs = list((Path(sys.argv[2]) / '.local/state/st3/macos-installs').glob('install-*'))
 assert len(jobs) == 1 and (jobs[0] / 'old-fixture').read_text() == 'previous app and launchd fixture'
 PYRECOVERY
-  if "$work/package/install.sh" --bin-dir "$work/another-$mode" --quiet \
+  if install_fixture --bin-dir "$work/another-$mode" --quiet \
       > "$work/second.out" 2> "$work/second.err"; then exit 1; fi
   test -z "$(ls -A "$work/another-$mode")"
 done
@@ -257,7 +264,7 @@ done
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_MACOS_INSTALL_HOME="$work/macos-incomplete" ST_MACOS_INSTALL_HOME="$work/macos-incomplete"
 printf 'previous app and launchd fixture' > "$INSTALL_APP_FIXTURE"
-if INSTALL_INCOMPLETE_SIGNAL=1 "$work/package/install.sh" --bin-dir "$work/prior" --quiet; then exit 1; else test "$?" = 143; fi
+if INSTALL_INCOMPLETE_SIGNAL=1 install_fixture --bin-dir "$work/prior" --quiet; then exit 1; else test "$?" = 143; fi
 test "$(cat "$INSTALL_APP_FIXTURE")" = 'previous app and launchd fixture'
 test ! -e "$work/prior/.smalltalk-install.lock"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read

@@ -21,6 +21,15 @@ mod install;
 mod lookup;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub use lookup::ConflictingServices;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod stage;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use stage::stage_fractal;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
+    unsupported()
+}
 
 
 /// The names the service manager knows this install by. An instance has its own, so installing,
@@ -1199,8 +1208,13 @@ WantedBy=default.target\n",
 }
 
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
+    render_launchd_plist_for_label(spec, service_label())
+}
+
+/// Render a daemon definition for an explicit label without changing runtime service names.
+pub fn render_launchd_plist_for_label(spec: &ServiceSpec, label: &str) -> String {
     render_launchd_program_plist(
-        service_label(),
+        label,
         &spec.program_arguments(),
         "st3.stdout.log",
         "st3.stderr.log",
@@ -1210,8 +1224,13 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
 }
 
 pub fn render_launchd_replication_plist(spec: &ServiceSpec) -> String {
+    render_launchd_replication_plist_for_label(spec, replication_service_label())
+}
+
+/// Render a replication definition for an explicit label.
+pub fn render_launchd_replication_plist_for_label(spec: &ServiceSpec, label: &str) -> String {
     render_launchd_program_plist(
-        replication_service_label(),
+        label,
         &spec.replication_program_arguments(),
         "st3-replication.stdout.log",
         "st3-replication.stderr.log",
@@ -1233,7 +1252,7 @@ fn render_launchd_program_plist(
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
     let mut environment = crate::instance::service_environment();
-    if label == service_label()
+    if process_type == "Interactive"
         && let Some(kib) = spec.read_cache_kib
     {
         environment.push(("SMALLCLAIMS_READ_CACHE_KIB".to_owned(), kib.to_string()));
