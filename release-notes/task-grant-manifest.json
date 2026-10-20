@@ -2,7 +2,7 @@
   "version": 1,
   "summary": "Q336 P1+P2 add the shared TaskManifest v1 approval contract and replicated immutable task-grant creation/revocation records; mutation routes remain dark until the P3 caller binding.",
   "replay": {"status": "changed", "detail": "Task-grant creation and revocation claims rebuild grant state through the normal projector; expiry is derived from the manifest window."},
-  "schema": {"status": "changed", "detail": "Registers durable task-grant.created and task-grant.revoked claims and a task-grant subject family. TaskManifest v1 uses camelCase, rejects unknown fields, and binds approval to RFC 8785 canonical JSON SHA-256."},
+  "schema": {"status": "changed", "detail": "Registers durable task-grant.created and task-grant.revoked claims and a task-grant subject family. TaskManifest v1 uses camelCase, rejects unknown fields, and binds approval to RFC 8785 canonical JSON SHA-256. Closed recursive locators mirror http-capture without ephemeral refs: UTF-16 text bounds, closed ARIA roles, at most 32 nodes/depth 8 and outermost-only withinFrame. CSS syntax is checked at dispatch, not grant creation. Delete effects are click-only; target requires delete; human kind/note and fillSecret inventoryId are operation-exclusive."},
   "rules": {"status": "none", "detail": "No admission or per-use enforcement in P1+P2; those remain P4/P5."},
   "compatibility": {"status": "changed", "detail": "Adds POST /v1/task-grants, GET /v1/task-grants/{id}, POST /v1/task-grants/{id}/revoke and typed Rust client methods. Mutations default to 403 caller-binding-unavailable; no caller-supplied header grants authority."},
   "downtime": {"status": "none", "detail": "No coordinated downtime required."},

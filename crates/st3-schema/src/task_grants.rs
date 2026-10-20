@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+mod locator;
+pub use locator::{AriaRole, Locator};
+#[cfg(test)]
+mod locator_golden_tests;
+
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const OP_PROXY_PRINCIPAL: &str = "service/op-proxy";
 
@@ -79,7 +84,7 @@ pub struct TaskBrowserStep {
     pub index: u64,
     pub op: TaskBrowserOp,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
-    pub locator: Option<String>,
+    pub locator: Option<Locator>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub literal: Option<String>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
@@ -320,10 +325,10 @@ impl TaskManifest {
             if step.index > MAX_SAFE_INTEGER || last_index.is_some_and(|last| step.index <= last) { return Err(invalid("browser step indexes must be increasing safe integers")); }
             last_index = Some(step.index);
             if let Some(locator) = &step.locator {
-                text("locator", locator)?;
+                locator.validate()?;
             }
             if matches!(step.op, TaskBrowserOp::Click | TaskBrowserOp::Fill | TaskBrowserOp::FillSecret | TaskBrowserOp::RevealOnce) {
-                text("locator", step.locator.as_deref().ok_or_else(|| invalid("operation requires locator"))?)?;
+                step.locator.as_ref().ok_or_else(|| invalid("operation requires locator"))?;
             }
             if step.op == TaskBrowserOp::Navigate {
                 let literal = step.literal.as_deref().ok_or_else(|| invalid("navigate requires literal HTTPS URL"))?;
@@ -343,9 +348,21 @@ impl TaskManifest {
                 }
             }
             if step.effect == Some(TaskBrowserEffect::Delete) {
+                if step.op != TaskBrowserOp::Click {
+                    return Err(invalid("delete effect is allowed only on click"));
+                }
                 let target = step.target.as_deref().ok_or_else(|| invalid("delete requires target"))?;
                 text("delete target", target)?;
                 if target.contains('*') { return Err(invalid("delete requires an exact target")); }
+            }
+            if step.target.is_some() && step.effect != Some(TaskBrowserEffect::Delete) {
+                return Err(invalid("target is allowed only with effect delete"));
+            }
+            if step.inventory_id.is_some() && step.op != TaskBrowserOp::FillSecret {
+                return Err(invalid("inventoryId is allowed only on fillSecret"));
+            }
+            if (step.kind.is_some() || step.note.is_some()) && step.op != TaskBrowserOp::Human {
+                return Err(invalid("kind and note are allowed only on human"));
             }
             if step.op == TaskBrowserOp::FillSecret {
                 let id = step.inventory_id.as_deref().ok_or_else(|| invalid("fillSecret requires inventoryId"))?;
@@ -455,10 +472,10 @@ mod tests {
     fn fixture() -> Value {
         let mut value: Value = serde_json::from_str(GOLDEN_INPUT).unwrap();
         value["browserSteps"] = json!([
-            {"index":0,"op":"navigate","locator":"page","literal":"https://example.com"},
-            {"index":1,"op":"fill","locator":"label","literal":"public label"},
-            {"index":2,"op":"click","locator":"submit"},
-            {"index":3,"op":"revealOnce","locator":"token","issues":"example-token"}
+            {"index":0,"op":"navigate","locator":{"kind":"text","value":"page"},"literal":"https://example.com"},
+            {"index":1,"op":"fill","locator":{"kind":"label","value":"label"},"literal":"public label"},
+            {"index":2,"op":"click","locator":{"kind":"text","value":"submit"}},
+            {"index":3,"op":"revealOnce","locator":{"kind":"text","value":"token"},"issues":"example-token"}
         ]);
         value["writes"] = json!([{
             "vaultId":"example-vault","itemId":"example-item",
@@ -693,7 +710,7 @@ mod tests {
 
     #[test]
     fn identifiers_are_nonempty_and_no_controls() {
-        for pointer in ["/title", "/requester/run", "/requester/step", "/requester/incarnation", "/provider/name", "/provider/browserProfile", "/browserSteps/0/locator", "/writes/0/vaultId", "/writes/0/itemId", "/writes/0/fields/0/inventoryId", "/readers/0/peerHost"] {
+        for pointer in ["/title", "/requester/run", "/requester/step", "/requester/incarnation", "/provider/name", "/provider/browserProfile", "/writes/0/vaultId", "/writes/0/itemId", "/writes/0/fields/0/inventoryId", "/readers/0/peerHost"] {
             for text in ["", "  ", "example\n"] {
                 let mut value = fixture();
                 *value.pointer_mut(pointer).unwrap() = json!(text);
@@ -747,7 +764,7 @@ mod extension_tests {
     use super::*;
     use serde_json::json;
 
-    const INPUT: &str = r#"{"version":1,"title":"Example extended grant","requester":{"principal":"agent/example-requester","run":"example-run","step":"example-step","incarnation":"example-1"},"window":{"notBefore":"2026-10-20T12:00:00Z","notAfter":"2026-10-20T13:00:00Z"},"provider":{"name":"example","browserProfile":"example","origins":["https://example.com"]},"browserSteps":[{"index":0,"op":"fillSecret","locator":"token","inventoryId":"example-token"},{"index":1,"op":"human","kind":"passkey","note":"Approve example action"},{"index":2,"op":"click","locator":"delete","effect":"delete","target":"example-record"}],"writes":[{"vaultId":"example-vault","itemId":"example-item","fields":[{"inventoryId":"example-token","kind":"secret","op":"remove"}]},{"vaultId":"example-vault","itemId":"example-old-item","fields":[],"itemOp":"destroy"}],"readers":[{"principal":"agent/example-requester","peerHost":"example-peer","inventoryIds":["example-token"],"maxUses":1}]}"#;
+    const INPUT: &str = r#"{"version":1,"title":"Example extended grant","requester":{"principal":"agent/example-requester","run":"example-run","step":"example-step","incarnation":"example-1"},"window":{"notBefore":"2026-10-20T12:00:00Z","notAfter":"2026-10-20T13:00:00Z"},"provider":{"name":"example","browserProfile":"example","origins":["https://example.com"]},"browserSteps":[{"index":0,"op":"fillSecret","locator":{"kind":"label","value":"token"},"inventoryId":"example-token"},{"index":1,"op":"human","kind":"passkey","note":"Approve example action"},{"index":2,"op":"click","locator":{"kind":"text","value":"delete"},"effect":"delete","target":"example-record"}],"writes":[{"vaultId":"example-vault","itemId":"example-item","fields":[{"inventoryId":"example-token","kind":"secret","op":"remove"}]},{"vaultId":"example-vault","itemId":"example-old-item","fields":[],"itemOp":"destroy"}],"readers":[{"principal":"agent/example-requester","peerHost":"example-peer","inventoryIds":["example-token"],"maxUses":1}]}"#;
 
     fn fixture() -> Value {
         serde_json::from_str(INPUT).unwrap()
@@ -762,7 +779,7 @@ mod extension_tests {
     #[test]
     fn extended_golden_and_absent_operations_preserved() {
         let manifest: TaskManifest = serde_json::from_str(INPUT).unwrap();
-        assert_eq!(manifest.digest().unwrap(), "02ce1423cadba9cdae9086100d3c865dba0661c6cdafab057a8b6659015220fc");
+        assert_eq!(manifest.digest().unwrap(), "7f4323d84bc2242a8134e434efab9d1b0247e6fda61e6f4526386712f0d0e4f7");
         let mut value = fixture();
         value["writes"][0]["fields"][0].as_object_mut().unwrap().remove("op");
         let absent: TaskManifest = serde_json::from_value(value.clone()).unwrap();
@@ -873,7 +890,7 @@ mod optional_member_tests {
     #[test]
     fn explicit_null_is_not_silently_dropped_before_hashing() {
         for member in ["locator", "literal", "issues", "effect", "target", "inventoryId", "kind", "note"] {
-            let mut step = json!({"index":0,"op":"click","locator":"example"});
+            let mut step = json!({"index":0,"op":"click","locator":{"kind":"text","value":"example"}});
             step[member] = Value::Null;
             assert!(serde_json::from_value::<TaskBrowserStep>(step).is_err(), "{member}");
         }
