@@ -167,11 +167,18 @@ def executable_command_guard(tree, protected, crates, public_commands=()):
                 # Cargo selectors intentionally use the renamed package.
                 if re.search(r'(?:-p|--package|--exclude)[ =]+$', prefix):
                     continue
+                shell_block = False
+                if path.suffix == '.md':
+                    for fence in re.finditer(r'^```([^\n]*)', text[:match.start()], re.M):
+                        shell_block = (not shell_block and fence[1].strip() in
+                                       ('sh', 'bash', 'shell', 'console'))
                 command = (
                     re.match(r'\s+--?[\w]', suffix)
-                    or re.fullmatch(r'\s*(?:[$>]\s*)?(?:exec\s+|sudo\s+)?', prefix)
+                    or ((path.suffix != '.md' or shell_block)
+                        and re.fullmatch(r'\s*(?:[$>]\s*)?(?:exec\s+|sudo\s+)?', prefix))
                     or re.search(r'''(?:Command::new|execFileSync|execFile|spawnSync|spawn)\(\s*["']$''', prefix)
                     or re.search(r'''subprocess\.(?:run|check_call|check_output|Popen)\(\s*\[\s*["']$''', prefix)
+                    or re.search(r'--bin[ =]+$', prefix)
                 )
                 if command:
                     checked += 1

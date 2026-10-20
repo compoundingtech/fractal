@@ -43,6 +43,15 @@ PROTECTED_EXECUTABLES = {
 
 
 def rewrite(text):
+    for old in PROTECTED_EXECUTABLES - {'st2', 'st3', 'stui'}:
+        new = CRATES.get(old)
+        if new is None:
+            continue
+        text = re.sub(r'(?P<flag>--bin[ =]+)' + re.escape(new) + r'(?![\w-])',
+                      lambda match: match['flag'] + old, text)
+        text = re.sub(r'(?P<flake>github:compoundingtech/smalltalk/[^\s`]*#)' +
+                      re.escape(new) + r'(?![\w-])',
+                      lambda match: match['flake'] + old, text)
     # Repair earlier output at reviewed runtime contexts, not Cargo selectors.
     text = re.sub(r'(?<![\w./-])fractal-fabric-adapter(?=\s+--)',
                   'st-fabric-adapter', text)
