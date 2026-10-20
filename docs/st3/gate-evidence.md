@@ -46,6 +46,29 @@ appear as deletion plus addition; submodules use their commit ID. `tests` lists
 immutable signed test record IDs the reviewer considered. The observer must
 obtain the verdict from its review execution and derive file hashes itself.
 
+### Receipt-mirror observations (not execution evidence)
+
+The existing protected Rust API `sign_observation` also accepts
+`Fact::ReceiptMirror`. Its wire kind is `receipt_mirror`, with the sole typed
+check key `receipt-mirror.check-quick` (`ReceiptMirrorCheck::CheckQuick`).
+It records `receipt_sha256` (the SHA-256 of the observed receipt bytes), `host`
+(the receipt's host identifier), `head`, `tree`, and `outcome` (`passed` or
+`failed`). `head` and `tree` must match the statement subject. The required
+typed `claim: "no_execution"` explicitly says that observing this receipt
+does **not** claim a command ran. The protected caller measures these facts;
+there is no caller-authored-statement or signing-key CLI.
+
+Use `ReceiptMirrorClaim::NoExecution` and `ReceiptMirrorOutcome` when constructing
+the fact, then the existing `sign_observation` and `put` APIs. `put` writes this
+kind only to `refs/notes/evidence/<tree>/<record-id>`, never the first layout or
+tags. No gate policy may use it in place of `tests`, including for `check-quick`.
+`scripts/evidence-verify --revision HEAD --check receipt-mirror.check-quick --keys FILE`
+prints trusted mirrors under `observations`, including their kind and all fields,
+but exits 1 with `satisfied: false` and reason `observation_only`. Asking for
+execution check `check-quick` likewise refuses mirror-only evidence; a mirror
+does not supersede or satisfy an actual execution record.
+
+
 The statement is the sole regular-file blob in a notes tree, named by its
 subject's full tree ID. For full/test records, `git commit-tree -S` signs that notes tree using Git's
 SSH signing. Its only parent is the observed source commit, so transporting the
@@ -90,8 +113,9 @@ lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") i
 refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
 Publishers write the tree-prefixed layout only (`scripts/evidence-publish`, `scripts/ci-evidence-observe`,
 `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/st3-kernel/src/evidence`) still writes
-the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
-removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
+the first layout for tests/reviews and ignores tree-prefixed refs when it lists execution evidence.
+Receipt mirrors are the exception: `put` writes them only in the tree-prefixed layout.
+The garbage collector removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
 
 Do not prune records as a side effect of branch cleanup, and keep the namespace when synchronizing
 repositories. The wildcard refspec is additive and does not need force updates or a merge of notes

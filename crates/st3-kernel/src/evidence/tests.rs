@@ -206,6 +206,86 @@ impl Fixture {
 }
 
 #[test]
+fn receipt_mirror_round_trip_is_tree_prefixed_and_never_execution_evidence() {
+    let f = Fixture::new();
+    let target_tree = tree(f.repo(), &f.head).unwrap();
+    let statement = f.statement(Fact::ReceiptMirror {
+        check: ReceiptMirrorCheck::CheckQuick,
+        receipt_sha256: "c".repeat(64),
+        host: "other".into(),
+        head: f.head.clone(),
+        tree: target_tree.clone(),
+        outcome: ReceiptMirrorOutcome::Passed,
+        claim: ReceiptMirrorClaim::NoExecution,
+    });
+    let id = sign_observation(f.repo(), &statement, &f.key).unwrap();
+    let expected_ref = format!("{NOTES_PREFIX}{target_tree}/{id}");
+    assert_eq!(put(f.repo(), &id, &f.trusted).unwrap(), expected_ref);
+    assert_eq!(put(f.repo(), &id, &f.trusted).unwrap(), expected_ref);
+    let observed = serde_json::to_value(
+        verify_record(f.repo(), &id, &f.trusted).unwrap().predicate.fact,
+    )
+    .unwrap();
+    assert_eq!(observed["kind"], "receipt_mirror");
+    assert_eq!(observed["check"], "receipt-mirror.check-quick");
+    assert_eq!(observed["claim"], "no_execution");
+    assert!(records(f.repo()).unwrap().is_empty());
+    assert_eq!(
+        git_text(
+            f.repo(),
+            &["for-each-ref", "--format=%(refname)", NOTES_PREFIX],
+            None,
+        )
+        .unwrap(),
+        expected_ref
+    );
+    f.put(&f.review(vec![id.clone()], Verdict::GO));
+    let mut required = policy();
+    required.required_checks = BTreeSet::from(["check-quick".into()]);
+    let evaluate = || {
+        verify(
+            f.repo(),
+            &f.head,
+            &f.base,
+            "fixture-change",
+            &f.trusted,
+            &required,
+        )
+    };
+    assert!(evaluate().is_err());
+    // Even an out-of-contract flat alias cannot turn the kind into executed tests.
+    git(f.repo(), &["update-ref", &format!("{NOTES_PREFIX}{id}"), &id], None).unwrap();
+    assert_eq!(
+        evaluate().unwrap_err().to_string(),
+        "review citation is not tests"
+    );
+    for (field, value) in [
+        ("check", serde_json::json!("check-quick")),
+        ("claim", serde_json::json!("execution")),
+    ] {
+        let mut invalid = observed.clone();
+        invalid[field] = value;
+        assert!(serde_json::from_value::<Fact>(invalid).is_err());
+    }
+    let mut invalid = serde_json::to_value(&statement).unwrap();
+    invalid["predicate"]["observed"]["receipt_sha256"] = serde_json::json!("bad");
+    assert!(
+        serde_json::from_value::<Statement>(invalid)
+            .unwrap()
+            .validate(f.repo())
+            .is_err()
+    );
+    let mut invalid = serde_json::to_value(&statement).unwrap();
+    invalid["predicate"]["observed"]["head"] = serde_json::json!(f.base);
+    assert!(
+        serde_json::from_value::<Statement>(invalid)
+            .unwrap()
+            .validate(f.repo())
+            .is_err()
+    );
+}
+
+#[test]
 fn legacy_and_fractal_predicate_uris_verify_but_an_unknown_uri_is_rejected() {
     let f = Fixture::new();
     assert_eq!(PREDICATE_TYPE, "https://smalltalk.dev/evidence/gate/v1");

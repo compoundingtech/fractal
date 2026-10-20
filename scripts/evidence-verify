@@ -312,7 +312,7 @@ def parse_time(value):
 
 
 def statement_of(blob, tree):
-    """The statement if it is a well-formed tests record keyed to this tree, else None."""
+    """A well-formed tests or non-executing receipt-mirror record keyed to this tree."""
     try:
         value = json.loads(blob)
         predicate = value['predicate']
@@ -324,9 +324,21 @@ def statement_of(blob, tree):
                 or predicate['schema_version'] != 1
                 or not isinstance(predicate['change_id'], str) or not predicate['change_id'].strip()
                 or predicate['tier'] not in ('full', 'degraded', 'test')
-                or not (predicate['signer'] is None or isinstance(predicate['signer'], str))
-                or observed.get('kind') != 'tests'
-                or not isinstance(observed.get('runner'), str)
+                or not (predicate['signer'] is None or isinstance(predicate['signer'], str))):
+            return None
+        if parse_time(predicate['observed_at']).tzinfo is None:
+            return None
+        if observed.get('kind') == 'receipt_mirror':
+            if (set(observed) != {'kind', 'check', 'receipt_sha256', 'host', 'head', 'tree', 'outcome', 'claim'}
+                    or observed['check'] != 'receipt-mirror.check-quick'
+                    or not SHA256.fullmatch(observed['receipt_sha256'])
+                    or not isinstance(observed['host'], str) or not observed['host'].strip()
+                    or observed['head'] != subject[0]['name'] or observed['tree'] != tree
+                    or observed['outcome'] not in ('passed', 'failed')
+                    or observed['claim'] != 'no_execution'):
+                return None
+            return value
+        if (observed.get('kind') != 'tests' or not isinstance(observed.get('runner'), str)
                 or not isinstance(observed.get('checks'), dict)):
             return None
         inputs = observed.get('inputs', {})
@@ -475,8 +487,20 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
                 untrusted.append(('bad_signature', commit))
             else:
                 untrusted.append(('untrusted_signer', commit))
+    # Receipt observations never enter execution selection, ordering, or policy satisfaction.
+    mirrors = [
+        {'record': c[0], 'signer': c[2], **c[1]['predicate']['observed']}
+        for c in trusted
+        if c[1]['predicate']['observed']['kind'] == 'receipt_mirror'
+        and check in ('check-quick', 'receipt-mirror.check-quick')
+    ]
+    trusted = [c for c in trusted if c[1]['predicate']['observed']['kind'] == 'tests']
+    degraded = [c for c in degraded if c[1]['predicate']['observed']['kind'] == 'tests']
     with_check = [c for c in trusted if check in c[1]['predicate']['observed']['checks']]
     if not with_check:
+        if mirrors:
+            raise Failure('observation_only', 'receipt mirrors record no command execution',
+                          observations=mirrors)
         only_degraded = [c for c in degraded if check in c[1]['predicate']['observed']['checks']]
         if only_degraded and not untrusted:
             raise Failure('degraded', f'only unsigned degraded records exist for check {check}',

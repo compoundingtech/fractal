@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add typed receipt-mirror.check-quick observations to the protected evidence signing API, without granting command-execution or gate authority.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "changed", "detail": "Evidence statements accept receipt_mirror with receipt_sha256, host, head, tree, passed/failed outcome, and mandatory no_execution claim." },
+  "rules": { "status": "none", "detail": "Receipt mirrors never satisfy execution evidence policy." },
+  "compatibility": { "status": "changed", "detail": "New receipt mirrors use only tree-prefixed notes refs. Older readers ignore this new observation kind; tests and reviews retain their existing format." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}
