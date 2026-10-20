@@ -4537,6 +4537,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "st-build-stamp"
+version = "0.1.0"
+
+[[package]]
 name = "st-chatgpt"
 version = "0.1.0"
 dependencies = [
@@ -4636,6 +4640,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-build-stamp",
  "st-drivers",
  "st-resource-protocol",
  "st-wire",
@@ -4766,6 +4771,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "st-build-stamp",
  "st-drivers",
  "st-runtime",
  "st3",

@@ -1117,9 +1117,9 @@ only for the exact saved Git SHA with a clean checkout, so a retry does not rebu
 unchanged sources merely because checkout refreshed their timestamps. Changed or dirty sources
 still take Cargo's normal validation path; the embedded source revision remains real.
 For a clean checkout Performance passes its actual full SHA as `AGENT_SPEC_REVISION`.
-The source-identity and shared CLI-version build scripts track that explicit value instead
-of unrelated Git index/ref timestamps. The CLI stamp still derives its real revision and
-commit time from Git.
+The build-identity script (crates/st-build-stamp, which only the st2 and st3 binaries depend on,
+so no library rebuilds for a new commit) tracks that explicit value instead of unrelated Git
+index/ref timestamps. The CLI stamp still derives its real revision and commit time from Git.
 Dirty checkouts continue to derive their identity from Git.
 PR snapshots also remain for seven days, outside the shared dependency-cache pool.
 The compiler-cache server stays alive during cold store generation; publication does not require

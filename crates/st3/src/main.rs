@@ -4357,6 +4357,10 @@ fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) 
 }
 
 fn main() -> ExitCode {
+    // Before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
+    use st_build_stamp::{CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL};
+    st_drivers::version::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
+    stui::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
     cli_output::finish(cli_main())
 }
 

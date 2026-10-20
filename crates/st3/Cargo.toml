@@ -64,6 +64,8 @@ stui = { path = "../stui" }
 st3-conversation-ui = { path = "../st3-conversation-ui", features = ["ratatui"] }
 st3-schema = { path = "../st3-schema" }
 st-drivers = { path = "../st-drivers" }
+# The build identity, baked here and not in a library (see crates/st-build-stamp).
+st-build-stamp = { path = "../st-build-stamp" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.27"
