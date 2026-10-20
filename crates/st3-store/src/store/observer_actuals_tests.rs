@@ -94,6 +94,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     assert!(store.runtime_authority(subject).unwrap().unwrap().actual.is_some());
     changes.borrow_and_update();
     store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-he860f6b73409 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */
         "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
     ).unwrap();
@@ -101,6 +102,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     assert!(changes.has_changed().unwrap(), "coverage failure must immediately wake readers");
     changes.borrow_and_update();
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hb2aea767ee4b owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id],
     ).unwrap();
     assert!(changes.has_changed().unwrap(), "WITHOUT ROWID repair must wake despite disabled publication");
@@ -111,6 +113,7 @@ fn terminal_authority_failed_coverage_wakes_until_verified_recovery() {
     assert!(changes.has_changed().unwrap(), "disabled coverage needs conservative resolution wakes");
     changes.borrow_and_update();
     store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h9cf9d3ce95b6 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */
         "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
     ).unwrap();
@@ -142,6 +145,7 @@ fn terminal_authority_operation_conflict_wakes_without_subject_claim_changes() {
     // A cross-subject idempotency collision repairs this shared operation projection.
     // Reproduce just that repair: no new terminal claim or graph-index advance.
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-ha7c61ef45a79 owner=st3_store::store::observer_actuals_tests TODO=prepare-body-and-predecessor-values */
         "UPDATE operations SET state='conflict' WHERE id IN
          (SELECT json_extract(body, '$._operation.id') FROM claims WHERE subject=?1)", [subject],
     ).unwrap();
@@ -307,18 +311,18 @@ fn observer_actuals_unsupported_coverage_stays_disabled_until_verified_recovery(
     read(&store);
     assert_eq!(read(&store).1, 0);
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-he860f6b73409 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-hc5f780da2b96 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
     ).unwrap();
     assert!(read(&store).1 > 0);
     assert!(read(&store).1 > 0, "seed must not clear failed native coverage");
     store.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-hb2aea767ee4b owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h00b4bf9bcc04 owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
     let repaired = read(&store);
     assert_eq!(repaired.0, None, "WITHOUT ROWID repairs must not reuse stale state");
     assert!(repaired.1 > 0);
     store.connection.write().execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h9cf9d3ce95b6 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-hb9cf185509a0 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
     ).unwrap();
     assert!(read(&store).1 > 0);
@@ -414,19 +418,19 @@ fn observer_actuals_external_ddl_requires_verified_physical_coverage() {
     assert_eq!(read(&store).1, 0);
     let external = Connection::open(&path).unwrap();
     external.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hc5f780da2b96 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-hfb7cbd7a3778 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
     ).unwrap();
     assert!(read(&store).1 > 0);
     assert!(read(&store).1 > 0, "external unsupported DDL must latch reuse off");
     external.execute(
-        /* sqlite-large-value: allow-for-now lv-h00b4bf9bcc04 owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
+        /* sqlite-large-value: allow-for-now lv-hd01430863f8c owner=st3_store::store::observer_actuals_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
     let repaired = read(&store);
     assert_eq!(repaired.0, None);
     assert!(repaired.1 > 0);
     assert!(read(&store).1 > 0, "external repair writes must not bypass the coverage latch");
     external.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hb9cf185509a0 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
+        /* sqlite-large-value: allow-for-now lv-ha99ab0825bc9 owner=st3_store::store::observer_actuals_tests TODO=chunk-or-reference-variable-columns */ "DROP TABLE projection_digest_repaired_claims;
          CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
     ).unwrap();
     assert!(read(&store).1 > 0);

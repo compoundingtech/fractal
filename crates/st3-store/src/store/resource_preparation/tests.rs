@@ -237,7 +237,7 @@ fn the_write_flag_follows_the_fast_path_the_stale_retries_and_the_fallback() {
     let _reset = ResetHook;
     BEFORE_VALIDATE.with(|hook| *hook.borrow_mut() = Some(Box::new(|store, pass| {
         store.connection.batched(|tx| -> Result<()> {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h6e3ad753b68c owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h43d726d1f22a owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
                 [pass.to_string()])?;
             Ok(())
         }).unwrap().unwrap();
