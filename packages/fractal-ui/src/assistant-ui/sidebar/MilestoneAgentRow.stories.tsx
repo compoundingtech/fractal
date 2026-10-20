@@ -95,6 +95,7 @@ const column = (root: HTMLElement, name: 'live' | 'frozen') => [...root.querySel
 
 export const GlyphStates: Story = {
   tags: ['critical'], name: 'G3 glyph states · live and frozen',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exhaustive live and frozen status matrix fixes timestamps to verify distinct glyph shapes, tones and observation-relative times.' } },
   args: { row: base },
   render: () => <main {...stylex.props(styles.root)}><StateMatrix /></main>,
   play: async ({ canvasElement }) => {
@@ -124,6 +125,7 @@ export const GlyphStates: Story = {
 
 export const TwoLineAndNesting: Story = {
   tags: ['critical'], name: 'Two lines · nesting in SidebarTree and standalone',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed parent, child and standalone rows verify 48px two-line geometry, nesting indentation and metric alignment.' } },
   args: { row: base },
   render: () => <main {...stylex.props(styles.root)}><TreeAndStandalone /></main>,
   play: async ({ canvasElement }) => {
@@ -194,6 +196,7 @@ export const TwoLineAndNesting: Story = {
 
 export const RowActions: Story = {
   tags: ['critical'], name: 'Row actions · shared menu and reported details',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed rows with and without conversations exercise pointer and keyboard menus, details dialogs and clipping boundaries.' } },
   args: { row: base },
   render: () => <main {...stylex.props(styles.root)}><ThemePortal><div {...stylex.props(styles.clipped)}><TreeWithActions /></div></ThemePortal></main>,
   play: async ({ canvasElement }) => {
@@ -286,6 +289,7 @@ const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async (
 
 export const AllStates: StoryObj<{ scheme: Scheme }> = {
   tags: ['critical'], name: 'All G3 states · live default width',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'An exhaustive status matrix at the default sidebar width verifies glyph uniqueness and theme tones, including states absent from a single scenario roster.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <AllStatesSidebar scheme={scheme} />,
   play: allStatesPlay,
@@ -323,6 +327,7 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
 
 export const PhoneTouchTargets: StoryObj<{ scheme: Scheme }> = {
   tags: ['critical'], name: 'Phone · native RM1 actions without hover',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px frame and a child without a conversation verify always-visible 44px touch targets, menu bounds and details access without hover.' } },
   args: { scheme: 'dark' },
   render: ({ scheme }) => <main {...stylex.props(styles.root, styles.phoneFrame, scheme === 'light' && lightTheme)}><NarrowLayoutContext.Provider value={true}><ThemePortal><TreeWithActions phone /></ThemePortal></NarrowLayoutContext.Provider></main>,
   play: phoneTouchPlay,
@@ -331,6 +336,7 @@ export const PhoneTouchTargetsLight: StoryObj<{ scheme: Scheme }> = { ...PhoneTo
 
 export const PhoneFocusNoHover: StoryObj<{ scheme: Scheme }> = {
   ...PhoneTouchTargets, name: 'Phone · native RM1 focus never opens hover UI',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed narrow tree row receives hover and focus beyond the opening delay to verify that phone interaction never opens hover UI.' } },
   play: async ({ canvasElement }) => {
     const row = await waitFor(() => within(canvasElement).getByRole('row', { name: parent.title }))
     await userEvent.hover(row)
