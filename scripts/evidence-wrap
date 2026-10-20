@@ -11,7 +11,7 @@ signer (scripts/evidence-sign, behind a sekrets grant; this script never sees th
 recomputes the tree and flake.lock itself and signs. A failing command is recorded too: a
 failure is a record, not a missing record.
 
-The note is imported as refs/notes/evidence/<record> in this checkout. With --push REMOTE it
+The note is imported as refs/notes/evidence/<tree>/<record> in this checkout. With --push REMOTE it
 is also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it
 only helps when the commit you push has the tree CI will test (a branch current with main).
 
@@ -213,7 +213,7 @@ def main(argv):
             print(json.dumps(summary, indent=2), file=sys.stderr)
             return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
-        ref = f'refs/notes/evidence/{record}'
+        ref = f'refs/notes/evidence/{tree}/{record}'
         if not git('for-each-ref', '--format=%(objectname)', ref).stdout.strip():
             git('update-ref', ref, record, '0' * len(record))
         result = {'record': record, 'ref': ref, 'tree': tree, 'check': args.check, 'exit_code': exit_code,

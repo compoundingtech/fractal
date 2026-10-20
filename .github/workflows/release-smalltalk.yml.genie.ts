@@ -22,7 +22,9 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ],
       "tags": [
         "**",
-        "!edge"
+        "!edge",
+        // Evidence records may live under refs/tags/evidence/ (one immutable tag per signed note); pushing one must never release.
+        "!evidence/**"
       ]
     },
     "workflow_dispatch": null,
@@ -32,7 +34,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "crates/st-drivers/build.rs",
+        "crates/st-build-stamp/**",
         "crates/st-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",

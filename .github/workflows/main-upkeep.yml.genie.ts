@@ -7,6 +7,8 @@ import {
   commonSetupSteps,
   fractalWebShellCache,
   fractalWebShellEnv,
+  fractalWebShellKeyStep,
+  fractalWebRunnerStep,
   fractalWebStoreCache,
   genieNixCacheStep,
   genieSetupSteps,
@@ -143,20 +145,37 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       'timeout-minutes': 15,
       defaults: { run: { shell: 'bash' } },
       steps: [
+        fractalWebRunnerStep,
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        fractalWebShellKeyStep,
         { name: 'Probe the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: { ...fractalWebStoreCache, 'lookup-only': true } },
-        { name: 'Probe the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: { ...fractalWebShellCache, 'lookup-only': true } },
-        ...[
-          ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
-        ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true' || steps.web-shell.outputs.cache-hit != 'true'" })),
+        { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
+        {
+          name: 'Verify web key completeness against the shell derivation',
+          id: 'web-shell-verify',
+          shell: 'bash',
+          run: `if bash scripts/ci-web-shell verify; then
+  exit 0
+else
+  status=$?
+  if [ "$status" -ne 2 ]; then exit "$status"; fi
+fi`,
+          env: { ...fractalWebShellEnv, CI_WEB_SHELL_CACHE_HIT: '${{ steps.web-shell.outputs.cache-hit }}' },
+        },
         ...[
           { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
           { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: fractalWebStoreCache },
         ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true'" })),
         ...[
-          { name: 'Fill the web shell closure', shell: 'bash', run: 'bash scripts/ci-web-shell fill', env: fractalWebShellEnv },
+          {
+            name: 'Fill the web shell closure',
+            shell: 'bash',
+            run: 'bash scripts/ci-web-shell fill',
+            env: { ...fractalWebShellEnv, CI_WEB_SHELL_IDENTITY: '${{ steps.web-shell-verify.outputs.identity }}' },
+          },
           { name: 'Save the web shell closure', uses: 'actions/cache/save@v4', with: fractalWebShellCache },
-        ].map((step) => ({ ...step, if: "steps.web-shell.outputs.cache-hit != 'true'" })),
+        ].map((step) => ({ ...step, if: "steps.web-shell-verify.outputs.cache-complete != 'true'" })),
       ],
     },
     // This check never ran in merge_group; keep its main measurements and generated-store cache.

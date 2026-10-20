@@ -1,8 +1,12 @@
-//! Bake a LocalStamp for a plain `cargo build`, per the shared
-//! build-versioning contract. Emitted as `ST_BUILD_STAMP_LOCAL` — a private var
-//! distinct from the fleet's `CLI_BUILD_STAMP`, so the flake's authoritative
-//! NixStamp can never be overridden by this (see src/version.rs). A hermetic Nix
-//! build has no `.git`, so this yields nothing there and the NixStamp is used.
+//! Bake this checkout's build identity, per the shared build-versioning contract. Only the final binaries (st2, st3) depend
+//! on this crate and hand the identity to the libraries at startup (`st_drivers::version::set_build_stamps`), so a new commit
+//! rebuilds those binaries and none of the libraries most of the workspace depends on.
+//!
+//! - `ST_BUILD_STAMP_LOCAL`: a LocalStamp for a plain `cargo build`, a private var distinct from the fleet's
+//!   `CLI_BUILD_STAMP`, so the flake's authoritative NixStamp can never be overridden by this (see
+//!   crates/st-drivers/src/version.rs). A hermetic Nix build has no `.git`, so this yields nothing there and the NixStamp is used.
+//! - `AGENT_SPEC_REVISION`: the source revision st2 reports as `agentSpecRevision`. A supplied value (the flake, CI) must be a
+//!   full SHA or an explicit `nix-dirty.*` identity; otherwise the clean HEAD, `local-dirty.<HEAD>` or `local.unknown`.
 //!
 use std::process::Command;
 
@@ -13,6 +17,13 @@ fn git(args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!s.is_empty()).then_some(s)
+}
+
+fn is_sha(revision: &str) -> bool {
+    revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Tell Cargo which Git files can change the stamp. The directory `refs` is NOT one of them: in a linked worktree
@@ -55,15 +66,20 @@ fn watch_git_inputs() {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=AGENT_SPEC_REVISION");
-    let mut explicit_clean_source = false;
-    if let Some(rev) = git(&["rev-parse", "--short", "HEAD"]) {
-        let full_rev = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| rev.clone());
-        let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
-        explicit_clean_source = !dirty
-            && std::env::var("AGENT_SPEC_REVISION")
-                .ok()
-                .zip(git(&["rev-parse", "HEAD"]))
-                .is_some_and(|(supplied, head)| supplied == head);
+    let supplied = std::env::var("AGENT_SPEC_REVISION")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if let Some(value) = &supplied {
+        assert!(
+            is_sha(value) || value.starts_with("nix-dirty."),
+            "AGENT_SPEC_REVISION must be a full source SHA or explicit nix-dirty identity"
+        );
+    }
+    let full_rev = git(&["rev-parse", "HEAD"]);
+    let dirty =
+        full_rev.is_some() && git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    if let Some(full_rev) = &full_rev {
+        let rev = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| full_rev.clone());
         let commit_ts = git(&["log", "-1", "--format=%ct"])
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
@@ -82,16 +98,19 @@ fn main() {
             format!(r#"{{"type":"local","rev":"{rev}","fullRev":"{full_rev}","commitTs":{commit_ts},"dirty":{dirty}}}"#);
         println!("cargo:rustc-env=ST_BUILD_STAMP_LOCAL={stamp}");
     }
-    // Performance supplies the real full SHA for a clean checkout. Its value changes
-    // with source identity, while fresh index/ref timestamps do not affect this stamp.
-    // Keep deriving the stamp above from Git, including its real commit time.
-    if explicit_clean_source {
-        println!("cargo:rerun-if-changed=src");
-        println!("cargo:rerun-if-changed=Cargo.toml");
+    let revision = supplied.clone().unwrap_or_else(|| match &full_rev {
+        None => "local.unknown".to_owned(),
+        Some(head) if dirty => format!("local-dirty.{head}"),
+        Some(head) => head.clone(),
+    });
+    println!("cargo:rustc-env=AGENT_SPEC_REVISION={revision}");
+    // Performance supplies the real full SHA for a clean checkout. Its value changes with source identity, while fresh
+    // index/ref timestamps do not affect this stamp, so only a new value reruns this. Keep deriving the stamp above from Git,
+    // including its real commit time.
+    if !dirty && supplied.is_some() && supplied == full_rev {
         return;
     }
     // Rebuild the stamp when HEAD moves or the working tree changes (dirty flag).
-    // This build script also stamps st-drivers from its crate directory. Git resolves the
-    // same worktree metadata for both callers, including linked-worktree layouts.
+    // Git resolves the same worktree metadata for each package, including linked-worktree layouts.
     watch_git_inputs();
 }

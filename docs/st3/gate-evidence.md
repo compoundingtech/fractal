@@ -55,22 +55,78 @@ or a detached signature scheme. This is in-toto statement JSON inside a signed
 Git commit, **not** a DSSE envelope or a GitHub artifact attestation.
 
 The immutable record ID is this notes commit's full object ID. Its only ref is
-`refs/notes/evidence/<record-id>`. There is no shared mutable notes tip: different
+`refs/notes/evidence/<tree>/<record-id>`, where `<tree>` is the git tree the note is about (the
+name of the one entry in the note's flat tree). There is no shared mutable notes tip: different
 writers create different refs, so their updates cannot conflict. Duplicate
 imports verify the signature and create the ref transactionally, or confirm it
-already points to the same ID. A ref whose suffix does not equal its target is
-invalid. The flat notes tree remains readable with Git's notes command:
+already points to the same ID. A ref whose last component does not equal its target, or that
+sits under a tree the note is not about, is invalid and finds nothing. The flat notes tree
+remains readable with Git's notes command:
 
 ```sh
-git notes --ref=refs/notes/evidence/RECORD_ID show TREE_ID
-git push origin 'refs/notes/evidence/*:refs/notes/evidence/*'
-git fetch origin 'refs/notes/evidence/*:refs/notes/evidence/*'
+git notes --ref=refs/notes/evidence/TREE_ID/RECORD_ID show TREE_ID
+git push origin 'refs/notes/evidence/TREE_ID/RECORD_ID:refs/notes/evidence/TREE_ID/RECORD_ID'
+git fetch origin 'refs/notes/evidence/TREE_ID/*:refs/notes/evidence/TREE_ID/*'
 ```
 
-Keep the namespace when synchronizing repositories; do not prune records as a
-side effect of branch cleanup. The wildcard refspec is additive and does not
-need force updates or a merge of notes histories. v1 uses one ref per record;
-large-repository indexing and retention belong to later stages.
+**One tree is one prefix.** The verifier, the gate, the signed-tree job and the publisher reach the
+records of a tree through `refs/notes/evidence/<tree>/` (and the records of an input key through
+`refs/notes/evidence-input/<check>/<key>/`), never by listing or fetching every note: a lookup costs
+what that tree's own records cost, however many trees have records. A test pins this (the verifier's
+`for-each-ref` listings during one verification return at most the tree's own records). The cost of the
+whole namespace is paid only by `scripts/evidence-gc`, which also keeps its size bounded (see below).
+
+**The first layout** was `refs/notes/evidence/<record-id>` (one object id under the prefix). The
+verifier still reads it, with a pattern that matches only names exactly one object id long, so it never
+lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
+refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
+Publishers write the tree-prefixed layout only (`scripts/evidence-publish`, `scripts/ci-evidence-observe`,
+`scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/st3-kernel/src/evidence`) still writes
+the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
+removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
+
+Do not prune records as a side effect of branch cleanup, and keep the namespace when synchronizing
+repositories. The wildcard refspec is additive and does not need force updates or a merge of notes
+histories. v1 uses one ref per record.
+
+### Garbage collection and the size of the namespace
+
+Every gate member of every pull request and merge-group run adds one ref, so the namespace grows with CI
+(measured 2026-10-19: 9,430 records on 1,195 trees, about 8 records per tree, 258 input-index refs, 2.2k to
+3.5k new refs a day; the whole remote lists 13,797 refs, 1.3 MB, in about 0.5 s). `scripts/evidence-gc`
+keeps it bounded. It is the one tool that reads the whole namespace; nothing on a hot path does.
+
+```sh
+scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk            # dry run: prints counts per reason
+scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk --apply    # migrates and deletes locally and on the remote
+```
+
+**Keep set.** A note applies to the exact tree it names, so a note of a superseded pull request head is not
+needed. Kept: records of each open pull request's *current* head tree and of each merge-queue tip while it is
+queued (`open-pr-head`); records of the trees of main's first-parent commits of the last `--keep-main-days`
+(default 3: `main-window`); and an input-index ref (`refs/notes/evidence-input/<check>/<key>/<record>`) whose
+key still equals what a protected head tree (or main's tip) projects to for that check, so unchanged-input
+reuse keeps working (`input-key`). Everything else is kept for `--grace-hours` (default 24, a note written for a
+head the listing raced with) and then deleted. The first layout is read from the note: a protected record is
+migrated to `refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), an
+unprotected one is deleted.
+
+**Bounds.** `--soft` (default 3,000): above it the oldest unprotected refs go first. `--cap` (default 5,000): if
+the protected set alone is over it, nothing protected is deleted, the set is printed and the exit status is 3, so
+a job summary shows it; publishers never fail a job over the cap. Output: refs and advertised bytes before and
+after, and the count per reason.
+
+**Sizing (2026-10-19 numbers).** A main tree that was tested carries 11.4 records on average and about 60 main
+trees a day have records, so the main window costs about 690 refs a day; the 265 open pull requests have 50 trees
+with records (289 refs) between them. The protected set is therefore about 290 + 690 x days: 2.4k for 3 days (the
+default), 5.1k for 7 days. A 7-day window needs `--cap 8000 --soft 6000`; with the default cap of 5,000 it would
+raise the alert every day. The main window serves a re-run or a push on the exact tree of a recent main commit,
+which happens within hours, so 3 days is generous.
+
+**Safety.** It fails closed: if a head commit cannot be turned into a tree, `--apply` deletes nothing (exit 1). A
+failed remote push leaves the local refs alone. A second run finds nothing to do. Refs outside the two namespaces
+and refs that are not well-formed records are never touched. Take a bundle first when running it by hand:
+`git bundle create evidence-notes.bundle 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
 
 ## Trust and custody
 
@@ -296,7 +352,7 @@ for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected o
 (`$EVIDENCE_OBSERVER`, the operator's JSON argument vector; default
 `st sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
 persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
-against the key list in `main`, creates `refs/notes/evidence/<record>` and pushes it. It runs no
+against the key list in `main`, creates `refs/notes/evidence/<tree>/<record>` and pushes it. It runs no
 check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
 unverified. A full record that does not verify fails the job and creates no ref. A cancelled
 run has no `linux-gate` job to record (the observer exits 2): the workflow skips cancelled
@@ -424,6 +480,12 @@ lower-case names with nonempty string values (a shard number, a test set). It ca
 one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
 (`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
 
+The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue. Each
+`fractal-web-execution` shard signs its own result (check `fractal-web`, artifact `evidence-note-fractal-web-shard-N`) and
+records `kit_shard`, `kit_shard_count`, `kit_play_set` and `app_test_set`, so a pull request's per-commit set can never be
+mistaken for the merge queue's full one, and a later policy can require every shard. A run that did not execute the lane
+makes no note and the shadow report reads `n/a`. The lane has no skip policy yet: its notes are evidence only.
+
 ### Shadow verification
 
 After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,
@@ -517,7 +579,7 @@ a policy input, until deadlines and the production controller are decided.
 
 `scripts/evidence-verify` answers one question without a built st: does a trusted,
 signed note exist for this exact tree and this check? It needs only `git`,
-`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<record-id>` notes
+`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<tree>/<record-id>` notes
 (one SSH-signed commit per record), and finishes in well under a second on a
 repository with hundreds of records. `st evidence verify` stays the reference
 implementation; the script's tests use real Git repositories and real SSH

@@ -10,7 +10,7 @@ mod voice;
 
 pub use ui::screens::{HOME_IDLE_TEXT, HOME_UNKNOWN_TEXT};
 pub use ui::checklist;
-pub use version::display_version;
+pub use version::{display_version, set_build_stamps};
 
 #[cfg(test)]
 use st3::EvidenceStore;
