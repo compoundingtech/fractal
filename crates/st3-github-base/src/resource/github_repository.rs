@@ -2451,6 +2451,23 @@ mod tests {
     }
 
     const WORKFLOW_RUNS: &str = "/repos/acme/garden/actions/workflows/perf.yml/runs?branch=main&event=push&status=failure&per_page=100";
+    const DAILY_RUNS: &str = "/repos/acme/garden/actions/workflows/daily-long.yml/runs?branch=main&status=failure&per_page=100";
+
+    fn daily_run(id: u64, attempt: u64, event: &str) -> Value {
+        json!({"id": id, "run_attempt": attempt, "head_sha": "d".repeat(40),
+            "name": "Daily long lanes", "path": ".github/workflows/daily-long.yml", "event": event,
+            "head_branch": "main", "status": "completed", "conclusion": "failure",
+            "repository": {"full_name": "acme/garden"}})
+    }
+
+    fn daily_jobs(github: &FakeGithub, id: u64, attempt: u64, jobs: &[(&str, &str)]) -> String {
+        let path = format!("/repos/acme/garden/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100");
+        let jobs = jobs.iter().map(|(name, conclusion)| json!({"name": name,
+            "status": "completed", "conclusion": conclusion, "run_attempt": attempt}))
+            .collect::<Vec<_>>();
+        github.route(&path, json!({"total_count": jobs.len(), "jobs": jobs}));
+        path
+    }
 
     #[tokio::test]
     async fn main_performance_failures_are_narrow_and_only_read_run_metadata() {
@@ -2473,6 +2490,7 @@ mod tests {
             runs.push(excluded);
         }
         github.route(WORKFLOW_RUNS, json!({"workflow_runs": runs}));
+        github.route(DAILY_RUNS, json!({"workflow_runs": []}));
         let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
         let first = observe_at(request(&[field], None, None), &base,
             Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
@@ -2483,12 +2501,13 @@ mod tests {
         assert_eq!(failures[1]["workflow_path"], ".github/workflows/perf.yml");
         assert_eq!(failures[0]["url"], "https://github.com/acme/garden/actions/runs/7");
         assert_eq!(github.take_requests(), vec!["GET /repos/acme/garden HTTP/1.1".to_owned(),
-            format!("GET {WORKFLOW_RUNS} HTTP/1.1")]);
+            format!("GET {WORKFLOW_RUNS} HTTP/1.1"), format!("GET {DAILY_RUNS} HTTP/1.1")]);
+        assert!(failures.iter().all(|failure| failure.get("failed_jobs").is_none()));
         let second = observe_at(request(&[field], first.cursor.as_deref(), Some(first.facts.clone())),
             &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
         assert_eq!(second.facts, first.facts);
         let revalidated = github.requests.lock().clone();
-        assert_eq!(revalidated.len(), 2);
+        assert_eq!(revalidated.len(), 3);
         assert!(revalidated.iter().all(|head| head.to_ascii_lowercase().contains("if-none-match:")));
         assert!(github.graphql_requests.lock().is_empty());
     }
@@ -2501,6 +2520,7 @@ mod tests {
         github.route(WORKFLOW_RUNS, json!({"workflow_runs": [workflow_run(1, 1)]}));
         github.route(page_two, json!({"workflow_runs": [workflow_run(2, 1)]}));
         github.links.lock().insert(WORKFLOW_RUNS.into(), format!("<{base}{page_two}>; rel=\"next\""));
+        github.route(DAILY_RUNS, json!({"workflow_runs": []}));
         let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
         let first = observe_at(request(&[field], None, None), &base,
             Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
@@ -2524,6 +2544,68 @@ mod tests {
         github.refuse(WORKFLOW_RUNS, "403 Forbidden");
         assert!(observe_at(request(&[field], rerun.cursor.as_deref(), Some(rerun.facts)),
             &base, Some(&GithubAuth::test("fixture-auth"))).await.is_err());
+        assert!(github.graphql_requests.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn main_performance_failures_include_daily_runs_only_when_a_perf_lane_failed() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));
+        github.route(WORKFLOW_RUNS, json!({"workflow_runs": [workflow_run(7, 1)]}));
+        let mut runs = vec![daily_run(20, 1, "schedule"), daily_run(21, 2, "workflow_dispatch"),
+            daily_run(22, 1, "workflow_dispatch")];
+        let mut pushed = daily_run(23, 1, "push");
+        pushed["path"] = json!(".github/workflows/daily-long.yml@refs/heads/main");
+        runs.push(pushed);
+        let mut renamed = daily_run(24, 1, "schedule");
+        renamed["name"] = json!("Performance");
+        runs.push(renamed);
+        github.route(DAILY_RUNS, json!({"workflow_runs": runs}));
+        let load = daily_jobs(&github, 20, 1, &[("daily-test-build", "success"),
+            ("daily-perf-load", "failure"), ("daily-perf-cost", "success"), ("daily-report", "success")]);
+        let tests_only = daily_jobs(&github, 21, 2, &[("daily-tests", "failure"),
+            ("daily-perf-load", "success"), ("daily-perf-load-hog", "cancelled")]);
+        let hogs = daily_jobs(&github, 22, 1, &[("daily-tests", "failure"),
+            ("daily-perf-load-hog-macos", "failure"), ("daily-perf-load-hog", "failure")]);
+        let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
+        let first = observe_at(request(&[field], None, None), &base,
+            Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        let failures = first.facts[field].as_array().unwrap();
+        assert_eq!(failures.iter().map(|failure| failure["run_id"].as_u64().unwrap())
+            .collect::<Vec<_>>(), [7, 20, 22]);
+        assert!(failures[0].get("failed_jobs").is_none());
+        assert_eq!(failures[1]["failed_jobs"], json!(["daily-perf-load"]));
+        assert_eq!(failures[1]["workflow"], "Daily long lanes");
+        assert_eq!(failures[1]["workflow_path"], ".github/workflows/daily-long.yml");
+        assert_eq!(failures[1]["event"], "schedule");
+        assert_eq!(failures[2]["failed_jobs"], json!(["daily-perf-load-hog", "daily-perf-load-hog-macos"]));
+        assert_eq!(failures[2]["event"], "workflow_dispatch");
+        // Only daily-long schedule/dispatch runs have their attempt's jobs read.
+        let requests = github.take_requests();
+        assert_eq!(requests.len(), 6);
+        for path in [&load, &tests_only, &hogs] {
+            assert!(requests.contains(&format!("GET {path} HTTP/1.1")));
+        }
+        let second = observe_at(request(&[field], first.cursor.as_deref(), Some(first.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(second.facts, first.facts);
+        // Only the newest failed daily runs have their jobs read.
+        let many = (30..41).map(|id| daily_run(id, 1, "schedule")).collect::<Vec<_>>();
+        let paths = (30..41).map(|id| daily_jobs(&github, id, 1, &[("daily-perf-cost", "failure")]))
+            .collect::<Vec<_>>();
+        github.route(DAILY_RUNS, json!({"workflow_runs": many}));
+        github.take_requests();
+        let window = observe_at(request(&[field], second.cursor.as_deref(), Some(second.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(window.facts[field].as_array().unwrap().len(), 11);
+        let requests = github.take_requests();
+        assert!(!requests.contains(&format!("GET {} HTTP/1.1", paths[0])));
+        assert!(requests.contains(&format!("GET {} HTTP/1.1", paths[10])));
+        // A jobs listing longer than one page fails rather than truncates.
+        github.route(&paths[10], json!({"total_count": 101, "jobs": []}));
+        assert!(observe_at(request(&[field], window.cursor.as_deref(), Some(window.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap_err()
+            .to_string().contains("page bound"));
         assert!(github.graphql_requests.lock().is_empty());
     }
 
