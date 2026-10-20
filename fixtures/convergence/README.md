@@ -27,6 +27,11 @@ corpus slot. After merging main, regenerate v3 with
 `cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v3.json`.
 The generator serializes the complete merged registry; do not hand-edit the snapshot.
 
+`claims-v4.json` captures the task-grant manifest registry, including
+`task-grant.created` and `task-grant.revoked`. Generate it with
+`cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v4.json`.
+The simulation uses v4; earlier snapshots remain unchanged.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&st3_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation

@@ -23,6 +23,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("resource_observations", &[]),
     ("glass_heads", &[]),
     ("person_directive_notes", &[]),
+    ("task_grants", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),

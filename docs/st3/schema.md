@@ -48,6 +48,7 @@ Storage digest: `ab318454d85787af18a36821c53eefcd4bc33c97da610305e607525dc6fb0b9
 | `sekret` | `sekret/HOST or sekret/HOST/OWNER/NAME` | no | A host's sekrets gateway, or one of its profiles: calls run with a credential the caller never reads. |
 | `step-run` | `step-run/GENERATION/PATH` | no | One step attempt lineage. |
 | `subscription` | `subscription/RUN/LOCAL_ID` | no | A mission-run observer subscription. |
+| `task-grant` | `task-grant/ID` | no | An immutable task authorization manifest and revocation, never credential values. |
 
 Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE.NAME`.
 
@@ -203,6 +204,8 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `subscription.mission-started` | `subscription` | `system-only` | `append` | `durable` | `mission_run!:subject-reference(mission-run)`, `request!:string` | `subscription` |
 | `subscription.state` | `subscription` | `system-only` | `state-transition` | `durable` | `fields:array`, `observer:subject-reference`, `reason:string`, `state!:string`, `to:subject-reference` | `subscription` |
 | `subscription.watch-ended` | `subscription` | `system-only` | `append` | `durable` | `message:subject-reference(message)`, `reason!:string`, `since_unix_ms!:string` | `subscription` |
+| `task-grant.created` | `task-grant` | `system-only` | `append` | `durable` | `digest!:string`, `grant_id!:string`, `incarnation!:string`, `manifest!:object`, `op_proxy_case_id!:string`, `requester!:string`, `run!:string`, `step!:string`, `window!:object` |  |
+| `task-grant.revoked` | `task-grant` | `system-only` | `append` | `durable` | `grant_id!:string`, `reason!:string` |  |
 | `terminal.input.requested` | `agent`, `pty` | `authorized-requester` | `append` | `durable` | `byte_count:integer`, `incarnation_id:string`, `intent:string`, `mode:string`, `runtime_id:string`, `sequence:integer`, `sha256:string` |  |
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |

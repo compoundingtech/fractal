@@ -676,7 +676,18 @@ mod tests {
         for origin in ["https://example.com", "https://example.com:443", "https://example.com:8443"] {
             let mut value = fixture();
             value["provider"]["origins"] = json!([origin]);
+            value["browserSteps"][0]["literal"] = json!(origin);
             accepted(value);
+        }
+        for literal in ["https://EXAMPLE.com/path", "https://example.com:443/path"] {
+            let mut value = fixture();
+            value["browserSteps"][0]["literal"] = json!(literal);
+            accepted(value);
+        }
+        for literal in ["http://example.com", "https://other.example.com", "https://example.com:8443"] {
+            let mut value = fixture();
+            value["browserSteps"][0]["literal"] = json!(literal);
+            refused(value);
         }
     }
 
