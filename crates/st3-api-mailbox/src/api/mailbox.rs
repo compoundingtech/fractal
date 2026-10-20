@@ -64,6 +64,15 @@ pub fn synthetic_mailbox_protocol_router_with(state: AppState, subject: &str, fa
         archives_inbox: false,
     }))
 }
+/// Resolve only the requested address. The transport peer remains the immutable
+/// physical principal: a public rename must never create new mailbox custody.
+fn storage_fence(state: &AppState, mut fence: Fence) -> Result<Fence, ApiError> {
+    fence.subject = crate::store::identities::resolve_reference_conn(
+        &state.store.readers.get(), &fence.subject,
+    ).map_err(ApiError::bad)?;
+    Ok(fence)
+}
+
 
 pub async fn subscribe(
     State(state): State<AppState>,
@@ -71,6 +80,7 @@ pub async fn subscribe(
     peer: Option<Extension<NativeDeliveryPeer>>,
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    let fence = storage_fence(&state, fence)?;
     authorize(&fence, peer.as_ref().map(|p| &p.0))?;
     let checked_state = state.clone();
     let binding = fence.clone();
@@ -103,6 +113,7 @@ pub async fn bind(
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Fence>,
 ) -> Result<Json<Fence>, ApiError> {
+    let request = storage_fence(&state, request)?;
     authorize(&request, peer.as_ref().map(|p| &p.0))?;
     let bind_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
@@ -127,6 +138,7 @@ pub async fn bind_admitted_fixture(
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Fence>,
 ) -> Result<Json<Value>, ApiError> {
+    let request = storage_fence(&state, request)?;
     authorize(&request, peer.as_ref().map(|peer| &peer.0))?;
     let bound = blocking_action(move || state.store.bind_mailbox(&request)).await?;
     Ok(Json(json!({"api_version":"st3.v1","value":bound})))
@@ -139,6 +151,7 @@ pub async fn subscribe_admitted_fixture(
     peer: Option<Extension<NativeDeliveryPeer>>,
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
+    let fence = storage_fence(&state, fence)?;
     authorize(&fence, peer.as_ref().map(|peer| &peer.0))?;
     state.store.check_mailbox(&fence).map_err(ApiError::bad)?;
     signal_local_change(&state);
@@ -150,6 +163,7 @@ pub async fn attachment(
     Query(fence): Query<Fence>,
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<crate::mailbox::Attachment>, ApiError> {
+    let fence = storage_fence(&state, fence)?;
     authorize(&fence, peer.as_ref().map(|p| &p.0))?;
     let store = state.store.clone();
     let checked_state = state.clone();
@@ -196,6 +210,8 @@ pub async fn receipt(
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Receipt>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    let mut request = request;
+    request.fence = storage_fence(&state, request.fence)?;
     authorize(&request.fence, peer.as_ref().map(|p| &p.0))?;
     if request.fence.component != "delivery"
         || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")

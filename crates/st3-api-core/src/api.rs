@@ -369,6 +369,9 @@ impl ApiError {
     pub fn bad(error: St3Error) -> Self {
         let status = match error.code {
             "recipient-retired"
+            | "identity-cycle"
+            | "identity-occupied"
+            | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
             | "stale-subject"
@@ -386,7 +389,7 @@ impl ApiError {
             | "wrong-message-recipient"
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
@@ -570,6 +573,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/agents/rename-id", post(agents::rename_agent_id))
+        .route("/v1/missions/rename-id", post(agents::rename_mission_id))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
@@ -4795,12 +4800,19 @@ fn client_launch_resource(
                 .map(|revision| format!("launch-approval/{}/{revision}", session.id))
         })
         .collect::<Vec<_>>();
+    use crate::store::identities::{IdentityKind, IdentityStore};
+    let mission = format!("mission/{}", session.mission.strip_prefix("mission/").unwrap_or(&session.mission));
+    let title = match store.resolve_identity(IdentityKind::Mission, &mission) {
+        Ok(resolved) => resolved.canonical_id.strip_prefix("mission/").unwrap_or(&resolved.canonical_id).to_owned(),
+        Err(error) if error.code == "identity-unknown" => session.mission.clone(),
+        Err(error) => return Err(error.into()),
+    };
     Ok(json!({
         "id": format!("launch/{}", session.id),
         "kind": "launch",
         "revision": format!("launch/{}", session.updated_at_unix_ms),
         "updated_at": client_timestamp(session.updated_at_unix_ms),
-        "title": session.mission,
+        "title": title,
         "phase": phase,
         "request": session.request,
         "planner": session.planner,
@@ -9033,6 +9045,8 @@ pub fn accept_message_receipt_with_upload_owner(
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
+    let requested_recipient = normalize_message_party(&request.to);
+    let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
         return Err(ApiError::bad(St3Error::new(
             "adapter-route-refused",
@@ -9084,8 +9098,14 @@ pub fn accept_message_receipt_with_upload_owner(
             )));
         }
     }
-    let from = normalize_message_party(&request.from);
-    let to = normalize_message_party(&request.to);
+    let requested_from = normalize_message_party(&request.from);
+    // Device signatures cover their original party spellings. Unsigned writes use stable
+    // storage identities; signed historical party labels are resolved by the delivery index.
+    let (from, to) = if device_signature.is_some() {
+        (requested_from, requested_recipient.clone())
+    } else {
+        (receipt_recipient(&state.store, &requested_from)?.1, recipient_identity.clone())
+    };
     if !from.starts_with("daemon/")
         && request
             .tags
@@ -9312,6 +9332,9 @@ pub fn accept_message_receipt_with_upload_owner(
         "wake"
     };
     Ok(MessageSendReceipt {
+        requested_recipient,
+        recipient,
+        recipient_identity,
         kind: Some(kind.into()),
         message: MessageView {
             subject,
@@ -9339,6 +9362,32 @@ pub fn accept_message_receipt_with_upload_owner(
         already_sent: !appended,
         sent_at: Some(client_timestamp(record.accepted_at_unix_ms)),
     })
+}
+
+fn receipt_recipient(store: &Store, requested: &str) -> Result<(String, String), ApiError> {
+    use crate::store::identities::IdentityKind;
+    if requested.starts_with("agent/") {
+        let resolved = public_identity(store, IdentityKind::Agent, requested)?;
+        Ok((resolved.canonical_id, resolved.identity))
+    } else {
+        Ok((requested.to_owned(), requested.to_owned()))
+    }
+}
+
+fn public_identity(
+    store: &Store,
+    kind: crate::store::identities::IdentityKind,
+    id: &str,
+) -> Result<crate::store::identities::ResolvedIdentity, ApiError> {
+    use crate::store::identities::{IdentityStore, ResolvedIdentity};
+    match store.resolve_identity(kind, id) {
+        Ok(resolved) => Ok(resolved),
+        // A first send and a discovered or historical roster row need no declaration.
+        Err(error) if error.code == "identity-unknown" => Ok(ResolvedIdentity {
+            kind, identity: id.into(), canonical_id: id.into(), naming_revision: None,
+        }),
+        Err(error) => Err(ApiError::bad(error)),
+    }
 }
 
 /// A recipient's successful reply is durable evidence that the parent was consumed.
@@ -9667,6 +9716,8 @@ pub async fn start_mission_run_action(
         .store
         .create_mission_run(&request)
         .map_err(ApiError::bad)?;
+    let mut response = response;
+    runs::present_mission_run(&state.store, &mut response).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(response))
 }
@@ -9683,7 +9734,7 @@ fn cached_revision_submission(
         .cached_idempotency_response::<MissionRunView>(direct_key)
         .map_err(ApiError::internal)?
     {
-        return Ok(Some(RevisionSubmissionView {
+        let mut result = RevisionSubmissionView {
             provenance: state
                 .store
                 .mission_provenance(&mission_run.mission, &mission_run.revision)
@@ -9691,7 +9742,9 @@ fn cached_revision_submission(
             status: "applied".into(),
             mission_run,
             proposal: None,
-        }));
+        };
+        runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
+        return Ok(Some(result));
     }
     let Some(cached) = state
         .store
@@ -9710,7 +9763,7 @@ fn cached_revision_submission(
         .mission_run(&proposal.run)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::internal("the proposal mission run is unavailable"))?;
-    Ok(Some(RevisionSubmissionView {
+    let mut result = RevisionSubmissionView {
         provenance: state
             .store
             .mission_provenance(&mission_run.mission, &proposal.candidate_revision)
@@ -9718,7 +9771,9 @@ fn cached_revision_submission(
         status: proposal.status.clone(),
         mission_run,
         proposal: Some(proposal),
-    }))
+    };
+    runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
+    Ok(Some(result))
 }
 
 async fn get_revision_proposal(
@@ -9939,11 +9994,18 @@ pub struct LiveSession {
     pub driver: Option<String>,
 }
 
+pub fn session_storage_subject(state: &AppState, subject: &str) -> Result<String, ApiError> {
+    crate::store::identities::resolve_reference_conn(&state.store.readers.get(), subject)
+        .map_err(ApiError::bad)
+}
+
 pub fn live_session(
     state: &AppState,
     subject: &str,
     expected_incarnation: Option<&str>,
 ) -> Result<LiveSession, ApiError> {
+    let identity = session_storage_subject(state, subject)?;
+    let subject = identity.as_str();
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
@@ -10020,6 +10082,7 @@ pub async fn input_session_as(
     request: SessionInputRequest,
     authority_actor: &str,
 ) -> Result<Json<SessionControlResponse>, ApiError> {
+    let subject = session_storage_subject(state, &subject)?;
     let result_key = format!(
         "session-control-result:input:{subject}:{}",
         request.idempotency_key
@@ -10143,6 +10206,7 @@ pub async fn signal_session_as(
     request: SessionSignalRequest,
     actor: &str,
 ) -> Result<Json<SessionControlResponse>, ApiError> {
+    let subject = session_storage_subject(&state, &subject)?;
     let signal = match request.signal.as_str() {
         "interrupt" => libc::SIGINT,
         "terminate" => libc::SIGTERM,

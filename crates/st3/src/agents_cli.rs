@@ -227,6 +227,9 @@ pub(super) async fn run_agents(
             ).await?;
             print_value(&response, json_output)
         }
+        AgentsCommand::RenameId(args) => {
+            run_identity_rename(endpoint, args, true, json_output).await
+        }
         AgentsCommand::Queue(args) => {
             run_agent_queue(endpoint, configured_person, args, json_output).await
         }

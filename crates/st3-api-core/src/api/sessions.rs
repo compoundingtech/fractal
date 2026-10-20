@@ -12,9 +12,17 @@ pub async fn list_sessions(
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<Vec<crate::model::SubjectStatus>>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.terminal_statuses(query.history))
-        .await
-        .map(Json)
+    let mut sessions = blocking_store(move || store.terminal_statuses(query.history)).await?;
+    for session in &mut sessions {
+        if session.subject.starts_with("agent/") {
+            session.subject = public_identity(
+                &state.store,
+                crate::store::identities::IdentityKind::Agent,
+                &session.subject,
+            )?.canonical_id;
+        }
+    }
+    Ok(Json(sessions))
 }
 
 #[derive(Deserialize)]
@@ -43,6 +51,11 @@ pub async fn logs_session(
     let session = read_deadline::query(&state.store, "/v1/sessions/logs/{*subject}", || {
         live_session(&state, &subject, None)
     })?;
+    let subject = if subject.starts_with("agent/") {
+        public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.canonical_id
+    } else {
+        subject
+    };
     if session.terminal {
         return Err(ApiError::bad(St3Error::new(
             "unsupported-capability",
@@ -144,6 +157,11 @@ pub async fn screen_session(
     let screen = daemon_pty(&state)
         .and_then(|runtime| runtime.screen(&session.runtime_id))
         .map_err(ApiError::internal)?;
+    let subject = if subject.starts_with("agent/") {
+        public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.canonical_id
+    } else {
+        subject
+    };
     Ok(Json(SessionScreen {
         subject,
         runtime_id: session.runtime_id,
@@ -165,6 +183,7 @@ pub async fn clear_context(
     AxumPath(subject): AxumPath<String>,
     Json(request): Json<ContextClearRequest>,
 ) -> Result<Json<SessionControlResponse>, ApiError> {
+    let subject = session_storage_subject(&state, &subject)?;
     let result_key = format!(
         "session-control-result:context-clear:{subject}:{}",
         request.idempotency_key
@@ -252,6 +271,7 @@ pub async fn attach_session(
     AxumPath(subject): AxumPath<String>,
     Json(_request): Json<AttachRequest>,
 ) -> Result<Json<Attachment>, ApiError> {
+    let subject = session_storage_subject(&state, &subject)?;
     let session = live_session(&state, &subject, None)?;
     if !session.terminal {
         return Err(ApiError::bad(St3Error::new(
@@ -294,6 +314,7 @@ pub async fn local_terminal(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<LocalTerminal>, ApiError> {
+    let subject = session_storage_subject(&state, &subject)?;
     // A read can still wait on a saturated disk; it must not hold a runtime worker meanwhile.
     let (lookup, lookup_subject) = (state.clone(), subject.clone());
     let session = crate::api::read_deadline::spawn_blocking(move || live_session(&lookup, &lookup_subject, None))
@@ -332,6 +353,7 @@ pub async fn terminal_session(
     AxumPath(subject): AxumPath<String>,
     Query(query): Query<TerminalQuery>,
 ) -> Result<Response, ApiError> {
+    let subject = session_storage_subject(&state, &subject)?;
     let store = state.store.clone();
     let secret = query.capability;
     let capability = blocking_action(move || store.consume_capability(&secret, "terminal")).await?;

@@ -11331,3 +11331,73 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
     let (status, body) = json_request(app, "/v1/harness-events", stale).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }
+
+#[test]
+fn identity_rename_refusals_keep_typed_http_statuses() {
+    for code in ["identity-cycle", "identity-occupied", "identity-retired-source", "lifecycle-unavailable"] {
+        let error = ApiError::bad(St3Error::new(code, "rename refused"));
+        assert_eq!(error.status, StatusCode::CONFLICT, "{code}");
+        assert_eq!(error.code, code);
+    }
+    assert_eq!(ApiError::bad(St3Error::new("identity-cross-kind", "wrong kind")).status,
+        StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(ApiError::bad(St3Error::new("identity-unknown", "missing")).status,
+        StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn native_rename_request_accepts_optional_compare_and_swap() {
+    let value = json!({
+        "from": "agent/example-old", "to": "agent/example-new",
+        "actor": "person/robin", "reason": "Clarify responsibility",
+        "idempotency_key": "example-rename"
+    });
+    let request: crate::store::identities::RenameRequest =
+        serde_json::from_value(value).unwrap();
+    assert_eq!(request.expected_declaration, None);
+    assert_eq!(request.expected_naming_revision, None);
+    assert_eq!(request.from, "agent/example-old");
+}
+
+#[tokio::test]
+async fn native_rename_routes_show_and_send_keep_storage_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example-original\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = crate::graph::parse_test_intent(source, state.store.origin()).unwrap();
+    state.store.apply(&intent, &BTreeMap::new(), "example-declare").unwrap();
+    let app = router(state.clone());
+    let rename = json!({
+        "from": "agent/example-original", "to": "agent/example-renamed",
+        "actor": "person/robin", "reason": "Clarify responsibility",
+        "idempotency_key": "example-rename"
+    });
+    let (status, receipt) = json_request(app.clone(), "/v1/agents/rename-id", rename.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["identity"], "agent/example-original");
+    assert_eq!(receipt["canonical_id"], "agent/example-renamed");
+    assert_eq!(receipt["replication"]["state"], "local-durable");
+    let (_, replay) = json_request(app.clone(), "/v1/agents/rename-id", rename).await;
+    assert_eq!(replay["applied"], "already-applied");
+    assert_eq!(replay["claim_id"], receipt["claim_id"]);
+    for requested in ["agent/example-original", "agent/example-renamed"] {
+        let Json(detail) = client_agents_detail(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            AxumPath(requested.into()), Query(ClientListQuery::default()),
+        ).await.unwrap();
+        assert_eq!(detail["requested_id"], requested);
+        assert_eq!(detail["id"], "agent/example-renamed");
+        assert_eq!(detail["identity"], "agent/example-original");
+        assert_eq!(detail["renamed_to"], if requested == "agent/example-original" {
+            json!("agent/example-renamed")
+        } else { Value::Null });
+    }
+    let (status, sent) = json_request(app, "/v1/messages", json!({
+        "from": "person/robin", "to": "agent/example-original", "content": "Continue.",
+        "idempotency_key": "example-send"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(sent["requested_recipient"], "agent/example-original");
+    assert_eq!(sent["recipient"], "agent/example-renamed");
+    assert_eq!(sent["recipient_identity"], "agent/example-original");
+}

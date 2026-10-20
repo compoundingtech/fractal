@@ -112,6 +112,11 @@
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
     "ErrorCode": {"anyOf": [{"enum": [
       "recipient-retired",
+      "identity-cycle",
+      "identity-occupied",
+      "identity-retired-source",
+      "identity-cross-kind",
+      "identity-unknown",
       "lifecycle-unavailable",
       "retirement-upgrade-required",
       "attention-migrated",

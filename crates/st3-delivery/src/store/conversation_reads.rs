@@ -27,17 +27,17 @@ const CONVERSATION_CHANGED: &str = "SELECT
     EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
       WHERE subject=?1 AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_to_order_index
-      WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1
+      WHERE kind='message.sent' AND json_extract(body,'$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
         AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_from_index
-      WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=?1
+      WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
         AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_to_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-        AND json_extract(body,'$.to')=?1 AND store_index>?2 AND store_index<=?3)
+        AND json_extract(body,'$.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_from_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-        AND json_extract(body,'$.from')=?1 AND store_index>?2 AND store_index<=?3)
+        AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
@@ -78,6 +78,8 @@ fn conversation_owner_from_connection(
     subject: &str,
     through: u64,
 ) -> Result<Option<Owner>> {
+    let subject = st3_store::store::identities::resolve_reference_conn(connection, subject)?;
+    let subject = subject.as_str();
     let exists: bool = connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND store_index<=?2)",
     )?.query_row(/* sqlite-large-value: allow-for-now lv-h6782172e979f owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
@@ -195,10 +197,12 @@ impl ConversationReadsStore for Store {
     fn conversation_changed_at(
             &self, owner: &str, after: u64, through: u64, local_after: u64, local_through: u64,
         ) -> Result<bool> {
+        let connection = self.readers.get();
+        let owner = st3_store::store::identities::resolve_reference_conn(&connection, owner)?;
         if after == through && local_after == local_through {
             return Ok(false);
         }
-        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h5d6619ff3fff owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
+        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5d6619ff3fff owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
             .query_row(/* sqlite-large-value: allow-for-now lv-hc9cc1afde011 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
     }
 
@@ -370,6 +374,7 @@ impl ConversationReadsStore for Store {
         let before = before.unwrap_or(i64::MAX as u64);
         let ids = {
             let connection = self.readers.get();
+            let owner = st3_store::store::identities::resolve_reference_conn(&connection, owner)?;
             let floor = if limit.is_some() {
                 after.saturating_add(1)
             } else {
@@ -385,22 +390,22 @@ impl ConversationReadsStore for Store {
             };
             connection
                 .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h8a2180677f3c owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+                    /* sqlite-large-value: allow-for-now lv-h79ed912dab05 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
                     SELECT store_index FROM claims INDEXED BY claims_message_to_order_index
-                    WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1
+                    WHERE kind='message.sent' AND json_extract(body,'$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                       AND store_index>=?2 AND store_index<?3
                     UNION
                     SELECT store_index FROM claims INDEXED BY claims_message_from_index
-                    WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=?1
+                    WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                       AND store_index>=?2 AND store_index<?3
                     UNION
                     SELECT store_index FROM claims INDEXED BY claims_message_legacy_to_index
                     WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                      AND json_extract(body,'$.to')=?1 AND store_index>=?2 AND store_index<?3
+                      AND json_extract(body,'$.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>=?2 AND store_index<?3
                     UNION
                     SELECT store_index FROM claims INDEXED BY claims_message_legacy_from_index
                     WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                      AND json_extract(body,'$.from')=?1 AND store_index>=?2 AND store_index<?3
+                      AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>=?2 AND store_index<?3
                  ) SELECT claims.id FROM claims JOIN selected USING(store_index)
                    ORDER BY claims.store_index DESC LIMIT ?4",
                 )?
@@ -417,6 +422,7 @@ impl ConversationReadsStore for Store {
         ) -> Result<Vec<ClaimRecord>> {
         let ids = {
             let connection = self.readers.get();
+            let owner = st3_store::store::identities::resolve_reference_conn(&connection, owner)?;
             connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-h274133e2032c owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ TIMELINE_OWNER_IDS)?
                 .query_map(params![owner, before.unwrap_or(i64::MAX as u64)], |row| {
@@ -510,6 +516,7 @@ impl ConversationReadsStore for Store {
             incarnation: &str,
         ) -> Result<(Option<u128>, Option<u128>)> {
         let connection = self.readers.get();
+        let owner = st3_store::store::identities::resolve_reference_conn(&connection, owner)?;
         let started: Option<String> = connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6446ec9963c5 owner=st3_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_incarnation_accepted_index

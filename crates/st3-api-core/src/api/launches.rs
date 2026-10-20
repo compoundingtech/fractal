@@ -202,7 +202,7 @@ pub async fn start_planning_session(
         &format!("{}:started", request.idempotency_key),
     )?;
     signal_changed(&state);
-    Ok(Json(session))
+    public_planning_session(&state.store, session)
 }
 
 pub async fn get_planning_session(
@@ -213,8 +213,8 @@ pub async fn get_planning_session(
     let id_for_read = id.clone();
     blocking_store(move || store.planning_session(&id_for_read))
         .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found(format!("launch `{id}` does not exist")))
+        .map(|session| public_planning_session(&state.store, session))
+        .ok_or_else(|| ApiError::not_found(format!("launch `{id}` does not exist")))?
 }
 
 pub async fn submit_planning_candidate(
@@ -409,7 +409,7 @@ async fn preview_planning_variant(
             preview.candidate_revision == candidate.revision && preview.hash == hash
         })
     {
-        return Ok(Json(session));
+        return public_planning_session(&state.store, session);
     }
     let response = state
         .store
@@ -452,7 +452,7 @@ async fn preview_planning_variant(
         &format!("planning-preview:{}:{}", response.id, preview.hash),
     )?;
     signal_changed(&state);
-    Ok(Json(response))
+    public_planning_session(&state.store, response)
 }
 
 pub async fn compare_planning_variants(
@@ -587,6 +587,8 @@ pub async fn propose_planning_variant(
                 proposal: Some(proposal),
             }
         };
+    let mut result = result;
+    runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(result))
 }
@@ -660,7 +662,7 @@ pub async fn revise_planning_session(
         "Launch revision requested",
     )?;
     signal_changed(&state);
-    Ok(Json(response))
+    public_planning_session(&state.store, response)
 }
 
 pub async fn approve_planning_session(
@@ -715,7 +717,7 @@ pub async fn approve_planning_session(
             let approval_key = format!("planning-approval:{}:{}", session.id, preview.hash);
             stop_planning_agent(&state, &session.planner, &approval_key)?;
             signal_changed(&state);
-            return Ok(Json(session));
+            return public_planning_session(&state.store, session);
         }
         return Err(ApiError::internal(format!(
             "launch `{}` has inconsistent approved revision state",
@@ -841,7 +843,7 @@ pub async fn approve_planning_session(
     )?;
     stop_planning_agent(&state, &session.planner, &approval_key)?;
     signal_changed(&state);
-    Ok(Json(response))
+    public_planning_session(&state.store, response)
 }
 
 pub async fn start_approved_launch(
@@ -882,6 +884,8 @@ pub async fn start_approved_launch(
         })
         .map_err(ApiError::bad)?;
     signal_changed(&state);
+    let mut response = response;
+    runs::present_mission_run(&state.store, &mut response).map_err(ApiError::bad)?;
     Ok(Json(response))
 }
 
@@ -1124,7 +1128,7 @@ pub async fn cancel_planning_session(
     if session.status == "cancelled" {
         stop_planning_agent(&state, &session.planner, &request.idempotency_key)?;
         signal_changed(&state);
-        return Ok(Json(session));
+        return public_planning_session(&state.store, session);
     }
     let response = state
         .store
@@ -1153,7 +1157,14 @@ pub async fn cancel_planning_session(
     )?;
     stop_planning_agent(&state, &session.planner, &request.idempotency_key)?;
     signal_changed(&state);
-    Ok(Json(response))
+    public_planning_session(&state.store, response)
+}
+
+fn public_planning_session(store: &Store, mut session: PlanningSessionView) -> Result<Json<PlanningSessionView>, ApiError> {
+    let subject = format!("mission/{}", session.mission.strip_prefix("mission/").unwrap_or(&session.mission));
+    let resolved = public_identity(store, crate::store::identities::IdentityKind::Mission, &subject)?;
+    session.mission = resolved.canonical_id.strip_prefix("mission/").unwrap_or(&resolved.canonical_id).to_owned();
+    Ok(Json(session))
 }
 
 fn required_planning_session(state: &AppState, id: &str) -> Result<PlanningSessionView, ApiError> {
@@ -1435,7 +1446,13 @@ pub async fn get_mission(
             return Ok(None);
         };
         let provenance = store.mission_provenance(&id_for_read, &mission.revision)?;
+        use crate::store::identities::{IdentityKind, IdentityStore};
+        let resolved = store.resolve_identity(IdentityKind::Mission, &mission.subject)?;
         let mut value = serde_json::to_value(mission)?;
+        value["id"] = json!(resolved.canonical_id.strip_prefix("mission/").unwrap_or(&resolved.canonical_id));
+        value["subject"] = json!(resolved.canonical_id);
+        value["identity"] = json!(resolved.identity);
+        value["naming_revision"] = json!(resolved.naming_revision);
         if let Some(provenance) = provenance {
             value["provenance"] = serde_json::to_value(provenance)?;
         }
@@ -1458,5 +1475,10 @@ pub async fn retire_mission(
         blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key))
             .await?;
     signal_changed(&state);
+    let mut retired = retired;
+    use crate::store::identities::{IdentityKind, IdentityStore};
+    let resolved = state.store.resolve_identity(IdentityKind::Mission, &retired.subject).map_err(ApiError::bad)?;
+    retired.id = resolved.canonical_id.strip_prefix("mission/").unwrap_or(&resolved.canonical_id).to_owned();
+    retired.subject = resolved.canonical_id;
     Ok(Json(retired))
 }

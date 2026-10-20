@@ -103,3 +103,75 @@ mission "capacity" state="ready" {
         "mission-run-capacity"
     );
 }
+
+#[test]
+fn mission_rename_keeps_revision_generation_and_schedule_occurrence() {
+    use st3_store::store::identities::{IdentityKind, IdentityStore as _, RenameRequest};
+    let store = Store::open_memory("example").unwrap();
+    let mission = publish_mission(
+        &store,
+        "version 2\nmission \"example-before\" state=\"ready\" {\n goal \"Keep continuity.\"\n step \"work\" { agentless }\n}\n",
+        "example-mission",
+    );
+    let mut request = MissionRunRequest {
+        mission: "mission/example-before".into(),
+        revision: Some(mission.revision.clone()),
+        workspace: "/tmp".into(),
+        requester: Some("person/robin".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "example-occurrence".into(),
+    };
+    let before = store.create_scheduled_mission_run(
+        &request, None, "schedule/example", 7,
+    ).unwrap();
+    let mut retry_request = request.clone();
+    retry_request.idempotency_key = "example-retry".into();
+    let original = store.create_mission_run(&retry_request).unwrap();
+    store.rename_identity(IdentityKind::Mission, &RenameRequest {
+        from: "mission/example-before".into(),
+        to: "mission/example-after".into(),
+        actor: "person/robin".into(),
+        reason: "Clarify responsibility".into(),
+        expected_naming_revision: None,
+        expected_declaration: None,
+        idempotency_key: "example-rename".into(),
+    }, &[]).unwrap();
+    request.mission = "mission/example-after".into();
+    let after = store.create_scheduled_mission_run(
+        &request, None, "schedule/example", 7,
+    ).unwrap();
+    assert_eq!(before.subject, after.subject);
+    assert_eq!(before.generation, after.generation);
+    assert_eq!(before.initial_revision, after.initial_revision);
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.steps[0].subject, after.steps[0].subject);
+    retry_request.mission = request.mission.clone();
+    let retried = store.create_mission_run(&retry_request).unwrap();
+    assert_eq!(original.subject, retried.subject);
+    assert_eq!(original.generation, retried.generation);
+    assert_eq!(
+        store.mission_spec("example-after", Some(&mission.revision)).unwrap().unwrap(),
+        mission,
+    );
+    let definitions = store.mission_definitions().unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].mission.subject, "mission/example-after");
+    assert_eq!(definitions[0].mission.revision, mission.revision);
+    // The same current spelling also starts a new run against the original rows.
+    request.idempotency_key = "example-next-run".into();
+    let next = store.create_mission_run(&request).unwrap();
+    assert_eq!(next.mission, "mission/example-before");
+    assert_eq!(next.revision, mission.revision);
+    let mut republished = parse_intent(
+        "version 2\nmission \"example-after\" state=\"ready\" {\n goal \"Keep continuity.\"\n step \"work\" { agentless }\n}\n",
+        store.origin(),
+    ).unwrap();
+    st3_store::store::missions::normalize_intent_missions(
+        &store.readers.get(), &mut republished,
+    ).unwrap();
+    let normalized = republished.missions.values().next().unwrap();
+    assert_eq!(normalized.id, mission.id);
+    assert_eq!(normalized.subject, mission.subject);
+    assert_eq!(normalized.revision, mission.revision);
+}

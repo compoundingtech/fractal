@@ -2,6 +2,13 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use st3_delivery::store::missions::*;
+use st3_store::store::missions::{mission_public_id, mission_storage_id};
+use st3_store::store::identities::resolve_reference_conn;
+
+fn physical_actor(connection: &Connection, actor: &str) -> Result<String, St3Error> {
+    let actor = normalize_actor(actor, "agent");
+    resolve_reference_conn(connection, &actor)
+}
 
 // One query preserves the native collection's indexed latest/live probes and shallow
 // key sort. Assistant membership matches reads::ident before pagination/hydration:
@@ -82,6 +89,14 @@ mod identifier_query_tests {
         }
         assert_eq!(plans[0], plans[1], "membership must not introduce a different scan");
     }
+}
+
+/// Render a copy; the signed revision and execution spec remain physical.
+fn public_mission_spec(connection: &Connection, body: &str) -> Result<MissionSpec> {
+    let mut mission: MissionSpec = serde_json::from_str(body)?;
+    mission.subject = mission_public_id(connection, &mission.subject)?;
+    mission.id = mission.subject.trim_start_matches("mission/").to_owned();
+    Ok(mission)
 }
 
 pub type StepStateRow = (String, bool, u32, String, String, String, String, String);
@@ -1904,7 +1919,9 @@ impl MissionsStore for Store {
             mission: &str,
             revision: &str,
         ) -> Result<Option<crate::provenance::Provenance>> {
-        crate::provenance::read(&self.readers.get(), mission, revision)
+        let connection = self.readers.get();
+        let mission = mission_storage_id(&connection, mission)?;
+        crate::provenance::read(&connection, &mission, revision)
     }
 
     fn mission_specs_for_runs(&self, runs: &[String]) -> Result<BTreeMap<String, MissionSpec>> {
@@ -1977,7 +1994,7 @@ impl MissionsStore for Store {
             .map(|row| {
                 let (body, accepted) = row?;
                 Ok(MissionDefinitionView {
-                    mission: serde_json::from_str(&body)?,
+                    mission: public_mission_spec(&connection, &body)?,
                     updated_at_unix_ms: accepted.parse()?,
                 })
             })
@@ -2002,7 +2019,7 @@ impl MissionsStore for Store {
             .map(|row| {
                 let (body, accepted) = row?;
                 Ok(MissionDefinitionView {
-                    mission: serde_json::from_str(&body)?,
+                    mission: public_mission_spec(&connection, &body)?,
                     updated_at_unix_ms: accepted.parse()?,
                 })
             })
@@ -2077,6 +2094,10 @@ impl MissionsStore for Store {
     ) -> Result<Vec<(String, u128)>> {
         let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
+        let after = after.map(|(time, id)| {
+            mission_storage_id(&connection, id).map(|id| (*time, id))
+        }).transpose()?;
+        let after = after.as_ref();
         // Seek once per distinct mission, not once per historical run. Latest and live
         // state are indexed probes; only shallow mission keys reach the final sort.
         let mut statement = connection.prepare(
@@ -2106,7 +2127,7 @@ impl MissionsStore for Store {
             )?
             .map(|row| {
                 let (id, time) = row?;
-                Ok((id, time.parse()?))
+                Ok((mission_public_id(&connection, &id)?, time.parse()?))
             })
             .collect()
     }
@@ -2179,6 +2200,7 @@ impl MissionsStore for Store {
         ) -> Result<PlanningSessionView, St3Error> {
         let now = now_ms().to_string();
         let connection = self.connection.write();
+        let mission = mission_storage_id(&connection, mission)?;
         connection
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h91ae13f2fe0d owner=st3_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO planning_sessions(id, mission_id, request_ref, workspace, requester, planner, planner_spec_json, status, target_run_id, source_generation_id, created_at_unix_ms, updated_at_unix_ms)
@@ -2214,6 +2236,8 @@ impl MissionsStore for Store {
 
     fn planning_sessions_for_mission(&self, mission: &str) -> Result<Vec<PlanningSessionView>> {
         let connection = self.readers.get();
+        let mission_identity = mission_storage_id(&connection, mission)?;
+        let mission = mission_identity.as_str();
         let mut statement = connection.prepare_cached(
             "SELECT id FROM planning_sessions
              WHERE mission_id IN (?1, ?2, ?3)
@@ -2506,6 +2530,7 @@ impl MissionsStore for Store {
             schedule: &str,
             occurrence: u64,
         ) -> Result<MissionRunView, St3Error> {
+        mission_storage_id(&self.readers.get(), &request.mission)?;
         let subject = Self::scheduled_mission_run_subject(schedule, occurrence);
         // A replicated or replayed run remains the occurrence's run even if the child head,
         // workspace or parent revision has changed since its request was accepted.
@@ -2538,6 +2563,7 @@ impl MissionsStore for Store {
         let now = now_ms();
         self.connection
             .batched(|transaction| -> Result<MissionOutputView, St3Error> {
+                let actor = physical_actor(transaction, &actor)?;
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, idempotency_key)?
                 {
                     return serde_json::from_str(&response).map_err(internal);
@@ -2648,6 +2674,7 @@ impl MissionsStore for Store {
         let subject = normalize_step_run(subject);
         let actor = normalize_actor(actor, "agent");
         let connection = self.readers.get();
+        let actor = physical_actor(&connection, &actor)?;
         let current = connection
             .query_row(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -2881,7 +2908,7 @@ impl MissionsStore for Store {
                 "a run revision cannot change its input declarations",
             ));
         }
-        let actor = normalize_actor(actor, "agent");
+        let actor = physical_actor(&self.readers.get(), actor)?;
         let old = crate::mission::run_mission(old, current.after.as_deref())?;
         let mission = &crate::mission::run_mission(mission.clone(), current.after.as_deref())?;
         let (compatible, reviewers) = analyze_mission_revision(&old, mission, &current.requester)?;
@@ -3632,7 +3659,7 @@ impl MissionsStore for Store {
                 "setting a run outcome needs a reason",
             ));
         }
-        let actor = normalize_actor(actor, "agent");
+        let actor = physical_actor(&self.readers.get(), actor)?;
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
@@ -3772,7 +3799,7 @@ impl MissionsStore for Store {
                 "stalled-after must be greater than zero",
             ));
         }
-        let actor = normalize_actor(actor, "agent");
+        let actor = physical_actor(&self.readers.get(), actor)?;
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
@@ -3897,8 +3924,9 @@ impl MissionsStore for Store {
         {
             return Ok(response);
         }
-        let mission_id = mission.strip_prefix("mission/").unwrap_or(mission);
-        let actor = normalize_actor(actor, "agent");
+        let mission_identity = mission_storage_id(&self.readers.get(), mission)?;
+        let mission_id = mission_identity.as_str();
+        let actor = physical_actor(&self.readers.get(), actor)?;
         let current = self
             .mission_spec(mission_id, None)
             .map_err(internal)?
@@ -3917,6 +3945,7 @@ impl MissionsStore for Store {
         let retired = crate::mission::retired_mission(current)?;
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
+        mission_storage_id(&transaction, mission_id)?;
         if let Some(response) = smallclaims::store::idempotency::cached_response(&transaction,idempotency_key)? {
             return serde_json::from_str(&response).map_err(internal);
         }
@@ -4000,7 +4029,7 @@ impl MissionsStore for Store {
             return Ok(response);
         }
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
-        let actor = normalize_actor(actor, "agent");
+        let actor = physical_actor(&self.readers.get(), actor)?;
         let current = self.mission_run(run_id).map_err(internal)?.ok_or_else(|| {
             St3Error::new(
                 "missing-mission-run",
@@ -4132,6 +4161,9 @@ impl MissionsStore for Store {
         for (step, selector, constraints) in new_steps {
             let (assignee, available_to, agentless) =
                 interpolate_selector(&selector, &successor_variables)?;
+            let assignee = assignee.map(|actor| physical_actor(&transaction, &actor)).transpose()?;
+            let available_to = available_to.iter().map(|actor| physical_actor(&transaction, actor))
+                .collect::<Result<Vec<_>, _>>()?;
             let subject = format!("step-run/{generation_id}/{}", step.path);
             let mut step_variables = successor_variables.clone();
             step_variables.insert("ST_STEP".into(), step.path.clone());
@@ -4383,8 +4415,8 @@ impl MissionsStore for Store {
         );
         let ids = ids
             .iter()
-            .map(|id| id.trim_start_matches("mission/"))
-            .collect::<Vec<_>>();
+            .map(|id| mission_storage_id(&connection, id))
+            .collect::<Result<Vec<_>, _>>()?;
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h580d8608ff7c owner=st3_missions::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map([serde_json::to_string(&ids)?], mission_run_header_from_row)?
@@ -4621,15 +4653,15 @@ impl MissionsStore for Store {
     }
 
     fn active_mission_runs_for_mission(&self, mission: &str) -> Result<Vec<MissionRunView>> {
-        let mission = mission.strip_prefix("mission/").unwrap_or(mission);
         let connection = self.readers.get();
+        let mission = mission_storage_id(&connection, mission)?;
         let mut statement = connection.prepare(
             "SELECT id FROM mission_runs
              WHERE mission_id=?1 AND status IN ('running','standing','blocked')
              ORDER BY created_at_unix_ms, id",
         )?;
         let ids = statement
-            .query_map([mission], |row| row.get::<_, String>(0))?
+            .query_map([&mission], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         ids.into_iter()
             .map(|id| mission_run_view_tx(&connection, &id).map_err(Into::into))
@@ -4756,6 +4788,7 @@ impl MissionsStore for Store {
         let actor = normalize_actor(actor, "agent");
         let snapshot = now_ms();
         let connection = self.readers.get();
+        let actor = physical_actor(&connection, &actor)?;
         let views = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -4840,6 +4873,7 @@ impl MissionsStore for Store {
         smallclaims::touched::note_read(|| format!("kind:{}", seat_queue::MOVED_CLAIM));
         let agent = normalize_seat(agent);
         let connection = self.readers.get();
+        let agent = physical_actor(&connection, &agent)?;
         Ok(seat_run_orders_tx(&connection, Some(&agent))?
             .remove(&agent)
             .unwrap_or_default())
@@ -4849,7 +4883,7 @@ impl MissionsStore for Store {
             &self,
             request: &SeatQueueMoveRequest,
         ) -> Result<ClaimRecord, St3Error> {
-        let agent = normalize_seat(&request.agent);
+        let agent = physical_actor(&self.readers.get(), &normalize_seat(&request.agent))?;
         let run = normalize_mission_run(&request.run);
         let placement = Placement::parse(&request.placement).ok_or_else(|| {
             St3Error::new(
@@ -4980,8 +5014,8 @@ impl MissionsStore for Store {
             open_only: bool,
             selected: Option<&BTreeSet<String>>,
         ) -> Result<Vec<StepRunView>> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
         let views = match selected {
             None => {
                 let query = if actor.is_some() {
@@ -5528,6 +5562,7 @@ impl MissionsStore for Store {
         let committed = self
             .connection
             .batched(|transaction| -> Result<StepRunView, St3Error> {
+                let actor = physical_actor(transaction, &actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?

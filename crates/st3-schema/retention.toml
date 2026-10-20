@@ -28,6 +28,7 @@
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }
+"agent.renamed" = { class = "durable" }
 "agent.retired" = { class = "durable" }
 "arrangement.edited" = { class = "durable" }
 "attention.requested" = { class = "durable" }
@@ -100,6 +101,7 @@
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
 "mission.published" = { class = "durable" }
+"mission.renamed" = { class = "durable" }
 "observer.observed" = { class = "current" }
 "observer.refresh-requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "observer.state" = { class = "current", pending = "no reader audit yet" }

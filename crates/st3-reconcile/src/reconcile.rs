@@ -3036,6 +3036,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let ((result, due), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     caught(|| -> Result<()> {
+                        if subject.kind == "agent" {
+                            use crate::store::identities::{IdentityKind, IdentityStore as _};
+                            // Naming is an admission fence, never a physical runtime rekey.
+                            // Continue using the original desired subject, runtime ID and
+                            // incarnation for every native/PTY operation below.
+                            self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+                        }
                         // A workspace or render failure blocks only a start or restart. A running member
                         // is still observed, checked, and given its work.
                         let mut blocked = member_errors.remove(&subject.subject);
@@ -6887,6 +6894,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         reason: &str,
         request: Option<&crate::model::ClaimRecord>,
     ) -> Result<bool> {
+        if subject.kind == "agent" {
+            use crate::store::identities::{IdentityKind, IdentityStore as _};
+            self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+        }
         if self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }

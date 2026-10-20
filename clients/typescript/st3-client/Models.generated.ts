@@ -1301,6 +1301,11 @@ export type Envelope = {
 
 export type ErrorCode = (
   "recipient-retired"
+  | "identity-cycle"
+  | "identity-occupied"
+  | "identity-retired-source"
+  | "identity-cross-kind"
+  | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
   | "attention-migrated"

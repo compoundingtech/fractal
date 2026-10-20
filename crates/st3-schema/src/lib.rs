@@ -1988,6 +1988,14 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "agent.renamed", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "mission.renamed", &["mission"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("missions"), true, &[],
+        ),
+        (
             "agent.presence",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -3212,6 +3220,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ),
             ("anchor", reference_to(&["mission-run"])),
             ("reason", string()),
+        ],
+        "agent.renamed" | "mission.renamed" => &[
+            ("from", required_reference_to(&["agent", "mission"])),
+            ("to", required_reference_to(&["agent", "mission"])),
+            ("reason", required_string()),
+            ("owner_host", required_string()),
+            ("declaration", required_string()),
+            ("previous_revision", string()),
+            ("preserved_incarnation", string()),
+            ("request", FieldSpec { required: true, ..object() }),
         ],
         "agent.retired" => &[
             ("reason", required_string()),
@@ -4532,6 +4550,7 @@ mod tests {
                 "agent.placement.source-offline",
                 "agent.presence",
                 "agent.queue.moved",
+                "agent.renamed",
                 "agent.retired",
                 "arrangement.edited",
                 "attention.requested",
@@ -4593,6 +4612,7 @@ mod tests {
                 "mission.produced",
                 "mission.provenance",
                 "mission.published",
+                "mission.renamed",
                 "observer.observed",
                 "observer.refresh-requested",
                 "observer.state",

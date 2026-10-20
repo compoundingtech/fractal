@@ -124,8 +124,10 @@ impl Store {
         limit: usize,
         delivery: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        let recipient = recipient.map(normalize_message_party);
         let connection = self.readers.get();
+        let recipient = recipient.map(|recipient|
+            super::identities::resolve_reference_conn(&connection, &normalize_message_party(recipient))
+        ).transpose()?;
         // Native harnesses repeatedly ask for their complete durable mailbox so
         // they can reconcile delivery receipts. Start at the indexed recipient
         // claims, not every lifecycle claim for every message in the fleet.

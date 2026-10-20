@@ -306,6 +306,8 @@ pub async fn retry_work(
         .cached_idempotency_response::<MissionRunView>(&request.idempotency_key)
         .map_err(ApiError::internal)?
     {
+        let mut cached = cached;
+        runs::present_mission_run(&state.store, &mut cached).map_err(ApiError::bad)?;
         return Ok(Json(cached));
     }
     let actor = match request.actor.as_str() {
@@ -327,6 +329,8 @@ pub async fn retry_work(
         store.retry_failed_step(&subject, &actor, &request.reason, &request.idempotency_key)
     })
     .await?;
+    let mut retried = retried;
+    runs::present_mission_run(&state.store, &mut retried).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(retried))
 }

@@ -429,6 +429,24 @@ pub async fn client_agents(
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
+    let store = state.store.clone();
+    let (snapshot, Json(mut page)) = client_agents_storage(State(state), Extension(snapshot), Query(query)).await?;
+    for item in &mut page.items {
+        if let Some(id) = item["id"].as_str() {
+            let resolved = public_identity(&store, crate::store::identities::IdentityKind::Agent, id)?;
+            item["identity"] = json!(resolved.identity);
+            item["id"] = json!(resolved.canonical_id);
+            item["naming_revision"] = json!(resolved.naming_revision);
+        }
+    }
+    Ok((snapshot, Json(page)))
+}
+
+async fn client_agents_storage(
+    State(state): State<AppState>,
+    Extension(snapshot): Extension<ClientSnapshot>,
+    Query(query): Query<ClientListQuery>,
+) -> Result<ClientPageResponse, ApiError> {
     if query.min_cut.is_some() && query.cursor.is_some() {
         return Err(client_v0::validation("min_cut is only supported on the first agents page"));
     }
@@ -655,7 +673,10 @@ pub async fn client_agents_detail(
     let history = query.history;
     let created_at = snapshot.created_at.clone();
     let snapshot_index = snapshot.store_index;
-    let subject = client_detail_id("agent", &id);
+    use crate::store::identities::IdentityKind;
+    let requested_id = client_detail_id("agent", &id);
+    let resolved = public_identity(&store, IdentityKind::Agent, &requested_id)?;
+    let subject = resolved.identity.clone();
     let items = blocking_store(move || {
         let selected = BTreeSet::from([subject]);
         let mut items = client_agent_resources_selected(
@@ -690,7 +711,17 @@ pub async fn client_agents_detail(
         Ok(items)
     })
     .await?;
-    client_detail(items, "agent", &id)
+    let Json(mut item) = client_detail(items, "agent", &resolved.identity)?;
+    item["requested_id"] = json!(requested_id);
+    item["id"] = json!(resolved.canonical_id);
+    item["identity"] = json!(resolved.identity);
+    item["renamed_to"] = if requested_id == resolved.canonical_id {
+        Value::Null
+    } else {
+        json!(resolved.canonical_id)
+    };
+    item["naming_revision"] = json!(resolved.naming_revision);
+    Ok(Json(item))
 }
 
 pub async fn client_sessions(

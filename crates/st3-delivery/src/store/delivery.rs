@@ -347,6 +347,8 @@ impl DeliveryStore for Store {
 
     fn conversation_search_timeline_stamp(&self, agent: &str, incarnation: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
+        let agent = st3_store::store::identities::resolve_reference_conn(&connection, agent)?;
+        let agent = agent.as_str();
         let (local_count, local_newest): (u64,u64) = connection.query_row(
             "SELECT COUNT(*),COALESCE(MAX(id),0) FROM local_observations
              WHERE subject=?1 AND kind='harness.timeline'
@@ -395,19 +397,21 @@ impl DeliveryStore for Store {
     }
 
     fn work_wake_messages_for_reconcile(&self, agent: &str) -> Result<Vec<MessageView>> {
-        let recipient = normalize_message_party(agent);
+        let connection = self.readers.get();
+        let recipient = st3_store::store::identities::resolve_reference_conn(
+            &connection, &normalize_message_party(agent),
+        )?;
         let bare_recipient = recipient
             .strip_prefix("agent/")
             .filter(|suffix| !suffix.contains('/'))
             .unwrap_or(&recipient);
-        let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT DISTINCT sent.subject,
                     (SELECT MIN(created.store_index) FROM claims created
                      WHERE created.subject=sent.subject) AS created_index
              FROM claims sent INDEXED BY claims_message_to_index
              WHERE sent.kind='message.sent'
-               AND json_extract(sent.body, '$.fields.to') IN (?1, ?2)
+               AND json_extract(sent.body, '$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
                AND instr(sent.body, 'st3-work:')>0
              ORDER BY created_index, sent.subject",
         )?;
@@ -444,15 +448,20 @@ impl DeliveryStore for Store {
             limit: usize,
         ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let connection = self.readers.get();
+        let sender = st3_store::store::identities::resolve_reference_conn(&connection, sender)?;
+        let sender = sender.as_str();
+        let recipients = recipients.iter().map(|recipient|
+            st3_store::store::identities::resolve_reference_conn(&connection, recipient)
+        ).collect::<Result<Vec<_>, _>>()?;
         let mut statement = connection.prepare_cached(
             "SELECT subject, store_index FROM claims INDEXED BY claims_message_from_index
-             WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1
+             WHERE kind='message.sent' AND json_extract(body, '$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                AND store_index>?2 AND store_index<=?3
-               AND json_extract(body, '$.fields.to') IN (SELECT value FROM json_each(?4))
+               AND json_extract(body, '$.fields.to') IN (SELECT value FROM json_each(?4) UNION SELECT name FROM identity_names WHERE identity IN (SELECT value FROM json_each(?4)))
              ORDER BY store_index LIMIT ?5",
         )?;
         let mut subjects = statement.query_map(
-            params![sender, after, through, serde_json::to_string(recipients)?, limit.saturating_add(1)],
+            params![sender, after, through, serde_json::to_string(&recipients)?, limit.saturating_add(1)],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
         )?.collect::<Result<Vec<_>, _>>()?;
         let more = subjects.len() > limit;
@@ -491,30 +500,34 @@ impl DeliveryStore for Store {
             through: u64,
             limit: usize,
         ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        let recipient = recipient.map(normalize_message_party);
-        let sender = sender.map(normalize_message_party);
+        let connection = self.readers.get();
+        let recipient = recipient.map(|party| st3_store::store::identities::resolve_reference_conn(
+            &connection, &normalize_message_party(party),
+        )).transpose()?;
+        let sender = sender.map(|party| st3_store::store::identities::resolve_reference_conn(
+            &connection, &normalize_message_party(party),
+        )).transpose()?;
         anyhow::ensure!(
             sender.is_some() || (subject.is_none() && subject_prefix.is_none()),
             "subject filters need a sender filter"
         );
-        let connection = self.readers.get();
         // Sender selection starts at the existing expression indexes, not the recipient's
         // entire mailbox. Include legacy root fields and declarations, whose defaults and
         // canonical party spelling are resolved by message_view_cached below.
         let sql = if sender.is_some() {
             "WITH candidates(subject) AS (
                 SELECT subject FROM claims INDEXED BY claims_message_from_index
-                WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (?1,?2)
+                WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
                 UNION
                 SELECT subject FROM claims INDEXED BY claims_message_legacy_from_index
                 WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                  AND json_extract(body,'$.from') IN (?1,?2)
+                  AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
                 UNION
                 SELECT desired.subject FROM desired
                 WHERE desired.kind='message' AND (
                     EXISTS (SELECT 1 FROM json_each(desired.body,'$.children') child
                             WHERE json_extract(child.value,'$.name')='from'
-                              AND json_extract(child.value,'$.arguments[0]') IN (?1,?2))
+                              AND json_extract(child.value,'$.arguments[0]') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2))
                     OR (?1='requester' AND NOT EXISTS (
                         SELECT 1 FROM json_each(desired.body,'$.children') child
                         WHERE json_extract(child.value,'$.name')='from')))
@@ -836,6 +849,13 @@ impl DeliveryStore for Store {
         ) -> Result<crate::mailbox::Fence, St3Error> {
         let mut connection = self.connection.write();
         let tx = connection.transaction().map_err(internal)?;
+        let mut stable_request;
+        let identity = st3_store::store::identities::resolve_reference_conn(&tx, &request.subject)?;
+        let request = if identity == request.subject { request } else {
+            stable_request = request.clone();
+            stable_request.subject = identity;
+            &stable_request
+        };
         check_mailbox_incarnation(&tx, request)?;
         if let Some(member) = argv_member {
             mailbox_lease::check_argv_declaration(&tx, request, member, &self.origin)?;
@@ -949,6 +969,13 @@ impl DeliveryStore for Store {
             fence: &crate::mailbox::Fence,
         ) -> Result<MailboxWatermark, St3Error> {
         let connection = self.readers.get();
+        let mut stable_fence;
+        let identity = st3_store::store::identities::resolve_reference_conn(&connection, &fence.subject)?;
+        let fence = if identity == fence.subject { fence } else {
+            stable_fence = fence.clone();
+            stable_fence.subject = identity;
+            &stable_fence
+        };
         // The process-wide committed index may advance beyond a pinned reader. Capture both
         // cursors from its SQLite snapshot, or a concurrent commit could be skipped forever.
         let (index, local) = connection

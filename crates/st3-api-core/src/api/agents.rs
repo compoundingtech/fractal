@@ -419,3 +419,31 @@ pub async fn rename_agent(
     signal_changed(&state);
     Ok(Json(response))
 }
+
+pub async fn rename_agent_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenameReceipt>, ApiError> {
+    rename_identity_id(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn rename_mission_id(
+    State(state): State<AppState>,
+    Json(request): Json<crate::store::identities::RenameRequest>,
+) -> Result<Json<crate::store::identities::RenameReceipt>, ApiError> {
+    rename_identity_id(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn rename_identity_id(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: crate::store::identities::RenameRequest,
+) -> Result<Json<crate::store::identities::RenameReceipt>, ApiError> {
+    use crate::store::identities::IdentityStore;
+    person_or_agent_actor(&request.actor, "invalid-rename-actor")?;
+    let store = state.store.clone();
+    let peers = state.configured_peers.clone();
+    let receipt = blocking_action(move || store.rename_identity(kind, &request, &peers)).await?;
+    signal_changed(&state);
+    Ok(Json(receipt))
+}

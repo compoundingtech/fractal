@@ -11,33 +11,26 @@ fn check_registry(
     configured_peers: &[String],
     digest: &str,
 ) -> Result<(), St3Error> {
-    let membership = fleet_membership_tx(connection).map_err(internal)?;
-    let peers = configured_peers
-        .iter()
-        .cloned()
-        .chain(
-            membership
-                .incarnations()
-                .filter(|member| member.end.is_none())
-                .map(|member| member.name.clone()),
-        )
-        .collect::<BTreeSet<_>>();
-    for peer in peers.into_iter().filter(|peer| peer != origin) {
-        let known: Option<String> = connection
-            .query_row(
-                "SELECT schema_digest FROM replication_peers WHERE peer=?1",
-                [&peer],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(internal)?
-            .flatten();
-        if known.as_deref() != Some(digest) {
-            return Err(St3Error::new("retirement-upgrade-required", format!("terminal retirement requires every member to run the new registry; `{peer}` has not advertised it"))
-                .with_detail("applied", "none").with_detail("peer", peer));
+    st3_store::store::identities::check_fleet_registry_conn(
+        connection,
+        origin,
+        configured_peers,
+        digest,
+    )
+    .map_err(|error| {
+        if error.code != "lifecycle-unavailable"
+            || error.details.get("reason").and_then(Value::as_str) != Some("incompatible-fleet")
+        {
+            return error;
         }
-    }
-    Ok(())
+        let peer = error.details.get("peer").and_then(Value::as_str).unwrap_or("unknown");
+        St3Error::new(
+            "retirement-upgrade-required",
+            format!("terminal retirement requires every member to run the new registry; `{peer}` has not advertised it"),
+        )
+        .with_detail("applied", "none")
+        .with_detail("peer", peer)
+    })
 }
 
 pub trait RetirementsStore {
@@ -70,6 +63,9 @@ impl RetirementsStore for Store {
             key: &str,
             peers: &[String],
         ) -> Result<(ClaimRecord, bool), St3Error> {
+        use st3_store::store::identities::{IdentityKind, IdentityStore as _};
+        let resolved = self.resolve_identity(IdentityKind::Agent, subject)?;
+        let subject = resolved.identity.as_str();
         if reason.trim().is_empty() {
             return Err(St3Error::new(
                 "invalid-retirement",
@@ -154,12 +150,20 @@ impl RetirementsStore for Store {
                 signature: None,
                 retirement_writer: true,
                 assistant: None,
+                ..Default::default()
             },
         )
     }
 
     fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, St3Error> {
-        record(&self.readers.get(), subject, None)
+        use st3_store::store::identities::{IdentityKind, resolve_identity_conn};
+        let connection = self.readers.get();
+        let resolved = match resolve_identity_conn(&connection, IdentityKind::Agent, subject) {
+            Ok(resolved) => resolved,
+            Err(error) if error.code == "identity-unknown" => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        record(&connection, &resolved.identity, None)
     }
 }
 

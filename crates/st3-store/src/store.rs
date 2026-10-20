@@ -3,13 +3,13 @@
 #[macro_export]
 macro_rules! message_sent_recipient_match {
     () => {
-        "json_extract(body, '$.fields.to') IN (?1, ?2)"
+        "json_extract(body, '$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)"
     };
 }
 #[macro_export]
 macro_rules! message_desired_recipient_match {
     () => {
-        "json_extract(child.value, '$.name')='to' AND json_extract(child.value, '$.arguments[0]') IN (?1, ?2)"
+        "json_extract(child.value, '$.name')='to' AND json_extract(child.value, '$.arguments[0]') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)"
     };
 }
 
@@ -28,6 +28,7 @@ pub mod assistant_write;
 pub mod assistant_write_gate;
 pub mod declarations;
 pub mod retirements;
+pub mod identities;
 pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
@@ -2780,6 +2781,22 @@ impl Store {
         let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, St3Error> {
+                let normalized_intent = identities::normalize_intent(transaction, intent)?;
+                let intent = normalized_intent.as_ref();
+                let mut normalized_expected = std::borrow::Cow::Borrowed(expected);
+                for (subject, tokens) in expected {
+                    let identity = identities::resolve_reference_conn(transaction, subject)?;
+                    if identity != *subject {
+                        if expected.get(&identity).is_some_and(|other| other != tokens) {
+                            return Err(St3Error::new("stale-subject", "declaration fences disagree across identity spellings"));
+                        }
+                        normalized_expected.to_mut().remove(subject);
+                        normalized_expected.to_mut().insert(identity, tokens.clone());
+                    }
+                }
+                let expected = normalized_expected.as_ref();
+                let normalized_actor = actor.map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
+                let actor = normalized_actor.as_deref();
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
                 if let Some(options) = owned {
                     let digest = canonical_hash(&(intent, options, actor)).map_err(internal)?;
@@ -3632,6 +3649,7 @@ impl Store {
                 }
                 if receipt_attached { repair_operations_tx(transaction,&[opaque_cache_key(idempotency_key)]).map_err(internal)?; }
                 owned_sets::project_tx(transaction)?;
+                identities::flush(transaction).map_err(internal)?;
                 let store_index = current_index_tx(transaction).map_err(internal)?;
                 let response = ApplyResponse {
                     changed: true,
@@ -5207,10 +5225,12 @@ impl Store {
     /// `selected_desired_token` of each of `subjects` that has a declaration, in one statement.
     pub fn selected_desired_tokens(&self, subjects: &[&str]) -> Result<BTreeMap<String, String>> {
         let connection = self.readers.get();
+        for subject in subjects { identities::resolve_reference_conn(&connection, subject).map_err(anyhow::Error::new)?; }
         connection
             .prepare_cached(
-                "SELECT subject, claim_id FROM desired
-                 WHERE subject IN (SELECT value FROM json_each(?1))",
+                "SELECT requested.value, desired.claim_id FROM json_each(?1) requested
+                 LEFT JOIN identity_names names ON names.name=requested.value
+                 JOIN desired ON desired.subject=COALESCE(names.identity,requested.value)",
             )?
             .query_map([serde_json::to_string(subjects)?], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -5234,6 +5254,8 @@ impl Store {
     pub fn selected_desired_origin(&self, subject: &str) -> Result<Option<String>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
+        let identity = identities::resolve_reference_conn(&connection, subject).map_err(anyhow::Error::new)?;
+        let subject = identity.as_str();
         connection
             .query_row(
                 "SELECT claims.origin FROM desired
@@ -7051,6 +7073,8 @@ pub fn enforce_mission_run_capacity(
 }
 
 pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredRow>> {
+    let identity = identities::resolve_reference_conn(connection, subject).map_err(anyhow::Error::new)?;
+    let subject = identity.as_str();
     connection
         .prepare_cached(
             "SELECT kind, revision, claim_id, body, member, owner_run, owner_generation
@@ -8277,6 +8301,7 @@ pub fn usage_native_session(
     if fields.get("semantics").and_then(Value::as_str) != Some("response_rollup") {
         return Ok(None);
     }
+    let subject = identities::resolve_reference_conn(connection, subject).map_err(anyhow::Error::new)?;
     let text = |key| fields.get(key).and_then(Value::as_str).unwrap_or("");
     let binding: Option<String> = connection
         .query_row(
@@ -9012,7 +9037,7 @@ fn known_replicated_claim_kind(kind: &str) -> bool {
 /// declaration (`intent.*`), its runtime observations and actions (`runtime.*`), and a host's
 /// transport (`transport.*`). A replicated claim of a kind this build does not know, in one of
 /// these families, could change the answer.
-const RUNTIME_AUTHORITY_FAMILIES: &[&str] = &["intent.", "runtime.", "transport."];
+const RUNTIME_AUTHORITY_FAMILIES: &[&str] = &["intent.", "runtime.", "transport.", "agent.renamed", "mission.renamed"];
 
 /// Whether a replica record this build cannot project could bear on a subject's runtime
 /// authority. An invalid record, or an unknown one without a kind, always could. An unknown kind
@@ -9298,6 +9323,9 @@ pub fn append_claim_tx_with_assistant_answer(
     // as API sends. Replication inserts authenticated history through its separate import path.
     if kind == retirements::KIND {
         return Err(anyhow::Error::new(retirements::writer_required()));
+    }
+    if identities::KINDS.contains(&kind) {
+        return Err(anyhow::Error::new(identities::writer_required()));
     }
     let admission = |connection: &Connection| {
         retirements::admit_recipient(
@@ -9691,6 +9719,8 @@ fn message_view_at_with_desired(
             .unwrap_or_else(|| "requester".into()),
     );
     let to = normalize_message_party(&field("to").or_else(|| child("to")).unwrap_or_default());
+    let from = identities::resolve_reference_conn(connection, &from).map_err(anyhow::Error::new)?;
+    let to = identities::resolve_reference_conn(connection, &to).map_err(anyhow::Error::new)?;
     // A replicated claim is another member's word: keep only references a file name can be
     // built from, so a hostile hash never reaches a path or a URL.
     let (attachments, body) = crate::message_body::split_attachments(actual.get("attachments"));
@@ -10119,6 +10149,12 @@ pub fn check_mailbox_incarnation(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
 ) -> Result<(), St3Error> {
+    let identity = identities::resolve_reference_conn(connection, &fence.subject)?;
+    let normalized;
+    let fence = if identity != fence.subject {
+        normalized = crate::mailbox::Fence { subject: identity, ..fence.clone() };
+        &normalized
+    } else { fence };
     #[cfg(any(test, feature = "test-support"))]
     MAILBOX_INCARNATION_EVALUATIONS.set(MAILBOX_INCARNATION_EVALUATIONS.get() + 1);
     let runtime: Option<(String, String)> = connection
@@ -10348,6 +10384,12 @@ pub fn check_mailbox_fence(
     fence: &crate::mailbox::Fence,
     host: &str,
 ) -> Result<(), St3Error> {
+    let identity = identities::resolve_reference_conn(connection, &fence.subject)?;
+    let normalized;
+    let fence = if identity != fence.subject {
+        normalized = crate::mailbox::Fence { subject: identity, ..fence.clone() };
+        &normalized
+    } else { fence };
     #[cfg(any(test, feature = "test-support"))]
     MAILBOX_FENCE_EVALUATIONS.set(MAILBOX_FENCE_EVALUATIONS.get() + 1);
     check_mailbox_incarnation(connection, fence)?;
@@ -13369,6 +13411,7 @@ pub fn classify_replicated_claim_with_registry(
             ),
         ));
     }
+    identities::validate_replicated(claim)?;
     if claim.kind == retirements::KIND
         && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
             || fields.get("retired_by").and_then(Value::as_str) != claim.actor.as_deref())
@@ -13509,6 +13552,8 @@ fn replay_projects_kind(kind: &str) -> bool {
         kind,
         "intent.desired"
             | "agent.retired"
+            | "agent.renamed"
+            | "mission.renamed"
             | "owned-set.revised"
             | "doc.bound"
             | "mission.published"
@@ -13556,6 +13601,7 @@ fn mark_dirty(dirty: &mut BTreeSet<Aggregate>, aggregate: Aggregate, reason: &st
 fn run_tree_kind(kind: &str) -> bool {
     replay_projects_kind(kind)
         && !matches!(kind, "intent.desired" | "agent.retired"
+                | "agent.renamed" | "mission.renamed"
                 | "owned-set.revised" | "doc.bound" | "mission.published")
         && !kind.starts_with("planning-session.")
 }
@@ -14460,6 +14506,8 @@ pub fn try_project_simple_replication_tx(
                 claim.kind.as_str(),
                 "intent.desired"
                     | "agent.retired"
+                    | "agent.renamed"
+                    | "mission.renamed"
                     | "work.person-asked"
                     | "work.person-done"
                     | "work.person-cancelled"
@@ -14858,7 +14906,9 @@ pub fn try_project_simple_replication_tx(
 
 /// The graph tables a replay derives from claims alone, children before the tables their
 /// foreign keys name. Local tables, such as lease renewals, are not among them.
-const REPLAYED_GRAPH_TABLES: [&str; 8] = [
+const REPLAYED_GRAPH_TABLES: [&str; 10] = [
+    "identity_names",
+    "identity_heads",
     "desired",
     "mission_definitions",
     "mission_run_deadlines",
@@ -14896,6 +14946,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     }
     stage("full-replay/operations");
     rebuild_operations_tx(transaction).map_err(internal)?;
+    identities::rebuild(transaction).map_err(internal)?;
     project_replicated_base_claims_with_progress(transaction, progress)?;
     let mut stage = |phase| {
         progress(ReplayProgress {
@@ -15092,10 +15143,15 @@ pub fn select_replicated_desired(
     claim: &ClaimRecord,
     desired: &DesiredSubject,
 ) -> Result<(), St3Error> {
-    if claim.body.get("owned_set").is_some() || owned_sets::owner(transaction, &claim.subject, None)?.is_some() {
+    let normalized_desired = identities::normalize_desired(transaction, desired)?;
+    let desired = normalized_desired.as_ref();
+    if claim.body.get("owned_set").is_some() || owned_sets::owner(transaction, &desired.subject, None)?.is_some() {
         return Ok(());
     }
-    let current = current_desired_row_tx(transaction, &claim.subject).map_err(internal)?;
+    // Read the physical row directly: conflict fencing belongs to admission, not replay.
+    let current = transaction.query_row("SELECT kind,revision,claim_id,body,member,owner_run,owner_generation FROM desired WHERE subject=?1",
+        [&desired.subject], |row| Ok(DesiredRow { kind:row.get(0)?,revision:row.get(1)?,claim_id:row.get(2)?,body:row.get(3)?,member:row.get(4)?,owner_run:row.get(5)?,owner_generation:row.get(6)? }))
+        .optional().map_err(internal)?;
     let revision = desired_revision(desired);
     let select = if let Some(row) = &current {
         if claim.id == row.claim_id
@@ -15119,7 +15175,7 @@ pub fn select_replicated_desired(
             /* sqlite-large-value: allow-for-now lv-haa631007e805 owner=st3_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, member, owner_run, owner_generation, owner_step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(subject) DO UPDATE SET kind=excluded.kind, revision=excluded.revision, claim_id=excluded.claim_id, body=excluded.body, member=excluded.member, owner_run=excluded.owner_run, owner_generation=excluded.owner_generation, owner_step=excluded.owner_step",
             params![
-                claim.subject,
+                desired.subject,
                 desired.kind,
                 revision,
                 claim.id,
@@ -19413,7 +19469,9 @@ pub mod tests;
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
 /// of these columns changes.
-pub const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 6] = [
+pub const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 8] = [
+    ("identity-heads", "identity_heads", &["identity", "kind", "canonical_id", "naming_revision", "unavailable"], "identity"),
+    ("identity-names", "identity_names", &["name", "identity", "claim_id"], "name"),
     (
         "desired",
         "desired",
@@ -19586,6 +19644,8 @@ pub struct ClaimCommitContext<'a> {
     pub signature: Option<&'a str>,
     // Only retire_agent supplies the declaration, owner and rollout admission together.
     pub retirement_writer: bool,
+    /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
+    pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
 }
@@ -19602,6 +19662,18 @@ pub fn append_claim_with_commit_context(
     let admission = |connection: &Connection| {
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());
+        }
+        if identities::KINDS.contains(&input.kind.as_str()) && !context.identity_writer {
+            return Err(identities::writer_required());
+        }
+        identities::resolve_reference_conn(connection, &input.subject)?;
+        if let Some(actor) = input.actor.as_deref() { identities::resolve_reference_conn(connection, actor)?; }
+        if input.kind == "message.sent" {
+            for party in ["from", "to"] {
+                if let Some(id) = input.fields.get(party).and_then(Value::as_str) {
+                    identities::resolve_reference_conn(connection, id)?;
+                }
+            }
         }
         if let Some(admission) = context.admission {
             admission(connection)?;
@@ -19623,15 +19695,25 @@ pub fn append_claim_with_commit_context(
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
     {
-        return append_local_observation_fenced(graph, input, event_runtime);
+        let connection = graph.readers.get();
+        admission(&connection)?;
+        let input = identities::normalize_claim_input(&connection, input)?;
+        return append_local_observation_fenced(graph, &input, event_runtime);
     }
     if latest_retention(&input.kind) {
-        return append_latest_observation_fenced(graph, input, now_ms(), event_runtime);
+        let connection = graph.readers.get();
+        admission(&connection)?;
+        let input = identities::normalize_claim_input(&connection, input)?;
+        return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
     }
     // One claim in a savepoint of the writer's next batch; its caller hears back once that
     // batch commits.
     graph.connection
         .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
+            let normalized_input = if context.signature.is_none() {
+                identities::normalize_claim_input(transaction, input)?
+            } else { std::borrow::Cow::Borrowed(input) };
+            let input = normalized_input.as_ref();
             let mut assistant_input;
             let input = if let Some(authorization) = context.assistant {
                 let grant_id = assistant_write::authorize_grant(transaction, &graph.origin, authorization)?;
@@ -19642,7 +19724,7 @@ pub fn append_claim_with_commit_context(
                 assistant_input.fields.insert("assistant_session_actor".into(), json!(authorization.actor));
                 &assistant_input
             } else { input };
-            let operation = claim_operation(input)?;
+            let operation = identities::claim_operation(input)?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
@@ -19654,6 +19736,12 @@ pub fn append_claim_with_commit_context(
             }
             let outcome = (|| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
+            let normalized_fence = fence.map(|fence| -> Result<_,St3Error> {
+                let identity = identities::resolve_reference_conn(transaction, &fence.subject)?;
+                Ok(if identity == fence.subject { std::borrow::Cow::Borrowed(fence) }
+                    else { std::borrow::Cow::Owned(crate::mailbox::Fence { subject:identity, ..fence.clone() }) })
+            }).transpose()?;
+            let fence = normalized_fence.as_deref();
             let settled_receipt = if let Some(fence) = fence {
                 check_mailbox_fence(transaction, fence, &graph.origin)?;
                 let index = transaction.query_row(
@@ -19661,7 +19749,8 @@ pub fn append_claim_with_commit_context(
                     [&input.subject], |row| row.get::<_, Option<u64>>(0),
                 ).map_err(internal)?.ok_or_else(|| St3Error::new("missing-message", "message does not exist"))?;
                 let message = message_view_tx(transaction, &input.subject, index).map_err(internal)?;
-                if message.to != fence.subject || input.actor.as_deref() != Some(&fence.subject) {
+                let actor = input.actor.as_deref().map(|actor| identities::resolve_reference_conn(transaction, actor)).transpose()?;
+                if message.to != fence.subject || actor.as_deref() != Some(fence.subject.as_str()) {
                     return Err(St3Error::new("wrong-message-recipient", "receipt belongs to another seat"));
                 }
                 if input.kind == "message.staged" && !rollouts::message_allowed(transaction, &message)? {
@@ -19690,12 +19779,10 @@ pub fn append_claim_with_commit_context(
                     .with_detail("stored_digest", stored_digest)
                     .with_detail("request_digest", request_digest.clone()));
                 }
-                return claim_by_id_tx(transaction, &canonical_claim)
-                    .map_err(internal)?
-                    .map(|claim| (claim, false))
-                    .ok_or_else(|| {
-                        St3Error::new("internal", "the operation claim is missing")
-                    });
+                let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
+                    .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))?;
+                identities::check_receipt(transaction, &claim)?;
+                return Ok((claim,false));
             }
             if let Some((operation_id, request_digest)) = &operation {
                 checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
@@ -19705,6 +19792,8 @@ pub fn append_claim_with_commit_context(
             admission(transaction)?;
             if let Some(expected_subjects) = expected_subjects {
                 for (subject, expected) in expected_subjects {
+                    let physical_subject = identities::resolve_reference_conn(transaction, subject)?;
+                    let subject = &physical_subject;
                     // Layout edits merge, but retiring a folded duplicate must not lose
                     // an edit accepted after the client read it.
                     if subject == &input.subject
@@ -19934,7 +20023,7 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
-    claim_operation(input)?;
+    identities::claim_operation(input)?;
     Ok(())
 }
 
@@ -20078,6 +20167,8 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
+    ("identity_heads", &[]),
+    ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
     ("message_index", &["created_index"]),

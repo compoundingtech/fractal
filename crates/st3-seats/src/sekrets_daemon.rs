@@ -98,7 +98,15 @@ pub fn attest(
     if !agent.starts_with("agent/") {
         return Err(refuse(format!("{scope} belongs to {agent}, not an agent")));
     }
-    if let Some(ancestor) = ancestor
+    use crate::store::identities::resolve_reference_conn;
+    // Attest immutable authority identity, never the public spelling: otherwise a
+    // rename into a wildcard grant's prefix would silently grant secret access.
+    let (agent, ancestor) = {
+        let connection = store.readers.get();
+        (resolve_reference_conn(&connection, &agent)?,
+            ancestor.map(|ancestor| resolve_reference_conn(&connection, ancestor)).transpose()?)
+    };
+    if let Some(ancestor) = ancestor.as_deref()
         && ancestor != agent
     {
         return Err(refuse(format!(
@@ -311,6 +319,7 @@ impl SekretsDaemonStore for Store {
 
     fn desired_revision(&self, subject: &str) -> anyhow::Result<Option<String>> {
         let connection = self.readers.get();
+        let subject = crate::store::identities::resolve_reference_conn(&connection, subject)?;
         Ok(connection
             .query_row(
                 "SELECT revision FROM desired WHERE subject=?1",

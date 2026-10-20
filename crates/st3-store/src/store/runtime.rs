@@ -609,7 +609,7 @@ impl Runtime for SmalltalkRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.person-directive-notes.forward-compat.v1";
+    "st3.shared-projections.identity-naming.claim-id-collision.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {
@@ -624,12 +624,14 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hac7a83f4ed08 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h48e515fb40e9 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hd3489deb9c17 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-he66b420b160d owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4b6bb56a214a owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3d9dce1a3af5 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hacb85aef8915 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h01ed68d36a12 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd1d9b7be2e44 owner=st3_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
     }
     Ok(())
 }
