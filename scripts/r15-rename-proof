@@ -226,6 +226,45 @@ def documented_flake_selector_guard(tree, outputs):
     return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'unresolved': errors}
 
 
+def script_directory_literal_guard(tree):
+    spec = importlib.util.spec_from_file_location(
+        'r15_script_paths', tree / 'scripts/r15-rename-scripts.py')
+    scripts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scripts)
+    directories = scripts.moved_directory_names()
+    errors, checked, historical = [], 0, 0
+    for path in sorted((tree / 'scripts').rglob('*')):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            source = path.read_text()
+        except UnicodeError:
+            continue
+        checked += 1
+        historical_function = None
+        if path.name == 'profile-mailbox-wakes':
+            historical_function = next((node for node in ast.walk(ast.parse(source))
+                                        if isinstance(node, ast.FunctionDef)
+                                        and node.name == 'mailbox_library'), None)
+            expected = {'st3-api-mailbox', 'st3-daemon', 'st3'}
+            names = ({node.value for node in ast.walk(historical_function)
+                      if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+                     if historical_function is not None else set())
+            if not expected <= names:
+                errors.append({'path': path.relative_to(tree).as_posix(),
+                               'reason': 'historical Git-ref lookup lost its pre-rename candidates'})
+        for _, _, line, old, new in scripts.path_directory_literals(source, directories):
+            if (historical_function is not None
+                    and historical_function.lineno <= line <= historical_function.end_lineno
+                    and old in expected):
+                historical += 1
+                continue
+            errors.append({'path': path.relative_to(tree).as_posix(), 'line': line,
+                           'directory': old, 'expected': new})
+    return {'result': 'FAIL' if errors else 'PASS', 'scripts': checked,
+            'historical_git_ref_lookups': historical, 'unresolved': errors}
+
+
 def embedded_cargo_guard(tree):
     """Resolve embedded script fixture dependencies against real source crates.
 
@@ -791,6 +830,9 @@ def main():
             tree.mkdir()
             snapshot(revision, tree)
         guards = {}
+        guards['script_directory_literals'] = script_directory_literal_guard(trees[1])
+        differences.extend({'category': 'script_directory_literal', **error}
+                           for error in guards['script_directory_literals']['unresolved'])
         guards['embedded_cargo_dependencies'] = embedded_cargo_guard(trees[1])
         differences.extend({'category': 'embedded_cargo_dependency_resolution', **error}
                            for error in guards['embedded_cargo_dependencies']['unresolved'])

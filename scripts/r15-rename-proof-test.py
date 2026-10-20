@@ -18,6 +18,29 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_indirect_directory_literals_follow_path_assignments_and_loops(self):
+        spec = importlib.util.spec_from_file_location('script_paths', ROOT / 'scripts/r15-rename-scripts.py')
+        scripts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scripts)
+        source = ('for package in ("st3-client", "st3-views"):\n'
+                  '    package_path = f"clients/typescript/{package}"\n'
+                  '    source = (root / package_path / "BUCK").read_text()\n'
+                  'label = "st3-client"\n')
+        matches = scripts.path_directory_literals(source, scripts.moved_directory_names())
+        self.assertEqual([row[3] for row in matches], ['st3-client', 'st3-views'])
+        rewritten = scripts.rewrite_path_directory_literals(source)
+        self.assertIn('("fractal-client", "fractal-views")', rewritten)
+        self.assertIn('label = "st3-client"', rewritten)
+        self.assertFalse(scripts.path_directory_literals(rewritten, scripts.moved_directory_names()))
+        embedded = "python3 - <<'PY'\n" + source + "PY\n"
+        self.assertEqual(len(scripts.path_directory_literals(embedded, scripts.moved_directory_names())), 2)
+        assigned = ('package = "st3-client"\n'
+                    'base = root / "clients" / "typescript"\n'
+                    'path = base / package / "BUCK"\n')
+        self.assertEqual(len(scripts.path_directory_literals(assigned, scripts.moved_directory_names())), 1)
+        local = 'local = root / "assistant-ui"\npath = local / "st3-views"\n'
+        self.assertFalse(scripts.path_directory_literals(local, scripts.moved_directory_names()))
+
     def test_documented_flake_selectors_resolve_local_and_remote_outputs(self):
         outputs = {
             'packages': {'x86_64-linux': ['st-chatgpt']},

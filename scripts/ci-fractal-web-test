@@ -293,7 +293,7 @@ assert "corepack enable" not in client, "Nix owns the client job's pnpm toolchai
 print("passed: client install and checks use the same Nix web toolchain")
 
 # The shared store renderer emits product views recursively; every workspace endpoint must exist.
-for package in ("st3-client", "st3-views"):
+for package in ("fractal-client", "fractal-views"):
     package_path = f"clients/typescript/{package}"
     source = (root / package_path / "BUCK").read_text()
     trees = {}
