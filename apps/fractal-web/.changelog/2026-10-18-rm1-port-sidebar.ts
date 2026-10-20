@@ -1,7 +1,7 @@
 import type { ChangelogEntrySource } from '../src/changelog/contract.ts'
 
 export default {
-  title: 'Bring the RM1 agent rows into the sidebar',
-  summary: 'The agent sidebar uses the RM1 two-line rows with shape-coded status glyphs, sentence-case status labels, last-activity times and reported usage. Reported subagents nest under their parent, and unfiled agents group by their reported project without moving your folders. Child rows keep their reading position and always offer reported details through the row menu, even without a reported session.',
+  title: 'Two-line agent rows, with subagents under their parent',
+  summary: "Each agent row shows its status, last activity and usage on two lines, with a distinct glyph for each status. Subagents appear under the agent that started them, and agents outside your folders are grouped by project without changing your folders. A subagent's row menu always opens its details, even when it has no conversation to show.",
   kind: 'improvement',
 } satisfies ChangelogEntrySource
