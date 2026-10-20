@@ -805,7 +805,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-execution","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -2789,6 +2789,7 @@ jobs:
       - genie-freshness
       - typescript-client
       - isolation-vm
+      - fractal-web-execution
       - evidence-gate-linux-gate
       - evidence-gate-mail-redelivery-canaries
       - evidence-gate-isolation-vm
@@ -2868,7 +2869,7 @@ jobs:
         run: |
           git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
-            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
         if: ${{ always() && steps.sign.outcome == 'success' }}
         continue-on-error: true
@@ -2876,7 +2877,7 @@ jobs:
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
           [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
           python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \
-            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
+            --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --optional "fractal-web" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true
@@ -3133,6 +3134,13 @@ jobs:
       relevant: ${{ steps.detect.outputs.relevant }}
       kit-inputs: ${{ steps.detect.outputs.kit-inputs }}
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - name: Detect web-relevant changes
         id: detect
         env:
@@ -3194,8 +3202,10 @@ jobs:
               "buck2/**",
               "genie/**",
               "nix/web/**",
+              "nix/web-shell*",
               "nix/fractal-web*.nix",
               "scripts/ci-fractal-web*",
+              "scripts/ci-web-shell*",
               "scripts/ci-typescript-client*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
@@ -3341,6 +3351,8 @@ jobs:
               "flake.nix",
               "flake.lock",
               "scripts/ci-fractal-web*",
+              "scripts/ci-web-shell*",
+              "nix/web-shell*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
           )
@@ -3442,10 +3454,18 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -3461,6 +3481,14 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
+      - name: Check web shell identity invariants
+        run: python3 scripts/ci-web-shell-test
+      - name: Identify the web shell inputs
+        id: web-shell-key
+        shell: bash
+        env:
+          CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
+        run: bash scripts/ci-web-shell key
       - name: Restore the pnpm store
         id: pnpm-store
         uses: actions/cache/restore@v4
@@ -3472,13 +3500,15 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/web-shell"
-          key: "fractal-web-shell1-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'nix/**/*.nix', 'scripts/ci-web-shell') }}"
+          key: ${{ steps.web-shell-key.outputs.key }}
       - name: Run the fractal-web lanes and dependency license check
+        id: run
         shell: bash
         run: bash scripts/ci-web-shell run bash scripts/ci-fractal-web
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
           CI_WEB_SHELL_DIR: "${{ runner.temp }}/web-shell"
+          CI_WEB_SHELL_KEY: ${{ steps.web-shell-key.outputs.key }}
           KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
           KIT_SHARD_INDEX: ${{ matrix.shard }}
           KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
@@ -3496,6 +3526,69 @@ jobs:
           name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
           path: "${{ runner.temp }}/kit-play-receipts/receipt.json"
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this job result
+        env:
+          STEP_CHECK: fractal-web
+          STEP_COMMAND: '["bash","scripts/ci-fractal-web"]'
+          STEP_OUTCOMES: '{"run":"${{ steps.run.outcome }}"}'
+          STEP_INPUTS: '{"kit_shard":"${{ matrix.shard }}","kit_shard_count":"${{ needs.fractal-web-changes.outputs.kit-inputs == ''true'' && github.event_name != ''pull_request'' && ''2'' || ''1'' }}","kit_play_set":"${{ github.event_name == ''pull_request'' && ''commit'' || ''all'' }}","app_test_set":"${{ github.event_name == ''pull_request'' && ''related'' || ''all'' }}"}'
+          GATE_SKIP: "false"
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STEP_CHECK"
+          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: "evidence-note-fractal-web-shard-${{ matrix.shard }}"
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -3511,6 +3604,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - name: Require detection and, for web changes, execution
         env:
           CHANGES_RESULT: ${{ needs.fractal-web-changes.result }}
