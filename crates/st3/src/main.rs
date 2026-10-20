@@ -3815,8 +3815,8 @@ enum MessageCommand {
     /// Send one durable normalized message to an agent.
     ///
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
-    /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `st work handoff` for work, and `--kind silent` for anything
-    /// else, which wakes nobody and reaches the recipient at its next turn. Status goes to
+    /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `st work handoff` for work, and `--kind silent` (or `--fyi`) for
+    /// anything else, which wakes nobody and reaches the recipient at its next turn. Status goes to
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
     /// People have no inbox: a send or reply to a person fails. To reach a person, print in
     /// the chat.
@@ -3942,19 +3942,28 @@ struct MessageWakeArgs {
     /// Wake the recipient (default), or hold unread mail for its next real turn.
     #[arg(long, value_parser = ["silent", "wake"], default_value = "wake")]
     kind: String,
+    /// FYI: the same as `--kind silent`. Stored and readable, it wakes nobody; the recipient
+    /// sees it with its next real turn. A daemon that does not know silent wakes as before.
+    #[arg(long, conflicts_with = "kind")]
+    fyi: bool,
 }
 
 impl Default for MessageWakeArgs {
     fn default() -> Self {
         Self {
             kind: "wake".into(),
+            fyi: false,
         }
     }
 }
 
 impl MessageWakeArgs {
+    fn silent(&self) -> bool {
+        self.fyi || self.kind == "silent"
+    }
+
     fn tags(&self) -> impl Iterator<Item = String> {
-        (self.kind == "silent")
+        self.silent()
             .then(|| st3::silent::SILENT_TAG.to_owned())
             .into_iter()
     }
@@ -13205,7 +13214,7 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
-    if args.wake.kind == "wake" && args.tags.iter().any(|tag| tag == st3::silent::SILENT_TAG) {
+    if !args.wake.silent() && args.tags.iter().any(|tag| tag == st3::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
     for tag in args.wake.tags() {
