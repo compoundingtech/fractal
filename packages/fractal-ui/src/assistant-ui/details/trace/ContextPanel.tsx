@@ -48,7 +48,7 @@ export const ContextPanel = ({ lane, compact = false }: ContextPanelProps): Reac
   const samples = usesTurns ? turnSamples : lane.samples
   const sampleKind = usesTurns ? 'turn' : 'bucket'
   const points = samples.flatMap((sample, index) => sample.contextPercent === null ? [] : [{ ts: sample.ts, index: 'turnIndex' in sample ? sample.turnIndex : index + 1, value: sample.contextPercent, estimated: sample.isContextEstimated }])
-  if (points.length === 0) return <div {...stylex.props(styles.root)}><span {...stylex.props(styles.note)}>Context series <MissingDetailsValue label="Context series" reason={`No ${sampleKind} context samples retained.`}/></span></div>
+  if (points.length === 0) return <div {...stylex.props(styles.root)}><span {...stylex.props(styles.note)}>Context history <MissingDetailsValue label="Context history" reason={`No ${sampleKind} context samples retained.`}/></span></div>
   const start = points[0]!.ts
   const end = points.at(-1)!.ts
   const maximumPoint = points.reduce((maximum, point) => point.value > maximum.value ? point : maximum, points[0]!)

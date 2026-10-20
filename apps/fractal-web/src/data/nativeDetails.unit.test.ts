@@ -40,7 +40,7 @@ describe('fixture-free native Details projection', () => {
     expect(result.trace.meters.spend.tokens).toMatchObject({ _tag: 'Known', value: 99_999_999 })
     expect(result.trace.meters.spend.mainUsdWindow).toMatchObject({ _tag: 'Known', value: { _tag: 'Interval', fromMs: 1000, toMs: 5000 } })
     expect(result.trace.meters.spend.tokensScope).toEqual({ _tag: 'AgentIncarnations' })
-    expect(result.trace.meters.spend.tokensWindow).toMatchObject({ _tag: 'Unknown', detail: 'Agent cumulative token accumulation start/window is not reported.' })
+    expect(result.trace.meters.spend.tokensWindow).toMatchObject({ _tag: 'Unknown', detail: 'The start of the agent’s total token count is not reported.' })
     expect(result.trace.meters.spend.totalUsd._tag).toBe('Unknown')
     expect(result.trace.meters.spend.mainUsdCoverage).toEqual({ _tag: 'Unavailable', reason: 'not-attributed' })
     expect(result.syncStatus).toBeUndefined()
@@ -66,12 +66,28 @@ describe('fixture-free native Details projection', () => {
     const result = project({ selected: { ...row, current_work: [work] } })
     expect(result.overview.mission).toBe('mission/example · mission title unreported · current work: Observed step title')
   })
+  it('uses a concise empty mission and user-facing copy for every projected missing fact', () => {
+    const banned = /\b(native|incarnation|provenance|descendant|series)\b/i
+    const collectCopy = (value: unknown): readonly string[] => {
+      if (Array.isArray(value)) return value.flatMap(collectCopy)
+      if (typeof value !== 'object' || value === null) return []
+      return Object.entries(value).flatMap(([key, item]) =>
+        ['detail', 'unavailableReason', 'label'].includes(key) && typeof item === 'string' ? [item] : collectCopy(item))
+    }
+    for (const reason of ['unsupported', 'ungranted', 'failed'] as const) {
+      const feed = unavailable({ reason, detail: 'Details not available.' })
+      const result = project({ selected: { ...row, usage: Option.none(), todo: Option.none() }, selectedPeriod: feed, sessionFeed: feed, selectedDeclarations: feed, selectedQueue: feed })
+      expect(result.overview.mission).toBe('none')
+      expect(result.overview.age).toBeUndefined()
+      for (const copy of collectCopy([result.overview, result.sections, result.trace])) expect(copy).not.toMatch(banned)
+    }
+  })
   it('uses known sidebar attention, runtime terminal identity and the same native agent queue, not placeholder sections', () => {
     const selected = { ...row, runtime_ids: [Native.decodeUnknownSync(Native.RuntimeId)('runtime/example')], ask: Option.some('question'), blocked_on: Option.some('human'), reason: Option.some('Observed pending question') }
     const queue = Native.decodeUnknownSync(Native.AgentQueue)({ kind: 'agent-queue', agent_id: row.id, current_work_ids: ['work/example'], next_work_id: null, move_count: 0, moves: [], runs: [{ mission_run_id: 'mission-run/example', joined_at: '1970-01-01T00:00:01Z', position: 1, state: 'ready', run_state: 'active', claimed_work_ids: [], ready_work_ids: ['work/example'], waiting_work_ids: [] }] })
     const sections = project({ selected, selectedQueue: observed({ value: queue }), needsMe: true }).sections
     expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Needs your attention')
-    expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Native ask · question')
+    expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Request · question')
     const terminals = sections.find(section => section.title === 'Terminals')?.items
     expect(terminals?._tag === 'Known' ? terminals.value.map(item => item.uri) : []).toEqual(['terminal/example'])
     expect(JSON.stringify(sections.find(section => section.title === 'Missions / queue'))).toContain('1 ready, 0 waiting')
@@ -203,11 +219,11 @@ describe('fixture-free native Details projection', () => {
     expect(result.nativeSessionId).toBeUndefined()
     expect(result.overview.durations?.[0]?.value).toBe('2s')
     expect(result.overview.since).toBe('3s')
-    expect(result.overview.age).toBe('Incarnation launch age unreported')
+    expect(result.overview.age).toBeUndefined()
     // Both values derive from Session.started_at; neither claims a native launch fact.
     expect(result.overview.durations?.map(item => item.label)).toEqual([
-      'Managed-session elapsed (from session start to end or now; wall time, not active)',
-      'Current-incarnation session age (from managed session start; native launch not reported)',
+      'Session elapsed',
+      'Session age',
     ])
   })
   it('keeps declared/requested resources distinct and hides paths/ref targets', () => {

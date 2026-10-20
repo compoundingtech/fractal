@@ -25,6 +25,9 @@ export interface DetailsChartsProps {
   readonly showUnavailableReasons?: boolean
 }
 
+/** A wholly unreported group reads as one plain sentence, whatever its individual fields' reasons. */
+const contextSummary = 'This session does not report context usage.'
+const spendSummary = 'This session does not report spend.'
 const missingReason = (fact: TraceFact<unknown>): string => fact._tag === 'Unknown' ? traceFactReason(fact) : 'Context occupancy could not be derived from the reported values.'
 
 /** A group's missing fields, named once; a field missing for several reasons keeps all of them. */
@@ -91,8 +94,8 @@ const ContextMeterPending = ({ footprint }: { readonly footprint: DetailsPending
   </div>}
 </div>
 
-const scopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · self':scope._tag==='IncludingSubagents'?' · including subagents':scope._tag==='AgentIncarnations'?' · agent incarnations':''
-const tokenScopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · this agent':scope._tag==='IncludingSubagents'?' · this agent + subagents':scope._tag==='AgentIncarnations'?' · observed agent incarnations':''
+const scopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · self':scope._tag==='IncludingSubagents'?' · including subagents':scope._tag==='AgentIncarnations'?' · all agent sessions':''
+const tokenScopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · this agent':scope._tag==='IncludingSubagents'?' · this agent + subagents':scope._tag==='AgentIncarnations'?' · observed agent sessions':''
 export const accumulationParts = (fact:TraceFact<TraceAccumulationWindow>):readonly string[]|undefined => {
   if(fact._tag==='Unknown')return undefined
   const window=fact.value
@@ -233,23 +236,23 @@ export const DetailsCharts = ({ trace, context, spend, section, showUnavailableR
   const compactSeries = spend === 'S2' && spendProjection !== undefined && (spendProjection.lane.cumulativeValues.length > 0 || spendProjection.descendantSpend.cumulativeValues.length > 0)
   const panelSeries = spend === 'S3' && spendProjection !== undefined && spendProjection.lane.cumulativeValues.length > 0
   const splitOnly = spend === 'S3' && !panelSeries && hasReportedSplit(trace)
-  const contextFields = mergeGaps([...contextGaps(trace.meters.context), ...(context !== 'C1' && !contextSeries ? [gap('context series', seriesReason)] : [])])
+  const contextFields = mergeGaps([...contextGaps(trace.meters.context), ...(context !== 'C1' && !contextSeries ? [gap('context history', seriesReason)] : [])])
   const spendFields = mergeGaps([...spendGaps(trace),
-    ...(spend !== 'S1' && !compactSeries && !panelSeries ? [gap('spend series', spendReason)] : []),
-    ...(compactSeries && spendProjection !== undefined && spendProjection.lane.cumulativeValues.length === 0 ? [gap('main session series', 'Session spend series was not retained.')] : []),
-    ...(compactSeries && spendProjection !== undefined && spendProjection.descendantSpend.cumulativeValues.length === 0 ? [gap('subagent series', 'Descendant spend series was not retained.')] : []),
+    ...(spend !== 'S1' && !compactSeries && !panelSeries ? [gap('spend history', spendReason)] : []),
+    ...(compactSeries && spendProjection !== undefined && spendProjection.lane.cumulativeValues.length === 0 ? [gap('main session history', 'Session spend history was not retained.')] : []),
+    ...(compactSeries && spendProjection !== undefined && spendProjection.descendantSpend.cumulativeValues.length === 0 ? [gap('subagent history', 'Subagent spend history was not retained.')] : []),
     ...(spend === 'S3' && !hasReportedSplit(trace) ? [gap('spend split', trace.meters.spend.split._tag === 'Unknown' ? missingReason(trace.meters.spend.split) : 'Valid session-attributed spend components were not supplied.')] : [])])
   const contextWhole = !hasContextMeterData(trace.meters.context) && !contextSeries
   const spendWhole = !hasSpendMeterData(trace) && !compactSeries && !panelSeries && !splitOnly
   const contextBody = <div {...stylex.props(styles.body)} data-details-chart={context}>
-    {contextWhole ? showUnavailableReasons && <DetailsNotReported group="Context" fields={contextFields} /> : <>
+    {contextWhole ? showUnavailableReasons && <DetailsNotReported group="Context" summary={contextSummary} fields={contextFields} /> : <>
       <ContextMeter context={trace.meters.context} />
       {contextSeries && projection !== undefined && <ContextPanel scene={projection.scene} lane={projection.lane} compact={context === 'C2'} />}
       <DetailsNotReported fields={contextFields} />
     </>}
   </div>
   const spendBody = <div {...stylex.props(styles.body)} data-details-chart={spend}>
-    {spendWhole ? showUnavailableReasons && <DetailsNotReported group="Spend" fields={spendFields} /> : <>
+    {spendWhole ? showUnavailableReasons && <DetailsNotReported group="Spend" summary={spendSummary} fields={spendFields} /> : <>
       <SpendMeter trace={trace} />
       {compactSeries && <CompactSpend lane={spendProjection!.lane} descendantSpend={spendProjection!.descendantSpend} showTotals={false}/>}
       {panelSeries && <SpendPanel lane={spendProjection!.lane} {...(hasReportedSplit(trace) && trace.meters.spend.split._tag === 'Known' ? {split:trace.meters.spend.split.value} : {})} componentsKnown={hasReportedSplit(trace)} showTotals={false}/>}
@@ -324,8 +327,14 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
 }
 
 /** Unpainted twin of DetailsNotReported, reserving the same line and the same unbreakable names. */
-const NotReportedPending = ({ group, names }: { readonly group?: string; readonly names: readonly string[] }): ReactNode => names.length === 0 ? null
-  : <p {...stylex.props(styles.notReported)}><span {...stylex.props(styles.pendingText)}>{group !== undefined ? `${group} · not reported` : <>Not reported: {names.map((name, index) => <span key={name}>{index > 0 && ', '}<span {...stylex.props(styles.nowrap)}>{name}</span></span>)}</>}</span></p>
+const NotReportedPending = ({ group, summary, names }: { readonly group?: string; readonly summary?: string; readonly names: readonly string[] }): ReactNode => {
+  const narrow = React.useContext(NarrowLayoutContext)
+  if (names.length === 0) return null
+  return <p {...stylex.props(styles.notReported)}><span {...stylex.props(styles.pendingText)}>{group !== undefined ? `${group} · not reported` : <>Not reported: {names.map((name, index) => <span key={name}>{index > 0 && ', '}<span {...stylex.props(styles.nowrap)}>{name}</span></span>)}</>}</span>
+    {/* Phone whole groups reserve the live sentence and the collapsed Why? control. */}
+    {narrow && group !== undefined && summary !== undefined && <><span {...stylex.props(styles.pendingBlock)}><span {...stylex.props(styles.pendingText)}>{summary}</span></span><span {...stylex.props(styles.pendingWhy)} /></>}
+  </p>
+}
 
 /**
  * Loading bodies for the pane's collapsible Context and Spend sections. They
@@ -344,23 +353,23 @@ export const DetailsChartsPending = ({ context, spend, section, shape }: {
   const panelFootprint = context === 'C1' ? undefined : context === 'C2' ? shape.context.compactPanel : shape.context.fullPanel
   const meter = shape.context.meter
   const contextWhole = meter.percentage === undefined && meter.compactions === undefined && meter.lastCompaction === undefined && panelFootprint === undefined
-  const contextNames = [...shape.context.gaps, ...(context !== 'C1' && panelFootprint === undefined ? ['context series'] : [])]
+  const contextNames = [...shape.context.gaps, ...(context !== 'C1' && panelFootprint === undefined ? ['context history'] : [])]
   const compact = shape.spend.compactChart, full = shape.spend.fullChart
   const compactShown = spend === 'S2' && (compact === undefined || compact.series || compact.descendants)
   const fullShown = spend === 'S3' && (full === undefined || full.series || full.split)
   const spendNames = [...shape.spend.gaps,
-    ...(spend === 'S2' && compact !== undefined ? !compact.series && !compact.descendants ? ['spend series'] : [...(compact.series ? [] : ['main session series']), ...(compact.descendants ? [] : ['subagent series'])] : []),
-    ...(spend === 'S3' && full !== undefined ? [...(full.series ? [] : ['spend series']), ...(full.split ? [] : ['spend split'])] : [])]
+    ...(spend === 'S2' && compact !== undefined ? !compact.series && !compact.descendants ? ['spend history'] : [...(compact.series ? [] : ['main session history']), ...(compact.descendants ? [] : ['subagent history'])] : []),
+    ...(spend === 'S3' && full !== undefined ? [...(full.series ? [] : ['spend history']), ...(full.split ? [] : ['spend split'])] : [])]
   const spendWhole = shape.spend.rows.length === 0 && shape.spend.subagents.length === 0 && !compactShown && !fullShown
   const contextBody = <div aria-hidden="true" inert data-details-skeleton="context" data-details-chart={context} {...stylex.props(styles.body)}>
-    {contextWhole ? <NotReportedPending group="Context" names={contextNames} /> : <>
+    {contextWhole ? <NotReportedPending group="Context" summary={contextSummary} names={contextNames} /> : <>
       <ContextMeterPending footprint={meter} />
       {panelFootprint !== undefined && <ContextPanelPending compact={context === 'C2'} footprint={panelFootprint} />}
       <NotReportedPending names={contextNames} />
     </>}
   </div>
   const spendBody = <div aria-hidden="true" data-details-skeleton="spend" data-details-chart={spend} {...stylex.props(styles.body)}>
-    {spendWhole ? <NotReportedPending group="Spend" names={spendNames} /> : <>
+    {spendWhole ? <NotReportedPending group="Spend" summary={spendSummary} names={spendNames} /> : <>
       <SpendMeterPending footprint={shape.spend} />
       {compactShown && <CompactSpendPending showTotals={false} {...(compact === undefined ? {} : {footprint:compact})}/>}
       {fullShown && <SpendPanelPending showTotals={false} {...(full === undefined ? {} : {footprint:full})}/>}
@@ -397,6 +406,9 @@ const styles = stylex.create({
   // Reported window descriptions wrap between words at narrow widths without shortening scope or provenance; words never break.
   windowPart: { whiteSpace: 'normal', overflowWrap: 'normal' },
   pendingText: { color: surface.transparent, backgroundImage: `linear-gradient(${border.borderStrong}, ${border.borderStrong})`, backgroundSize: `100% ${space.md}`, backgroundPosition: 'center', backgroundRepeat: 'no-repeat', boxDecorationBreak: 'clone' },
+  pendingBlock: { display: 'block' },
+  // The phone Why? control's collapsed footprint: one 44px row.
+  pendingWhy: { display: 'block', height: geometry.touchTarget },
   amount: { margin: 0, textAlign: 'var(--details-value-align, right)', overflowWrap: 'normal' },
   tokens: { margin: 0, color: text.fgMuted, textAlign: 'var(--details-value-align, right)', overflowWrap: 'normal' },
 })

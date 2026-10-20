@@ -159,10 +159,10 @@ describe('native Details mounted hook with real getter adapters', () => {
       await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><Pane /></DataSourceProvider>))
       await act(async () => { await vi.waitFor(() => expect(last?.overview.durations?.[0]?.value).toBe('9s')) })
       expect(last?.overview.durations).toMatchObject([
-        { label: expect.stringMatching(/^Managed-session elapsed/), value: '9s' },
-        { label: expect.stringMatching(/^Current-incarnation session age/), value: '9s' },
+        { label: 'Session elapsed', value: '9s' },
+        { label: 'Session age', value: '9s' },
       ])
-      expect(last?.overview.age).toBe('Incarnation launch age unreported')
+      expect(last?.overview.age).toBeUndefined()
       expect(last?.overview.title).toBe('Native title')
       expect(last?.harness).toBe('claude')
       expect(last?.nativeSessionId).toBeUndefined()

@@ -182,7 +182,7 @@ function assertPartial(root: HTMLElement, expected: string) {
   requireContract(labels.length > 0 && labels.every(label => label === expected), 'Coverage rounding or attribution copy differs')
   requireContract(!Array.from(spend(root).querySelectorAll('dt')).some(item => /^Total/.test(item.textContent ?? '')), 'Partial attribution was labelled a complete total')
 }
-function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens · observed agent incarnations') {
+function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens · observed agent sessions') {
   const section = spend(root)
   const tokenRow = section.querySelector('[data-details-token-label]')?.closest('div')
   requireContract(tokenRow?.querySelector('[data-details-token-label]')?.textContent === tokenLabel, 'Token scope inherited monetary scope')
@@ -393,12 +393,14 @@ function durationRow(root: HTMLElement, shortLabel: string): HTMLElement {
   requireContract(row, 'Timing row is missing')
   return row
 }
-/** Timing fields settle independently; host provenance stays in each value's tooltip rather than repeating beneath values. */
+/** Timing fields settle independently; a missing field is omitted, and host provenance stays in each known value's tooltip. */
 function assertTiming(root: HTMLElement) {
   requireContract(root.getAttribute('data-details-pane-state') === 'busy' && !root.querySelector('[data-details-skeleton="overview"]') && root.querySelector('[data-details-name]')?.textContent === 'UI redesign milestone', 'Pending timing replaced loaded sibling details')
-  const elapsed = durationRow(root, 'Managed-session elapsed'), age = durationRow(root, 'Current-incarnation session age'), span = durationRow(root, 'Root observed span')
+  const elapsed = durationRow(root, 'Managed-session elapsed'), span = durationRow(root, 'Root observed span')
   requireContract(elapsed.getAttribute('aria-busy') === 'true' && elapsed.querySelector('[data-details-skeleton="duration"][aria-hidden="true"][inert]') && elapsed.textContent?.endsWith('Loading') && !elapsed.querySelector('[data-details-missing-value]'), 'First-read timing rendered a settled value')
-  requireContract(!age.hasAttribute('aria-busy') && !age.querySelector('[data-details-skeleton]') && age.querySelector(`[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`)?.textContent === '—', 'Settled timing stayed pending')
+  // A guarded missing field paints nothing; known siblings keep the group from collapsing to the timing summary.
+  const overview = root.querySelector<HTMLElement>('section[aria-label$="Overview"]')
+  requireContract(overview && ![...overview.querySelectorAll('[data-details-description-row]')].some(row => row.querySelector('button')?.textContent === 'Current-incarnation session age') && !overview.querySelector('[data-details-missing-value],[data-details-timing-missing]') && !paintedText(overview).includes('—'), 'Missing timing painted instead of omitted')
   requireContract(!span.hasAttribute('aria-busy') && [...span.querySelectorAll('button')].some(button => button.textContent === '42m'), 'Known timing lost its value')
   requireContract(!paintedText(root).includes(timingGuard) && !paintedText(root).includes(timingProvenance), 'Timing guard reason repeats beneath values')
 }
@@ -607,14 +609,8 @@ async function checkTiming(canvasElement: HTMLElement) {
     const root = scenarioPane(canvasElement, 'timing')
     await waitFor(() => assertTiming(root))
     await rejectsControl('First-read timing rendered a settled value', () => assertTiming(mutated(root, '[data-details-skeleton="duration"]', node => node.remove())))
-    await rejectsControl('Settled timing stayed pending', () => assertTiming(mutated(root, `[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`, node => node.closest('[data-details-description-row]')?.setAttribute('aria-busy', 'true'))))
-    await rejectsControl('Timing guard reason repeats beneath values', () => assertTiming(mutated(root, `[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`, node => { const prose = node.ownerDocument.createElement('p'); prose.textContent = timingGuard; node.closest('[data-details-description-row]')?.after(prose) })))
-    const missing = root.querySelector<HTMLElement>(`[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`)
-    requireContract(missing, 'Missing guarded timing value')
-    const guard = await tooltipFor(canvasElement, missing, timingGuard, 'Guarded timing tooltip lost the host reason')
-    const wrongGuard = guard.cloneNode(true) as HTMLElement
-    wrongGuard.textContent = `${ageLabel} is not reported by this source.`
-    await rejectsControl('Guarded timing tooltip lost the host reason', () => requireContract(wrongGuard.textContent === timingGuard, 'Guarded timing tooltip lost the host reason'))
+    await rejectsControl('Missing timing painted instead of omitted', () => assertTiming(mutated(root, '[data-details-skeleton="duration"]', node => { const dash = node.ownerDocument.createElement('span'); dash.setAttribute('data-details-missing-value', ''); dash.textContent = '—'; node.closest('[data-details-description-row]')?.after(dash) })))
+    await rejectsControl('Timing guard reason repeats beneath values', () => assertTiming(mutated(root, '[data-details-skeleton="duration"]', node => { const prose = node.ownerDocument.createElement('p'); prose.textContent = timingGuard; node.closest('[data-details-description-row]')?.after(prose) })))
     const value = [...durationRow(root, 'Root observed span').querySelectorAll<HTMLElement>('button')].find(button => button.textContent === '42m')
     requireContract(value, 'Missing known timing value')
     const provenance = await tooltipFor(canvasElement, value, `42m${timingProvenance}`, 'Known timing tooltip lost host provenance')

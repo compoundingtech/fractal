@@ -86,7 +86,7 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('CI runs')
     const reasonTrigger = host.querySelector<HTMLElement>('[data-details-unreported-section="CI runs"]')!
     const description = document.getElementById(reasonTrigger.getAttribute('aria-describedby')!)
-    expect(description?.textContent).toBe('CI runs observations are not supplied by this native Details feed.')
+    expect(description?.textContent).toBe('This source does not report CI runs.')
     expect(description?.hasAttribute('hidden')).toBe(true)
     expect(within(host).getByRole('region', { name: 'Attention' }).textContent).toContain('No attention action observed')
   })

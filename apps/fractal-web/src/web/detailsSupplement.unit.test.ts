@@ -137,7 +137,7 @@ it('shows the reported traced count in the heading, not the bounded list size or
   expect(heading(render(missing))).toBe('Subagents')
 })
 
-it('keeps elapsed/age acquiring independently and describes missing values accessibly without painting desktop prose', () => {
+it('keeps elapsed/age acquiring independently and omits missing timing fields', () => {
   const render = (durations: DetailsOverview['durations']) => renderToStaticMarkup(createElement(DetailsPane, {
     state: 'partial', overview: { ...overview, durations }, trace: trace(), sections: [], now: 2000,
     variants: { overview: 'O2', context: 'C3', spend: 'S2', resources: 'R1', empty: 'E3' },
@@ -150,11 +150,9 @@ it('keeps elapsed/age acquiring independently and describes missing values acces
   expect(pending).not.toContain('Unreported')
   const reason = 'Session start matches the producer snapshot time; elapsed time and age are unreported.'
   const rejected = render(['Managed elapsed', 'Session age'].map(label => ({ label, value: 'Unreported', detail: reason })))
-  expect(rejected.match(/aria-label="Managed elapsed: unavailable"/g)).toHaveLength(1)
-  expect(rejected.match(/aria-label="Session age: unavailable"/g)).toHaveLength(1)
-  expect(rejected.split(reason)).toHaveLength(3)
-  expect(rejected).toContain('aria-describedby=')
-  expect(rejected).toContain(reason)
+  expect(rejected).not.toContain('aria-label="Managed elapsed: unavailable"')
+  expect(rejected).not.toContain('aria-label="Session age: unavailable"')
+  expect(rejected).not.toContain(reason)
   expect(rejected).not.toContain('data-details-duration-pending')
 })
 

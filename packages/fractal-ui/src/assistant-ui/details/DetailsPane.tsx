@@ -12,25 +12,24 @@ import { canRetrySyncFailure, syncFailureRecovery } from '../st3-views/sync-line
 import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
 import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry } from '../composition-tokens.stylex'
-import { DetailsInlineReason, MissingDetailsValue } from './DetailsUnavailable'
+import { DetailsInlineReason } from './DetailsUnavailable'
 import { detailsReasonText } from './trace-reasons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 export interface DetailsVariants {
   overview: 'O1'|'O2'|'O3'; context:'C1'|'C2'|'C3'; spend:'S1'|'S2'|'S3'; resources:'R1'|'R2'|'R3'; empty:'E1'|'E2'|'E3'
 }
+/** A missing Overview fact renders nothing: absent, blank or a host state word (`Unreported`) is never a value. */
+const reported=(value:string|undefined):value is string=>value!==undefined&&value.trim()!==''&&!/^(unreported|unavailable|not reported)$/i.test(value.trim())
 /**
- * A host `detail` is the missing value's provenance, or a known value's provenance beneath it in the tooltip.
- * A missing value's state word (`Unreported`) is never its reason: without a host `detail` the reason is plain prose,
- * naming the field only where its label is not painted beside it (`labelPainted`).
- * Narrow (phone) hosts have no hover: the value wraps in full and its provenance paints beneath it.
+ * A known value; a host `detail` is its source note beneath it in the tooltip.
+ * Narrow (phone) hosts have no hover: the value wraps in full and its note paints beneath it.
  */
-function OverviewValue({label,value,detail,labelPainted=false}:{label:string;value:string|undefined;detail?:string|undefined;labelPainted?:boolean}) {
+function OverviewValue({value,detail}:{value:string;detail?:string|undefined}) {
   const narrow=React.useContext(NarrowLayoutContext)
-  if(value===undefined||/\b(unreported|unavailable)\b/i.test(value))return <MissingDetailsValue label={label} reason={detail??(labelPainted?'Not reported by this source.':`${label} is not reported by this source.`)}/>
-  const provenance=detail===undefined?undefined:detailsReasonText(detail)
-  if(narrow)return <span data-details-overview-value {...stylex.props(styles.valueText)}>{value}{provenance!==undefined&&<DetailsInlineReason block>{provenance}</DetailsInlineReason>}</span>
-  return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}{provenance!==undefined&&<span data-details-value-detail {...stylex.props(styles.tooltipDetail)}>{provenance}</span>}</Tooltip></TooltipTrigger>
+  const note=detail===undefined?undefined:detailsReasonText(detail)
+  if(narrow)return <span data-details-overview-value {...stylex.props(styles.valueText)}>{value}{note!==undefined&&<DetailsInlineReason block>{note}</DetailsInlineReason>}</span>
+  return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}{note!==undefined&&<span data-details-value-detail {...stylex.props(styles.tooltipDetail)}>{note}</span>}</Tooltip></TooltipTrigger>
 }
 export interface DetailsLayoutIntent { readonly hiddenSections: readonly string[] }
 function Section({title,children,hidden}:{title:string;children:React.ReactNode;hidden:boolean}) {
@@ -139,14 +138,27 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const dataOnly=variants.empty==='E3'
   const consolidateUnavailable=state==='new'&&dataOnly
   const glyphStatus=overview.activity==='working'||overview.activity==='waiting'||overview.activity==='idle'?overview.activity:'unobserved'
-  const knownIdentity=[overview.machine,overview.model].filter(Boolean).join(' · ')
-  const fields=[['Status',overview.status],['Machine',overview.machine],['Harness',overview.harness],['Model',overview.model],['Status since',overview.since],['Incarnation age',overview.age]] as const
+  const knownIdentity=[overview.machine,overview.model].filter(reported).join(' · ')
+  // Missing facts render nothing: the grid, identity and meta lines carry only reported values, never a dangling separator.
+  const fields=([['Status',overview.status],['Machine',overview.machine],['Harness',overview.harness],['Model',overview.model],['Status since',overview.since],['Age',overview.age]] as const).flatMap(([name,value])=>reported(value)?[[name,value] as const]:[])
+  const identityFacts=[overview.machine,overview.model,overview.since].filter(reported).map((value,index)=><OverviewValue key={`identity-${index}`} value={value}/>)
+  const metaFacts=[...[overview.harness,overview.age].filter(reported).map((value,index)=><OverviewValue key={`meta-${index}`} value={value}/>),...(spend.totalUsd._tag==='Known'?[<span key="spend">{spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</span>]:[])]
+  const durations=overview.durations??[]
+  const shownDurations=durations.filter(duration=>duration.pending===true||reported(duration.value))
+  // Every timing fact missing collapses to one source-level line instead of a row per absent value.
+  const timingMissing=durations.length>0&&shownDurations.length===0&&!reported(overview.since)&&!reported(overview.age)
+  const overviewFacts=(variants.overview==='O3'?fields.length:(glyphStatus==='unobserved'?0:1)+identityFacts.length+(variants.overview==='O2'?metaFacts.length+(occupancy===undefined?0:1):0))+shownDurations.length
+  // The host's empty-mission marker paints only when nothing else is known about the agent.
+  const mission=reported(overview.mission)&&(overview.mission.trim().toLowerCase()!=='none'||overviewFacts===0)?overview.mission:undefined
   const pendingOverview=providedPendingOverview??overview
   // Reserve the populated strings' actual wrapping, not approximate unbreakable ch-width ink.
-  const pendingFields=[['Status',pendingOverview.status],['Machine',pendingOverview.machine],['Harness',pendingOverview.harness],['Model',pendingOverview.model],['Status since',pendingOverview.since],['Incarnation age',pendingOverview.age]] as const
+  const pendingFields=([['Status',pendingOverview.status],['Machine',pendingOverview.machine],['Harness',pendingOverview.harness],['Model',pendingOverview.model],['Status since',pendingOverview.since],['Age',pendingOverview.age]] as const).flatMap(([name,value])=>reported(value)?[[name,value] as const]:[])
   const pendingSpend=pendingTrace.meters.spend.totalUsd
   const pendingContext=pendingTrace.meters.context
-  const pendingOverviewLine=[pendingOverview.harness,pendingOverview.age].filter(Boolean).join(' · ')+(pendingSpend._tag==='Known'?` · ${pendingTrace.meters.spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}$${pendingSpend.value.toFixed(2)}`:'')
+  const pendingOverviewLine=[...[pendingOverview.harness,pendingOverview.age].filter(reported),...(pendingSpend._tag==='Known'?[`${pendingTrace.meters.spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}$${pendingSpend.value.toFixed(2)}`]:[])].join(' · ')
+  const pendingMission=reported(pendingOverview.mission)&&pendingOverview.mission.trim().toLowerCase()!=='none'?pendingOverview.mission:undefined
+  const pendingDurations=(pendingOverview.durations??[]).filter(duration=>duration.pending===true||reported(duration.value))
+  const pendingTimingMissing=(pendingOverview.durations?.length??0)>0&&pendingDurations.length===0&&!reported(pendingOverview.since)&&!reported(pendingOverview.age)
   const pendingOccupancy=contextOccupancy(pendingContext)
   const pendingContextLine=`Context ${Math.round(pendingOccupancy?.percent??0)}%${pendingOccupancy?.estimated?' est.':''}`
   const headerAccessory=<PaneHeaderAccessory inlineFallback={onClose!==undefined}>
@@ -166,33 +178,33 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         {pending?<>
         {overview.title!==undefined&&<strong data-details-name {...stylex.props(styles.name)}>{overview.title}</strong>}
         {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{pendingFields.map(([name,value])=>{
-          if(value===undefined)return null
-          const identity=name==='Machine'?overview.machine:name==='Model'?overview.model:undefined
+          const identity=name==='Machine'&&reported(overview.machine)?overview.machine:name==='Model'&&reported(overview.model)?overview.model:undefined
           return <React.Fragment key={name}><dt aria-hidden={identity===undefined||undefined} {...stylex.props(styles.muted)}>{identity!==undefined?name:<span inert {...stylex.props(styles.pendingText)}>{name}</span>}</dt><dd aria-hidden={identity===undefined||undefined} {...stylex.props(styles.value)}>{identity!==undefined?<span {...stylex.props(styles.pendingIdentity)}>{identity}</span>:<span inert {...stylex.props(styles.pendingText)}>{value}</span>}</dd></React.Fragment>
         })}</dl>:<>
-          <div {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/>}<span>{knownIdentity}<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span></span></div>
+          <div {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/>}<span>{knownIdentity}{reported(pendingOverview.since)&&<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span>}</span></div>
           {variants.overview==='O2'&&<>
-            <div aria-hidden="true" {...stylex.props(line)}><span {...stylex.props(styles.pendingText)}>{pendingOverviewLine}</span></div>
+            {pendingOverviewLine!==''&&<div aria-hidden="true" {...stylex.props(line)}><span {...stylex.props(styles.pendingText)}>{pendingOverviewLine}</span></div>}
             <div aria-hidden="true"><span {...stylex.props(styles.muted)}><span {...stylex.props(styles.pendingText)}>{pendingContextLine}</span></span><div {...stylex.props(meterStyles.track)}/></div>
           </>}
         </>}
         </>:<>
         {overview.title!==undefined&&<strong data-details-name {...stylex.props(styles.name)}>{overview.title}</strong>}
-        {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=><React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}><OverviewValue label={name} value={value} labelPainted/></dd></React.Fragment>)}</dl>:<>
-          <div data-details-overview-line {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}<OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
+        {variants.overview==='O3'?fields.length>0&&<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=><React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}><OverviewValue value={value}/></dd></React.Fragment>)}</dl>:<>
+          {(glyphStatus!=='unobserved'||identityFacts.length>0)&&<div data-details-overview-line {...stylex.props(line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}{identityFacts.flatMap((fact,index)=>index===0?[fact]:[<span key={`separator-${index}`} aria-hidden="true">·</span>,fact])}</div>}
           {variants.overview==='O2'&&<>
-            <div data-details-overview-line {...stylex.props(line)}><OverviewValue label="Harness" value={overview.harness}/><span>·</span><OverviewValue label="Incarnation age" value={overview.age}/>{spend.totalUsd._tag==='Known'&&<> · {spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</>}</div>
+            {metaFacts.length>0&&<div data-details-overview-line {...stylex.props(line)}>{metaFacts.flatMap((fact,index)=>index===0?[fact]:[<span key={`separator-${index}`} aria-hidden="true">·</span>,fact])}</div>}
             {/* Progressbar children are presentational: the estimate is painted and announced here; the Context section's `est.` trigger carries the explanation. */}
             {occupancy!==undefined&&<ProgressBar aria-label="Context window" value={occupancy.percent} maxValue={100} valueLabel={`${Math.round(occupancy.percent)}%${occupancy.estimated?', estimated from tokens':''}`}>{({percentage})=><><span data-details-occupancy={occupancy.estimated?'estimated':'reported'} {...stylex.props(styles.muted)}>Context {Math.round(percentage??0)}%{occupancy.estimated?' est.':''}</span><div {...stylex.props(meterStyles.track)}><div {...stylex.props(meterStyles.fill(percentage??0))}/></div></>}</ProgressBar>}
           </>}
         </>}
         </>}
-        {(pending?pendingOverview.mission:overview.mission)!==undefined&&<div data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.pendingText)}>Mission</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{pendingOverview.mission}</span></>:<><span {...stylex.props(styles.shortLabel)}>Mission</span>{narrow?<span data-details-overview-value {...stylex.props(styles.valueText)}>{overview.mission}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{overview.mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{overview.mission}</Tooltip></TooltipTrigger>}</>}</div>}
-        {(pending?pendingOverview.durations:overview.durations)?.map(duration=>{
+        {(pending?pendingMission:mission)!==undefined&&<div data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.pendingText)}>Mission</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{pendingMission}</span></>:<><span {...stylex.props(styles.shortLabel)}>Mission</span>{narrow?<span data-details-overview-value {...stylex.props(styles.valueText)}>{mission}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{mission}</Tooltip></TooltipTrigger>}</>}</div>}
+        {(pending?pendingDurations:shownDurations).map(duration=>{
           // A first-read field keeps its known label and reserves the host's placeholder value; settled siblings stay readable.
           const fieldPending=!pending&&duration.pending===true
-          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue label={duration.label} value={duration.value} detail={duration.detail} labelPainted/>}</>}</div>
+          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue value={duration.value} detail={duration.detail}/>}</>}</div>
         })}
+        {(pending?pendingTimingMissing:timingMissing)&&<p data-details-overview-line data-details-timing-missing aria-hidden={pending||undefined} {...stylex.props(line,styles.timingMissing)}>{pending?<span inert {...stylex.props(styles.pendingText)}>Timing not reported by this source.</span>:'Timing not reported by this source.'}</p>}
       </div>
     </Section>
     {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
@@ -202,7 +214,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
     </div>
     {noPriorFailure&&syncStatus._tag==='Failed'&&<div data-details-error {...stylex.props(styles.errorBlock)}>
       {overview.title!==undefined&&<strong>{overview.title}</strong>}
-      {[overview.machine,overview.harness,overview.model].some(value=>value!==undefined)&&<p {...stylex.props(styles.errorText)}>{[overview.machine,overview.harness,overview.model].filter(Boolean).join(' · ')}</p>}
+      {[overview.machine,overview.harness,overview.model].some(reported)&&<p {...stylex.props(styles.errorText)}>{[overview.machine,overview.harness,overview.model].filter(reported).join(' · ')}</p>}
       <Heading level={2} data-details-error-reason {...stylex.props(styles.errorHeading)}>Couldn't load agent details</Heading>
       {failureMessage&&(narrow?<p data-details-error-cause {...stylex.props(styles.errorText)}>{failureMessage}</p>:<TooltipTrigger delay={0}><Button data-details-error-cause {...stylex.props(styles.errorText,styles.errorCause)}><span {...stylex.props(styles.errorCauseLines)}>{failureMessage}</span></Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{failureMessage}</Tooltip></TooltipTrigger>)}
       {retryable?<div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,narrow&&styles.touchRow,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton,narrow&&styles.touchRow)}>Retry</Button></div>:<p data-details-error-recovery {...stylex.props(styles.errorText)}>{syncFailureRecovery(syncStatus.cause)}</p>}
@@ -247,6 +259,7 @@ const styles=stylex.create({
   muted:{color:tx.fgMuted,overflowWrap:'normal'},
   value:{display:'flex',margin:s.zero,minWidth:0,overflow:'hidden',whiteSpace:'normal',overflowWrap:'normal'},
   orientation:{margin:s.zero,paddingInline:s.zero,paddingBlock:s.sm,color:tx.fgSoft,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
+  timingMissing:{margin:s.zero},
   errorBlock:{position:'absolute',inset:s.zero,boxSizing:'border-box',display:'flex',flexDirection:'column',alignItems:'flex-start',gap:s.sm,padding:s.md,overflowY:'auto',overflowX:'hidden'},
   errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   errorHeading:{margin:s.zero,color:tx.fg,fontSize:t.metaSize,lineHeight:t.metaLeading,fontWeight:t.weightSemibold},

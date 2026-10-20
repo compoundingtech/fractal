@@ -5,7 +5,8 @@ import { RegistryContext } from '@effect/atom-react'
 import { DetailsPane, Workbench } from '@smalltalk/fractal-ui/assistant-ui'
 import type { DetailsLayoutIntent, DetailsVariants, WorkbenchLayout, WorkbenchResources } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-status.ts'
-import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { useClockDeadline, useGatewaySync, useNowSnapshot } from '../data/react.tsx'
 import { syncLineNextChange } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
 import { earliestChange } from '@smalltalk/fractal-ui/human-time/format'
@@ -45,7 +46,8 @@ export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, va
   const [selected, setSelected] = React.useState(detailsKey)
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
   return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={width === 'fill' ? undefined : { width }} {...stylex.props(styles.root, width === 'fill' && styles.fillRoot)}>
-    <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouchTarget)}>Close</Button></div>
+    {/* Phone: a recognizable 44px control (icon, label, filled shape); desktop keeps the quiet text button. */}
+    <div {...stylex.props(styles.closeBar)}><Button aria-label="Close agent inspector" data-agent-inspector-close onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouch)}>{narrow && <Icon name="x" />}Close</Button></div>
     <Workbench layout={layout} resources={resources} workspaceId={`live-inspector:${agentRef}`} scheme={scheme}
       appearance={{ width: 'W1', header: 'H3', chrome: 'P1', dropZones: 'D3' }}
       landmarkContext="Agent inspector" focusedPaneKey={selected} onPaneSelect={setSelected}
@@ -141,7 +143,7 @@ const styles = stylex.create({
   fillRoot: { width: '100%', flexGrow: 1 },
   closeBar: { display: 'flex', justifyContent: 'flex-end', flexShrink: 0, padding: s.xs },
   close: { fontSize: t.metaSize, color: c.fgMuted, backgroundColor: 'transparent', borderWidth: 0, padding: s.xs, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
-  closeTouchTarget: { minWidth: g.touchTarget, minHeight: g.touchTarget },
+  closeTouch: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, minWidth: g.touchTarget, minHeight: g.touchTarget, paddingInline: s.lg, color: c.fg, backgroundColor: c.rowActive, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: r.control },
   content: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flexGrow: 1, overflowY: 'auto' },
   coverage: { margin: 0, padding: s.sm, fontSize: t.metaSize, color: c.fgMuted, overflowWrap: 'anywhere', flexShrink: 0 },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },

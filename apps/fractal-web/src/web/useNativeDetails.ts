@@ -9,7 +9,7 @@ import type * as Native from '@smalltalk/st3-client/schema'
 import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
 
 export type { NativeDetailsObservation } from '../data/nativeDetails.ts'
-const notReported = Atom.make(unavailable({ reason: 'unsupported', detail: 'The selected native fact is not reported.' }))
+const notReported = Atom.make(unavailable({ reason: 'unsupported', detail: 'These session details are not reported.' }))
 
 interface SessionStartGuard {
   readonly earliest: number

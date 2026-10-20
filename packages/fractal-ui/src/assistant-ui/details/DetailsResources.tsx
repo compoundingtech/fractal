@@ -166,7 +166,7 @@ export function traceHistorySection(trace: TraceSeries): DetailsSection {
     glyph:'◷',
     card:{
       kind:'file',
-      label:`Incarnation · ${incarnation.nativeSessionId}`,
+      label:`Session · ${incarnation.nativeSessionId}`,
       detail:`Started ${historyTimestamp.format(incarnation.startedMs)} UTC${incarnation.endedMs===null?'':` · Ended ${historyTimestamp.format(incarnation.endedMs)} UTC`} · $${incarnation.usd.toFixed(2)} · ${incarnation.compactions} ${incarnation.compactions === 1 ? 'compaction' : 'compactions'}`,
       fileCount:{_tag:'Unknown'},
       files:[],
@@ -317,7 +317,7 @@ function resourceIcon(resource: DetailsResource): IconName {
     case 'agent':
     case 'mission': return 'message'
     case 'attention': return 'alert'
-    case 'session': return resource.card.label.startsWith('Incarnation · ') ? 'clock' : 'message'
+    case 'session': return resource.glyph === '◷' ? 'clock' : 'message'
     default: return resource.card.kind === 'diff' ? 'pencil' : 'attach'
   }
 }

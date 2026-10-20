@@ -89,9 +89,9 @@ const elapsedChange = (at: number | undefined, now: number): number | undefined 
   const unit = now - at < 60_000 ? 1000 : 60_000
   return at + (Math.floor((now - at) / unit) + 1) * unit
 }
-const factFailure = (feed: Feed<unknown>): string => feed._tag === 'Waiting' ? 'Loading native observation.'
-  : feed._tag === 'Unavailable' ? feed.reason === 'ungranted' ? 'Native read is not granted.' : feed.reason === 'unsupported' ? 'Native observation is unsupported.' : 'Native observation failed.'
-  : feed.error?.reason === 'ungranted' ? 'Native read is not granted.' : 'Not reported by the native source.'
+const factFailure = (feed: Feed<unknown>): string => feed._tag === 'Waiting' ? 'Loading this session’s details.'
+  : feed._tag === 'Unavailable' ? feed.reason === 'ungranted' ? 'Access to these details is not granted.' : feed.reason === 'unsupported' ? 'This source does not report these details.' : 'These details could not be loaded.'
+  : feed.error?.reason === 'ungranted' ? 'Access to these details is not granted.' : 'Not reported by this source.'
 const resource = ({ key, label, detail }: { readonly key: string; readonly label: string; readonly detail: string }): DetailsResource => ({ uri: `${nativeDetailsUriPrefix}${key}`, glyph: 'resource', card: { kind: 'worktree', label, detail, fileCount: { _tag: 'Unknown' }, files: [] } })
 
 /** Pure host DTO boundary: no fixture fallback and no private producer dependencies. */
@@ -126,17 +126,17 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const context = cumulativeUsage?.context
   const contextAsOf = context === undefined ? undefined : DateTime.toEpochMillis(context.observed_at_unix_ms)
   const contextValid = contextAsOf !== undefined && contextAsOf <= now && (projected?.contextObservedAfter === undefined || contextAsOf > projected.contextObservedAfter)
-  const contextField = (value: number | undefined): TraceFact<number> => value === undefined || !contextValid ? unknown('Latest reported seat context; current-incarnation provenance is not reported.') : known(value, contextAsOf)
+  const contextField = (value: number | undefined): TraceFact<number> => value === undefined || !contextValid ? unknown('Context usage for the current session is not reported.') : known(value, contextAsOf)
   const rows = attributedRoot === undefined || period === undefined ? [] : period.rows.filter(item => item.agent === agentRef && item.native_session_id === attributedRoot)
   const nativeWindow: TraceFact<TraceAccumulationWindow> = period !== undefined && rows.length > 0 && period.since_ms < period.until_ms
     ? known({ _tag: 'Interval', fromMs: period.since_ms, toMs: period.until_ms }, period.until_ms)
-    : unknown('No attributed native reported period.', periodFeed._tag === 'Waiting' ? 'loading' : 'not-attributed')
+    : unknown('No reporting period is linked to this session.', periodFeed._tag === 'Waiting' ? 'loading' : 'not-attributed')
   const hasPeriod = rows.length > 0 && nativeWindow._tag === 'Known'
   // Unpriced tokens are not expressible in kit coverage; the amount keeps unavailable attribution coverage.
   const cost = rows.reduce((sum, item) => sum + item.cost_microusd, 0) / 1_000_000
   // API period groups expose latest native ID, not their incarnation or binding history.
   const nativeCoverage: TraceCoverage = { _tag: 'Unavailable', reason: rows.some(item => item.unpriced_tokens > 0) ? 'not-covered' : 'not-attributed' }
-  const unsupported = unknown<number>('Native source does not report descendant-inclusive spend.')
+  const unsupported = unknown<number>('This source does not report spend including subagents.')
   const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, snapshotCreatedAt: sessionFeed._tag === 'Observed' ? sessionFeed.snapshotCreatedAt : undefined, now })
   const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.detail : undefined)
   const timingPending = rowFeed._tag === 'Waiting' || sessionFeed._tag === 'Waiting'
@@ -147,7 +147,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const work = row?.current_work?.[0]
   const missionTitle = work === undefined || missions._tag !== 'Observed' ? undefined : missions.value.find(item => item.id === work.mission_id)?.title
   const workTitle = work === undefined ? undefined : Option.getOrUndefined(work.title)
-  const mission = work === undefined ? row === undefined ? undefined : 'No current mission reported'
+  const mission = work === undefined ? row === undefined ? undefined : 'none'
     : missionTitle ?? `${work.mission_id} · mission title ${missions._tag === 'Observed' ? 'unreported' : 'unavailable'}${workTitle === undefined ? '' : ` · current work: ${workTitle}`}`
   const workspaceItems: DetailsResource[] = []
   if (row !== undefined && Option.isSome(row.workspace)) workspaceItems.push(resource({ key: 'workspace/declared', label: 'Declared workspace', detail: 'Configured on the owning host; path withheld. Observed checkout/cwd confirmation is not reported.' }))
@@ -159,18 +159,18 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   ]
   const terminal = row !== undefined && row.runtime_ids.length > 0 ? projected?.terminal : undefined
   const sections: DetailsSection[] = [
-    { title: 'Workspace', items: workspaceItems.length === 0 ? { _tag: 'Unknown' } : { _tag: 'Known', value: workspaceItems }, unavailableReason: 'Declared workspace/checkout not reported; observed workspace confirmation is unsupported.' },
-    { title: 'Subagents', items: row?.subagents === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: row.subagents.map((child, index) => resource({ key: `subagent/${index}`, label: `Observed st subagent ${index + 1}`, detail: `${child.driver} · ${Option.getOrUndefined(child.subagent_type) ?? 'type unreported'} · status unobserved${Option.match(child.started_at, { onNone: () => ' · start unreported', onSome: at => ` · started ${new Date(DateTime.toEpochMillis(at)).toISOString()}` })}` })) }, unavailableReason: 'Currently leased st subagents are not reported; not a traced-descendant list.' },
+    { title: 'Workspace', items: workspaceItems.length === 0 ? { _tag: 'Unknown' } : { _tag: 'Known', value: workspaceItems }, unavailableReason: 'This source does not report a workspace or confirm which checkout is in use.' },
+    { title: 'Subagents', items: row?.subagents === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: row.subagents.map((child, index) => resource({ key: `subagent/${index}`, label: `Subagent ${index + 1}`, detail: `${child.driver} · ${Option.getOrUndefined(child.subagent_type) ?? 'type unreported'} · status unobserved${Option.match(child.started_at, { onNone: () => ' · start unreported', onSome: at => ` · started ${new Date(DateTime.toEpochMillis(at)).toISOString()}` })}` })) }, unavailableReason: 'This source does not report the agent’s current subagents.' },
     { title: 'Declared bindings', items: declared === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
       ...declared.bindings.map((binding, index) => resource({ key: `binding/${index}`, label: `Declared ${binding.kind}`, detail: `${binding.count} reference${binding.count === 1 ? '' : 's'} · revision ${declared.revision} · targets withheld; declared intent, not observed resources.` })),
       ...(declared.declaredModel === undefined ? [] : [resource({ key: 'binding/model', label: 'Declared model', detail: `${declared.declaredModel} · revision ${declared.revision} · declared harness setting, not the observed runtime model.` })]),
     ] }, pending: rowFeed._tag === 'Waiting' || declarations._tag === 'Waiting', unavailableReason: factFailure(declarations) },
-    { title: 'Terminals', items: row === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: terminal === undefined ? [] : [{ ...resource({ key: 'terminal', label: 'Agent terminal', detail: 'Observed native runtime terminal; opening uses the app’s existing terminal view.' }), uri: terminal, glyph: 'terminal' }] }, unavailableReason: 'The selected agent runtime terminal is not observed.' },
-    { title: 'Missions / queue', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, pending: queue?._tag === 'Waiting', unavailableReason: queue === undefined ? 'Agent queue is not supplied.' : factFailure(queue) },
+    { title: 'Terminals', items: row === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: terminal === undefined ? [] : [{ ...resource({ key: 'terminal', label: 'Agent terminal', detail: 'This agent’s terminal opens in the app’s terminal view.' }), uri: terminal, glyph: 'terminal' }] }, unavailableReason: 'The selected agent’s terminal is not reported.' },
+    { title: 'Missions / queue', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, pending: queue?._tag === 'Waiting', unavailableReason: queue === undefined ? 'This source does not report the agent’s queue.' : factFailure(queue) },
     { title: 'Attention', items: projected === undefined || needsMe === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
-      resource({ key: 'attention', label: needsMe ? 'Needs your attention' : 'No attention action observed', detail: `${projected.ask._tag === 'Known' ? `Native ask · ${projected.ask.value}` : 'Native ask unreported'}${row === undefined || Option.isNone(row.reason) ? '' : ` · ${row.reason.value}`} · same waiting-status and attention-subject union as the sidebar; read-only, not an answer action.` }),
-    ] }, unavailableReason: 'Selected-agent attention state is not observed.' },
-    ...(['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'History'] as const).map(title => ({ title, items: { _tag: 'Unknown' as const }, unavailableReason: `${title} observations are not supplied by this native Details feed.` })),
+      resource({ key: 'attention', label: needsMe ? 'Needs your attention' : 'No attention action observed', detail: `${projected.ask._tag === 'Known' ? `Request · ${projected.ask.value}` : 'No request reported'}${row === undefined || Option.isNone(row.reason) ? '' : ` · ${row.reason.value}`} · read-only; respond from the agent’s conversation.` }),
+    ] }, unavailableReason: 'This source does not report whether the agent needs your attention.' },
+    ...(['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'History'] as const).map(title => ({ title, items: { _tag: 'Unknown' as const }, unavailableReason: `This source does not report ${title === 'CI runs' ? title : title.toLowerCase()}.` })),
   ]
   const nextChangeAt = earliestChange(now, [
     elapsedChange(session === undefined ? undefined : DateTime.toEpochMillis(session.started_at), now),
@@ -182,19 +182,19 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   return {
     overview: { title: row?.name, status: projected?.status, activity: projected?.activity, machine: projected?.host, harness: projected?.harness, model, mission,
       durations: [
-        { label: 'Managed-session elapsed (from session start to end or now; wall time, not active)', value: timingPending ? 'Loading' : timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), pending: timingPending, ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
-        { label: 'Current-incarnation session age (from managed session start; native launch not reported)', value: timingPending ? 'Loading' : timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), pending: timingPending, ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
+        { label: 'Session elapsed', value: timingPending ? 'Loading' : timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), pending: timingPending, ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
+        { label: 'Session age', value: timingPending ? 'Loading' : timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), pending: timingPending, ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
       ],
       since: statusSince === undefined || DateTime.toEpochMillis(statusSince) > now ? undefined : durationText(now - DateTime.toEpochMillis(statusSince)),
-      age: 'Incarnation launch age unreported',
+      age: undefined,
     }, sections,
-    trace: { agentId: agentRef, nativeSessionId: attributedRoot === undefined ? unknown('No unique usage root proven by a current-incarnation native binding.', 'not-attributed') : known(attributedRoot),
+    trace: { agentId: agentRef, nativeSessionId: attributedRoot === undefined ? unknown('Usage could not be linked to the current session.', 'not-attributed') : known(attributedRoot),
       meters: { context: { reportedPercent: contextField(context?.used_percent), usedTokens: occupancy._tag === 'Known' ? contextField(occupancy.usedTokens) : unknown('Context tokens not reported.'), windowTokens: occupancy._tag === 'Known' ? contextField(occupancy.windowTokens) : unknown('Context capacity not reported.'), compactions: contextField(context?.compactions), lastCompactionMs: contextField(context?.last_compaction_ms === undefined ? undefined : Duration.toMillis(context.last_compaction_ms)) },
-        spend: { usdScope: { _tag: 'IncludingSubagents' }, usdWindow: unknown('Descendant period not reported.'), totalUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, totalUsd: unsupported,
-          mainUsdScope: { _tag: 'Self' }, mainUsdWindow: nativeWindow, mainUsdCoverage: nativeCoverage, mainUsd: hasPeriod ? known(cost, period?.until_ms) : unknown('No native period rows attributed to the selected root.', 'not-attributed'),
-          subagentUsdScope: { _tag: 'IncludingSubagents' }, subagentUsdWindow: unknown('Descendant period not reported.'), subagentUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, subagentUsd: unsupported,
-          tokensScope: { _tag: 'AgentIncarnations' }, tokensWindow: unknown('Agent cumulative token accumulation start/window is not reported.'), tokens: cumulativeUsage === undefined ? unknown('Agent cumulative tokens are not reported.') : known(cumulativeUsage.total_tokens), split: unknown('Native period does not report cost-class split.') } },
-      coverage: { _tag: 'Unavailable', reason: 'not-covered' }, series: unknown('Native historical context/cost series is unsupported.'), turns: unknown('Native per-turn context series is unsupported.'), history: unknown('Historical incarnation trace is unsupported.'), subagents: unknown('Native leased subagents are resources, not a traced-session breakdown.'), subagentsWindow: unknown('Native traced-descendant window is unsupported.'), subagentCount: unknown('Native traced-descendant count is unsupported.'),
+        spend: { usdScope: { _tag: 'IncludingSubagents' }, usdWindow: unknown('The reporting period for subagent spend is not reported.'), totalUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, totalUsd: unsupported,
+          mainUsdScope: { _tag: 'Self' }, mainUsdWindow: nativeWindow, mainUsdCoverage: nativeCoverage, mainUsd: hasPeriod ? known(cost, period?.until_ms) : unknown('No spend records are linked to this session.', 'not-attributed'),
+          subagentUsdScope: { _tag: 'IncludingSubagents' }, subagentUsdWindow: unknown('The reporting period for subagent spend is not reported.'), subagentUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, subagentUsd: unsupported,
+          tokensScope: { _tag: 'AgentIncarnations' }, tokensWindow: unknown('The start of the agent’s total token count is not reported.'), tokens: cumulativeUsage === undefined ? unknown('The agent’s total token count is not reported.') : known(cumulativeUsage.total_tokens), split: unknown('This source does not report a cost breakdown.') } },
+      coverage: { _tag: 'Unavailable', reason: 'not-covered' }, series: unknown('This source does not report context or spend history.'), turns: unknown('This source does not report context usage by turn.'), history: unknown('This source does not report previous sessions.'), subagents: unknown('This source reports subagents without a session usage breakdown.'), subagentsWindow: unknown('The reporting period for subagent usage is not reported.'), subagentCount: unknown('The number of subagent sessions is not reported.'),
     }, state: rowFeed._tag === 'Waiting' ? 'loading' : rowFeed._tag === 'Unavailable' ? 'error' : row === undefined ? 'absent' : stale || !hasPeriod ? 'partial' : projected?.activity === 'working' ? 'busy' : 'idle',
     stale, ...(row === undefined ? {} : { observedAt: DateTime.toEpochMillis(row.updated_at) }), ...(root === undefined ? {} : { nativeSessionId: root }),
     nativeRootPending: rowFeed._tag === 'Waiting' || periodFeed._tag === 'Waiting',

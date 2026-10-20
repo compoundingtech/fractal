@@ -19,7 +19,7 @@ export interface NativeDetailsSource {
 const failure = (error: unknown): Feed<never> => unavailable({
   reason: error instanceof ClientError && error.status === 403 ? 'ungranted'
     : error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed',
-  detail: 'The selected native fact could not be read.',
+  detail: 'These session details could not be loaded.',
 })
 
 /** Reuse the source registry, SDK codecs and getter-poll lifecycle used by SubjectReads. */

@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Tooltip, TooltipTrigger, VisuallyHidden, type ButtonProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { Icon } from '../composition/Icons'
 import { detailsReasonText } from './trace-reasons'
 
 type DescribedTooltipButtonProps = Omit<ButtonProps, 'aria-describedby' | 'children'> & {
@@ -93,14 +94,29 @@ const ReasonLines = ({ groups }: { readonly groups: readonly ReasonGroup[] }) =>
   <>{groups.map(group => <span key={group.reason} data-details-reason-line data-details-reason-fields={groups.length > 1 ? group.names.join(', ') : undefined} {...stylex.props(styles.reasonLine)}>{reasonPrefix(group, groups)}<span data-details-reason-text>{group.reason}</span></span>)}</>
 
 /**
+ * Phone disclosure for a whole group's per-field reasons: collapsed by default, a 44px quiet control whose
+ * accessible name keeps the visible `Why?` and adds the group it explains. The panel is removed from layout and the
+ * accessibility tree while collapsed.
+ */
+function WhyDisclosure({ group, children }: { readonly group: string; readonly children: React.ReactNode }) {
+  const [open, setOpen] = React.useState(false)
+  const id = React.useId()
+  return <>
+    <Button data-details-why aria-expanded={open} aria-controls={id} onPress={() => setOpen(value => !value)} {...stylex.props(styles.why)}><Icon name={open ? 'chevron-down' : 'chevron-right'} />Why?<VisuallyHidden elementType="span"> {group} not reported</VisuallyHidden></Button>
+    <span id={id} hidden={!open} data-details-why-panel {...stylex.props(styles.whyPanel, !open && styles.collapsed)}>{children}</span>
+  </>
+}
+
+/**
  * A metric group's single missing-data line; never per-field dashes. A whole group paints
  * `Spend · not reported`; a partial group paints `Not reported: window, attribution`.
  * Reasons are grouped: a reason shared by every missing field is one sentence; differing reasons each paint once,
  * prefixed by the fields they explain. Desktop: the state word (whole) or each name (partial) is a
- * keyboard-reachable trigger whose reason is its tooltip and accessible description. Narrow hosts paint the
- * grouped reasons beneath the line.
+ * keyboard-reachable trigger whose reason is its tooltip and accessible description. Narrow hosts paint a partial
+ * group's grouped reasons beneath the line; a whole group paints one plain `summary` sentence, whatever the fields'
+ * individual reasons, and keeps those reasons behind a collapsed `Why?` disclosure.
  */
-export function DetailsNotReported({ group, fields }: { readonly group?: string; readonly fields: readonly NotReportedField[] }) {
+export function DetailsNotReported({ group, summary, fields }: { readonly group?: string; readonly summary?: string; readonly fields: readonly NotReportedField[] }) {
   const narrow = React.useContext(NarrowLayoutContext)
   if (fields.length === 0) return null
   const names = fields.map(field => field.name).join(', ')
@@ -109,7 +125,7 @@ export function DetailsNotReported({ group, fields }: { readonly group?: string;
   if (group !== undefined) return <p data-details-unavailable data-details-unavailable-subject={group} data-details-not-reported="group" data-details-not-reported-names={names} data-details-reason-groups={groups.length} {...stylex.props(styles.line)}>
     <span aria-hidden={narrow ? undefined : 'true'} {...stylex.props(styles.subject)}>{group}</span><span aria-hidden="true">·</span>
     {narrow
-      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span>{reasons}</>
+      ? <><span data-details-not-reported-word {...stylex.props(styles.word)}>not reported</span><DetailsInlineReason block><span data-details-group-summary>{summary ?? `This session does not report ${group.toLowerCase()}.`}</span></DetailsInlineReason><WhyDisclosure group={group}>{reasons}</WhyDisclosure></>
       : <DescribedTooltipButton aria-label={`${group}: not reported`} description={groups.map(reason => `${reasonPrefix(reason, groups)}${reason.reason}`).join('; ')} tooltip={<ReasonLines groups={groups} />} {...stylex.props(styles.trigger, styles.word)}>not reported</DescribedTooltipButton>}
   </p>
   // Prose, not flex: names wrap like the pending twin's ink, so arrival never reflows the line.
@@ -127,6 +143,10 @@ const styles = stylex.create({
   // Names flow as prose; a multi-word name never splits across lines.
   inlineTrigger: { display: 'inline', minWidth: 0, whiteSpace: 'nowrap' },
   nowrap: { whiteSpace: 'nowrap' },
+  // Quiet, recognizable phone disclosure: muted ink, a chevron and a full 44px hit area, aligned with the line's text.
+  why: { display: 'inline-flex', alignItems: 'center', gap: space.xs, minWidth: geometry.touchTarget, minHeight: geometry.touchTarget, padding: space.zero, borderWidth: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'pointer', ':hover': { color: text.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
+  whyPanel: { display: 'block', flexBasis: '100%', minWidth: 0 },
+  collapsed: { display: 'none' },
   reasonLine: { display: 'block' },
   // Secondary provenance keeps the muted line ink (AA in both themes) at its normal weight, even inside a strong value.
   reasonText: { color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, fontWeight: type.weightRegular, whiteSpace: 'normal', overflowWrap: 'normal' },

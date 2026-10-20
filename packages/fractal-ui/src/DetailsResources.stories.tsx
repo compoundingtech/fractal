@@ -169,7 +169,7 @@ function assertCraft(pane: HTMLElement, item: Case) {
   }
   if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-not-reported="group"]`), 'Unknown source omits its single not-reported line')
   const history = pane.querySelector('section[aria-label$="History"]')
-  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Incarnation/}).length>0, 'Known trace history is absent')
+  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Session · /}).length>0, 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   // Compactions paint context occupancy: 897,170 → 132,952 of a 1M window, excluding the straddling bucket.
   if (changes) requireContract(/90% → 13%/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
@@ -315,11 +315,11 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
   const scopeNote = spend.querySelector<HTMLElement>('[data-details-scope-note]')
   if (scopeNote) requireContract(scopeNote.getBoundingClientRect().height <= parseFloat(getComputedStyle(scopeNote).lineHeight) + 0.5, 'Unreported scope note is not one quiet line')
   if (meter.tokensScope._tag === 'Unknown') {
-    requireContract(!/including subagents|excludes subagents|this agent|observed agent incarnations/i.test(label), 'Unreported total makes an unproven scope claim')
+    requireContract(!/including subagents|excludes subagents|this agent|observed agent sessions/i.test(label), 'Unreported total makes an unproven scope claim')
     if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and descendant spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
     requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token scope"]'), 'Unreported token total lacks its exact scope explanation')
   } else {
-    requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent incarnations' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
+    requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent sessions' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
     if (meter.tokensWindow._tag === 'Known') {
       const window = meter.tokensWindow.value
       if (window._tag === 'AllTime') requireContract(period === 'all time', 'Reported all-time window is absent')
