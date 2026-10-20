@@ -1,4 +1,5 @@
 import { Agent as NativeAgent, decodeUnknownSync, UsageSummary, type UsageSummaryEncoded } from '@smalltalk/st3-client/schema'
+import { openAgent } from '@st3/sdk/effect'
 import { describe, expect, it } from 'vitest'
 import * as Option from 'effect/Option'
 import { contextOccupancy } from './contextOccupancy.ts'
@@ -12,7 +13,7 @@ const usage = (context?: UsageSummaryEncoded['context']) => ({ _tag: 'Known' as 
   ...(context === undefined ? {} : { context }),
 }) })
 const reading = { used_tokens: 61_206, window_tokens: 1_000_000, used_percent: 6.1206, observed_at_unix_ms: 3000, model: 'observed-model', compactions: 2 }
-const native = decodeUnknownSync(NativeAgent)({ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1', updated_at: '1970-01-01T00:00:04.000Z', incarnation_id: 'first', usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: reading } })
+const native = openAgent(decodeUnknownSync(NativeAgent)({ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1', updated_at: '1970-01-01T00:00:04.000Z', incarnation_id: 'first', usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: reading } }))
 const occupancy = (agent: Agent) => contextOccupancy({ usage: agent.usage, now: 10_000, observedAfter: agent.contextObservedAfter })
 const details = (row: typeof native, agent: Agent) => {
   const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
@@ -26,6 +27,13 @@ describe('reported context occupancy', () => {
     expect(projected._tag === 'Known' ? projected.usedPercent : undefined).toBeCloseTo(6.1206, 6)
     expect(contextOccupancy({ usage: usage({ ...reading, used_tokens: 0, used_percent: 0 }), now: 10_000 })).toMatchObject({ _tag: 'Known', usedPercent: 0 })
     expect(contextOccupancy({ usage: usage({ used_percent: 42, observed_at_unix_ms: 3000 }), now: 10_000 })).toEqual({ _tag: 'Known', usedPercent: 42, observedAt: 3000 })
+  })
+  it('does not interpret occupancy under an unrecognized usage aggregation', () => {
+    expect(contextOccupancy({
+      usage: { _tag: 'Known', value: { ...usage(reading).value,
+        aggregation: { _tag: 'Unrecognized', raw: 'future-aggregation' } } },
+      now: 10_000,
+    })).toEqual({ _tag: 'Unknown' })
   })
   it('rejects missing, future and fenced readings without inventing capacity', () => {
     for (const value of [{ _tag: 'Unknown' } as const, usage(), usage({ observed_at_unix_ms: 3000 }), usage({ used_tokens: 50, window_tokens: 0, observed_at_unix_ms: 3000 })])

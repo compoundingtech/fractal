@@ -12,7 +12,7 @@ import { detailsTraceFixtures } from './assistant-ui/details/trace/fixture-provi
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
+import { NarrowLayoutContext, NarrowSheet } from './assistant-ui/composition/NarrowLayout'
 import { Workbench } from './assistant-ui/workbench/Workbench'
 import { group, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
 import { accentVars as accent, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
@@ -684,12 +684,38 @@ function assertProductionIdentity(root:HTMLElement){
   requireContract(lines.length>0&&bad.length===0&&!overview.querySelector('[data-details-missing-value]')&&overview.querySelectorAll('[data-details-timing-missing]').length<=1&&(emptyMission===-1||lines.length===1),`${identityGap}: ${[...bad,...(emptyMission!==-1&&lines.length>1?['Mission none beside other facts']:[])].join(' | ')}`)
 }
 const closeShape='Production phone close is not a recognizable 44px control'
-/** The host close reads as a control on phone: icon, label, filled shape distinct from the inspector surface. */
-function assertCloseControl(close:HTMLElement){
-  const css=getComputedStyle(close),surface=getComputedStyle(close.closest('aside')!),box=close.getBoundingClientRect()
-  requireContract(box.width>=43.5&&box.height>=43.5&&close.querySelector('svg')&&close.textContent?.trim()==='Close'&&css.backgroundColor!=='rgba(0, 0, 0, 0)'&&css.backgroundColor!==surface.backgroundColor&&parseFloat(css.borderTopWidth)>=1&&css.borderTopStyle==='solid'&&parseFloat(css.borderTopLeftRadius)>0,closeShape)
+const soleClose='Production phone sheet repeats its close inside the inspector'
+/** The real phone sheet: a header with the "Agent details" title, then its 44px X; the inspector tabs and content follow below. */
+function assertSheetClose(sheet:HTMLElement){
+  const header=sheet.querySelector<HTMLElement>(':scope > header'),title=header&&within(header).queryByRole('heading',{name:'Agent details'}),close=header&&within(header).queryByRole('button',{name:'Close agent details'}),tabs=sheet.querySelector<HTMLElement>('[data-agent-inspector-tabs]'),box=close?.getBoundingClientRect()
+  requireContract(sheet.getAttribute('data-narrow-sheet')==='end'&&header&&title&&close&&box&&box.width>=43.5&&box.height>=43.5&&close.querySelector('svg')&&(title.compareDocumentPosition(close)&Node.DOCUMENT_POSITION_FOLLOWING)&&tabs&&header.getBoundingClientRect().bottom<=tabs.getBoundingClientRect().top+0.5,closeShape)
+  const closes=within(sheet).queryAllByRole('button',{name:/\bclose\b/i})
+  requireContract(closes.length===1&&closes[0]===close,soleClose)
 }
-/** The deployed inspector boundary, including its host-owned close control rather than only the kit pane. */
+const desktopClose='Production desktop inspector does not keep exactly one own close'
+/** Desktop has no sheet: the inspector's tab row carries its one close. */
+function assertDesktopClose(panel:HTMLElement){
+  const closes=within(panel).queryAllByRole('button',{name:/\bclose\b/i})
+  requireContract(closes.length===1&&closes[0]!.getAttribute('aria-label')==='Close agent inspector'&&closes[0]!.closest('[data-agent-inspector-tabs]'),desktopClose)
+}
+/** The deployed phone boundary: the real NarrowSheet titled Agent details, whose X is the only close, with the inspector as its body. */
+function ProductionPhoneSheet({scheme,children}:{readonly scheme:Args['scheme'];readonly children:(close:()=>void)=>React.ReactNode}){
+  const [open,setOpen]=React.useState(false)
+  return <div role="main" aria-label="Production phone inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:390,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
+    <ThemePortal><NarrowLayoutContext.Provider value={true}>
+      <Button onPress={()=>setOpen(true)} {...stylex.props(styles.control)}>Agent details</Button>
+      <NarrowSheet label="Agent details" isOpen={open} onOpenChange={setOpen} width={400}>{children(()=>setOpen(false))}</NarrowSheet>
+    </NarrowLayoutContext.Provider></ThemePortal>
+  </div>
+}
+/** Opens the phone sheet as a user does and waits for the inspector inside it. */
+async function openPhoneSheet(canvasElement:HTMLElement){
+  const canvas=within(canvasElement),opener=canvas.getByRole('button',{name:'Agent details'})
+  await userEvent.click(opener)
+  const sheet=await canvas.findByRole('dialog',{name:'Agent details'}),panel=await within(sheet).findByRole('complementary',{name:'Agent inspector'})
+  await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+  return {opener,sheet,panel}
+}
 function ProductionPhoneInspector({ scheme }: Args) {
   const [registry] = React.useState(() => AtomRegistry.make())
   const [source] = React.useState(() => fixtureSource({ world: {
@@ -699,33 +725,34 @@ function ProductionPhoneInspector({ scheme }: Args) {
     })], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }))
   React.useEffect(() => () => registry.dispose(), [registry])
-  return <div role="main" aria-label="Production phone inspector" {...stylex.props(...baselineTheme, ...(scheme === 'light' ? lightTheme : []))} style={{ width: 390, maxWidth: '100%', height: 900, display: 'flex', flexDirection: 'column' }}>
-    <ThemePortal><NarrowLayoutContext.Provider value={true}><DataSourceProvider source={source} registry={registry}>
-      <AgentDetailsPanel agentRef="agent/phone-details" width="fill" scheme={scheme} onClose={() => undefined} onOpen={() => undefined} />
-    </DataSourceProvider></NarrowLayoutContext.Provider></ThemePortal>
-  </div>
+  return <DataSourceProvider source={source} registry={registry}>
+    <ProductionPhoneSheet scheme={scheme}>{close => <AgentDetailsPanel agentRef="agent/phone-details" width="fill" scheme={scheme} onClose={close} onOpen={() => undefined} />}</ProductionPhoneSheet>
+  </DataSourceProvider>
 }
 export const ProductionPhoneDetails: Story = {
   render: ProductionPhoneInspector,
   play: async ({ canvasElement }) => {
-    const panel = await within(canvasElement).findByRole('complementary', { name: 'Agent inspector' })
-    await waitFor(() => requireContract(panel.querySelectorAll('[role="tab"]').length === 2 && panel.querySelector('[data-testid="details-pane"]'), 'Production inspector did not mount Details and Changes'))
-    const close = within(panel).getByRole('button', { name: 'Close agent inspector' })
-    requireContract(touchTargets(panel).includes(close), 'Production phone sweep omitted the host close control')
-    assertTouch(touchTargets(panel))
-    const minimum = close.style.minHeight
+    const { opener, sheet, panel } = await openPhoneSheet(canvasElement)
+    const close = within(sheet).getByRole('button', { name: 'Close agent details' })
+    requireContract(touchTargets(sheet).includes(close), 'Production phone sweep omitted the host close control')
+    assertTouch(touchTargets(sheet))
+    const closeStyle = close.getAttribute('style')
+    const restoreClose = () => { if (closeStyle === null) close.removeAttribute('style'); else close.setAttribute('style', closeStyle) }
     try {
-      close.style.minHeight = '24px'
-      await rejectsCause(touchFloor, () => assertTouch(touchTargets(panel)))
-    } finally { close.style.minHeight = minimum }
-    assertTouch(touchTargets(panel))
+      close.style.width = '24px'; close.style.height = '24px'
+      await rejectsCause(touchFloor, () => assertTouch(touchTargets(sheet)))
+      await rejectsControl(closeShape, () => assertSheetClose(sheet))
+    } finally { restoreClose() }
+    assertTouch(touchTargets(sheet))
     assertNoReasonCodes(panel)
     // The kit gate runs this story in dark and light: every check below holds in both schemes.
     await waitFor(() => requireContract(exposedLines(panel, '[data-details-not-reported="group"]').length > 0, 'Production phone has no wholly missing group'))
-    assertCloseControl(close)
-    const closeStyle = close.getAttribute('style') ?? ''
-    try { close.style.backgroundColor = 'transparent'; close.style.borderWidth = '0'; await rejectsControl(closeShape, () => assertCloseControl(close)) } finally { close.setAttribute('style', closeStyle) }
-    assertCloseControl(close)
+    assertSheetClose(sheet)
+    // The pre-fix shape: the inspector paints its own close beside the sheet's X.
+    const tabRow = panel.querySelector<HTMLElement>('[data-agent-inspector-tabs]'); requireContract(tabRow, 'Missing inspector tab row')
+    const duplicate = close.cloneNode(true) as HTMLElement; duplicate.setAttribute('aria-label', 'Close agent inspector'); tabRow.append(duplicate)
+    try { await rejectsControl(soleClose, () => assertSheetClose(sheet)) } finally { duplicate.remove() }
+    assertSheetClose(sheet)
     assertProductionIdentity(panel)
     const identity = panel.querySelector<HTMLElement>('section[aria-label$="Overview"] [data-details-overview-line]'); requireContract(identity, 'Missing production identity control target')
     const dangling = panel.ownerDocument.createElement('span'); dangling.textContent = '·'; identity.append(dangling)
@@ -743,6 +770,18 @@ export const ProductionPhoneDetails: Story = {
     assertPlainCopy(panel)
     for (const why of whys) await userEvent.click(why)
     await waitFor(() => { assertWholeGroups(panel, true); assertTail(panel, true, productionTail) })
+    // Escape, then the X pressed from the keyboard, each close the sheet and return focus to its opener.
+    const canvas = within(canvasElement), doc = canvasElement.ownerDocument
+    const assertSheetClosed = () => requireContract(!canvas.queryByRole('dialog', { name: 'Agent details' }) && doc.activeElement === opener, 'Phone sheet did not close and restore opener focus')
+    within(panel).getByRole('tab', { name: 'Details' }).focus()
+    const intercept = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation() } }
+    sheet.addEventListener('keydown', intercept, { capture: true })
+    try { await userEvent.keyboard('{Escape}'); await rejectsControl('Phone sheet did not close and restore opener focus', assertSheetClosed) } finally { sheet.removeEventListener('keydown', intercept, { capture: true }) }
+    await userEvent.keyboard('{Escape}'); await waitFor(assertSheetClosed)
+    await userEvent.keyboard('{Enter}')
+    const reopened = await canvas.findByRole('dialog', { name: 'Agent details' })
+    within(reopened).getByRole('button', { name: 'Close agent details' }).focus()
+    await userEvent.keyboard('{Enter}'); await waitFor(assertSheetClosed)
   },
 }
 
@@ -758,9 +797,12 @@ function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:bool
   const [registry]=React.useState(()=>AtomRegistry.make())
   const [source]=React.useState(ompDetailsSource)
   React.useEffect(()=>()=>registry.dispose(),[registry])
-  return <div role="main" aria-label={narrow?'Production phone inspector':'Production desktop inspector'} {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:narrow?390:440,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
-    <ThemePortal><NarrowLayoutContext.Provider value={narrow}><DataSourceProvider source={source} registry={registry}>
-      <AgentDetailsPanel agentRef={ompAgentRef} width={narrow?'fill':440} scheme={scheme} onClose={()=>undefined} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
+  if(narrow)return <DataSourceProvider source={source} registry={registry}>
+    <ProductionPhoneSheet scheme={scheme}>{close=><AgentDetailsPanel agentRef={ompAgentRef} width="fill" scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>}</ProductionPhoneSheet>
+  </DataSourceProvider>
+  return <div role="main" aria-label="Production desktop inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:440,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
+    <ThemePortal><NarrowLayoutContext.Provider value={false}><DataSourceProvider source={source} registry={registry}>
+      <AgentDetailsPanel agentRef={ompAgentRef} width={440} scheme={scheme} onClose={()=>undefined} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
     </DataSourceProvider></NarrowLayoutContext.Provider></ThemePortal>
   </div>
 }
@@ -829,8 +871,14 @@ function assertOmpLine(panel:HTMLElement,narrow:boolean,state:OmpSupplementState
 }
 function ompPlay(narrow:boolean,state:OmpSupplementState){
   return async({canvasElement}:{canvasElement:HTMLElement})=>{
-    const panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'}),doc=canvasElement.ownerDocument,expected=ompLines[state]
-    await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+    const doc=canvasElement.ownerDocument,expected=ompLines[state]
+    let panel:HTMLElement
+    if(narrow){const opened=await openPhoneSheet(canvasElement);panel=opened.panel;assertSheetClose(opened.sheet)}
+    else{
+      panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'})
+      await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+      assertDesktopClose(panel)
+    }
     await waitFor(()=>{assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state)})
     await checkOmpAccounting(panel,narrow,state)
     // The pre-fix shape: a second paragraph painted beside the summary.

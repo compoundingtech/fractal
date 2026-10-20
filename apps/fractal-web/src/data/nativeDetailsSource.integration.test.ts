@@ -1,5 +1,6 @@
 import { it } from '@effect/vitest'
 import { St3Client } from '@smalltalk/st3-client'
+import { openAgent } from '@st3/sdk/effect'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -115,7 +116,7 @@ describe('real native Details getter adapters', () => {
     const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => Response.json(String(input).endsWith('/capabilities') ? recording.capabilities : envelope(sessionValue)) }
     const reads = gatewaySubjectReads({ options, registry })
     const session = yield* reads.session.read('session/current')
-    const row = Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Example', runtime_ids: [], incarnation_id: 'inc/current', current_session_id: 'session/current', revision: '1', updated_at: '1970-01-01T00:00:04Z', state: 'running', reachability: 'local' })
+    const row = openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Example', runtime_ids: [], incarnation_id: 'inc/current', current_session_id: 'session/current', revision: '1', updated_at: '1970-01-01T00:00:04Z', state: 'running', reachability: 'local' }))
     expect(nativeDetailsTiming({ row, session, now: 10000 })).toEqual({ elapsedMs: 2000, sessionAgeMs: 9000 })
   }).pipe(Effect.scoped))
 

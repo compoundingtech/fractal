@@ -124,14 +124,13 @@ const close = () => host.querySelector<HTMLButtonElement>('button[aria-label="Cl
 const openChanges = async () => {
   if (toggle().getAttribute('aria-pressed') !== 'true') await act(async () => toggle().click())
   await act(async () => vi.dynamicImportSettled())
-  const changes = host.querySelector<HTMLButtonElement>('[role="tab"][aria-label="Changes"]')
-    ?? [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab => tab.textContent?.trim() === 'Changes')
-  expect(changes).not.toBeNull()
+  const changes = [...host.querySelectorAll<HTMLElement>('[data-testid="agent-details-panel"] [role="tab"]')].find(tab => tab.textContent?.trim() === 'Changes')
+  expect(changes).toBeDefined()
   await act(async () => changes!.click())
   await act(async () => vi.dynamicImportSettled())
   await vi.waitFor(async () => {
     await act(async () => {})
-    expect(host.querySelector('aside[aria-label="Changes"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="diff-code"]')).not.toBeNull()
   }, { timeout: 15_000 })
 }
 const key = async (value: string) => {

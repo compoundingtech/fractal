@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { St3Client } from '@smalltalk/st3-client'
 import * as Native from '@smalltalk/st3-client/schema'
+import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
 import { DateTime } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -16,7 +17,7 @@ import { observed, type DataSource, type Feed } from '../data/source.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { guardedSessionTiming, useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
 
-const nativeRow = (incarnation: string) => Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Session title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } })
+const nativeRow = (incarnation: string) => openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Session title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } }))
 const emptySource = (): DataSource => fixtureSource({ world: { now: 10000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
 
 describe('native Details mounted hook with real getter adapters', () => {
@@ -79,7 +80,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       return Response.json({ ...recording.cases.agent.payload, snapshot: { ...recording.cases.agent.payload.snapshot, created_at: snapshotAt },
         value: { id: 'session/first', kind: 'session', owner_id: 'agent/example', runtime_incarnation: 'first', revision: '1', started_at: startedAt, updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' } })
     } }
-    const agents = Atom.make<Feed<readonly Native.Agent[]>>(observed({ value: [nativeRow('first')] }))
+    const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [nativeRow('first')] }))
     const source: DataSource = { ...emptySource(), agents, subjectReads: gatewaySubjectReads({ options, registry }) }
     let last: NativeDetailsObservation | undefined
     const Pane = () => { last = useNativeDetails({ agentRef: 'agent/example' }); return <div>{last.overview.durations?.map(item => <div key={item.label}>{item.value}<span>{item.detail}</span></div>)}</div> }
@@ -147,7 +148,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       return Response.json({ ...recording.cases.agent.payload, value })
     } }
     const client = new St3Client(options)
-    const agents = Atom.make<Feed<readonly Native.Agent[]>>(observed({ value: [nativeRow('first')] }))
+    const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [nativeRow('first')] }))
     const source: DataSource = { ...fixtureSource({ world: { now: 10000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), mode: 'live', agents,
       subjectReads: gatewaySubjectReads({ options, registry, discovery: client }),
       nativeDetails: gatewayNativeDetails({ options, registry, discovery: client, now: () => 10000 }),

@@ -1,4 +1,5 @@
 import type * as Native from '@smalltalk/st3-client/schema'
+import type { DecodedAgent } from '@st3/sdk/effect'
 import type { DetailsOverview, DetailsSection, DetailsState, DetailsResource, TraceSeries, TraceFact, TraceCoverage, TraceAccumulationWindow } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
 import { DateTime, Duration, Option } from 'effect'
@@ -39,7 +40,7 @@ const unknown = <T>(detail: string, reason: 'not-covered' | 'not-attributed' | '
 const known = <T>(value: T, asOfMs?: number): TraceFact<T> => ({ _tag: 'Known', value, source: 'st', ...(asOfMs === undefined ? {} : { asOfMs }) })
 
 /** A period row lacks incarnation identity. Only an explicit current-incarnation binding can fence it. */
-export const nativeDetailsRoot = ({ row, period }: { readonly row: Native.Agent; readonly period: Native.UsagePeriod }): string | undefined => {
+export const nativeDetailsRoot = ({ row, period }: { readonly row: DecodedAgent; readonly period: Native.UsagePeriod }): string | undefined => {
   const incarnation = Option.getOrUndefined(row.incarnation_id)
   if (incarnation === undefined) return undefined
   const bindings = new Set<string>()
@@ -65,7 +66,7 @@ export const nativeSessionStartReason = ({ session, snapshotCreatedAt }: { reado
   return undefined
 }
 
-export const nativeDetailsTiming = ({ row, session, snapshotCreatedAt, now }: { readonly row: Native.Agent; readonly session: Native.Session | undefined; readonly snapshotCreatedAt?: Native.Timestamp; readonly now: number }): { readonly elapsedMs?: number; readonly sessionAgeMs?: number; readonly detail?: string } => {
+export const nativeDetailsTiming = ({ row, session, snapshotCreatedAt, now }: { readonly row: DecodedAgent; readonly session: Native.Session | undefined; readonly snapshotCreatedAt?: Native.Timestamp; readonly now: number }): { readonly elapsedMs?: number; readonly sessionAgeMs?: number; readonly detail?: string } => {
   const incarnation = Option.getOrUndefined(row.incarnation_id)
   if (session === undefined || incarnation === undefined || session.id !== Option.getOrUndefined(row.current_session_id) ||
     session.owner_id !== row.id || Option.getOrUndefined(session.runtime_incarnation) !== incarnation) return {}
@@ -94,11 +95,11 @@ const factFailure = (feed: Feed<unknown>): string => feed._tag === 'Waiting' ? '
   : feed.error?.reason === 'ungranted' ? 'Access to these details is not granted.' : 'Not reported for this session.'
 const resource = ({ key, label, detail }: { readonly key: string; readonly label: string; readonly detail: string }): DetailsResource => ({ uri: `${nativeDetailsUriPrefix}${key}`, glyph: 'resource', card: { kind: 'worktree', label, detail, fileCount: { _tag: 'Unknown' }, files: [] } })
 
-/** Pure host DTO boundary: no fixture fallback and no private producer dependencies. */
+/** Pure host DTO boundary: SDK-normalized roster rows, generated getter DTOs, no fixture fallback. */
 export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: sessionFeed, period: periodFeed, declarations, missions, queue, needsMe, now, onRetry }: {
   readonly agentRef: string
   readonly agent: Feed<Agent | undefined>
-  readonly row: Feed<Native.Agent | undefined>
+  readonly row: Feed<DecodedAgent | undefined>
   readonly session: Feed<Native.Session>
   readonly period: Feed<Native.UsagePeriod>
   readonly declarations: Feed<NativeDeclarations>
@@ -121,7 +122,8 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const root = row === undefined || period === undefined || rowFeed._tag !== 'Observed' || rowFeed.freshness !== 'live' || periodFeed._tag !== 'Observed' || periodFeed.freshness !== 'live'
     ? undefined : nativeDetailsRoot({ row, period })
   const occupancy = contextOccupancy({ usage: projected?.usage ?? { _tag: 'Unknown' }, now, ...(projected?.contextObservedAfter === undefined ? {} : { observedAfter: projected.contextObservedAfter }) })
-  const cumulativeUsage = row === undefined ? undefined : Option.getOrUndefined(row.usage)
+  const reportedUsage = row === undefined ? undefined : Option.getOrUndefined(row.usage)
+  const cumulativeUsage = reportedUsage === undefined || typeof reportedUsage.aggregation === 'object' ? undefined : reportedUsage
   const nativeHost = row === undefined ? undefined : Option.getOrUndefined(row.host_id)
   const context = cumulativeUsage?.context
   const contextAsOf = context === undefined ? undefined : DateTime.toEpochMillis(context.observed_at_unix_ms)

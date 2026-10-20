@@ -1,4 +1,5 @@
 import * as Native from '@smalltalk/st3-client/schema'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@st3/sdk/effect'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createProjections } from './projections.ts'
@@ -7,17 +8,39 @@ import { nativeDetailsRoot, nativeDetailsTiming, projectNativeDetails } from './
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
 import { contextOccupancy } from './contextOccupancy.ts'
 
-const row = Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Real seat', state: 'running', reachability: 'local', runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z', incarnation_id: 'inc/current', current_session_id: 'session/current', driver: 'omp', workspace: '/private/checkout', checkout: { repository: '/private/repo', branch: 'private-branch', base: 'main' },
+const row = openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Real seat', state: 'running', reachability: 'local', runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z', incarnation_id: 'inc/current', current_session_id: 'session/current', driver: 'omp', workspace: '/private/checkout', checkout: { repository: '/private/repo', branch: 'private-branch', base: 'main' },
   usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 500, output_tokens: 500, cached_tokens: 0, total_tokens: 99999999, context: { used_tokens: 61206, window_tokens: 1000000, used_percent: 6.1206, observed_at_unix_ms: 4000, model: 'actual-model', compactions: 2, last_compaction_ms: 3000 } },
   todo: { accepted_at: '1970-01-01T00:00:04Z', claim_id: 'claim/todo', stale: false, snapshot: { harness: 'omp', incarnation_id: 'inc/current', session_id: 'native/root', observed_at: '1970-01-01T00:00:04Z', source_op: 'todo/write', phases: [], totals: { blocked: 0, completed: 0, in_progress: 0, pending: 0 }, truncated: false } },
-})
+}))
 const usageRow = { agent: row.id, native_session_id: 'native/root', model: 'first-model', input_tokens: 10, output_tokens: 20, cached_tokens: 3, cache_write_tokens: 4, cache_write_1h_tokens: 0, total_tokens: 37, cost_microusd: 1200000, reported_cost_microusd: 0, unpriced_tokens: 0 }
 const period = Native.decodeUnknownSync(Native.UsagePeriod)({ since_ms: 1000, until_ms: 5000, rows: [usageRow, { ...usageRow, model: 'second-model', account: 'second-account', total_tokens: 63, cost_microusd: 2300000 }, { ...usageRow, agent: 'agent/other', cost_microusd: 99000000 }] })
 const session = Native.decodeUnknownSync(Native.Session)({ id: 'session/current', kind: 'session', owner_id: row.id, runtime_incarnation: 'inc/current', started_at: '1970-01-01T00:00:01Z', ended_at: '1970-01-01T00:00:03Z', updated_at: '1970-01-01T00:00:03Z', revision: '1', state: 'completed', timeline_cursor: 'cursor/0' })
 const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
-const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, sessionFeed, selectedQueue, selectedDeclarations = missing, needsMe }: { readonly selected?: Native.Agent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly sessionFeed?: Feed<Native.Session>; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly selectedDeclarations?: Feed<NativeDeclarations>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: sessionFeed ?? observed({ value: selectedSession }), declarations: selectedDeclarations, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
+const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, sessionFeed, selectedQueue, selectedDeclarations = missing, needsMe }: { readonly selected?: DecodedAgent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly sessionFeed?: Feed<Native.Session>; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly selectedDeclarations?: Feed<NativeDeclarations>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: sessionFeed ?? observed({ value: selectedSession }), declarations: selectedDeclarations, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
 
 describe('fixture-free native Details projection', () => {
+  it('retains future states without guessing unknown aggregation totals or context', () => {
+    const { value: future } = decodeResourceRow({
+      kind: 'agent', id: row.id, name: row.name, state: 'future-state', reachability: 'local',
+      runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z',
+      usage: { aggregation: 'future-aggregation', incarnation_count: 1, input_tokens: 500,
+        output_tokens: 500, cached_tokens: 0, total_tokens: 99999999,
+        context: { used_tokens: 61206, window_tokens: 1000000, used_percent: 6.1206,
+          observed_at_unix_ms: 4000, model: 'future-model', compactions: 2 } },
+    })
+    if (future?.kind !== 'agent') throw new TypeError('Expected a decodable roster row')
+    expect(future.state).toEqual({ _tag: 'Unrecognized', raw: 'future-state' })
+    const futureState = project({ selected: { ...row, state: future.state } })
+    expect(futureState.overview.title).toBe(row.name)
+    expect(futureState.trace.meters.spend.tokens).toMatchObject({ _tag: 'Known', value: 99999999 })
+    const result = project({ selected: { ...row, state: future.state, usage: future.usage } })
+    expect(result.overview.model).toBeUndefined()
+    expect(result.trace.meters.context.reportedPercent._tag).toBe('Unknown')
+    expect(result.trace.meters.context.compactions._tag).toBe('Unknown')
+    expect(result.trace.meters.spend.tokens._tag).toBe('Unknown')
+    expect(result.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
+    expect(result.overview.durations?.map(item => item.value)).toEqual(['2s', '9s'])
+  })
   it('keeps reported activity independent of missing period rows and stale observations', () => {
     const idle = { ...row, harness_state: Option.some('idle') }
     const working = { ...row, harness_state: Option.some('working') }

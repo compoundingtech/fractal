@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { St3Client } from '@smalltalk/st3-client'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Option from 'effect/Option'
@@ -21,15 +22,15 @@ import { ompAgentRef, ompDetailsSource, ompSubagent, ompSupplementFeeds, type Om
 import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
-const row = decodeUnknownSync(Agent)({
+const row = openAgent(decodeUnknownSync(Agent)({
   kind: 'agent', id: 'agent/synthetic', name: 'Synthetic Details seat', host_id: 'host/synthetic', runtime_ids: [],
   reachability: 'reachable', state: 'running', revision: '1', incarnation_id: 'first', updated_at: '1970-01-01T00:00:04.000Z',
   usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: { used_tokens: 61_206, window_tokens: 1_000_000, used_percent: 6.1206, observed_at_unix_ms: 3000, model: 'synthetic-reported-model' } },
-})
+}))
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
-let agents: Atom.Writable<Feed<readonly Agent[]>>
+let agents: Atom.Writable<Feed<readonly DecodedAgent[]>>
 const onClose = vi.fn()
 beforeEach(async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
@@ -40,7 +41,7 @@ beforeEach(async () => {
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   window.localStorage.clear()
   registry = AtomRegistry.make()
-  agents = Atom.make<Feed<readonly Agent[]>>(observed({ value: [row] }))
+  agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [row] }))
   const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
   host = document.createElement('div')
   document.body.append(host)
