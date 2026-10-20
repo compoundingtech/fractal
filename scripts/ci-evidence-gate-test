@@ -1558,11 +1558,16 @@ class WorkflowStructure(unittest.TestCase):
                 continue  # the aggregate note job fetches what it needs itself
             depth = re.search(r'fetch-depth: (.*)', checkout.group(1))
             self.assertIsNotNone(depth, f'{name} checks out without saying how much history')
-            self.assertIn(depth.group(1).strip().strip('"\''), ('0', "${{ github.event_name == 'pull_request' && '0' || '1' }}"), name)
+            # One commit, then the history (without evidence tags, workspace-ci.ts fullHistoryCheckoutSteps): always, or on pull requests.
+            self.assertEqual(depth.group(1).strip(), '1', name)
+            fetch = re.search(r'- name: Fetch the whole history without evidence tags\n(?:\s+if: (.*)\n)?', block[checkout.end():])
+            self.assertIsNotNone(fetch, f'{name} checks out one commit and never fetches the history')
+            self.assertEqual(block[checkout.end():][:fetch.start()].strip(), '', f'{name}: the history fetch must follow the checkout')
+            if fetch.group(1):
+                self.assertIn("github.event_name == 'pull_request'", fetch.group(1), name)
+                self.assertNotIn('||', fetch.group(1), name)
             checked += 1
         self.assertGreaterEqual(checked, 5)
-        # A bare 0 is falsy in an expression, so `cond && 0 || 1` is always 1; the depths must be strings.
-        self.assertNotRegex((ROOT / '.github/workflows/fleet.yml').read_text(), r"&& 0 \|\| 1")
 
     def test_every_signing_step_learns_when_its_gate_skipped_and_the_aggregate_sees_every_gate(self):
         blocks = self.blocks()
