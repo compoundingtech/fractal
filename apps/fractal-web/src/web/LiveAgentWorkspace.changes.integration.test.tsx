@@ -129,6 +129,10 @@ const openChanges = async () => {
   expect(changes).not.toBeNull()
   await act(async () => changes!.click())
   await act(async () => vi.dynamicImportSettled())
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    expect(host.querySelector('aside[aria-label="Changes"]')).not.toBeNull()
+  }, { timeout: 15_000 })
 }
 const key = async (value: string) => {
   await act(async () => separator().dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true })))
