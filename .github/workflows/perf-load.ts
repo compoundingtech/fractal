@@ -54,10 +54,13 @@ const loadEnv = {
 export const perfLoadJobs = scopeLinuxNixSandbox({
   jobs: {
     // The release load test against main's last five reports; main's runs also publish the build and
-    // store snapshots every later run restores.
+    // store snapshots every later run restores. They publish only after a complete workload report, so a
+    // run on a new recipe must finish cold to seed it: run 39488050274 compiled for 10m38s and generated
+    // stores for 966s, and its 30-minute limit cancelled the measurement before anything was saved.
+    // 60 minutes leaves that cold run room in both workflows.
     'perf-load': {
       'runs-on': performanceRunner,
-      'timeout-minutes': 30,
+      'timeout-minutes': 60,
       defaults: { run: { shell: 'bash' } },
       env: loadEnv,
       steps: [

@@ -69,6 +69,12 @@ for job in ('perf-load', 'perf-load-hog'):
     assert 'python3 scripts/ci-perf-cache restore' in blocks[job], job
 assert 'namespace-profile-macos-arm64' in blocks['perf-load-hog-macos']
 assert 'scripts/ci-perf-cache pack' in blocks['perf-load'], "main's daily load publishes the snapshots"
+# Snapshots publish only after the load step's complete report, so a cold new recipe (run 39488050274:
+# 10m38s compiling, 966s generating stores) must finish within the limit to seed itself; 30 minutes did not.
+for workflow_blocks in (blocks, performance):
+    assert '\n    timeout-minutes: 60\n' in workflow_blocks['perf-load'], 'a cold perf-load has room to seed'
+steps = blocks['perf-load']
+assert steps.index('scripts/ci-perf load') < steps.index('scripts/ci-perf-cache check-report') < steps.index('scripts/ci-perf-cache pack'), 'snapshots publish only after a complete report'
 print('passed: daily-perf-load, daily-perf-load-hog and daily-perf-load-hog-macos run on main every day and report red')
 
 

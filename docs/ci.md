@@ -1145,7 +1145,10 @@ Cargo outputs, registry/git sources, a local sccache, and a signed Nix binary ca
 small shell closure. The build recipe includes the lockfiles, shell, manifests and Cargo config.
 Generated-store snapshots have a separate exact generator/schema key. Publication requires a
 complete real workload report, proving compilation and store generation finished; a missed latency
-budget still retains these valid caches. Cancelled and incomplete runs do not publish. Failed
+budget still retains these valid caches. Cancelled and incomplete runs do not publish, and the
+snapshot steps run after the load step, so the first run of a new recipe seeds it only by finishing
+cold within `perf-load`'s 60-minute limit (both workflows): daily run 39488050274 compiled for
+10m38s, generated stores for 966s and was cancelled at the earlier 30-minute limit. Failed
 reports never become main baselines. PRs prefer their own published snapshots, then fall back to
 trusted main artifacts. A PR snapshot must match the head
 repository and branch and a commit in the current PR; it cannot supply main's caches or anyone's
