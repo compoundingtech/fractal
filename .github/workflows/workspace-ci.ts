@@ -616,7 +616,7 @@ export const evidenceStepSteps = (
  */
 export const nixEvidenceSteps = (name: string): unknown[] => {
   const soft = { if: 'always()', 'continue-on-error': true } as const
-  const record = `nix-${name}`
+  const record = `nix-${name}`  // the ledger name only: one signature per job
   return [
     {
       name: 'Take the evidence signer from the base commit',
@@ -657,13 +657,13 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
     },
     {
       ...soft,
-      name: `Sign the ${record} record`,
+      name: `Sign the nix record for ${name}`,
       if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
       env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${record}
 home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${record} \\
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${name} \\
   --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\

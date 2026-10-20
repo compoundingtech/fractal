@@ -40,6 +40,12 @@ class NixEvidenceJobs(unittest.TestCase):
             self.assertIn('evidence-base/scripts/evidence-sign', body)
             self.assertNotIn('python3 scripts/nix-check-facts', body)
 
+    def test_the_record_is_signed_under_the_checks_own_name(self):
+        for check in CHECKS:
+            body = job(f'nix-evidence-{check}')
+            self.assertIn(f'nix-check-facts" --check {check} ', body)
+            self.assertIn(f'evidence-wrap" --check {check} ', body)
+
     def test_the_notes_are_retained_under_a_name_the_gate_does_not_collect(self):
         collected = re.compile(r'^evidence-note-')
         for check in CHECKS:

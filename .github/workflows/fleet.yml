@@ -1334,14 +1334,14 @@ jobs:
           python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
       - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
         continue-on-error: true
-        name: Sign the nix-genie-freshness record
+        name: Sign the nix record for genie-freshness
         env:
           PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once nix-genie-freshness
           home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check nix-genie-freshness \
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check genie-freshness \
             --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
@@ -1427,14 +1427,14 @@ jobs:
           python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
       - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
         continue-on-error: true
-        name: Sign the nix-typescript-client record
+        name: Sign the nix record for typescript-client
         env:
           PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once nix-typescript-client
           home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check nix-typescript-client \
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check typescript-client \
             --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
