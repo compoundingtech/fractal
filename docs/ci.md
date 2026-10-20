@@ -1451,8 +1451,10 @@ for the distinction between build concurrency and merge batch size.
 ## Superseded merge groups
 
 Push concurrency in Main upkeep, Performance and the public guard is scoped to protected main.
-A new main push cancels obsolete automatic work; its upkeep still probes and fills the current
-main's exact cache entries. PR groups use the PR number, rather than its head SHA, so a new head
+In Performance and the public guard a new main push cancels obsolete automatic work. Main upkeep
+never cancels a started run: main pushes share one group, GitHub keeps only the newest pending
+run, so a burst of merges coalesces into one more upkeep that probes and fills the current
+main's exact cache entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
 replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
 immutable workflow revisions can remain queued: before cancelling a backlog entry, compare its
 event, source and PR state with current main or the PR's latest head, retain its original timing
