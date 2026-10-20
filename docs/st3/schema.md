@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `0e776cb31435d991a2ded375b8b1b4f9291798a52cc122c1c8bf63488a7fa2e5`
+Storage digest: `4e2afded6a2d811d83bc15d63d1d013f6c76e368ac18455bf7650f13eb49f00d`
 
 ## Subject families
 
@@ -338,6 +338,16 @@ the checkpoint tables: reading the ledger before local-mode activation stops tho
 would permanently refuse a claim that adoption let return. A SHA-256 identity in canonical
 64-digit lowercase hex is stored as 32 bytes; any other value keeps its TEXT, which SQLite never
 equates with a BLOB.
+
+## Writer heads
+
+`writer_heads` keeps each writer's highest batch (sequence, hash). A trigger raises it on every
+batch insert and stores it before any batch delete, so a checkpoint trim that deletes a writer's
+newest batch never lowers it; rows are never deleted. Local sequence allocation takes the
+maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `checkpoint_envelopes`
+and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
+this table existed), and the writer floor; the chain's previous hash is the higher of the newest
+batch and the stored head.
 
 ## Retired claim facts
 

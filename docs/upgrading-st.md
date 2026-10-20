@@ -106,6 +106,64 @@ cat "${archive%.tar.gz}/BUILD.json"
 so an installed CLI and a running daemon can be compared. All versions use metadata baked at
 compile time, independent of the caller's directory or environment.
 
+## Per-host Fractal name cutover
+
+This is an explicit, default-host-only operation, not part of a normal installation or
+Home Manager activation. Coordinate **one host at a time**, while checkpoints and sync
+are idle. Preserve the backups above. Do not move named instances or workspace roots.
+
+1. Install the migration-capable build without restarting the running daemon. For native
+   services, run `fractal service install --stage-fractal`; the macOS installer also accepts
+   `--stage-fractal`. For Home Manager, select
+   `services.smalltalk.fractalMigration.phase = "stage"` and activate the same package and
+   service settings as the running generation. Staging writes disabled Fractal definitions;
+   legacy definitions, state, memory drop-ins, sockets and running processes stay in place.
+2. Run `fractal migrate host --dry-run`. It requires a running legacy daemon, disabled and
+   stopped target definitions, idle checkpoint/replication status, free destinations, and
+   same-filesystem renames. Both service families running is a hard error. A populated
+   `~/.config/fractal` or `~/.local/state/fractal` is never merged or overwritten, even if it
+   has a receipt. Move the unrelated dotfiles Fractal TUI data to `fractalite` first.
+   For Home Manager, preflight also reads every retained `home-manager-N-link` in the
+   XDG/default user and legacy per-user Nix profiles. It refuses forced targets that
+   raw-prefix-match legacy `config.toml` or the state root, listing the generation
+   numbers to prune. This includes sibling prefixes such as `st3/config`, not just
+   containing directories. Prune the reported generations before retrying; no generation
+   is removed automatically. Unreadable or unrecognized collision scripts also refuse
+   cutover. Activation scripts are inspected, never executed by preflight.
+   Inspection accepts only the pinned checker's single `forcedPaths` initializer and
+   read-only loop; extra references, including append/indexed assignments, are refused
+   with their retained generation number rather than trusting the initial array.
+3. Run `fractal migrate host --json` and retain its host receipt. It persistently disables
+   legacy boot/login activation **before** stopping services and waiting for their state lock.
+   Atomic directory/bridge exchanges move config/state without ever leaving an absent legacy
+   root; each **whole** service `.d` directory is renamed. Both destinations receive an
+   atomically published `.fractal-migration-completed` containing exactly
+   `arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` and a newline.
+4. The target daemon must answer the local health API as the same node: `Type=simple` alone
+   is not readiness. The receipt reports **local API listening**, the measured gap and,
+   on Linux, effective `memory.swap.max` and `MemoryLow` read from the daemon's cgroup.
+   Changed memory protection or failure before readiness triggers automatic rollback.
+   Only after readiness are legacy definitions removed and target workers enabled.
+5. For Home Manager, select `fractalMigration.phase = "completed"` before the next
+   activation. Legacy and staging generations reject receipt-bearing roots. A persistent
+   foreign `config.toml -> config.home-manager.toml` symlink also blocks immutable older
+   generations at their normal collision check, including backup modes. Completed activation
+   updates only the guarded backing TOML. Home Manager's explicit `force = true` bypasses
+   collision checks using raw string prefixes, so both the module assertion and retained
+   generation preflight reject force prefixes of legacy config/state paths.
+
+The write-ahead journal lives at
+`${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,
+moves, original service enablement, readiness commit and before/after memory protection.
+If interrupted before readiness, use `fractal migrate host --rollback` and then retry.
+Rollback persists reverse progress before recreating empty destinations, so recovery can
+itself be interrupted and retried; it restores the original Home Manager config object.
+If readiness already committed, rerun `fractal migrate host` to finish retirement; rollback
+is refused.
+The gap has a five-minute startup budget (individual manager calls are bounded at 30 seconds,
+and the API probe at 30 seconds); an exhausted pre-start budget restores legacy state.
+The old-path symlinks remain for already-running seats during the migration bridge.
+
 ## Config keys and clients on an old PATH
 
 After an install adds configuration keys, replace stale `st` clients on session PATHs and
