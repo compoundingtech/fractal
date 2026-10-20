@@ -691,6 +691,11 @@ The inventory is a set, not a high-water cursor. Sparse delivery and two candida
 
 The inventory is compact. It carries one digest per writer range of 256 sequences, and it lists identities only for ranges whose digests differ. A peer sends a range the other side lacks entirely, and it sends identities within a differing range only after the other side has listed that complete range and verified its count and digest. An ordinary two-phase exchange makes progress in both directions without sending the whole authority log. A peer without range digests receives and sends the full identity list, as before.
 
+An equal-digest answer retains its range digests even though it lists no identities or payloads.
+Equality applies to the exported snapshot only: a concurrent local or replicated write may make
+that digest stale before the next export. Retaining the ranges keeps that next request compact
+instead of accidentally selecting the older peer's full-inventory answer path.
+
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.

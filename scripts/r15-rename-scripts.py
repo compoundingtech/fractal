@@ -69,7 +69,7 @@ def rewrite(relative, source):
     source = source.replace(r'\nst-build-stamp', r'\nfractal-build-stamp')
     # Source paths, not executable names, state paths or serialized fixtures.
     if name not in HISTORICAL:
-        source = re.sub(r'crates/(st3(?:-[a-z0-9-]+)?|stui|st-(?:drivers|runtime|chatgpt|storage-version|ui-model|terminal-direct)|st2-(?:resource-providers|resource-wasip2|[a-z0-9-]+-component))(?=[/"\' *])',
+        source = re.sub(r'crates/(st3(?:-[a-z0-9-]+)?|stui|st-(?:drivers|runtime|chatgpt|storage-version|ui-model|terminal-direct|fabric-adapter)|st2-(?:resource-providers|resource-wasip2|[a-z0-9-]+-component))(?=[/"\' *])',
                         lambda match: 'crates/' + package(match[1]), source)
     for old, new in (
         ('clients/typescript/st3-client', 'clients/typescript/fractal-client'),

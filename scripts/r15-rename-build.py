@@ -55,6 +55,7 @@ def clippy_ancestry(text: str) -> str:
     # Main extracted this library after the immutable pre-rename lock above.
     # Its old warning baseline remains historical Git data, not a Cargo alias.
     ancestry["fractal-build-stamp"] = "st-build-stamp"
+    ancestry["fractal-fabric-adapter"] = "st-fabric-adapter"
     return json.dumps(ancestry, indent=2, sort_keys=True) + "\n"
 
 

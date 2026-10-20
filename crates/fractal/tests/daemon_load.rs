@@ -586,7 +586,7 @@ fn target_rows_pool_each_targets_paths_and_keep_message_send_apart() {
         ("person read /v1/client/work".to_owned(), ms(&[30])),
         ("person read fresh".to_owned(), ms(&[250, 400])),
         ("harness event".to_owned(), ms(&[5])),
-        ("message send".to_owned(), ms(&[7, 150])),
+        ("message send".to_owned(), ms(&[7, 400])),
         // Not a latency target's path.
         ("claim".to_owned(), ms(&[900])),
         (LONG_POLL.to_owned(), ms(&[30_000])),
@@ -598,7 +598,7 @@ fn target_rows_pool_each_targets_paths_and_keep_message_send_apart() {
     assert_eq!(rows["write-ack"].count, 3, "a harness event and both message sends");
     assert_eq!(rows["message-send"].count, 2);
     assert_eq!(rows["message-send"].target_ms, rows["write-ack"].target_ms);
-    assert!(rows["message-send"].over_target);
+    assert!(rows["message-send"].over_target, "400 ms is over the 300 ms write-ack target");
     assert!(!rows.contains_key("terminal-attach"));
 }
 

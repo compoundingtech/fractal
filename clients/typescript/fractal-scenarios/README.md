@@ -50,15 +50,22 @@ to the consumer.
 
 ```ts
 // .storybook/preview.ts
-import { scenarioGlobalTypes, withScenario } from '@fractal/scenarios/storybook'
-export default { globalTypes: scenarioGlobalTypes, decorators: [withScenario] }
+import { scenarioGlobalTypes, scenarioLoaders, withScenario } from '@fractal/scenarios/storybook'
+export default { globalTypes: scenarioGlobalTypes, loaders: scenarioLoaders, decorators: [withScenario] }
 
 // a story file
 parameters: { scenario: { slices: ['roster'] } }, argTypes: scenarioArgTypes(['roster'])
 
 // a test: checks reads, data dependence, world switch, pinned world and URL state
+import { scenarioStoryCheck } from '@fractal/scenarios/storybook/check'
 scenarioStoryCheck(Story, meta, { assert: true })
 ```
+
+The preview entry contains only toolbar/control metadata. Its async loaders import worlds and
+recordings only for stories declaring `parameters.scenario`; install both loaders and decorator.
+The small static manifest is checked against the catalog in the binding tests, avoiding a codegen
+step. Synchronous Node checks and `resolveScenarioWorld` live at `storybook/check`, which may
+eagerly import the catalog. Portable SSR without loaders can use that entry's `withScenario`.
 
 Rust, Swift and other readers use the committed files in `fixtures/scenarios/` and shift the
 instants each file lists in `times` (vectors: `fixtures/scenarios/_vectors/rebase.json`).

@@ -17,7 +17,8 @@ import {
 } from '../src/index.ts'
 import { createReplay, manualClock } from '../src/replay/index.ts'
 import { ScenarioProvider, createReadTracker, useScenarioSlice } from '../src/react/index.ts'
-import { resolveScenarioWorld, scenarioGlobalTypes, scenarioStoryCheck, withScenario } from '../src/storybook/index.ts'
+import { scenarioGlobalTypes } from '../src/storybook/index.ts'
+import { resolveScenarioWorld, scenarioStoryCheck, withScenario } from '../src/storybook/check.ts'
 
 const REBASED_NOW = ANCHOR_MS + 123_456_789
 const WINDOW_LIMIT = 200
@@ -328,7 +329,7 @@ const verifyReplay = async (world: World) => {
     }
     await subscribeCurrent()
     expectedEnd = world.slices.sync.timeline.some((event) => event.at_ms <= 0 && (event._tag === 'close' || event._tag === 'open-fail'))
-    await step(world, 'sync', 'anchor:socket open and first frames', () => clock.advance(0))
+    await step(world, 'sync', 'anchor:socket open and first frames', async () => { clock.advance(0); await replay.flush() })
     expect(endings.length === 0 || expectedEnd, label(world, 'sync', 'anchor:unexpected socket end')).toBe(true)
     await compare()
     const events = SLICE_KINDS.flatMap((kind) => world.slices[kind].timeline.map((event, index) => ({ kind, event, index })))
@@ -336,9 +337,10 @@ const verifyReplay = async (world: World) => {
     for (const { kind, event, index } of events) {
       currentStep = `${event.at_ms}ms:${kind}[${index}]:${event._tag}`
       expectedEnd ||= event._tag === 'close' || event._tag === 'open-fail'
-      await step(world, kind, `${currentStep}:dispatch`, () => clock.advance(world.now + event.at_ms - clock.now()))
+      await step(world, kind, `${currentStep}:dispatch`, async () => { clock.advance(world.now + event.at_ms - clock.now()); await replay.flush() })
       await subscribeCurrent()
       clock.advance(0)
+      await replay.flush()
       expect(endings.length === 0 || expectedEnd, label(world, 'sync', `${currentStep}:unexpected socket end`)).toBe(true)
       await compare()
       if (kind === 'sync' && ['http-error', 'http-raw', 'http-ok'].includes(event._tag) && 'route' in event) {

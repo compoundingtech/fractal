@@ -118,7 +118,7 @@ mod tests {
         }
         let mut snapshot = new_client_snapshot(&state);
         let context = response_body::Context {
-            state:state.clone(), client_request:true, observation_report:false,
+            state:state.clone(), client_request:true, local_only_response: false,
             request_id:format!("request/{}\n", "escaped-\"".repeat(24)),
             client_snapshot:Some(snapshot.clone()), server:None, roster:false,
         };

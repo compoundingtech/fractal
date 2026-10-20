@@ -1,3 +1,4 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { readFileSync } from 'node:fs'
@@ -44,7 +45,7 @@ printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_ST
 
 // Performance always stays on Namespace. Main's successful runs seed durable snapshots and
 // real baseline reports. Each PR can also reuse its own snapshots, outside the dependency-cache pool.
-export default githubWorkflow(readyPRJobs({
+export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs({
   name: 'Performance',
   on: {
     push: { branches: ['main'] },
@@ -190,4 +191,4 @@ binary=$(find target/release/deps -maxdepth 1 -type f -name 'perf_load-*' ! -nam
       ],
     },
   },
-}))
+})))

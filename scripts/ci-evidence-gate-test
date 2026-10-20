@@ -352,6 +352,18 @@ class EndToEnd(unittest.TestCase):
         env.update(overrides)
         return env
 
+    def test_a_record_filed_only_as_a_tag_on_the_remote_is_fetched_and_skips(self):
+        s = self.pull_request()
+        self.f.layout = 'tag'
+        record = self.note(s['head'], s['head_tree'], seconds=1)
+        self.assertEqual(self.f.git('for-each-ref', '--format=%(refname)', 'refs/notes/evidence/'), '')
+        # The runner's checkout does not bring it: the tag names a commit that no fetched branch holds.
+        shallow = Path(self.work_dir.name) / 'precondition'
+        subprocess.run(['git', 'clone', '-q', '--depth=1', 'file://' + str(self.f.repo), str(shallow)], check=True, capture_output=True)
+        self.assertEqual(subprocess.run(['git', '-C', str(shallow), 'tag', '-l', 'evidence/*'], capture_output=True, text=True).stdout, '')
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], fields['notes_fetch'], outputs['record']), ('skip', 'ok', record))
+
     def test_a_pull_request_run_skips_on_the_note_for_its_head_tree_although_main_moved(self):
         s = self.pull_request()
         self.assertNotEqual(s['head_tree'], s['merge_tree'])
@@ -464,6 +476,9 @@ class EndToEnd(unittest.TestCase):
         # the tree's own prefix, never the whole namespace
         tree_fetches = [c for c in note_fetches if any(str(part).startswith('+refs/notes/evidence/' + 'c' * 40 + '/*') for part in c)]
         self.assertTrue(tree_fetches)
+        # the same prefix in the protected namespace, in the same fetch
+        self.assertTrue(all(any(str(part).startswith('+refs/tags/evidence/' + 'c' * 40 + '/*') for part in c) for c in tree_fetches), tree_fetches)
+        self.assertFalse([c for c in calls if any(str(part).startswith(('refs/tags/evidence/*', '+refs/tags/evidence/*', '+refs/tags/*')) for part in c)])
         self.assertFalse([c for c in note_fetches if any(str(part).startswith(('refs/notes/evidence/*', '+refs/notes/evidence/*')) for part in c)])
         self.assertNotIn('--no-filter', [part for c in calls if c[:2] == ('git', 'fetch') and 'refs/notes' not in ' '.join(map(str, c)) for part in c])
 
@@ -1415,7 +1430,7 @@ class WorkflowStructure(unittest.TestCase):
             with tempfile.TemporaryDirectory() as scratch:
                 work = Path(scratch)
                 (work / '.github/workflows').mkdir(parents=True)
-                for name in ('queue-watch.ts', 'ready-pr.ts', 'build-snapshot.ts', 'cache-audit.ts', 'workspace-ci.ts'):
+                for name in ('queue-watch.ts', 'ready-pr.ts', 'build-snapshot.ts', 'cache-audit.ts', 'nix-sandbox-scope.ts', 'workspace-ci.ts'):
                     shutil.copy(ROOT / '.github/workflows' / name, work / '.github/workflows' / name)
                 (work / '.github/workflows/fleet.yml.genie.ts').write_text(source.replace(anchor, f'{probe}\n{anchor}', 1))
                 for name in ('repos', 'scripts'):

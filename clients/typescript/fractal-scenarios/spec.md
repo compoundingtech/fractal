@@ -741,7 +741,9 @@ remain screen-derived adapters, not evidence of a captured runtime GET.
 
 ## Replay (D8)
 
-`createReplay(world, { clock })` returns a transport for the real data layer:
+`createReplay(world, { clock })` returns a `ReplayHandle` transport for the real data layer.
+`ReplayHandle` extends the structural `Replay` transport interface with `flush()` for test
+synchronization. Consumers that supply their own `Replay` transport need not implement it:
 
 ```ts
 const replay = createReplay(loadWorld('fleet-mid-refactor'), { clock: realClock() })
@@ -757,6 +759,17 @@ replay.actions  // actions the client submitted, in order, for test assertions
 - **Windows:** the first reply to a collection subscription is a `snapshot` with the slice state
   filtered by the subscription's filters, in display order, cut to its `limit` (1–200), at the
   current store version.
+- **Recorded subscriptions:** explicit recording proofs retain the captured subscribe commands,
+  socket identities and clock offsets. Reissuing a captured command at its captured offset on
+  its captured socket follows the recorded wire boundaries, without a second initial snapshot
+  or timeline dispatch. Command matching compares every field recursively, ignoring object key
+  order but preserving array order and window/cursor values. Other subscriptions read the
+  folded state immediately and follow slice
+  events, just like synthetic worlds. A known running agent without a thread receives an empty
+  `replace: true` conversation snapshot; later entries append, while authoritative replacement
+  events retain their replacement semantics. Opening an existing thread returns its current page,
+  not an earlier captured window. Catalog narrative worlds adopt recorded slices without
+  captured transport metadata and always use this folded-state behavior.
 - **HTTP:** `fetch` answers `GET` reads from the same state, paging by cursor within the advertised
   bounds. `terminal.attach` returns the terminal's current incarnation and a capability that the
   socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted
@@ -780,8 +793,23 @@ replay.actions  // actions the client submitted, in order, for test assertions
   committed/generated boundary. The `huge` scripted consumer starts with the newest 50 entries
   and requests older pages, including beyond the committed 1,600-entry window. Native file
   readers have only the committed pages; the full logical history is available through replay.
-- **Clocks:** `realClock()` schedules with timers; `manualClock()` exposes `advance(ms)` for unit
-  tests. Replay never waits on its own; it runs only what the clock releases.
+- **Clocks and socket tasks:** `realClock()` schedules timeline work with timers;
+  `manualClock()` exposes `advance(ms)` for tests. The clock releases timeline events;
+  opens and socket callbacks are delivered as later tasks, never reentrantly from `send()` or
+  `close()`. Replies and timeline frames share one FIFO MessageChannel task queue, with one
+  event per task (not a microtask). Playwright's `clock.install` does not fake MessageChannel,
+  so delivery works while its timers and Date are paused. Where supported (Node/Bun), idle
+  ports are unref'd; pending work refs the receiving port until the queue becomes idle.
+  Replay teardown closes both ports.
+  Opening becomes effective in the open task before `onopen`; closing immediately prevents
+  further sends and queues `onclose`. The typed socket seam does not expose `readyState`.
+  `replay.close()` cancels pending opens, frames and timeline work, then delivers close
+  notifications asynchronously and disposes the ports. Already-queued close notifications
+  survive teardown and are delivered exactly once, including `socket.close(); replay.close()`.
+- **Test synchronization:** after `clock.advance(ms)` or a subscribe/send, await
+  `replay.flush()` before asserting socket output. It waits until the delivery queue is idle,
+  including replies queued by handlers, but neither advances the clock nor releases future
+  timeline events. Awaiting only a microtask is insufficient.
 
 ### Store versions
 
@@ -977,8 +1005,8 @@ The kit hands out **wire state**, not decoded values:
 
 ```ts
 // .storybook/preview.ts
-import { scenarioGlobalTypes, withScenario } from '@fractal/scenarios/storybook'
-export default { globalTypes: scenarioGlobalTypes, decorators: [withScenario] }
+import { scenarioGlobalTypes, scenarioLoaders, withScenario } from '@fractal/scenarios/storybook'
+export default { globalTypes: scenarioGlobalTypes, loaders: scenarioLoaders, decorators: [withScenario] }
 
 // Sidebar.stories.tsx
 export default {
@@ -991,6 +1019,15 @@ export const Huge = { parameters: { scenario: { world: 'huge' } } } // pinned
 
 - `scenarioGlobalTypes` adds the `scenario` toolbar item (the catalog, default
   `fleet-mid-refactor`) and `scenarioNow` (pinned time; default: load time).
+- The preview-facing `storybook` entry MUST stay light: neither its toolbar nor default
+  controls may statically import worlds or recordings. `scenarioLoaders` uses dynamic import
+  only when `parameters.scenario` is declared; stories without that parameter load no catalog.
+  Storybook awaits loaders before the synchronous decorator renders its provider.
+- Toolbar names and default-world variant controls use a small static manifest, with a test
+  comparing it to the catalog. This avoids adding a generation step for a small metadata list.
+- Synchronous Node consumers import `scenarioStoryCheck`, `ScenarioStoryCheckError` and
+  `resolveScenarioWorld` from `@fractal/scenarios/storybook/check`. That separate entry
+  may eagerly load the catalog and exports a synchronous `withScenario` for portable SSR.
 - Each declared slice becomes an arg of the same name; its control selects a variant. Default
   arg value `default` means "the world's own slice".
 - Precedence: a story's pinned `parameters.scenario.world` wins over the toolbar; an arg other than
@@ -1040,6 +1077,36 @@ A story may mark a slice as intentionally invariant in its rendering
 (`parameters.scenario.invariant: { sync: 'reason' }`), for example a story that reads `sync`
 only to choose a layout. Checks 2 and 3 skip that slice; check 1 still requires the read. A
 reason is required.
+
+Stories whose consumer initially mounts only part of a conversation may declare
+`parameters.scenario.window`, typed by `ScenarioStoryParameter` from `/storybook/check`:
+
+```ts
+// Transcript uses initialTailCount={2}; EmbraceScrollViewport historyBatchSize=4.
+window: { _tag: 'tail', turns: 2, historyBatch: 4 }
+```
+
+The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window,
+including for empty or loading baselines; vacuity validation applies only to tail windows.
+The check derives each thread's turns from folded wire entries: user text content opens a
+turn; an assistant-content/tool-call prefix is one turn. It selects the final N turns per
+thread, not the final N entries; threads with at most N + historyBatch turns mount whole,
+matching EmbraceScrollViewport's short-conversation rule. The check requires their markers and counts.
+Other slices retain their full marker contract. World-switch contrast selection uses the
+same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
+The story must state the consumer's real mount rule, with a comment naming that rule; this
+is not permission to choose arbitrary convenient data or split the transcript.
+Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
+Transcript's initial tail count and EmbraceScrollViewport's history batch size. Stories
+can use this shared value instead of copying the counts; a consumer-side test guards it.
+
+`MountedWindow` failures reject invalid tail counts/history batches, a baseline tail window
+selecting zero entries, or one excluding every marker from a marker-bearing conversation.
+Genuinely empty/loading contrast sides still participate as contentless contrasts.
+Without a window, the all-source marker contract is unchanged. The mounted check does not
+prove history reveal or a reply deliberately held back by an interaction harness: browser
+plays must separately prove both, and a tail window cannot express an arbitrary held-back
+reply within a mounted turn.
 
 The kit's own tests include a negative case: a story that declares slices but renders fixed text
 fails checks 1 and 2.
@@ -1126,7 +1193,7 @@ breaks a scenario fails in the same pull request.
 
 | Consumer | Owner | Contract |
 | --- | --- | --- |
-| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
+| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for scenario stories. Every scenario story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
 | `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
@@ -1147,6 +1214,9 @@ breaks a scenario fails in the same pull request.
 
 - Every fractal-ui story renders a scenario world, passes `scenarioStoryCheck`, and the Scenario
   toolbar switches it.
+- Mounted conversation stories declare the real consumer mount policy and pass marker/contrast
+  checks within it; kit tests reject missing mounted markers and vacuous windows and preserve
+  the unwindowed rule. Browser plays separately prove history reveal and held-back replies.
 - fractal-web e2e runs on replay; the production bundle contains no scenario-kit code.
 - The SDK fold matches every non-pending sync matrix row.
 - The stui demo shows the generated `fleet-mid-refactor` world.

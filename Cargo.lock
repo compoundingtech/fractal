@@ -1535,6 +1535,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "urlencoding",
  "uuid",
 ]
@@ -1890,6 +1891,22 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "fractal-fabric-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -4495,7 +4512,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libc",
  "pty-core",
@@ -4506,7 +4523,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "indexmap",
  "libc",
@@ -4521,7 +4538,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",

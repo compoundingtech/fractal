@@ -561,16 +561,17 @@ records the KVM probe and each phase's elapsed time.
 ### TypeScript client
 
 `typescript-client` runs on every PR and merge-group entry. Main retains the queue check;
-Main upkeep's `warm-typescript` fills the pnpm store with `pnpm fetch`. The job installs
-Node 24.18.0 through `actions/setup-node`, runs `corepack enable`, then installs the root
-workspace with `pnpm install --frozen-lockfile`. The client, shared views and iOS app share
-one root `pnpm-lock.yaml`; install scripts are disabled by the workspace configuration.
+Main upkeep's `warm-typescript` fills the pnpm store with `pnpm fetch`. The job materializes
+the pinned megarepo member, then runs both the frozen root install and the client checks
+inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack shims.
+The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
+are disabled by the workspace configuration.
 The store cache key is
 `typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
 
-After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
+After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
@@ -580,6 +581,11 @@ for generated-client consumers. The main ruleset requires `typescript-client`.
 
 The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
 workflow-level path filters. `linux-gate` does not depend on them.
+Only `fractal-web-execution` enables unprivileged user namespaces with
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral
+Ubuntu runner VM before entering the web lanes. The effect-utils Buck TypeScript
+actions require those namespaces for Bubblewrap containment (effect-utils #1784);
+their sandbox flags and declared-input boundary remain unchanged.
 
 - `fractal-web-changes` always runs, with a one-minute timeout and no checkout. Its
   embedded `scripts/ci-fractal-web-changes` fetches both commits explicitly without
@@ -1191,8 +1197,8 @@ not past it at the start, at its lowest 5-second sample or at the end.
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
 every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
-`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
-`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+`GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
 not, until `ST_LOAD_HOG_STRICT=1`.
 
@@ -1324,9 +1330,10 @@ Apply the fifth live ruleset check after this workflow has passed on main.
 ## Generated files and existing workflows
 
 All workflow YAML and `.github/repo-settings.json` are generated from neighboring `.genie.ts`
-files. The `effect-utils` flake input supplies the generator library and CLI. The small, separate
-`genie` shell creates `repos/effect-utils` as a symlink to the exact input's Nix store path;
-`repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
+files. The `effect-utils` flake input supplies the genie CLI and the `effect-utils` member in
+`megarepo.lock` supplies the generator library: run `mr apply` first, which links
+`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/st-test` run the same command; the small,
+separate `genie` shell only warns when it is missing). `repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
 shell is not changed to depend on genie, so generation does not build its PTY/collector tools.
 
 ```sh

@@ -1,4 +1,4 @@
-import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook'
+import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
 import { loadWorld } from '@fractal/scenarios'
 import { scenarioSections } from './scenario-transcript.story-harness'
 import { expect, test } from 'vitest'
@@ -12,6 +12,14 @@ import declarationMeta, { MissionStructuredFallback, ScenarioMissionDeclarations
 import composerMeta, { ReadingColumn, ReadingColumnLight, HostWidth, ScenarioConversation as ComposerScenarioConversation, ScenarioConversationLight as ComposerScenarioConversationLight } from './TranscriptComposer.stories.tsx'
 import * as pressModule from './TranscriptPress.stories.tsx'
 
+import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
+import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
+
+test('the story mounted window uses the real Transcript and viewport mount constants', () => {
+  expect(transcriptMountedWindow).toEqual({
+    _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
+  })
+})
 test('Markdown AllStates consumes the declared conversation slice', () => {
   const result = scenarioStoryCheck(AllStates, meta)
   expect(result.failures).toEqual([])

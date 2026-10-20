@@ -136,6 +136,8 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     Ok(ClientSession { actor: source["session_actor"].as_str()
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
         pairing_grant: Some(granted.subject.clone()),
+        // An assistant grant is not a device pairing: it never registers push tokens.
+        pairing_issued_here: false,
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
         assistant_write: None,
         conversation_blocks:false, messages_paging:false, assistant_content_handles:false, local_peer:false, scopes })

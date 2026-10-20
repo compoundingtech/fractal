@@ -7,6 +7,15 @@ have their own logical authority digests; local physical fields and caches are o
 
 The claim log and immutable blobs are the durable graph authority.
 
+`local_push_registrations` is member-local secret authority, not a shared projection or a
+rebuildable cache. Its token and registration metadata come from an authenticated phone;
+pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
+survive daemon restarts and stay outside graph replication, exports and projection digests.
+Explicit unregistration, pairing revocation/replacement and expiry remove them. Deleting
+or losing this local table loses registrations; recovery requires the phone to register
+again with a valid locally issued pairing, not a graph replay. Full local database backups
+contain these secrets and must remain private; a graph-only backup cannot recover them.
+
 ## Large inline values
 
 New storage work must avoid unbounded large inline SQLite objects, including variable
@@ -229,6 +238,7 @@ order from the same admitted claims.
 | `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |
 | `local_mailbox_owners` | Local | This daemon's native socket subscription owner, live runtime incarnation and replacement epoch. Survives daemon restart; excluded from replicated projection digests. |
 | `local_observations` | Local | Local-retention observations and their local frontier/id; never replicated. |
+| `client_diagnostic_receipts` | Local operational fact | Paired-device diagnostic retry receipts and admission accounting; retained for 30 days independently of local observations, never replicated or included in projection digests. |
 | `local_publication_claims`, `local_publication_starts`, `local_publication_pending`, `local_publication_batches`, `local_publication_bootstrap`, `local_publication_launch_epoch` | Local derived state | Rebuildable retained runtime and incarnation launch evidence, canonical keys, exact delta and coalesced batch queues, cache generation, and durable bootstrap cursor. Outside replicated digests; missing or incomplete evidence is Unknown. |
 | `local_resource_projection_pending` | Local projection work queue | Resource subjects whose admitted observations changed in the current transaction; flushed before commit |
 | `local_seat_accounts` | Local operational fact | The account chosen for each pooled seat on this node; retained across restarts, never replicated |
