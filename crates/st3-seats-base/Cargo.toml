@@ -15,8 +15,8 @@ anyhow = "1"
 base64 = "0.22"
 hex = "0.4"
 libc = "0.2"
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 serde_json = "1"
 sha2 = "0.10"

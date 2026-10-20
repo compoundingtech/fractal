@@ -11,7 +11,9 @@ members = [
   "crates/agent-spec",
   "crates/demo-resolver-wasm",
   "crates/smallclaims",
+  "crates/st-build-stamp",
   "crates/st-drivers",
+  "crates/st-fabric-adapter",
   "crates/st-runtime",
   "crates/st-storage-version",
   "crates/st-resource-protocol",
@@ -56,7 +58,9 @@ default-members = [
   ".",
   "crates/agent-spec",
   "crates/smallclaims",
+  "crates/st-build-stamp",
   "crates/st-drivers",
+  "crates/st-fabric-adapter",
   "crates/st-runtime",
   "crates/st-resource-protocol",
   "crates/st-wire",
@@ -181,7 +185,6 @@ overflow-checks = true
 name = "st2"
 version.workspace = true
 edition = "2024"
-build = "crates/st-drivers/build.rs"
 description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."
 license = "MIT"
 # Every file in tests/ is a module of one test binary; see tests/integration.rs.
@@ -220,6 +223,8 @@ path = "tests/resource_profile_supervisor_e2e.rs"
 # Sync by design: the runner is I/O-light (shell-outs to `pty` plus a
 # folder watch + a sleep), so no tokio. Deps grow per milestone; M0 needs only parse + CLI.
 agent-spec = { path = "crates/agent-spec" }
+# The build identity: only the binary packages depend on it (see crates/st-build-stamp).
+st-build-stamp = { path = "crates/st-build-stamp" }
 st-drivers = { path = "crates/st-drivers" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

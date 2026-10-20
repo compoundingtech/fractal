@@ -45,6 +45,7 @@ import traceback
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.dont_write_bytecode = True
+from script_process import signal_private
 from st_boundary import fresh_seat_findings, isolated_path, output_findings
 from st3_test_evidence import register, capture, write_json
 from st3_events import Events, claim, fields
@@ -162,7 +163,8 @@ client_gateway_socket = "{root / 'run/client.sock'}"
                       alive=lambda: self.daemon.poll() is None or fail("daemon exited: " + self.tail("daemon.log")))
 
     def kill_daemon(self):
-        os.killpg(self.daemon.pid, signal.SIGKILL)
+        if self.daemon.poll() is None:
+            os.killpg(self.daemon.pid, signal.SIGKILL)
         self.daemon.wait()
 
     def tail(self, name):
@@ -229,7 +231,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid, _ in self.seat_processes():
                 try:
-                    os.kill(pid, sig)
+                    signal_private(pid, sig, endpoint=self.endpoint)
                 except ProcessLookupError:
                     pass
             time.sleep(0.3)

@@ -165,7 +165,7 @@ def main(argv):
         lines = log.read_text().splitlines()
         assert not any('secret-token-xyz' in l or header in l for l in lines if not l.startswith('ENV ')), 'token in an argument'
         assert any(header in l for l in lines if l.startswith('ENV ')), 'token reaches git through the environment'
-        assert git(sink, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').startswith('refs/notes/evidence/')
+        assert git(sink, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').startswith(f'refs/notes/evidence/{git(repo, "rev-parse", "HEAD^{tree}")}/')
         print('passed: --push sends the token through the environment, not an argument, and never prints it')
 
         (repo / 'a').write_text('dirty\n')

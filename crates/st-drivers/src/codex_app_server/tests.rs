@@ -1495,6 +1495,132 @@ fn graph_hold_controls_native_handoff_independently_of_status_and_inbox_refresh(
     assert_eq!(request["method"], "turn/start");
 }
 
+/// Twenty pump passes after an inbox refresh. Each request is one offer to Codex; the offers are
+/// then settled exactly as Codex settles them (turn result, then the typed user-message receipt),
+/// and twenty more passes prove a consumed, still unarchived message is never offered again.
+fn offer_round(delivery: &mut CodexInboxDelivery, state: &CodexControlState) -> Vec<String> {
+    delivery.next_inbox_refresh = Instant::now();
+    let requests: Vec<Value> = (0..20)
+        .filter_map(|_| delivery.maybe_request(state).unwrap())
+        .collect();
+    let offers: Vec<String> = requests
+        .iter()
+        .map(|request| request["params"]["clientUserMessageId"].as_str().unwrap().to_owned())
+        .collect();
+    for (request, client_id) in requests.iter().zip(&offers) {
+        let turn = format!("turn-{client_id}");
+        assert!(
+            delivery
+                .accept_response(
+                    &json!({ "id": request["id"], "result": { "turn": { "id": turn } } }),
+                    state.observed(),
+                )
+                .unwrap()
+        );
+        delivery
+            .accept_typed_receipt(
+                &json!({
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-main",
+                        "turnId": turn,
+                        "item": { "type": "userMessage", "clientId": client_id }
+                    }
+                }),
+                state,
+            )
+            .unwrap();
+    }
+    delivery.next_inbox_refresh = Instant::now();
+    for _ in 0..20 {
+        assert_eq!(delivery.maybe_request(state).unwrap(), None, "a settled offer was replayed");
+    }
+    for entry in delivery.ledger.entries() {
+        assert_eq!(
+            entry.phase,
+            delivery_ledger::Phase::Consumed,
+            "every offer is settled before the next phase"
+        );
+    }
+    offers
+}
+
+/// Per-PR contract for the `idle-hold` boot canary (scripts/st3-boot-canaries/run,
+/// `idle_delivery_control`): after an idle period, under a hold, at its release and at its expiry,
+/// the native pump admits exactly one offer for each message and replays none. The gate is fed
+/// what the daemon's hold view reports at each instant of a test clock (`active` is
+/// `held && now < until`, which st3-api-core's
+/// `expiry_release_restart_and_adoption_preserve_graph_authority` proves on the real claim store),
+/// so nothing sleeps. That an idle tick reads no hold at all is
+/// driver_cli's `native_delivery_control_reads_hold_only_while_mail_waits`.
+#[test]
+fn delivery_hold_release_and_expiry_each_admit_one_offer() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = delivery_config(root.path());
+    let gate = crate::session_control::DeliveryGate::default();
+    config.control = crate::session_control::SessionControl::Graph(gate.clone());
+    let mut delivery = inbox_delivery(root.path(), config.clone());
+    // Codex's typed receipt settles only an attempt made by the same runtime incarnation.
+    let mut state = CodexControlState::new(&delivery.runtime, "thread-main".into());
+    state.subscribed = true;
+    state.observed = CodexObservedState::Idle;
+    // A permit lease no test outlives: only the hold view below opens or closes the gate.
+    let lease = Duration::from_secs(3600);
+    let hold_active = |held: bool, until_unix_ms: u64, now: u64| held && now < until_unix_ms;
+    let offer = |filename: &str| stable_client_user_message_id("h.worker", "thread-main", filename);
+    let send = |label: &str| {
+        message::send_to_inbox(&config.inbox, "person/eval", Some(label), None, &[], label).unwrap()
+    };
+    let mut now = 1_790_000_000_000_u64;
+
+    // Idle: no mail waits, so the driver closes the gate without a hold read and nothing is offered.
+    gate.idle();
+    for _ in 0..5 {
+        assert!(offer_round(&mut delivery, &state).is_empty());
+    }
+    assert!(delivery.ledger.entries().is_empty());
+
+    // The first mail after the idle window: no hold claim exists, so the first read admits it.
+    let after_idle = send("after-idle");
+    gate.update(false, lease);
+    assert_eq!(offer_round(&mut delivery, &state), [offer(&after_idle)]);
+
+    // A hold that outlasts the phase: only its release can admit the held message.
+    let until = now + 120_000;
+    let held = send("held-delivery");
+    for _ in 0..3 {
+        gate.update(hold_active(true, until, now), lease);
+        assert!(offer_round(&mut delivery, &state).is_empty(), "a held message reached Codex");
+        now += 4_000;
+    }
+    assert!(config.inbox.join(&held).is_file());
+    // The release is a claim with held=false and expiry zero.
+    gate.update(hold_active(false, 0, now), lease);
+    assert_eq!(offer_round(&mut delivery, &state), [offer(&held)]);
+
+    // A short hold: the message waits up to the last instant before expiry and is offered at it.
+    let until = now + 4_000;
+    let expiry = send("expiry-delivery");
+    for instant in [now, until - 1] {
+        gate.update(hold_active(true, until, instant), lease);
+        assert!(offer_round(&mut delivery, &state).is_empty(), "offered before hold expiry");
+    }
+    now = until;
+    gate.update(hold_active(true, until, now), lease);
+    assert_eq!(offer_round(&mut delivery, &state), [offer(&expiry)]);
+
+    // No phase replays an earlier message: each was offered and consumed exactly once.
+    assert!(offer_round(&mut delivery, &state).is_empty());
+    assert_eq!(delivery.ledger.entries().len(), 3);
+    for filename in [&after_idle, &held, &expiry] {
+        assert_eq!(
+            delivery.ledger.entry(filename).unwrap().phase,
+            delivery_ledger::Phase::Consumed,
+            "{filename}"
+        );
+    }
+}
+
 #[test]
 fn review_compaction_and_dnd_hold_the_unread_fifo_head() {
     let tmp = tempfile::tempdir().unwrap();
@@ -9087,4 +9213,108 @@ fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
     assert!(preserved.ends_with(&authored[1..]));
     let error = managed_codex_argv(AccessMode::Auto, None, workspace, plain).unwrap_err();
     assert!(error.to_string().contains("ST3_ENDPOINT"));
+}
+
+/// Per-PR contract for the `access-auto` and `access-bypass` boot canaries
+/// (scripts/st3-boot-canaries/run, the `access-` block after `scenario`): every managed provider
+/// launch, fresh and restarted on its saved thread, carries exactly the access-mode flags the
+/// canary reads from the stub providers' `started` receipts. The Codex argv is composed as a
+/// controlled launch composes it: install defaults, the app-server/TUI split, then the TUI's own
+/// overrides. The approval projection `run_connected` applies after reading the provider's
+/// configured policy is not part of it.
+#[test]
+fn managed_launch_argv_carries_access_mode_flags() {
+    use crate::access::AccessMode;
+    let socket = "/run/example/st.sock";
+    let workspace = Path::new("/work/example");
+    let authored: Vec<String> = vec!["codex".into(), "--model".into(), "gpt-example".into()];
+    let has = |argv: &[String], value: &str| argv.iter().any(|arg| arg == value);
+    let permission_config = |argv: &[String]| {
+        argv.iter().filter(|arg| arg.as_str() != "-c").any(|arg| {
+            ["default_permissions=", "permissions.", "approvals_reviewer=", "sandbox_workspace_write"]
+                .iter()
+                .any(|prefix| arg.starts_with(prefix))
+        })
+    };
+    let profile_names_seat = |argv: &[String]| {
+        argv.iter()
+            .find(|arg| arg.starts_with("permissions.st-managed="))
+            .is_some_and(|profile| profile.contains(socket) && profile.contains("/work/example"))
+    };
+    for mode in [AccessMode::Bypass, AccessMode::Auto] {
+        let managed = managed_codex_argv_asking(
+            mode,
+            false,
+            Some(&format!("unix://{socket}")),
+            workspace,
+            authored.clone(),
+            Default::default(),
+        )
+        .unwrap();
+        // A fresh launch, then the restart, which resumes the thread the seat was bound to.
+        for resume in [None, Some("thread-prior")] {
+            let case = format!("{mode:?} resume={resume:?}");
+            let prepared =
+                prepare_controlled_launch_args("unix:///control.sock", &managed[1..], resume).unwrap();
+            let server = prepared.server_args;
+            let tui: Vec<String> = controlled_tui_command("codex", &prepared.tui_args)
+                .get_args()
+                .map(|arg| arg.to_str().unwrap().to_owned())
+                .collect();
+            // The canary tells the two launches apart by the app server's first argument.
+            assert_eq!(server[0], "app-server", "{case}");
+            assert_ne!(tui[0], "app-server", "{case}");
+            assert!(has(&tui, "check_for_update_on_startup=false"), "{case}: {tui:?}");
+            assert_eq!(has(&tui, "resume"), resume.is_some(), "{case}: {tui:?}");
+            match (mode, resume) {
+                (AccessMode::Bypass, None) => {
+                    assert!(has(&tui, "--dangerously-bypass-approvals-and-sandbox"), "{case}: {tui:?}");
+                    assert!(has(&tui, "--dangerously-bypass-hook-trust"), "{case}: {tui:?}");
+                    assert!(!permission_config(&tui), "{case}: {tui:?}");
+                }
+                // The canary does not check a resumed bypass TUI. It carries no permission flag
+                // (Codex refuses one on a remote resume); the app server holds the bypass policy.
+                (AccessMode::Bypass, Some(_)) => {
+                    assert!(!has(&tui, "--dangerously-bypass-approvals-and-sandbox"), "{case}: {tui:?}");
+                    assert!(!permission_config(&tui), "{case}: {tui:?}");
+                    assert!(has(&server, "approval_policy=\"never\""), "{case}: {server:?}");
+                    assert!(has(&server, "sandbox_mode=\"danger-full-access\""), "{case}: {server:?}");
+                }
+                (AccessMode::Auto, None) => {
+                    assert!(has(&tui, "default_permissions=\"st-managed\""), "{case}: {tui:?}");
+                    assert!(!has(&tui, "--dangerously-bypass-approvals-and-sandbox"), "{case}: {tui:?}");
+                    assert!(profile_names_seat(&tui), "{case}: {tui:?}");
+                }
+                // A resumed TUI carries no permission config; its app server holds the profile.
+                (AccessMode::Auto, Some(_)) => {
+                    assert!(!permission_config(&tui), "{case}: {tui:?}");
+                    assert!(has(&server, "default_permissions=\"st-managed\""), "{case}: {server:?}");
+                    assert!(!has(&server, "--dangerously-bypass-approvals-and-sandbox"), "{case}: {server:?}");
+                    assert!(profile_names_seat(&server), "{case}: {server:?}");
+                }
+            }
+        }
+    }
+
+    // Claude: bypass skips permissions, auto selects the auto permission mode, on a fresh launch
+    // and on a restart that resumes the saved session, and every managed launch disables updates.
+    assert_eq!(
+        crate::claude_session::CONTROLLED_DISABLE_AUTOUPDATER,
+        ("DISABLE_AUTOUPDATER", "1")
+    );
+    for authored in [vec!["claude"], vec!["claude", "--resume", "native-one"]] {
+        let authored: Vec<String> = authored.into_iter().map(str::to_owned).collect();
+        let bypass =
+            crate::claude_session::managed_claude_argv(Some(AccessMode::Bypass), workspace, authored.clone());
+        assert!(has(&bypass, "--dangerously-skip-permissions"), "{bypass:?}");
+        assert!(!has(&bypass, "auto") && !has(&bypass, "--permission-mode"), "{bypass:?}");
+        assert!(bypass.ends_with(&authored[1..]), "{bypass:?}");
+        let auto =
+            crate::claude_session::managed_claude_argv(Some(AccessMode::Auto), workspace, authored.clone());
+        assert!(auto.windows(2).any(|pair| pair == ["--permission-mode", "auto"]), "{auto:?}");
+        assert!(!has(&auto, "--dangerously-skip-permissions"), "{auto:?}");
+        assert!(auto.ends_with(&authored[1..]), "{auto:?}");
+        // A hand-run driver has no install policy and keeps its authored argv.
+        assert_eq!(crate::claude_session::managed_claude_argv(None, workspace, authored.clone()), authored);
+    }
 }
