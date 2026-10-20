@@ -283,6 +283,7 @@ const isStory = (value: unknown): value is StoryObj => typeof value === 'object'
 const undeclared: string[] = []
 const exemptions: string[] = []
 const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
+const sliceFiles = new Set<string>()
 
 for (const [path, module] of Object.entries(storyModules)) {
   const { default: storyMeta, ...exports } = module
@@ -309,7 +310,7 @@ for (const [path, module] of Object.entries(storyModules)) {
       const modes = exemptFiles.get(path) ?? new Set<ExemptStoryMode>()
       modes.add(tag)
       exemptFiles.set(path, modes)
-    }
+    } else sliceFiles.add(path)
     test(`${id} validates its scenario mode`, () => {
       const result = scenarioStoryCheck(story, storyMeta)
       expect(result.failures).toEqual([])
@@ -322,6 +323,7 @@ for (const [path, module] of Object.entries(storyModules)) {
 
 test('exempt CSF runtime import graphs cannot reach domain fixture roots', () => {
   const started = performance.now()
+  expect([...exemptFiles.keys()].filter(file => sliceFiles.has(file)), 'Slice and exempt stories must use separate CSF files').toEqual([])
   const uiSource = nodePath.resolve(process.cwd(), 'src')
   const kitRoot = nodePath.resolve(uiSource, '../../../clients/typescript/st3-scenarios')
   const contractDataModules = [
