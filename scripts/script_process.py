@@ -29,7 +29,7 @@ def ancestors():
 
 
 def signal_private(pid, sig, *, endpoint=None, root=None, environment=None,
-                   start_ticks=None, contains=None, parent=None):
+                   start_ticks=None, contains=None, parent=None, process_group=None):
     """Return False for a vanished/mismatched target; never fall back to kill(pid).
 
     An exact private endpoint, private root or environment marker is mandatory.
@@ -52,7 +52,7 @@ def signal_private(pid, sig, *, endpoint=None, root=None, environment=None,
         # Scope this catch to metadata, not resource exhaustion or invalid signals.
         try:
             if not matches_private_process(pid, endpoint, root, environment,
-                                           start_ticks, contains, parent):
+                                           start_ticks, contains, parent, process_group):
                 return False
         except (OSError, ValueError, IndexError):
             return False
@@ -66,7 +66,7 @@ def signal_private(pid, sig, *, endpoint=None, root=None, environment=None,
         os.close(fd)
 
 
-def matches_private_process(pid, endpoint, root, environment, start_ticks, contains, parent):
+def matches_private_process(pid, endpoint, root, environment, start_ticks, contains, parent, process_group):
     proc = Path(f"/proc/{pid}")
     if proc.stat().st_uid != os.getuid():
         return False
@@ -74,6 +74,8 @@ def matches_private_process(pid, endpoint, root, environment, start_ticks, conta
     if start_ticks is not None and int(stat[19]) != start_ticks:
         return False
     if parent is not None and int(stat[1]) != parent:
+        return False
+    if process_group is not None and int(stat[2]) != process_group:
         return False
     env = dict(item.split(b"=", 1) for item in (proc / "environ").read_bytes().split(b"\0") if b"=" in item)
     if endpoint is not None:

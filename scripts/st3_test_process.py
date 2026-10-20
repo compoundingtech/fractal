@@ -34,7 +34,12 @@ def reap_exited_descendants(task_pid):
     children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
     for pid in map(int, children.read_text().split()):
         if pid != task_pid:
-            os.waitpid(pid, os.WNOHANG)
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                # A SIGCHLD callback can retire the same adopted child while a
+                # preceding child notification is being handled.
+                pass
 
 
 def reap_descendants():
@@ -77,6 +82,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, interrupt)
     task = None
+    previous_sigchld = None
     roots = []
     evidence_manifest = tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
     code = 1
@@ -92,6 +98,12 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             if keep:
                 print(f"isolated test keeping {root}", file=sys.stderr, flush=True)
         task = subprocess.Popen(command, env=env, start_new_session=True)
+        # Reap adopted exits when SIGCHLD arrives, rather than leaving zombies
+        # visible until the owner-watch timer. PTY lifecycle checks can launch
+        # their next --once pass immediately after killing a detached process.
+        previous_sigchld = signal.getsignal(signal.SIGCHLD)
+        signal.signal(signal.SIGCHLD, lambda signum, frame: reap_exited_descendants(task.pid))
+        reap_exited_descendants(task.pid)
         with os.fdopen(os.pidfd_open(task.pid), "rb") as task_fd:
             poller = select.poll()
             for fd in [*watched, task_fd.fileno()]:
@@ -99,8 +111,10 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             # pidfds avoid PID reuse and the check/launch race. An already dead
             # owner is immediately readable, including after the double fork.
             while not interrupted and not poller.poll(100):
-                reap_exited_descendants(task.pid)
+                pass
     finally:
+        if previous_sigchld is not None:
+            signal.signal(signal.SIGCHLD, previous_sigchld)
         if task is not None:
             kill_group(task.pid)
             code = task.wait()

@@ -79,11 +79,13 @@ async def stop(process):
     if process:
         # asyncio's child watcher may already have reaped the group leader.
         # Never signal that old group number. Revalidate each marked private
-        # descendant after pinning its pidfd, including inherited pipe writers.
+        # group member after pinning its pidfd, including inherited pipe writers.
+        # Detached seats inherit the marker but must survive a daemon restart.
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for proc in Path('/proc').glob('[0-9]*'):
                 signal_private(int(proc.name), sig,
-                               environment={'SCRIPT_TEST_PROCESS': process.signal_marker})
+                               environment={'SCRIPT_TEST_PROCESS': process.signal_marker},
+                               process_group=process.pid)
             if sig == signal.SIGTERM:
                 try:
                     await asyncio.wait_for(process.wait(), 1)
