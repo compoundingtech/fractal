@@ -741,7 +741,9 @@ remain screen-derived adapters, not evidence of a captured runtime GET.
 
 ## Replay (D8)
 
-`createReplay(world, { clock })` returns a transport for the real data layer:
+`createReplay(world, { clock })` returns a `ReplayHandle` transport for the real data layer.
+`ReplayHandle` extends the structural `Replay` transport interface with `flush()` for test
+synchronization. Consumers that supply their own `Replay` transport need not implement it:
 
 ```ts
 const replay = createReplay(loadWorld('fleet-mid-refactor'), { clock: realClock() })

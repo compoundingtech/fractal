@@ -9,11 +9,11 @@ import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownS
 import { applyConversation, isConversational, type Conversation } from '../../st3-views/sessionView.ts'
 
 import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
-import { createReplay, manualClock, realClock, type Replay } from '../src/replay/index.ts'
+import { createReplay, manualClock, realClock, type ReplayHandle } from '../src/replay/index.ts'
 import { syntheticFirstRunOnboarding } from '../src/worlds/firstRunOnboarding.ts'
 import { genericVariants } from '../src/kit/variants.ts'
 
-const replays: Replay[] = []
+const replays: ReplayHandle[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
 const base = () => loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })
 const scripted = (timeline: SyncEvent[], world = base()): World => world.with({ sync: { ...world.slices.sync, timeline } })

@@ -6,12 +6,12 @@ import { rngFromSeed } from '../src/kit/rng.ts'
 import { entry, thread } from '../src/kit/factories/turn.ts'
 import { timeContext } from '../src/kit/time.ts'
 import type { FactoryContext } from '../src/kit/context.ts'
-import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
+import { createReplay, manualClock, type Replay, type ReplayHandle } from '../src/replay/index.ts'
 import { decodeSlice } from '../scripts/decode.ts'
 import { sliceFile, sliceTimes } from '../scripts/emit.ts'
 
 import { syntheticFleetMidRefactor } from '../src/worlds/fleetMidRefactor.ts'
-const replays: Replay[] = []
+const replays: ReplayHandle[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
 const base = () => buildWorld(syntheticFleetMidRefactor, genericVariants, ANCHOR_MS)
 const setup = (timeline: SyncEvent[] = []) => {

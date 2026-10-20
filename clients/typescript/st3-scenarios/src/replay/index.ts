@@ -22,9 +22,13 @@ export interface Replay {
   readonly fetch: typeof fetch
   readonly actions: ActionRequest[]
   readonly served: () => ReadonlySet<SliceKind>
+  readonly close: () => void
+}
+
+/** A replay created by the kit, with task-delivery synchronization for tests. */
+export interface ReplayHandle extends Replay {
   /** Waits for queued socket events, including replies queued by their handlers. Does not advance the clock. */
   readonly flush: () => Promise<void>
-  readonly close: () => void
 }
 
 type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string }
@@ -85,8 +89,8 @@ const requestMatches = (url: URL, when?: HttpCondition): boolean =>
   (when?.cursor === undefined || url.searchParams.has('cursor') === (when.cursor === 'present')) &&
   Object.entries(when?.query ?? {}).every(([key, value]) => url.searchParams.get(key) === value)
 
-/** Socket opens are clock tasks, not microtasks: manual-clock callers release them with advance(0). */
-export const createReplay = (world: World, { clock }: { readonly clock: Clock }): Replay => {
+/** Socket callbacks run as FIFO tasks independently of the scenario clock. */
+export const createReplay = (world: World, { clock }: { readonly clock: Clock }): ReplayHandle => {
   const consumed = new Set<SliceKind>()
   const deliveries = deliveryTasks()
   const actions: ActionRequest[] = []

@@ -3,9 +3,9 @@ import { St3Client, type CollectionFrame } from '@smalltalk/st3-client'
 import { Arrangement, ArrangementPage, CollectionFrame as Frame, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 
 import { ANCHOR_MS, loadWorld, type World } from '../src/index.ts'
-import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
+import { createReplay, manualClock, type ReplayHandle } from '../src/replay/index.ts'
 
-const replays: Replay[] = []
+const replays: ReplayHandle[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
 const setup = (world: World) => {
   const clock = manualClock(world.now)
