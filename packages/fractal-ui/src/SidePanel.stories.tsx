@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react'
 import { Button } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { SidePanel, assistantDarkTheme, compositionLightTheme, liveAccentTheme } from './assistant-ui/shell.ts'
+import { ChromeControl, SidePanel, assistantDarkTheme, compositionLightTheme, liveAccentTheme } from './assistant-ui/shell.ts'
 import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex.ts'
 
 const PanelSurface = ({ scheme = 'dark', width = 1440, initiallyOpen = false }: { readonly scheme?: 'dark' | 'light'; readonly width?: number; readonly initiallyOpen?: boolean }) => {
@@ -13,7 +13,9 @@ const PanelSurface = ({ scheme = 'dark', width = 1440, initiallyOpen = false }: 
     <main aria-label="Workspace" {...stylex.props(styles.workspace)}>
       <header {...stylex.props(styles.header)}>
         <strong>Builder session</strong>
-        <Button aria-label="Resources" aria-expanded={open} aria-controls={open ? panelId : undefined} onPress={() => setOpen(value => !value)} {...stylex.props(styles.button)}>Resources</Button>
+        {initiallyOpen
+          ? <ChromeControl icon="folder" label="Resources" expanded={open} active={open} {...(open ? { controls: panelId } : {})} onPress={() => setOpen(value => !value)} />
+          : <Button aria-label="Resources" aria-expanded={open} aria-controls={open ? panelId : undefined} onPress={() => setOpen(value => !value)} {...stylex.props(styles.button)}>Resources</Button>}
       </header>
       <ol {...stylex.props(styles.transcript)}>{Array.from({ length: 24 }, (_, index) => <li key={index}>Transcript entry {index + 1}: the workspace stays readable and interactive while the panel is open.</li>)}</ol>
       <Button {...stylex.props(styles.button)}>Workspace action</Button>

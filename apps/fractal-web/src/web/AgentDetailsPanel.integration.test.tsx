@@ -6,6 +6,7 @@ import type { Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -56,6 +57,24 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(host.textContent).not.toMatch(/worker-1|Small Talk release|Self vs descendants.*\$0/)
     context.setAttribute('aria-valuenow', String(480_035_214 / 1_000_000 * 100))
     expect(() => expect(Number(context.getAttribute('aria-valuenow'))).toBeCloseTo(6.1206, 6)).toThrow()
+  })
+  it('labels token-only occupancy as estimated on the production panel', async () => {
+    const usage = Option.getOrThrow(row.usage)
+    const { used_percent: _reportedPercent, ...context } = usage.context!
+    await act(async () => registry.set(agents, observed({ value: [{ ...row, usage: Option.some({ ...usage, context }) }] })))
+    const meter = within(host).getByRole('progressbar', { name: 'Context window' })
+    expect(Number(meter.getAttribute('aria-valuenow'))).toBeCloseTo(6.1206, 6)
+    expect(meter.getAttribute('aria-valuetext')).toContain('estimated')
+    expect(host.textContent).toContain('6% est.')
+  })
+  it('preserves a reported percentage over a conflicting token-derived estimate', async () => {
+    const usage = Option.getOrThrow(row.usage)
+    await act(async () => registry.set(agents, observed({ value: [{ ...row, usage: Option.some({ ...usage, context: { ...usage.context!, used_percent: 42 } }) }] })))
+    const meter = within(host).getByRole('progressbar', { name: 'Context window' })
+    expect(Number(meter.getAttribute('aria-valuenow'))).toBe(42)
+    expect(meter.getAttribute('aria-valuetext') ?? '').not.toContain('estimated')
+    expect(host.textContent).toContain('42%')
+    expect(host.textContent).not.toContain('42% est.')
   })
   it('hides not-supplied resource sections and names their absence once, without inventing empty counts', () => {
     for (const name of ['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions / queue', 'History'])
