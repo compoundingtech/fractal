@@ -66,11 +66,9 @@ mod tests {
             .claims_for(&newly_failed.message_subjects[0], Some("message.sent"))
             .unwrap()
             .remove(0);
-        assert!(
-            message.body["fields"]["title"]
-                .as_str()
-                .unwrap()
-                .starts_with("P0:")
+        assert_eq!(
+            message.body["fields"]["title"],
+            "P0: main Performance failed: acme/garden run 2/1"
         );
         assert_eq!(message.body["fields"]["to"], "agent/node.target");
         let content: Value =
@@ -81,6 +79,7 @@ mod tests {
         assert_eq!(content["run_attempt"], 1);
         assert_eq!(content["head_sha"], "b".repeat(40));
         assert_eq!(content["workflow_path"], ".github/workflows/perf.yml");
+        assert!(content.get("failed_jobs").is_none());
         assert_eq!(
             content["url"],
             "https://github.com/acme/garden/actions/runs/2"
@@ -228,6 +227,49 @@ subscription "third-performance" { observer "observer/repo"; on "main_performanc
             "next",
         );
         assert_eq!(next.message_subjects.len(), 1);
+    }
+
+    #[test]
+    fn main_performance_failures_name_the_failed_daily_perf_lanes() {
+        let store = Store::open_memory("node").unwrap();
+        publish(&store, SOURCE, "register");
+        observe(&store, json!([failure(1, 1, "a")]), "baseline");
+        let daily = |run_id: u64, failed_jobs: Value| {
+            let mut daily = failure(run_id, 1, "d");
+            daily["workflow"] = json!("Daily long lanes");
+            daily["workflow_path"] = json!(".github/workflows/daily-long.yml");
+            daily["event"] = json!("schedule");
+            daily["failed_jobs"] = failed_jobs;
+            daily
+        };
+        let outcome = observe(
+            &store,
+            json!([
+                failure(1, 1, "a"),
+                daily(9, json!(["daily-perf-load"])),
+                daily(10, json!(["daily-tests"]))
+            ]),
+            "daily",
+        );
+        assert_eq!(outcome.message_subjects.len(), 1);
+        let message = store
+            .claims_for(&outcome.message_subjects[0], Some("message.sent"))
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            message.body["fields"]["title"],
+            "P0: main daily-perf-load failed: acme/garden run 9/1"
+        );
+        let content: Value =
+            serde_json::from_str(message.body["fields"]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["priority"], "P0");
+        assert_eq!(content["failed_jobs"], json!(["daily-perf-load"]));
+        assert_eq!(content["workflow_path"], ".github/workflows/daily-long.yml");
+        assert!(
+            observe(&store, json!([daily(9, json!(["daily-perf-load"]))]), "again")
+                .message_subjects
+                .is_empty()
+        );
     }
 
     #[test]
