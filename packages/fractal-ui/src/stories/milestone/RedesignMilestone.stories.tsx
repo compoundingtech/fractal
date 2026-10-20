@@ -134,7 +134,7 @@ export const HideChanges: Story = {
   },
 }
 
-/** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows and Mod+B work end to end. */
+/** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows, Mod+B and the row menu's Open conversation work end to end. */
 export const NavigationKeyboard: Story = {
   tags: ['critical'], args: { state: 'slice' },
   play: async ({ canvasElement }) => {
@@ -166,6 +166,14 @@ export const NavigationKeyboard: Story = {
     await waitFor(() => expect(canvas.queryByRole('searchbox', { name: 'Filter agents' })).toBeNull())
     await userEvent.keyboard(chord('b'))
     await waitFor(() => expect(canvas.getByRole('searchbox', { name: 'Filter agents' })).toBeVisible())
+    // The row menu opens the same conversation a row press does: enabled, and it lands on the agent's tab.
+    await userEvent.click(canvas.getByRole('button', { name: 'Actions for Fix flaky interaction gate' }))
+    const rowMenu = await page.findByRole('menu', { name: 'Actions for Fix flaky interaction gate' })
+    const openItem = within(rowMenu).getByRole('menuitem', { name: 'Open conversation' })
+    await expect(openItem).not.toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(openItem)
+    await waitFor(() => expect(page.queryByRole('menu')).toBeNull())
+    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent('Fix flaky interaction gate'))
   },
 }
 

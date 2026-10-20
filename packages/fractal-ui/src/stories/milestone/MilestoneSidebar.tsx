@@ -111,7 +111,7 @@ function AgentItem({ row, frozen, ...props }: AgentItemProps) {
   const active = row.ref === props.activeRef
   return <TreeItem id={row.ref} textValue={row.title} aria-label={`${sidebarRowAccessibleName(row)}${active ? ', open' : ''}`} {...stylex.props(styles.item)}>
     {/* RAC levels: folder 1, agent 2, subagent 3; the row's depth counts below the root agent. */}
-    <TreeItemContent>{({ hasChildItems, isExpanded, isFocusVisible, level }) => <MilestoneAgentRow row={row} depth={level - 2} active={active} focused={isFocusVisible} query={props.query} now={props.now} frozen={frozen}
+    <TreeItemContent>{({ hasChildItems, isExpanded, isFocusVisible, level }) => <MilestoneAgentRow row={row} depth={level - 2} active={active} focused={isFocusVisible} query={props.query} now={props.now} frozen={frozen} onOpen={props.onOpen}
       chevron={hasChildItems ? <Button slot="chevron" excludeFromTabOrder aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${row.children.length} subagents`} {...stylex.props(styles.chevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button> : null} />}</TreeItemContent>
     {row.children.map(child => <AgentItem key={child.ref} {...props} row={child} frozen={frozen} />)}
   </TreeItem>
