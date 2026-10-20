@@ -32,7 +32,7 @@ pub const MISSION_PHASES: &[&str] = &[
     "retired",
 ];
 
-const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
+pub const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
 const SUMMARY_FIELDS: &[&str] = &["max_response_bytes"];
 const CONVERSATION_FIELDS: &[&str] = &[
     "agent_id", "session_id", "reference", "revision", "start", "end", "max_response_bytes",
@@ -98,7 +98,7 @@ pub fn allow(
     Ok(())
 }
 
-fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
+pub fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
     parameters
         .get(name)
         .map(String::as_str)
@@ -106,7 +106,7 @@ fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<
         .ok_or_else(|| validation(format!("query parameter `{name}` is required")))
 }
 
-fn budget_exceeded(message: impl Into<String>) -> ApiError {
+pub fn budget_exceeded(message: impl Into<String>) -> ApiError {
     ApiError {
         status: StatusCode::PAYLOAD_TOO_LARGE,
         code: "response-budget-exceeded".into(),
@@ -377,7 +377,7 @@ pub fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize
 /// is opened only if it fits the response budget, so no larger body is ever read. The
 /// range must lie on character boundaries inside the text and fit the budget; it is never
 /// widened, split or continued automatically. `next_range` names the next equal range.
-async fn conversation(
+pub async fn conversation(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
