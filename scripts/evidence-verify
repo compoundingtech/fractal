@@ -2,8 +2,10 @@
 """Does a trusted, signed evidence note exist for this tree and this check?
 
 Standalone on purpose: git, ssh-keygen and the Python standard library, no built st.
-It reads the notes written by `st evidence` (refs/notes/evidence/<record-id>, one
-SSH-signed commit per record) and answers with one JSON document on stdout.
+It reads the notes written by `st evidence` (refs/notes/evidence/<tree>/<record-id>, one
+SSH-signed commit per record, found by ONE prefix listing of the tree's own refs; the first layout,
+refs/notes/evidence/<record-id>, is still read until scripts/evidence-gc has removed it) and answers
+with one JSON document on stdout.
 
   exit 0  satisfied
   exit 1  not satisfied (JSON carries the reason), including unreadable input
@@ -341,13 +343,28 @@ def statement_of(blob, tree):
         return None
 
 
-def note_refs(repo):
-    """Records whose ref suffix equals the commit they point at; anything else is not evidence."""
-    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', NOTES[:-1]).decode()
+def legacy_refs(repo, width):
+    """Records of the FIRST layout, refs/notes/evidence/<record-id> (the ref name is exactly one object id long, so this pattern never
+    lists a tree-prefixed ref). Only refs of that layout that still exist are listed, and `scripts/evidence-gc` removes them: when
+    none are left this is an empty listing."""
+    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', NOTES + '?' * width).decode()
     found = []
     for line in out.splitlines():
         oid, _, name = line.partition(' ')
         if OID.match(oid) and name == NOTES + oid:
+            found.append(oid)
+    return found
+
+
+def tree_refs(repo, tree):
+    """Records of ONE tree, refs/notes/evidence/<tree>/<record-id>: a single prefix listing, bounded by that tree's own records, however many
+    trees have records. A ref that names another object than its suffix finds nothing, and load() requires the note to be about this tree."""
+    prefix = f'{NOTES}{tree}/'
+    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', prefix.rstrip('/')).decode()
+    found = []
+    for line in out.splitlines():
+        oid, _, name = line.partition(' ')
+        if OID.match(oid) and name == prefix + oid:
             found.append(oid)
     return found
 
@@ -420,8 +437,8 @@ def signature(repo, commit, keys, revocations):
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
            trust_levels=None, now=None, rules=None, lane=None):
     with tempfile.NamedTemporaryFile() as revocations:
-        everything = note_refs(repo)
-        hits = with_note_for(repo, everything, tree)
+        everything = legacy_refs(repo, len(tree))  # the first layout, until the GC has removed it
+        hits = with_note_for(repo, list(dict.fromkeys(tree_refs(repo, tree) + everything)), tree)  # commits that carry a note named by the tree
         mine = []
         for commit in hits:
             statement = load(repo, commit, tree)
