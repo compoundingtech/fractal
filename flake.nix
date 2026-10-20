@@ -1419,6 +1419,8 @@
         checks.wasm-resolver-feature = st2WasmResolver;
         checks.wasip2-resource-providers = st2ProviderRuntime;
         checks.provider-components = st2ProviderComponents;
+        # The `typescript-client` required check: the frozen pnpm installation is a fixed-output derivation.
+        checks.typescript-client = import ./nix/typescript-client.nix { inherit effect-utils system version; self = ./.; };
         # Exercise the shipped binary, not a cargo-side surrogate: its version entrypoint runs and
         # the same artifact strictly admits a catalog carrying a real wasm profile module.
         checks.wasm-resolver-artifact = pkgs.runCommand "st2-wasm-resolver-artifact-${version}" { } ''

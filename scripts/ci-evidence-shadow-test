@@ -129,11 +129,23 @@ with tempfile.TemporaryDirectory() as directory:
                     f'ok = {moved!r} in out\nimport json; print(json.dumps({{"satisfied": ok, "reason": "refs_" + "_".join(out).replace("/", "")}}))\nsys.exit(0 if ok else 1)\n')
     done = shadow('--verifier', str(stub), checks='linux-tests')
     assert 'check=linux-tests' in done.stdout and 'reason=verifier_exit_1' not in done.stdout and 'ok=1 ' in done.stdout, done.stdout
-    published['accepted'][0]['ref'] = 'refs/heads/main'
+    # The same record as a tag (the protected layout) is fetched by that name.
+    tagged = f'refs/tags/evidence/{tree}/{record}'
+    git(publisher, 'update-ref', tagged, record)
+    git(publisher, 'push', '-q', 'sink', f'{tagged}:{tagged}')
+    for a in published['accepted']:
+        if a['record'] == record:
+            a['ref'] = tagged
     result_file.write_text(json.dumps(published))
-    done = shadow(checks='linux-tests')
-    assert 'error=unreadable_publish_result' in done.stdout, done.stdout
-    print('passed: an entry that names a tree-prefixed ref is fetched by that ref; a ref outside refs/notes/evidence is refused')
+    stub.write_text(stub.read_text().replace(repr(moved), repr(tagged)))
+    done = shadow('--verifier', str(stub), checks='linux-tests')
+    assert 'check=linux-tests' in done.stdout and 'reason=verifier_exit_1' not in done.stdout and 'ok=1 ' in done.stdout, done.stdout
+    for bad in ('refs/heads/main', 'refs/tags/v1.0', f'refs/tags/evidence/{record}', f'refs/tags/evidence/input/unit/{tree}/{record}'):
+        published['accepted'][0]['ref'] = bad
+        result_file.write_text(json.dumps(published))
+        done = shadow(checks='linux-tests')
+        assert 'error=unreadable_publish_result' in done.stdout, (bad, done.stdout)
+    print('passed: an entry that names a tree-prefixed ref or tag is fetched by that name; any other ref is refused')
     published['accepted'][0].pop('ref')
     result_file.write_text(json.dumps(published))
 

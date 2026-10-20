@@ -76,6 +76,14 @@ what that tree's own records cost, however many trees have records. A test pins 
 `for-each-ref` listings during one verification return at most the tree's own records). The cost of the
 whole namespace is paid only by `scripts/evidence-gc`, which also keeps its size bounded (see below).
 
+**Tags, read first.** Every reader also reads `refs/tags/evidence/<tree>/<record>` and
+`refs/tags/evidence/input/<check>/<key>/<record>` (lightweight tags naming the same signed commit), in the same
+listing or fetch as the notes, one prefix per tree or key in each namespace; a record under both names counts
+once. Nothing writes tags yet. Records move there because a ruleset can protect tags and not notes, and the
+readers must be on main before any producer writes one (`doc/fleet/factory/skip-ci-plan`, the hard
+precondition). A tree id is hex, so `input/` never collides with a tree's prefix; both live under `evidence/`,
+which the tag release workflow ignores and full-history checkouts leave out.
+
 **The first layout** was `refs/notes/evidence/<record-id>` (one object id under the prefix). The
 verifier still reads it, with a pattern that matches only names exactly one object id long, so it never
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
@@ -997,7 +1005,10 @@ records the exit code and output digest. The CI gate looks up the note for the p
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
-throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. When that tree has a
+`megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
+from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
+shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
 recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or

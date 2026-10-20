@@ -13,8 +13,10 @@ asks the verifier, from the accepted base, whether the tree is now covered, and 
 The tree: HEAD, the commit you are pushing. The CI gate looks up the note for the pull request head's own tree, so the tree
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
 It tells you how far behind the base the branch is. The command always runs in a fresh throwaway worktree of that commit, never
-in this checkout, so untracked or ignored files here cannot change the result; nothing is linked in (the dev shells create
-their own helper links).
+in this checkout, so untracked or ignored files here cannot change the result. Nothing is linked in from here: when the tree
+has a megarepo.lock, its members are materialized under repos/ first, with the command CI's `megarepoApplyStep` runs
+(`mr apply`, from the flake's effect-utils pin), because both lanes read repos/effect-utils and their dev shells no longer
+create it.
 
 evidence-wrap, evidence-sign and evidence-verify come from the accepted base, not from the change under test.
 Commands that call cargo reach the build admission shim on PATH like any other cargo; nothing here knows about
@@ -131,12 +133,38 @@ def behind(base):
 def target_worktree(base, scratch):
     """(directory, commit): a clean throwaway worktree of that commit.
 
-    Always a fresh worktree, never this checkout, so untracked or ignored files here cannot change the result, and no
-    helper directory is linked in: the dev shells create their own."""
+    Always a fresh worktree, never this checkout, so untracked or ignored files here cannot change the result, and nothing
+    is linked in from here (materialize_members fills repos/ from the tree's own locks)."""
     commit = target_commit(base)
     directory = Path(scratch) / 'tree'
     git('worktree', 'add', '--detach', '-q', str(directory), commit)
     return directory, commit
+
+
+def members_command(directory):
+    """CI's `megarepoApplyStep` (.github/workflows/workspace-ci.ts): `mr` from the flake's effect-utils pin. A test pins the two together."""
+    rev = json.loads((directory / 'flake.lock').read_text())['nodes']['effect-utils']['locked']['rev']
+    if not re.fullmatch(r'[0-9a-f]{40}', rev):
+        raise ValueError(f'effect-utils rev {rev!r} is not a commit id')
+    return ['nix', 'run', f'github:overengineeringstudio/effect-utils/{rev}#megarepo', '--',
+            'apply', '--worktree-mode', 'commit', '--git-protocol', 'https']
+
+
+def materialize_members(directory):
+    """Fill repos/ from the tree's megarepo.lock, as CI does before every lane that reads it; a tree without one needs nothing.
+
+    Returns None, or why the members could not be materialized (then no check runs and nothing is signed)."""
+    if not (directory / 'megarepo.lock').is_file():
+        return None
+    try:
+        command = members_command(directory)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return f'cannot read the effect-utils pin from flake.lock: {error}'
+    done = subprocess.run(command, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if done.returncode != 0:
+        sys.stderr.write(done.stdout.decode(errors='replace')[-4000:])
+        return f'materializing the megarepo members failed ({done.returncode})'
+    return None
 
 
 def reap_stale():
@@ -243,7 +271,12 @@ def main(argv):
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, tools['evidence-sign']])
             rows, failed = [], False
             lanes = lane_names(args.base)
+            unmaterialized = materialize_members(directory)
             for name in checks:
+                if unmaterialized:
+                    rows.append((name, 'NOT RUN', 0, unmaterialized))
+                    failed = True
+                    continue
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
                 if name in lanes:
