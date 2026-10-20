@@ -29,7 +29,7 @@ vi.mock('../data/react.tsx', async () => {
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,
   useNowSnapshot: () => 1000,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
   useAttention: () => ({ _tag: 'Waiting' }),
   })
 })

@@ -14,6 +14,7 @@ import {
   type St3Options,
   type SyncStatus,
   syncStatusFromFailure,
+  openPtySession,
 } from '@st3/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -151,6 +152,7 @@ export const liveSource = ({
     actions: 'ungranted',
     messageSend: 'ungranted',
     terminalInput: 'ungranted',
+    terminalControl: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
   setDebug('Wf.socketLive', 0)
@@ -1090,6 +1092,7 @@ export const liveSource = ({
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
+            terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
           })
         }),
       )
@@ -1155,6 +1158,11 @@ export const liveSource = ({
       prompts: gatewayPromptAnswers(client),
       alertActions: gatewayAlertActions(client),
       documents: gatewayDocuments(client),
+      // Same origin and transport as `client`; the gateway injects the credential and keeps the
+      // capability subprotocol on the WebSocket upgrade.
+      terminalRaw: {
+        open: ({ target, mode, size, onOutput }) => openPtySession({ baseUrl, target, mode, size, onOutput, fetch }),
+      },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.

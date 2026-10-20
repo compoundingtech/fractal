@@ -35,6 +35,7 @@ import type { MonitorSource } from '../monitor/source.ts'
 import type { AgentResourceSource } from '../resources/agent/source.ts'
 import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
+import type { RawTerminalPort } from '../terminal/rawTerminalState.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
 import type { AgentControlPort } from '../agents/agent-control-port.ts'
@@ -161,7 +162,10 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** `terminal.input`: typing through the gateway's fenced `terminal.input` actions. */
   readonly terminalInput: 'granted' | 'ungranted'
+  /** `terminal.control`: a raw PTY ATTACH that types on the socket and votes the shared size. */
+  readonly terminalControl: 'granted' | 'ungranted'
 }
 
 /** One gateway activity line (`at` is ISO-8601) for the events feed. */
@@ -285,7 +289,7 @@ export interface DataSource {
   readonly prefetchConversation?: (agentRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
-  /** Keyed by terminal ref; live attaches a read-only viewer. */
+  /** Keyed by terminal ref; the projected read-only screen, also the raw stream's fallback. */
   readonly terminal: (terminalRef: string) => Atom.Atom<Feed<TerminalScreen>>
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
@@ -294,7 +298,7 @@ export interface DataSource {
   readonly agentControls?: AgentControlPort
   /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
-  /** Explicit geometry action; never tied to the browser pane dimensions. */
+  /** Explicit geometry action; never tied to the browser pane dimensions. The raw ATTACH path resizes on the socket instead. */
   readonly terminalResize?: TerminalResizePort
   /** Answers to native harness prompts (`prompt.respond`), one submission each. */
   readonly prompts?: PromptAnswerPort
@@ -302,7 +306,9 @@ export interface DataSource {
   readonly alertActions?: AlertActionPort
   /** Retained owner scrollback, with its own independently granted availability. */
   readonly terminalHistory?: TerminalHistoryFactory
-  /** Ordered input sessions bound to one terminal incarnation; absent when the source cannot type. */
+  /** Raw PTY stream (`st3.client.pty.v0`): ATTACH with `terminal.control`, else view-only PEEK; absent when the source has none. */
+  readonly terminalRaw?: RawTerminalPort
+  /** Ordered `terminal.input` sessions bound to one terminal incarnation: typing when raw ATTACH is not allowed. */
   readonly terminalInput?: TerminalInputPortFactory
   /** Keyed by subject ref (PR, CI run, mission, pty …). */
   readonly envelope: (ref: string) => Atom.Atom<Feed<SubjectEnvelope>>
