@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useLocale } from 'react-aria'
-import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
+import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Rect, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
 import { Icon } from '../composition/Icons'
@@ -65,6 +65,16 @@ interface MeasuredRow { readonly width: number; readonly height: number; readonl
 class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
   private rowContent: unknown
   private readonly measured = new WeakMap<object, MeasuredRow>()
+  override getLayoutInfo(key: Key) {
+    const info = super.getLayoutInfo(key)
+    if (info !== null || this.virtualizer?.collection.getItem(key) == null) return info
+    // A stale wider requested rect can have more area without covering newly expanded rows.
+    // Upstream: https://github.com/adobe/react-spectrum/issues/10129
+    // Remove this fallback when upstream fixes missing-key layout after resize.
+    const contentSize = this.getContentSize()
+    this.getVisibleLayoutInfos(new Rect(0, 0, contentSize.width, contentSize.height))
+    return super.getLayoutInfo(key)
+  }
   override getDropTargetLayoutInfo(target: Parameters<ListLayout<unknown>['getDropTargetLayoutInfo']>[0]) {
     const info = super.getDropTargetLayoutInfo(target)
     info.zIndex = 2
