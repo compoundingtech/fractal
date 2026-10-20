@@ -2124,14 +2124,7 @@ async fn wait_peer_retry<B: Backend>(
 /// A worker timer. `ST3_WORKER_INTERVAL_MS` caps every one of them, so tests of several nodes on
 /// one machine need not wait out the 30- and 60-second defaults.
 fn worker_interval(default: Duration) -> Duration {
-    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
-    CAP.get_or_init(|| {
-        std::env::var("ST3_WORKER_INTERVAL_MS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .map(Duration::from_millis)
-    })
-    .map_or(default, |cap| cap.min(default))
+    super::capped(default, super::worker_timer_cap())
 }
 
 /// The HTTP client one dialer exchanges with: short connects, and a bound on each exchange.
