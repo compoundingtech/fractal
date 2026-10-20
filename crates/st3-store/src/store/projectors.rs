@@ -55,6 +55,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::open },
     Hook { name: "arrangements", run: arrangements::open },
     Hook { name: "limits", run: limits::open_limits },
+    Hook { name: "task-grants", run: task_grants::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
@@ -101,15 +102,27 @@ pub const APPEND: &[AppendProjector] = &[
         takes: Takes::Kinds(&["arrangement.edited"]),
         project: arrangements::project,
     },
+    AppendProjector {
+        name: "task-grants",
+        takes: Takes::Kinds(&[task_grants::CREATED, task_grants::REVOKED]),
+        project: task_grants::project,
+    },
 ];
 
 /// Projects a replicated claim the incremental projection extends the graph with, after every
 /// claim of the range has its event row.
-pub const REPLICATED: &[AppendProjector] = &[AppendProjector {
-    name: "arrangement-project",
-    takes: Takes::Kinds(&["arrangement.edited"]),
-    project: arrangements::project_replicated,
-}];
+pub const REPLICATED: &[AppendProjector] = &[
+    AppendProjector {
+        name: "arrangement-project",
+        takes: Takes::Kinds(&["arrangement.edited"]),
+        project: arrangements::project_replicated,
+    },
+    AppendProjector {
+        name: "task-grants",
+        takes: Takes::Kinds(&[task_grants::CREATED, task_grants::REVOKED]),
+        project: task_grants::project,
+    },
+];
 
 /// Catches each domain up with the claims a projection pass admitted.
 pub const FLUSH: &[Hook] = &[
@@ -131,6 +144,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
+    Hook { name: "task-grants", run: task_grants::rebuild },
 ];
 
 /// The domain stages of the full graph replay, after the mission runs are replayed.
@@ -141,6 +155,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/directive-notes", run: directive_notes::rebuild },
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
+    ReplayStage { phase: "full-replay/task-grants", run: task_grants::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
 

@@ -24,6 +24,8 @@
 #           until one exists
 
 [kinds]
+"task-grant.created" = { class = "durable" }
+"task-grant.revoked" = { class = "durable" }
 "agent.account" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }

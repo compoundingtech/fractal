@@ -10,6 +10,7 @@ pub mod owned_terminals;
 pub mod provenance;
 pub mod retention;
 pub mod review;
+pub mod task_grants;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -695,6 +696,33 @@ impl Registry {
             provenance::validate_claim(subject, fields)?;
         }
         harness_questions::validate(kind, fields)?;
+        if matches!(kind, "task-grant.created" | "task-grant.revoked") {
+            if fields.get("grant_id").and_then(Value::as_str) != Some(subject) {
+                return Err(error("invalid-task-grant", "grant_id must equal the task-grant subject"));
+            }
+            if kind == "task-grant.created" {
+                let manifest: task_grants::TaskManifest = serde_json::from_value(fields["manifest"].clone())
+                    .map_err(|cause| error("invalid-task-grant", cause.to_string()))?;
+                let request = task_grants::CreateTaskGrantRequest {
+                    manifest,
+                    op_proxy_case_id: fields["op_proxy_case_id"].as_str().unwrap_or_default().into(),
+                    digest: fields["digest"].as_str().unwrap_or_default().into(),
+                };
+                request.validate().map_err(|cause| error("invalid-task-grant", cause.to_string()))?;
+                let requester = &request.manifest.requester;
+                for (name, expected) in [("requester", &requester.principal), ("run", &requester.run),
+                    ("step", &requester.step), ("incarnation", &requester.incarnation)] {
+                    if fields[name].as_str() != Some(expected.as_str()) {
+                        return Err(error("invalid-task-grant", format!("{name} must match manifest requester")));
+                    }
+                }
+                if fields["window"] != serde_json::to_value(&request.manifest.window).expect("window serializes") {
+                    return Err(error("invalid-task-grant", "window must match manifest window"));
+                }
+            } else if fields["reason"].as_str().is_none_or(|reason| reason.trim().is_empty()) {
+                return Err(error("invalid-task-grant", "revocation reason must not be blank"));
+            }
+        }
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -1018,6 +1046,7 @@ fn build_registry() -> Registry {
             "A question a seat's harness asked natively: question ids and option positions, never text.",
             false,
         ),
+        ("task-grant", "task-grant/ID", "An immutable task authorization manifest and revocation, never credential values.", false),
         (
             "lane",
             "lane/RUN/LOCAL_ID",
@@ -2154,6 +2183,8 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             false,
             &[],
         ),
+        ("task-grant.created", &["task-grant"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("task-grant.revoked", &["task-grant"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         // A host's sekrets gateway logs each call, its exit, each refusal and each change to its
         // profiles, grants, locks and keys; the host's daemon records each entry once. Never a
         // credential and never a command's output.
@@ -3682,6 +3713,18 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("answers", required_object()),
             ("receipt", object()),
         ],
+        "task-grant.created" => &[
+            ("grant_id", required_string()),
+            ("manifest", required_object()),
+            ("digest", required_string()),
+            ("op_proxy_case_id", required_string()),
+            ("requester", required_string()),
+            ("run", required_string()),
+            ("step", required_string()),
+            ("incarnation", required_string()),
+            ("window", required_object()),
+        ],
+        "task-grant.revoked" => &[("grant_id", required_string()), ("reason", required_string())],
         "harness.telemetry" => &[
             ("driver", required_enum(&["claude"])),
             ("unit", required_enum(&["hook"])),
@@ -4484,6 +4527,7 @@ mod tests {
                 "sekret",
                 "step-run",
                 "subscription",
+                "task-grant",
             ]
         );
         assert_eq!(
@@ -4660,6 +4704,8 @@ mod tests {
                 "subscription.mission-started",
                 "subscription.state",
                 "subscription.watch-ended",
+                "task-grant.created",
+                "task-grant.revoked",
                 "terminal.input.requested",
                 "terminal.input.result",
                 "terminal.launch-geometry",

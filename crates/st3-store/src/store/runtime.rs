@@ -382,7 +382,7 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([("mission_run_deadlines".into(), 3)])
+        BTreeMap::from([("mission_run_deadlines".into(), 3), ("task_grants".into(), 1)])
     }
 
     fn classify_replicated_claim(
@@ -417,7 +417,8 @@ impl Runtime for SmalltalkRuntime {
         repaired: &str,
         replacement: &str,
     ) -> Result<()> {
-        select_desired_repair_tx(transaction, repaired, replacement)
+        select_desired_repair_tx(transaction, repaired, replacement)?;
+        task_grants::repair(transaction, repaired, replacement)
     }
 
     fn append_claim_tx(
