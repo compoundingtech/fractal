@@ -240,7 +240,7 @@ def layers(edges):
     return depth
 
 
-BINARY_SIDE_CRATES = ("stui", "st3-conversation-ui")
+BINARY_SIDE_CRATES = ("stui", "st3-conversation-ui", "st-build-stamp")
 
 
 def client_alias_findings(manifest_path, workspace_dependencies):
