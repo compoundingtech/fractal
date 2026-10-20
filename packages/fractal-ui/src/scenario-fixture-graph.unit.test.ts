@@ -1,3 +1,4 @@
+import * as path from 'node:path'
 import { expect, test } from 'vitest'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
@@ -109,4 +110,44 @@ test('unresolved runtime edges fail closed instead of disappearing from the grap
 })
 test('raw recording JSON cannot bypass domain ownership checks', () => {
   expect(check('recording.stories.ts', 'contract-fixture').violations.join('\n')).toContain('/fixture-graph/kit/recordings/data.json')
+})
+
+test.each([
+  ['allowed', "export { value } from './value'", []],
+  ['static', `export { value } from '${policy.kitSource}/index'`, [policy.kitSource + '/index.ts']],
+  ['dynamic', `export const value = () => import('${policy.kitSource}/index')`, [policy.kitSource + '/index.ts']],
+  ['require', `export const value = require('${policy.kitSource}/index')`, [policy.kitSource + '/index.ts']],
+])('workspace package aliases are emitted and traversed: %s', (_kind, workspaceSource, forbidden) => {
+  const repository = path.resolve(import.meta.dirname, '../../..')
+  const entry = `${repository}/packages/graph-example/contract.stories.ts`
+  const workspace = `${repository}/clients/graph-example/index.ts`
+  const value = `${repository}/clients/graph-example/value.ts`
+  const thirdParty = `${repository}/node_modules/graph-third-party/index.ts`
+  const seededSources = {
+    ...sources,
+    [entry]: "export { value } from '@example/graph-workspace'",
+    [`${repository}/node_modules/@example/graph-workspace/package.json`]: JSON.stringify({
+      name: '@example/graph-workspace', main: '../../../clients/graph-example/index.ts',
+    }),
+    [workspace]: `import type { Shape } from '${policy.kitSource}/worlds/types'; import { OtherShape } from '${policy.kitSource}/worlds/types'; import 'graph-third-party'; ${workspaceSource}; export const shape: Shape | OtherShape = { value: 1 }`,
+    [value]: 'export const value = 1',
+    [`${repository}/node_modules/graph-third-party/package.json`]: JSON.stringify({
+      name: 'graph-third-party', main: './index.ts',
+    }),
+    [thirdParty]: `export { value } from '${policy.kitSource}/index'`,
+  }
+  // Only the CSF is a root: adding the workspace to rootNames hides TS's external-library emit skip.
+  const seededGraph = createTypeScriptGraph([entry], {
+    target: ts.ScriptTarget.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noLib: true,
+    types: [],
+  }, seededSources)
+  expect(seededGraph.resolve('@example/graph-workspace', entry)).toBe(workspace)
+  expect(seededGraph.isExternal(thirdParty)).toBe(true)
+  expect(seededGraph.read(workspace).imports.map(edge => edge.specifier)).not.toContain(`${policy.kitSource}/worlds/types`)
+  const result = checkFixtureGraph(new Map([[entry, new Set<ExemptStoryMode>(['contract-fixture'])]]), seededGraph, policy)
+  expect(result.violations).toEqual(forbidden.map(file =>
+    `contract-fixture: ${entry} -> ${workspace} -> ${file} (forbidden domain/fixture module)`))
+  expect(result.visited).toBe(3)
 })
