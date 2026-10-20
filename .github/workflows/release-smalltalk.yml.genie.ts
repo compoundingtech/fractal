@@ -1,6 +1,6 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -255,13 +255,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       },
       "steps": [
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "fetch-depth": 0,
-            "persist-credentials": false
-          }
-        },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         {
           "uses": "actions/download-artifact@v4",
           "with": {
@@ -290,12 +284,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "SOURCE_SHA": "${{ github.sha }}"
       },
       "steps": [
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "fetch-depth": 0
-          }
-        },
+        ...fullHistoryCheckoutSteps(),
         {
           "uses": "actions/download-artifact@v4",
           "with": {

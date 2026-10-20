@@ -18,6 +18,28 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_documented_flake_selectors_resolve_local_and_remote_outputs(self):
+        outputs = {
+            'packages': {'x86_64-linux': ['st-chatgpt']},
+            'apps': {}, 'checks': {'x86_64-linux': ['genie-freshness']},
+            'devShells': {'x86_64-linux': ['web', 'genie', 'perf']},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'docs').mkdir()
+            path = tree / 'docs/build.md'
+            valid = ('nix build .#st-chatgpt\nnix develop .#web\n'
+                     'nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt\n'
+                     'nix build .#checks.<system>.genie-freshness\n')
+            path.write_text(valid)
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['checked'], 4)
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'PASS')
+            for invalid in ('nix build .#fractal-chatgpt', 'nix build .#web',
+                            'nix build .#checks.x86_64-linux.suite',
+                            'nix build github:compoundingtech/smalltalk/main#missing'):
+                path.write_text(valid + invalid)
+                self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'FAIL')
+
     def test_docs_preserve_executables_and_command_guard_rejects_crate_names(self):
         spec = importlib.util.spec_from_file_location('rename_docs', ROOT / 'scripts/r15-rename-docs.py')
         docs = importlib.util.module_from_spec(spec)
@@ -27,6 +49,9 @@ class RenameProof(unittest.TestCase):
         expected = text.replace(f'-p {old}', f'-p {new}')
         self.assertEqual(docs.rewrite(text), expected)
         self.assertEqual(docs.rewrite(expected), expected)
+        for prefix in ('.#', 'github:compoundingtech/smalltalk/<commit>#'):
+            self.assertEqual(docs.rewrite('nix build ' + prefix + 'fractal-chatgpt'),
+                             'nix build ' + prefix + 'st-chatgpt')
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)
             (tree / 'scripts').mkdir()
@@ -330,6 +355,7 @@ let socket = "/state/st3.sock";
                 'packages': {'x86_64-linux': ['stable-output'], 'aarch64-darwin': ['other']},
                 'apps': {'aarch64-linux': ['stable-output']},
                 'checks': {'x86_64-darwin': ['stable-output']},
+                'devShells': {},
             })
             for kind, system in (
                 ('packages', 'x86_64-linux'), ('apps', 'aarch64-linux'), ('checks', 'x86_64-darwin'),

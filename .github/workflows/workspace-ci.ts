@@ -151,6 +151,41 @@ export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${names
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
 export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled() }}' } as const
 
+/**
+ * What `actions/checkout` with `fetch-depth: 0` fetches (every branch, every tag, the whole history) except evidence records.
+ * Signed evidence records are to become tags under refs/tags/evidence/ (docs/st3/gate-evidence.md, "Records as tags"), one per
+ * record up to the GC cap, and `fetch-depth: 0` fetches every tag: 5,000 of them added 81.5 MiB and 16 s to a full fetch
+ * (measured 2026-10-19), mostly source objects of tested commits that no branch holds. So check out one commit, then fetch the
+ * rest with a negative refspec (git 2.29 or later). Deepening the shallow clone (`--unshallow`) took 21 s against 11 s for a
+ * full fetch (2026-10-20, from hetz2): the server cannot reuse its packs for it. So the shallow marker goes and the history is
+ * fetched as a fresh clone would (`--refetch`, git 2.36 or later), then checked: the whole history is here or the step fails.
+ * The job token is used only when checkout did not persist its own.
+ */
+export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regexp '^http\\..*\\.extraheader$' || true)" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\\n')"
+  export GIT_CONFIG_VALUE_0
+fi
+head=$(git rev-parse HEAD)
+rm -f "$(git rev-parse --git-path shallow)"
+git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+git fsck --connectivity-only --no-dangling --no-progress`
+
+/**
+ * The checkout step (its own keys, such as `name`, and its `with`), shallow, then the fetch above with the same
+ * `continue-on-error`; `fetchIf` limits the fetch (a job that needs the history on pull requests only).
+ */
+export const fullHistoryCheckoutSteps = (checkout: Record<string, unknown> = {}, step: Record<string, unknown> = {}, fetchIf?: string) => [
+  { ...step, uses: 'actions/checkout@v4', with: { ...checkout, 'fetch-depth': 1 } },
+  {
+    name: 'Fetch the whole history without evidence tags',
+    ...(fetchIf ? { if: fetchIf } : {}),
+    ...('continue-on-error' in step ? { 'continue-on-error': step['continue-on-error'] } : {}),
+    env: { FETCH_TOKEN: '${{ github.token }}' },
+    run: fullHistoryFetchScript,
+  },
+]
+
 /** The public, read-only effect-utils cache supplies genie and other pinned effect-utils packages. */
 export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 
@@ -207,7 +242,7 @@ export const saveMainDependencyCaches = (setup: readonly unknown[]) => setup
  * HOME/XDG. `pull_request` checks out GitHub's merge ref: the PR head merged with the latest base.
  */
 export const commonSetupSteps = [
-  { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   // ci1 keeps its own caches warm on the machine (a Cargo home and build directory per runner, a
   // shared sccache and the Nix store) and names its Cargo home in CI_LOCAL_CARGO_HOME. Restoring
   // the archives below there would only cost time.
@@ -761,7 +796,7 @@ export const fractalWebJobs = {
       fractalWebRunnerStep,
       // A pull request needs its history: the signing guard lists the commits between the base and the head to
       // check their authors, and without them a web-relevant run is never signed and its lane reads as not run.
-      { uses: 'actions/checkout@v4', with: { 'fetch-depth': "${{ github.event_name == 'pull_request' && '0' || '1' }}", 'persist-credentials': false } },
+      ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
       megarepoApplyStep,
       { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },

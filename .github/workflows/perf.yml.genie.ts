@@ -2,7 +2,7 @@ import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { readFileSync } from 'node:fs'
-import { buildEnv, linuxRunner, linuxStageRunner, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { buildEnv, fullHistoryCheckoutSteps, linuxRunner, linuxStageRunner, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
 
 const snapshotAttempt = "!cancelled() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (steps.load.outcome == 'success' || steps.load.outcome == 'failure')"
 const snapshotPublished = "!cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.publish == 'true'"
@@ -12,7 +12,7 @@ const irrelevantLabel = "github.event_name == 'pull_request' && (github.event.ac
 const relevantEvent = `!(${irrelevantLabel})`
 // The checkout, snapshots, Nix and scratch space every load job starts from.
 const loadSetupSteps = [
-  { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   {
     name: 'Name compatible snapshot recipes',
     env: {
@@ -166,7 +166,7 @@ python3 scripts/ci-perf-cache pack`,
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, SCCACHE_IDLE_TIMEOUT: '0' },
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
         {
           name: 'Isolate test state',

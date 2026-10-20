@@ -1463,7 +1463,7 @@ runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 40
 paths return an empty 404.
 
 The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
-Cargo dependencies. Run `nix build .#fractal-chatgpt` from a checkout, or
+Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
 `nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 

@@ -189,6 +189,43 @@ def executable_command_guard(tree, protected, crates, public_commands=()):
             'protected': sorted(protected), 'unresolved': errors}
 
 
+def documented_flake_selector_guard(tree, outputs):
+    """Resolve local and this repository's documented selectors at the exact head."""
+    checked, errors = 0, []
+    selector = re.compile(
+        r'(?:\.|github:compoundingtech/smalltalk(?:/[^#\s`"\']+)?)#'
+        r'(?P<attribute>[A-Za-z0-9_<>${}.-]+)')
+    for path in sorted((tree / 'docs').rglob('*.md')):
+        text = path.read_text()
+        for match in selector.finditer(text):
+            attribute = match['attribute'].rstrip('.,')
+            checked += 1
+            parts = attribute.split('.')
+            prefix = text[text.rfind('\n', 0, match.start()) + 1:match.start()]
+            commands = list(re.finditer(r'\bnix\s+(build|run|develop|print-dev-env)\b', prefix))
+            command = commands[-1][1] if commands else None
+            kinds = (('devShells',) if command in ('develop', 'print-dev-env')
+                     else ('packages', 'apps') if command == 'run'
+                     else ('packages',) if command == 'build' else tuple(outputs))
+            if len(parts) == 1:
+                resolved = any(attribute in names for kind in kinds
+                               for names in outputs.get(kind, {}).values())
+            elif len(parts) == 3 and parts[0] in outputs:
+                kind, system, name = parts
+                systems = (list(outputs[kind]) if system in ('<system>', '${system}')
+                           else [system])
+                resolved = bool(systems) and all(
+                    name in outputs[kind].get(candidate, []) for candidate in systems)
+            else:
+                resolved = False
+            if not resolved:
+                errors.append({'path': path.relative_to(tree).as_posix(),
+                               'line': text.count('\n', 0, match.start()) + 1,
+                               'selector': match[0], 'attribute': attribute,
+                               'reason': 'documented selector has no matching HEAD flake output'})
+    return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'unresolved': errors}
+
+
 def embedded_cargo_guard(tree):
     """Resolve embedded script fixture dependencies against real source crates.
 
@@ -272,14 +309,14 @@ def nix_output_names(tree, revision, repository=ROOT):
       builtins.listToAttrs (map (kind: {{
         name = kind;
         value = builtins.mapAttrs (_: outputs: builtins.attrNames outputs) (flake.${{kind}} or {{}});
-      }}) [ "packages" "apps" "checks" ])'''
+      }}) [ "packages" "apps" "checks" "devShells" ])'''
     command = ['nix', 'eval', '--json', '--no-write-lock-file',
                '--no-update-lock-file', '--expr', expression]
     result = subprocess.run(command, cwd=tree, text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError(f'Nix output evaluation failed in {tree}: {result.stderr.strip()}')
     outputs = json.loads(result.stdout)
-    if not isinstance(outputs, dict) or set(outputs) != {'packages', 'apps', 'checks'}:
+    if not isinstance(outputs, dict) or set(outputs) != {'packages', 'apps', 'checks', 'devShells'}:
         raise ValueError('invalid Nix output attribute map')
     for systems in outputs.values():
         if not isinstance(systems, dict) or any(
@@ -796,6 +833,10 @@ def main():
             trees[1], set(binary_lists[0]), crates, public_commands)
         differences.extend({'category': 'protected_executable_command', **error}
                            for error in guards['protected_executable_commands']['unresolved'])
+        guards['documented_flake_selectors'] = documented_flake_selector_guard(
+            trees[1], guards['nix_output_attributes'].get('after', {}))
+        differences.extend({'category': 'documented_flake_selector', **error}
+                           for error in guards['documented_flake_selectors']['unresolved'])
         if binary_lists[0] != binary_lists[1]:
             differences.append({'category': 'binary_names', 'before': binary_lists[0], 'after': binary_lists[1]})
         provider_names = []

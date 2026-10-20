@@ -43,13 +43,19 @@ PROTECTED_EXECUTABLES = {
 
 
 def rewrite(text):
+    # The verifier example must name a real check and an existing flake target.
+    text = text.replace(
+        'scripts/evidence-verify --repo . --revision HEAD --check typescript-client \\\n'
+        '  --keys-from BASE_COMMIT [--command \'["nix","build",".#checks.x86_64-linux.suite"]\']',
+        'scripts/evidence-verify --repo . --revision HEAD --check genie-freshness \\\n'
+        '  --keys-from BASE_COMMIT [--command \'["nix","build",".#checks.x86_64-linux.genie-freshness"]\']')
     for old in PROTECTED_EXECUTABLES - {'st2', 'st3', 'stui'}:
         new = CRATES.get(old)
         if new is None:
             continue
         text = re.sub(r'(?P<flag>--bin[ =]+)' + re.escape(new) + r'(?![\w-])',
                       lambda match: match['flag'] + old, text)
-        text = re.sub(r'(?P<flake>github:compoundingtech/smalltalk/[^\s`]*#)' +
+        text = re.sub(r'(?P<flake>(?:\.|github:compoundingtech/smalltalk/[^\s`]*)#)' +
                       re.escape(new) + r'(?![\w-])',
                       lambda match: match['flake'] + old, text)
     # Repair earlier output at reviewed runtime contexts, not Cargo selectors.
