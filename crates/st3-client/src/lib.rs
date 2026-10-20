@@ -9,9 +9,9 @@ mod contract;
 pub mod device;
 mod generated;
 pub mod product_dirs;
-mod task_grants;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+mod task_grants;
 pub use contract::*;
 pub use generated::*;
 

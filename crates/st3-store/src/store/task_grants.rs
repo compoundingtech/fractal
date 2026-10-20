@@ -7,11 +7,15 @@ use st3_schema::task_grants::{CreateTaskGrantRequest, TaskGrantReceipt, TaskGran
 pub const CREATED: &str = "task-grant.created";
 pub const REVOKED: &str = "task-grant.revoked";
 
-pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h085880bb2ea5 owner=st3_store::store::task_grants TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS task_grants (
+pub fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h085880bb2ea5 owner=st3_store::store::task_grants TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS task_grants (
         grant_id TEXT PRIMARY KEY, created_claim_id TEXT NOT NULL, revoked INTEGER NOT NULL
     );")?;
     Ok(())
+}
+
+pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    create_schema(tx)
 }
 
 fn active_claims(connection: &Connection, subject: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
@@ -192,6 +196,29 @@ mod tests {
             Ok(())
         }).unwrap().unwrap();
         assert_eq!(store.task_grant(&receipt.grant_id).unwrap(), expected);
+    }
+
+    #[test]
+    fn fresh_and_existing_current_schema_stores_install_task_grants() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("example.sqlite");
+        let schema_version;
+        {
+            let store = Store::open(&path, "example").unwrap();
+            assert!(store.task_grant("task-grant/missing").unwrap().is_none());
+            let connection = store.readers.get();
+            schema_version = connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap();
+        }
+        // Model a store already at the current version, predating this additive table.
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch("DROP TABLE task_grants").unwrap();
+        }
+        let store = Store::open(&path, "example").unwrap();
+        assert!(store.task_grant("task-grant/missing").unwrap().is_none());
+        let version = store.readers.get().query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(version, schema_version);
+        store.create_task_grant(&request()).unwrap();
     }
 
     #[test]

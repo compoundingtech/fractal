@@ -185,6 +185,7 @@ impl SmalltalkRuntime {
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
+        task_grants::create_schema(connection)?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
         }

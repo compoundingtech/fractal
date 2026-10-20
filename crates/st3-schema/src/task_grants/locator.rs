@@ -41,7 +41,7 @@ fn js_whitespace(value: char) -> bool {
         '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
-fn bounded_text(value: &str, maximum: usize) -> Result<(), TaskGrantError> {
+pub(super) fn bounded_text(value: &str, maximum: usize) -> Result<(), TaskGrantError> {
     if value.encode_utf16().count() > maximum || value.trim_matches(js_whitespace).is_empty()
         || value.contains('\0') {
         return Err(invalid(format!("locator text must be nonblank, NUL-free and at most {maximum} UTF-16 code units")));

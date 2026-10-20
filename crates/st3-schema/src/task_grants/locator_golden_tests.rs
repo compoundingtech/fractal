@@ -44,6 +44,10 @@ fn browser_members_are_closed_over_their_operations() {
         }
         if op == "fillSecret" { step["inventoryId"] = json!("example-token"); }
         let mut valid = base.clone();
+        if op == "revealOnce" {
+            step["issues"] = json!("example-token");
+            step["trigger"] = json!({"locator":{"kind":"role","role":"button","name":"Reveal token"}});
+        }
         valid["browserSteps"] = json!([step.clone()]);
         serde_json::from_value::<TaskManifest>(valid).unwrap().validate().unwrap();
         for (member, value, prohibited) in [
@@ -54,6 +58,11 @@ fn browser_members_are_closed_over_their_operations() {
             ("issues", json!("example-token"), op != "revealOnce"),
             ("effect", json!("delete"), op != "click"),
             ("target", json!("example-target"), true),
+            ("trigger", json!({"locator":{"kind":"text","value":"Reveal"}}), op != "revealOnce"),
+            ("sourceKind", json!("input"), op != "revealOnce"),
+            ("textNode", json!({"pattern":"example"}), op != "revealOnce"),
+            ("intent", json!("Reveal token"), op != "revealOnce"),
+            ("safeUrl", json!("https://example.com"), op != "revealOnce"),
         ] {
             if !prohibited { continue; }
             let mut invalid = base.clone();

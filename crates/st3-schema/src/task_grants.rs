@@ -14,6 +14,10 @@ mod locator;
 pub use locator::{AriaRole, Locator};
 #[cfg(test)]
 mod locator_golden_tests;
+mod reveal;
+pub use reveal::{TaskRevealTrigger, TaskRevealSourceKind, TaskTextNode};
+#[cfg(test)]
+mod reveal_tests;
 
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const OP_PROXY_PRINCIPAL: &str = "service/op-proxy";
@@ -99,6 +103,16 @@ pub struct TaskBrowserStep {
     pub kind: Option<TaskHumanKind>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TaskRevealTrigger>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<TaskRevealSourceKind>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub text_node: Option<TaskTextNode>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub safe_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -302,6 +316,7 @@ impl TaskManifest {
         }
         let mut items = BTreeSet::new();
         let mut inventory = BTreeSet::new();
+        let mut secret_inventory = BTreeSet::new();
         for write in &self.writes {
             text("vaultId", &write.vault_id)?;
             text("itemId", &write.item_id)?;
@@ -318,10 +333,12 @@ impl TaskManifest {
                     return Err(invalid("remove requires an exact inventoryId"));
                 }
                 if !inventory.insert(field.inventory_id.as_str()) { return Err(invalid("duplicate inventoryId")); }
+                if field.kind == TaskFieldKind::Secret { secret_inventory.insert(field.inventory_id.as_str()); }
             }
         }
         let mut last_index = None;
         let mut fill_inventory = BTreeSet::new();
+        let mut issued_inventory = BTreeSet::new();
         for step in &self.browser_steps {
             if step.index > MAX_SAFE_INTEGER || last_index.is_some_and(|last| step.index <= last) { return Err(invalid("browser step indexes must be increasing safe integers")); }
             last_index = Some(step.index);
@@ -381,9 +398,16 @@ impl TaskManifest {
                 }
             }
             if step.literal.is_some() && !matches!(step.op, TaskBrowserOp::Fill | TaskBrowserOp::Navigate) { return Err(invalid("literal is allowed only on fill or navigate")); }
-            if let Some(issue) = &step.issues {
-                if step.op != TaskBrowserOp::RevealOnce { return Err(invalid("issues is allowed only on revealOnce")); }
-                if !inventory.contains(issue.as_str()) { return Err(invalid("issued inventoryId must be declared in writes")); }
+            if step.op == TaskBrowserOp::RevealOnce {
+                let issue = step.issues.as_deref().ok_or_else(|| invalid("revealOnce requires issues"))?;
+                if !secret_inventory.contains(issue) {
+                    return Err(invalid("revealOnce issues must name a secret field in writes"));
+                }
+                if !issued_inventory.insert(issue) { return Err(invalid("revealOnce issues ID must be unique")); }
+                reveal::validate(step, &self.provider)?;
+            } else if step.issues.is_some() || step.trigger.is_some() || step.source_kind.is_some()
+                || step.text_node.is_some() || step.intent.is_some() || step.safe_url.is_some() {
+                return Err(invalid("issues, trigger, sourceKind, textNode, intent and safeUrl are revealOnce-only"));
             }
         }
         for reader in &self.readers {
@@ -487,7 +511,7 @@ mod tests {
             {"index":0,"op":"navigate","locator":{"kind":"text","value":"page"},"literal":"https://example.com"},
             {"index":1,"op":"fill","locator":{"kind":"label","value":"label"},"literal":"public label"},
             {"index":2,"op":"click","locator":{"kind":"text","value":"submit"}},
-            {"index":3,"op":"revealOnce","locator":{"kind":"text","value":"token"},"issues":"example-token"}
+            {"index":3,"op":"revealOnce","locator":{"kind":"text","value":"token"},"trigger":{"locator":{"kind":"role","role":"button","name":"Reveal token"}},"issues":"example-token"}
         ]);
         value["writes"] = json!([{
             "vaultId":"example-vault","itemId":"example-item",
@@ -901,7 +925,7 @@ mod optional_member_tests {
 
     #[test]
     fn explicit_null_is_not_silently_dropped_before_hashing() {
-        for member in ["locator", "literal", "issues", "effect", "target", "inventoryId", "kind", "note"] {
+        for member in ["locator", "literal", "issues", "effect", "target", "inventoryId", "kind", "note", "trigger", "sourceKind", "textNode", "intent", "safeUrl"] {
             let mut step = json!({"index":0,"op":"click","locator":{"kind":"text","value":"example"}});
             step[member] = Value::Null;
             assert!(serde_json::from_value::<TaskBrowserStep>(step).is_err(), "{member}");
