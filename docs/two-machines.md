@@ -64,8 +64,8 @@ The invite pins studio's Fabric identity and carries a short-lived, one-use pair
 permit. The adapter exchanges the signed st admission over Fabric's restricted
 pairing channel. A pending node receives no ordinary Fabric trust or service
 grants. Only after verifying signed membership and its binding to beacon's
-authenticated Fabric NodeID does the adapter atomically confirm the exact fleet,
-PTY, and client grants. Beacon also verifies studio's signed answer before
+authenticated Fabric NodeID does the adapter atomically confirm the exact
+replication and client API grants. Beacon also verifies studio's signed answer before
 installing reciprocal access. Neither command edits `peers.toml`.
 
 The default code expires after ten minutes; Fabric pairing never extends beyond
