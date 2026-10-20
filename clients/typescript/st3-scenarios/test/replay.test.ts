@@ -11,6 +11,7 @@ import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent
 import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
 import { syntheticFirstRunOnboarding } from '../src/worlds/firstRunOnboarding.ts'
 import { genericVariants } from '../src/kit/variants.ts'
+import { loadRecordedWorld } from './recorded-world.ts'
 
 const replays: Replay[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
@@ -114,6 +115,31 @@ describe('WebSocket wire aliases', () => {
 })
 
 describe('collection windows', () => {
+  it('serves uncaptured roster and details subscriptions in a recorded world and follows their changes', async () => {
+    const world = base()
+    const h = setup({ ...world, recording: { frames: [], http: [] } })
+    const stream = await h.connect()
+    stream.subscribe('agents', 'agents', 200)
+    stream.subscribe('missions', 'missions', 200)
+    stream.subscribe('work', 'work', 200)
+    h.clock.advance(0)
+    expect(h.frames.map((frame) => frame.kind)).toEqual(['snapshot', 'snapshot', 'snapshot'])
+    const windows = new Map<string, CollectionWindow>()
+    let read = 0
+    for (const at of [0, 20_000]) {
+      h.clock.advance(at)
+      for (const frame of h.frames.slice(read)) {
+        const next = applyWindow(windows.get(frame.id ?? ''), frame)
+        if (next !== undefined) windows.set(frame.id ?? '', next)
+      }
+      read = h.frames.length
+      expect(windows.get('agents')?.items).toEqual(foldSlice(world.slices.roster, at).state.agents)
+      expect(windows.get('missions')?.items).toEqual(foldSlice(world.slices.details, at).state.missions)
+      expect(windows.get('work')?.items).toEqual(foldSlice(world.slices.details, at).state.work)
+    }
+    expect(h.frames.some((frame) => frame.kind === 'changes')).toBe(true)
+  })
+
   it('dispatches changes and applyWindow equals the roster fold at each clock step', async () => {
     const h = setup()
     const stream = await h.connect()
@@ -192,9 +218,12 @@ describe('collection windows', () => {
 })
 
 describe('conversation dispatch and consumer fold', () => {
-  it('snapshots Builder immediately before and after the recorded onboarding thread appears', async () => {
+  it.each(['catalog', 'recorded-transport'] as const)('snapshots Builder immediately before and after the recorded onboarding thread appears (%s)', async (source) => {
     // Match the web replay's non-anchor ISO start, with a pane opened after the roster arrives.
-    const h = setup(loadWorld('first-run-onboarding', { now: '2026-10-20T12:00:00.000Z' }))
+    const world = loadWorld('first-run-onboarding', { now: '2026-10-20T12:00:00.000Z' })
+    const h = setup(source === 'catalog' ? world : {
+      ...world, recording: loadRecordedWorld('first-run-onboarding', world.now).world.recording,
+    })
     const builder = h.world.cast.agents.find((member) => member.key === 'builder')!
     const stream = await h.connect()
     h.clock.advance(4_010)

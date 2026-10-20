@@ -38,6 +38,7 @@ type Subscription = {
   incarnation?: string
   capability?: string
   ready: boolean
+  recorded?: boolean
   window?: { items: WireResource[]; has_more: boolean }
 }
 type Connection = { socket: CollectionSocket; open: boolean; closed: boolean; subscriptions: Map<string, Subscription>; legacy: boolean; recorded_socket_id?: string }
@@ -216,7 +217,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       emit(connection, { kind: 'snapshot', id: sub.id, collection: sub.collection, snapshot: fence(), ...window, order: window.items.map((item) => item.id) })
       return
     }
-    if (world.recording !== undefined) {
+    if (sub.recorded) {
       if (sub.collection === 'terminal') {
         const terminal = state('terminal').terminals.find((item) => item.terminal === sub.terminal)
         if (terminal === undefined) return refuse(connection, sub, 'not-found', false)
@@ -272,13 +273,13 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     connection.socket.onclose?.({ code, reason })
   }
   const dispatch = (kind: SliceKind, event: TimelineEvent) => {
-    if (world.recording !== undefined && kind !== 'sync') return
     switch (event._tag) {
       case 'thread-create': {
         const timeline = world.slices.conversation.timeline
         const previous = foldSlice({ ...world.slices.conversation, timeline: timeline.slice(0, timeline.indexOf(event)) }, event.at_ms)
           .state.threads.find((thread) => thread.agent === event.thread.agent)
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection !== 'conversation' || !(followsThread(sub, event.thread) || previous !== undefined && followsThread(sub, previous))) continue
           sub.threadAgent = event.thread.agent
           if (!sub.ready) first(connection, sub)
@@ -295,6 +296,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       }
       case 'terminal-create':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection !== 'terminal' || sub.terminal !== event.record.terminal) continue
           if (!sub.ready) first(connection, sub)
           else if (event.record.runtime.state === 'exited') refuse(connection, sub, 'terminal-ended', false)
@@ -307,18 +309,21 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         return
       case 'terminal-remove':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection === 'terminal' && sub.terminal === event.terminal) refuse(connection, sub, 'not-found', false)
         }
         return
       case 'thread-remove': {
         const previous = foldSlice(world.slices.conversation, event.at_ms - 1).state.threads.find((thread) => thread.agent === event.agent)
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection === 'conversation' && (sub.threadAgent === event.agent || sub.conversation === event.agent || previous !== undefined && followsThread(sub, previous))) refuse(connection, sub, 'not-found', false)
         }
         return
       }
       case 'changes':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (!sub.ready || sub.collection === 'arrangements' || collectionKind(sub.collection) !== kind || sub.window === undefined) continue
           const previous = sub.window
           const next = windowOf(sub)
@@ -334,6 +339,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         const thread = state('conversation').threads.find((thread) => thread.agent === event.agent)
         if (thread === undefined) return
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (!sub.ready || sub.collection !== 'conversation' || !followsThread(sub, thread)) continue
           sub.threadState = 'present'
           emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: thread.session_id,
@@ -344,6 +350,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       }
       case 'screen': case 'unavailable': case 'end': case 'incarnation':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (!sub.ready || sub.collection !== 'terminal' || sub.terminal !== event.terminal) continue
           if (event._tag === 'screen') {
             const terminal = state('terminal').terminals.find((terminal) => terminal.terminal === event.terminal)
@@ -420,7 +427,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
   }
   const recordedFrame = (metadata: RecordedFrame): void => {
     for (const connection of connections) for (const sub of connection.subscriptions.values()) {
-      if (!sub.ready || !matches(sub, metadata.selector) ||
+      if (!sub.recorded || !sub.ready || !matches(sub, metadata.selector) ||
         world.recording?.socket_ids !== undefined && metadata.socket_id !== undefined && connection.recorded_socket_id !== metadata.socket_id ||
         metadata.subscription_id !== undefined && metadata.subscription_id !== sub.id) continue
       const identity = { id: sub.id, collection: sub.collection }
@@ -501,6 +508,8 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
           filters: { status: stringField(command, 'status'), actor: stringField(command, 'actor'), person: stringField(command, 'person'), subject: stringField(command, 'subject') },
           conversation: stringField(command, 'conversation'), terminal: stringField(command, 'terminal'),
           incarnation: stringField(command, 'incarnation'), capability: stringField(command, 'capability') }
+        sub.recorded = world.recording?.subscriptions?.some((entry) =>
+          entry.at_ms === offset() && entry.socket_id === connection.recorded_socket_id && equal(entry.command, command)) ?? false
         connection.subscriptions.set(sub.id, sub)
         first(connection, sub)
       },

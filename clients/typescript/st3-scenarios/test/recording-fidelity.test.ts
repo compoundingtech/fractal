@@ -31,7 +31,11 @@ const mutateItem = (world: World, revision: boolean): World => {
 /** Focused metadata tests still use capture-derived slice data and the captured command. */
 const captureMetadataFrames = (proof: RecordedProof, recording: RecordedTransport): JsonObject[] => {
   const clock = manualClock(ANCHOR_MS - 100)
-  const replay = createReplay({ ...proof.world, recording }, { clock })
+  const command = proof.rows.find((row) => row.kind === 'command' && row.value.collection === 'conversation')
+  if (command === undefined) throw new Error('Missing captured conversation command')
+  const replay = createReplay({ ...proof.world, recording: { ...recording,
+    subscriptions: [{ at_ms: -100, command: command.value }],
+  } }, { clock })
   const frames: JsonObject[] = []
   try {
     const socket = replay.socket('ws://scenario.invalid/v1/client/collections', ['st3.client.collections.v0'], {})
@@ -41,8 +45,6 @@ const captureMetadataFrames = (proof: RecordedProof, recording: RecordedTranspor
       frames.push(jsonObject(parsed))
     }
     clock.advance(0)
-    const command = proof.rows.find((row) => row.kind === 'command' && row.value.collection === 'conversation')
-    if (command === undefined) throw new Error('Missing captured conversation command')
     socket.send(JSON.stringify(command.value))
     clock.advance(1100)
     return frames
