@@ -3,7 +3,7 @@
   "summary": "Rename agent and mission public identities without replacing their immutable storage identities",
   "replay": {
     "status": "changed",
-    "detail": "Immutable agent.renamed and mission.renamed claims retain historical names and rebuild the naming projection. Original claims and storage subjects are not rewritten. Historical names remain reserved and resolve to the same storage identity. Agent renames do not rename child missions."
+    "detail": "Immutable agent.renamed and mission.renamed claims retain historical names and rebuild the naming projection. Original claims and storage subjects are not rewritten: replicated declarations retain their signed storage subjects regardless of arrival order. Historical names remain reserved and resolve to the same storage identity. Conflicted naming fences effect admission without preventing historical arrangement replay. Agent renames do not rename child missions."
   },
   "schema": {
     "status": "changed",

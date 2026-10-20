@@ -49,6 +49,11 @@ pub async fn start_planning_session(
         })
         .unwrap_or_else(|| request.mission.clone());
     crate::mission::validate_mission_id(&mission_id).map_err(ApiError::bad)?;
+    let resolved = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Mission,
+        &format!("mission/{mission_id}"),
+    )?;
+    let mission_id = resolved.identity.strip_prefix("mission/").unwrap_or(&resolved.identity).to_owned();
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..24].to_owned();
     let request_name = format!("doc/planning/{id}/request");
     let request_document = state
@@ -1325,11 +1330,15 @@ fn close_planning_message(
 }
 
 fn stop_planning_agent(state: &AppState, planner: &str, key: &str) -> Result<(), ApiError> {
+    let planner = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, planner)?.identity;
     let local_agent = planner
         .strip_prefix("agent/")
         .and_then(|value| value.split_once('/').map(|(_, local)| local))
-        .unwrap_or(planner);
+        .unwrap_or(&planner);
     let standing_mission = format!("mission/standing/{local_agent}");
+    let standing_mission = public_identity(
+        &state.store, crate::store::identities::IdentityKind::Mission, &standing_mission,
+    )?.identity;
     let cancellation = state
         .store
         .active_mission_runs()

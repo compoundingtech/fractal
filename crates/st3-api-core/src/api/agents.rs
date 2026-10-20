@@ -20,6 +20,8 @@ pub async fn rollout_agent(
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-rollout-actor")?;
     let subject = agent_subject(request.subject);
+    // Launch receipts, runtime keys and retry keys remain attached to the immutable seat.
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     let old =
         crate::rollout::launched_member(&state.store, &subject, &request.expected_incarnation)
             .map_err(ApiError::internal)?
@@ -75,6 +77,7 @@ pub async fn restart_agent(
     } else {
         format!("agent/{}", request.subject)
     };
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     state.store.owned_member_guard(&subject).map_err(ApiError::bad)?;
     let key = format!("agent-restart:{subject}:{}", request.idempotency_key);
     if let Some(prior) = state
@@ -210,6 +213,7 @@ pub async fn override_placement_source(
 ) -> Result<Json<ClaimRecord>, ApiError> {
     request.actor = person_or_agent_actor(&request.actor, "invalid-source-offline-actor")?;
     request.subject = agent_subject(request.subject);
+    request.subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &request.subject)?.identity;
     let store = state.store.clone();
     let (claim, appended) = blocking_action(move || {
         let input = crate::placement::source_offline_input(&store, request)?;
@@ -226,6 +230,7 @@ pub async fn start_mission_seat(
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-start-actor")?;
     let subject = agent_subject(request.subject);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     let response = state
         .store
         .start_mission_seat(
@@ -263,7 +268,9 @@ pub async fn seat_snapshot_chunk(
     Json(request): Json<SnapshotReadRequest>,
 ) -> Result<Json<Value>, ApiError> {
     person_or_agent_actor(&request.actor, "invalid-resume-actor")?;
-    let suspension = crate::suspension::current(&state.store, &request.subject)
+    let subject = agent_subject(request.subject);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let suspension = crate::suspension::current(&state.store, &subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("no suspension"))?;
     if suspension.operation_id != request.resume_operation
@@ -290,7 +297,7 @@ pub async fn seat_snapshot_chunk(
             "snapshot belongs to another source",
         )));
     }
-    let sources = crate::placement::latest_by_origin(&state.store, &request.subject, u64::MAX)
+    let sources = crate::placement::latest_by_origin(&state.store, &subject, u64::MAX)
         .map_err(ApiError::internal)?;
     if !sources
         .get(&state.node)
@@ -336,7 +343,13 @@ pub async fn report_native_session(
     Json(request): Json<NativeSessionReport>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     let subject = agent_subject(request.subject);
-    if request.actor != subject {
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
+    let actor = if request.actor.starts_with("agent/") {
+        public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &request.actor)?.identity
+    } else {
+        request.actor
+    };
+    if actor != subject {
         return Err(ApiError::bad(St3Error::new(
             "foreign-agent-actor",
             "a seat reports only its own native session",
@@ -406,6 +419,7 @@ pub async fn rename_agent(
     } else {
         format!("agent/{}", request.subject)
     };
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     if !request.actor.starts_with("person/") {
         normalized_agent_actor(&request.actor).ok_or_else(|| {
             ApiError::bad(St3Error::new("invalid-rename-actor", "rename needs a person or agent actor"))

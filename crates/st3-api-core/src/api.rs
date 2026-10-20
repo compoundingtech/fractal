@@ -8462,6 +8462,7 @@ pub fn request_suspend(
 ) -> Result<ClaimRecord, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-suspend-actor")?;
     let subject = agent_subject(request.subject);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     let key = format!("agent-suspend:{subject}:{}", request.idempotency_key);
     if let Some(prior) = state
         .store
@@ -8561,6 +8562,7 @@ pub fn request_resume(
 ) -> Result<ClaimRecord, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-resume-actor")?;
     let subject = agent_subject(request.subject);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     let key = format!("agent-resume:{subject}:{}", request.idempotency_key);
     if let Some(prior) = state
         .store

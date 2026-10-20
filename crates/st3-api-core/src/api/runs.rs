@@ -258,10 +258,18 @@ pub async fn mission_overview(
     State(state): State<AppState>,
     Query(query): Query<MissionOverviewQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let subject = if query.mission.starts_with("mission/") {
+        query.mission
+    } else {
+        format!("mission/{}", query.mission)
+    };
+    let resolved = public_identity(&state.store, crate::store::identities::IdentityKind::Mission, &subject)?;
     blocking_store(move || {
-        state
-            .store
-            .read_snapshot(|_| state.store.mission_overview(&query.mission, 10))
+        state.store.read_snapshot(|_| {
+            let mut overview = state.store.mission_overview(&resolved.identity, 10)?;
+            overview["mission"] = json!(resolved.canonical_id);
+            Ok(overview)
+        })
     })
     .await
     .map(Json)

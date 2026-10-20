@@ -15143,8 +15143,8 @@ pub fn select_replicated_desired(
     claim: &ClaimRecord,
     desired: &DesiredSubject,
 ) -> Result<(), St3Error> {
-    let normalized_desired = identities::normalize_desired(transaction, desired)?;
-    let desired = normalized_desired.as_ref();
+    // Replication projects the signed storage subject, never a receiver-local public alias.
+    // Only newly authored declarations are normalized at admission.
     if claim.body.get("owned_set").is_some() || owned_sets::owner(transaction, &desired.subject, None)?.is_some() {
         return Ok(());
     }

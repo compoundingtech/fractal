@@ -195,6 +195,53 @@ fn partition_target_collision_has_same_winner_in_both_arrival_orders() {
 }
 
 #[test]
+fn replicated_declarations_keep_signed_subjects_across_arrival_order_and_replay() {
+    let owner = node("example-owner", None, None);
+    let independent = node("example-independent", None, None);
+    let rename_first = node("example-rename-first", None, None);
+    let declaration_first = node("example-declaration-first", None, None);
+    let desired_rows = |store: &Store| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT subject,kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step FROM desired ORDER BY subject",
+        ).unwrap();
+        let rows = statement.query_map([], |row| {
+            (0..9).map(|column| row.get::<_, Option<String>>(column)).collect::<rusqlite::Result<Vec<_>>>()
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        rows
+    };
+    declare(&owner, ORIGINAL);
+    declare(&independent, RENAMED);
+    let mut expected = desired_rows(&owner);
+    expected.extend(desired_rows(&independent));
+    expected.sort();
+    assert_eq!(expected.len(), 2);
+    owner.rename_identity(
+        IdentityKind::Agent, &request(ORIGINAL, RENAMED, "partition-rename"), &[],
+    ).unwrap();
+
+    sync(&owner, &rename_first);
+    sync(&independent, &rename_first);
+    sync(&independent, &declaration_first);
+    sync(&owner, &declaration_first);
+
+    for store in [&rename_first, &declaration_first] {
+        // Inspect literal storage rows, not an alias-resolving desired lookup.
+        let before = desired_rows(store);
+        assert_eq!(before, expected);
+        for row in &before {
+            let subject = row[0].as_deref().unwrap();
+            let claim = store.claim_by_id(row[3].as_deref().unwrap()).unwrap().unwrap();
+            assert_eq!(claim.subject, subject);
+            assert_eq!(claim.kind, "intent.desired");
+        }
+        store.replay_replication_graph().unwrap();
+        assert_eq!(desired_rows(store), before);
+    }
+    assert_eq!(desired_rows(&rename_first), desired_rows(&declaration_first));
+}
+
+#[test]
 fn naming_writer_cannot_be_bypassed_and_full_replay_preserves_resolution() {
     let store = Store::open_memory("example").unwrap();
     declare(&store, ORIGINAL);

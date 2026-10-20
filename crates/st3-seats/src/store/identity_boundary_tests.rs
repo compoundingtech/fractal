@@ -142,3 +142,88 @@ fn sidebar_placement_keeps_order_and_register_revision_after_rename() {
     assert_eq!(current["body"]["placements"].as_object().unwrap().len(), 1);
     assert_eq!(current["body"]["placements"][CANONICAL]["value"]["key"], "a1");
 }
+
+#[test]
+fn partition_collision_replay_preserves_fenced_identity_historical_placement() {
+    const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    let left = fixture();
+    let right = Store::open_memory("example-right").unwrap();
+    let other = "agent/example-other";
+    let target = "agent/example-target";
+    let arrangement = "arrangement/person/robin/019a0000-0000-7000-8000-000000000002";
+    for store in [&left, &right] {
+        store.bind_fleet(FLEET).unwrap();
+    }
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"example-other\" { command \"true\"; }", "example-right",
+    ).unwrap();
+    right.apply_internal(&intent, "independent-declaration").unwrap();
+    let sync = |from: &Store, to: &Store| {
+        let exchange = from.export_replication_exchange_answering(
+            FLEET,
+            &to.replication_inventory().unwrap(),
+            &to.replication_signature_requests().unwrap(),
+        ).unwrap();
+        to.receive_replication_exchange(&from.origin, FLEET, &exchange).unwrap();
+        to.validate_replication_backlog().unwrap();
+        to.project_replication_backlog().unwrap();
+    };
+    sync(&left, &right);
+    sync(&right, &left);
+    let placement_claim = left.append_client_claim(&ClaimInput {
+        subject: arrangement.into(), kind: "arrangement.edited".into(),
+        actor: Some("person/robin".into()),
+        fields: serde_json::from_value(json!({
+            "owner":"person/robin",
+            "operations":[
+                {"op":"create","name":"Work"},
+                {"op":"subject.place","subject":ORIGINAL,"folder":null,"key":"a0"},
+                {"op":"subject.place","subject":other,"folder":null,"key":"a1"}
+            ]
+        })).unwrap(),
+        evidence: vec![], expected_subject: None,
+        idempotency_key: Some("historical-placements".into()),
+    }).unwrap();
+    sync(&left, &right);
+    let placements = |store: &Store| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT register,value,revision,winner FROM arrangement_registers WHERE subject=?1 AND register LIKE 'placement/%' ORDER BY register",
+        ).unwrap();
+        let rows = statement.query_map([arrangement], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?,
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        rows
+    };
+    let before = placements(&left);
+    assert_eq!(before.len(), 2);
+    let rename_to_target = |store: &Store, from: &str, key: &str| {
+        store.rename_identity(IdentityKind::Agent, &RenameRequest {
+            from: from.into(), to: target.into(), actor: "person/robin".into(),
+            reason: "Clarify responsibility".into(), expected_declaration: None,
+            expected_naming_revision: None, idempotency_key: key.into(),
+        }, &[]).unwrap()
+    };
+    let a = rename_to_target(&left, ORIGINAL, "left-partition-rename");
+    let b = rename_to_target(&right, other, "right-partition-rename");
+    sync(&left, &right);
+    sync(&right, &left);
+    let loser = if a.claim_id < b.claim_id { other } else { ORIGINAL };
+    for store in [&left, &right] {
+        let error = store.resolve_identity(IdentityKind::Agent, loser).unwrap_err();
+        assert_eq!(error.code, "lifecycle-unavailable");
+        assert_eq!(error.details["reason"], "conflict");
+        assert_eq!(placements(store), before);
+        // Replay must project historical facts even though public ingress is fenced.
+        store.replay_replication_graph().unwrap();
+        assert_eq!(placements(store), before);
+        let retained = placements(store).into_iter()
+            .find(|(register, _, _, _)| register == &format!("placement/{loser}")).unwrap();
+        assert_eq!(retained.2, placement_claim.id);
+        assert_eq!(serde_json::from_str::<Value>(&retained.1).unwrap()["key"],
+            if loser == ORIGINAL { "a0" } else { "a1" });
+        let error = store.resolve_identity(IdentityKind::Agent, loser).unwrap_err();
+        assert_eq!(error.details["reason"], "conflict");
+    }
+}
