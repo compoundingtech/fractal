@@ -3,6 +3,7 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::AgentMessagesStore;
 use st3::CoordinationStore;
 use st3::MissionsStore;
 use st3::LimitsStore;
@@ -6050,6 +6051,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = st3::maintenance::divergence_check_interval(
         std::env::var(st3::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
@@ -18170,6 +18172,28 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
                 eprintln!("st3: coordination count bootstrap failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Count the retained sends for the usage estimate in bounded pages, one writer turn each, so
+/// neither opening the store nor the first usage read rebuilds every send. A usage read that
+/// arrives before the last page completes the rest itself.
+async fn backfill_agent_message_days(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.agent_message_days", || {
+                page_store.advance_agent_message_days()
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
+            error => {
+                eprintln!("st3: agent message usage backfill failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
