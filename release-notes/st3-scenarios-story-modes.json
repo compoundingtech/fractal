@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make every st3-scenarios story declare a scenario mode (slices, contract-fixture or primitive) and check it in the Storybook scenario check. Test and story tooling only; no runtime change.",
+  "replay": {"status": "none", "detail": "Test and story tooling only; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change; the scenarios package is test tooling."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery change."}
+}
