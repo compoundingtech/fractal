@@ -1061,6 +1061,36 @@ A story may mark a slice as intentionally invariant in its rendering
 only to choose a layout. Checks 2 and 3 skip that slice; check 1 still requires the read. A
 reason is required.
 
+Stories whose consumer initially mounts only part of a conversation may declare
+`parameters.scenario.window`, typed by `ScenarioStoryParameter` from `/storybook/check`:
+
+```ts
+// Transcript uses initialTailCount={2}; EmbraceScrollViewport historyBatchSize=4.
+window: { _tag: 'tail', turns: 2, historyBatch: 4 }
+```
+
+The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window,
+including for empty or loading baselines; vacuity validation applies only to tail windows.
+The check derives each thread's turns from folded wire entries: user text content opens a
+turn; an assistant-content/tool-call prefix is one turn. It selects the final N turns per
+thread, not the final N entries; threads with at most N + historyBatch turns mount whole,
+matching EmbraceScrollViewport's short-conversation rule. The check requires their markers and counts.
+Other slices retain their full marker contract. World-switch contrast selection uses the
+same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
+The story must state the consumer's real mount rule, with a comment naming that rule; this
+is not permission to choose arbitrary convenient data or split the transcript.
+Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
+Transcript's initial tail count and EmbraceScrollViewport's history batch size. Stories
+can use this shared value instead of copying the counts; a consumer-side test guards it.
+
+`MountedWindow` failures reject invalid tail counts/history batches, a baseline tail window
+selecting zero entries, or one excluding every marker from a marker-bearing conversation.
+Genuinely empty/loading contrast sides still participate as contentless contrasts.
+Without a window, the all-source marker contract is unchanged. The mounted check does not
+prove history reveal or a reply deliberately held back by an interaction harness: browser
+plays must separately prove both, and a tail window cannot express an arbitrary held-back
+reply within a mounted turn.
+
 The kit's own tests include a negative case: a story that declares slices but renders fixed text
 fails checks 1 and 2.
 
@@ -1167,6 +1197,9 @@ breaks a scenario fails in the same pull request.
 
 - Every fractal-ui story renders a scenario world, passes `scenarioStoryCheck`, and the Scenario
   toolbar switches it.
+- Mounted conversation stories declare the real consumer mount policy and pass marker/contrast
+  checks within it; kit tests reject missing mounted markers and vacuous windows and preserve
+  the unwindowed rule. Browser plays separately prove history reveal and held-back replies.
 - fractal-web e2e runs on replay; the production bundle contains no scenario-kit code.
 - The SDK fold matches every non-pending sync matrix row.
 - The stui demo shows the generated `fleet-mid-refactor` world.
