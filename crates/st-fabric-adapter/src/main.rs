@@ -48,7 +48,6 @@ enum PairingCommand {
     #[command(name = "pairing-status")]
     Receipt,
 }
-
 #[derive(Debug, Deserialize)]
 struct LeaveSnapshot {
     fleet_id: Option<String>,
@@ -164,7 +163,6 @@ fn fence_pairing(snapshot: &mut LeaveSnapshot, pending: &pairing::PairingState) 
         });
     }
 }
-
 async fn poll(
     client: &reqwest::Client,
     socket: &Path,
@@ -306,6 +304,7 @@ async fn main() -> Result<()> {
         .open(state.join("adapter.lock"))?;
     lock.try_lock()
         .context("another adapter owns this state directory")?;
+
     loop {
         let result = poll(&client, &fabric_socket, &state).await;
         let status = match &result {

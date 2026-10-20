@@ -18,6 +18,7 @@ from unittest.mock import patch
 import uuid
 
 HERE = Path(__file__).resolve().parent
+from script_process import signal_private
 def load(name, path):
     loader = SourceFileLoader(name, str(path))
     module = module_from_spec(spec_from_loader(name, loader))
@@ -381,9 +382,9 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         child = Path(self.directory.name) / "channel"
         descendant = Path(self.directory.name) / "descendant-pid"
         child.write_text("#!" + sys.executable + "\n" +
-                         "import subprocess, sys\n"
+                         "import os, subprocess, sys\n"
                          "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
-                         "stdout=subprocess.DEVNULL)\n"
+                         f"stdout=subprocess.DEVNULL, env={{**os.environ, 'SCRIPT_TEST_OWNER': {self.directory.name!r}}})\n"
                          f"open({str(descendant)!r}, 'w').write(str(descendant.pid))\n"
                          "sys.stderr.write('st: startup refused before hello\\n')\n"
                          "sys.exit(2)\n")
@@ -424,7 +425,8 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             tracking.stop()
             if descendant.exists():
                 try:
-                    os.kill(int(descendant.read_text()), signal.SIGKILL)
+                    signal_private(int(descendant.read_text()), signal.SIGKILL,
+                                   environment={"SCRIPT_TEST_OWNER": self.directory.name})
                 except ProcessLookupError:
                     pass
 

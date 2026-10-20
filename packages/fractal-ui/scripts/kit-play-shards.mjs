@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { fullCases } from './kit-play-commit-set.mjs'
 
 export function shardNumber(id, count) {
   if (!Number.isSafeInteger(count) || count < 1) throw new Error('Shard count must be a positive integer')
@@ -48,15 +49,15 @@ export function aggregateShards(candidates, count, provenance) {
     seen.add(shardIndex)
     if (JSON.stringify(receipt.fullIds) !== JSON.stringify(full)) throw new Error('Shards validated different full indexes')
     const expected = shardStories(full, shardIndex, count)
-    if (!Array.isArray(rows) || rows.length !== expected.length * 4) throw new Error('Incomplete shard cases')
-    const assigned = new Set(expected)
+    const expectedCases = new Set(fullCases(expected).map(({ id, scheme, width }) => JSON.stringify([id, scheme, width])))
+    if (!Array.isArray(rows) || rows.length !== expectedCases.size) throw new Error('Incomplete shard cases')
     for (const row of rows) {
       const key = JSON.stringify([row.id, row.scheme, row.width])
-      if (!row.pass || !assigned.has(row.id) || !['dark', 'light'].includes(row.scheme) || ![440, 1440].includes(row.width) || allCases.has(key)) throw new Error('Missing, duplicate or invalid play case')
+      if (!row.pass || !expectedCases.has(key) || allCases.has(key)) throw new Error('Missing, duplicate or invalid play case')
       allCases.add(key)
     }
   }
-  if (allCases.size !== full.length * 4) throw new Error('Shard union does not cover the full index')
+  if (allCases.size !== fullCases(full).length) throw new Error('Shard union does not cover the full strict case set')
   return { stories: full.length, cases: allCases.size, shards: count, pass: true }
 }
 

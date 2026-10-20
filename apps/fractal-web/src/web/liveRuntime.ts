@@ -2,9 +2,10 @@ import { Effect, Layer } from 'effect'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
+import type { Replay } from '@smalltalk/st3-scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
-export const createPageRuntime = () => {
+export const createPageRuntime = (replay?: Replay) => {
   // Dogfood records 100% of pages: budget roots and their SDK detail cannot disappear at 10%.
   const telemetry = makeTelemetry({
     otlpTracesUrl: import.meta.env.VITE_OTLP_TRACES_URL?.trim() || undefined,
@@ -31,17 +32,29 @@ export const createPageRuntime = () => {
   const live = liveSource({
     options: {
       baseUrl: window.location.origin, maxFollows: 8, conversationSlots: 'advertised',
-      adoptEarlyCollections: true,
+      adoptEarlyCollections: replay === undefined,
+      ...(replay === undefined ? {} : { socket: replay.socket, fetch: replay.fetch }),
       parentSpan: ux.activeSpan,
       traceContext: ux.traceContext,
     },
     telemetryLayer,
     ux: () => ux,
   })
-  return { live, telemetry }
+  return {
+    live: replay === undefined ? live : {
+      ...live,
+      dispose: () => live.dispose().finally(() => replay.close()),
+    },
+    telemetry,
+  }
 }
 type PageRuntime = ReturnType<typeof createPageRuntime>
 const retained = import.meta.hot?.data.pageRuntime as PageRuntime | undefined
-const runtime = retained ?? createPageRuntime()
+const runtime = retained ?? createPageRuntime(
+  import.meta.env.DEV && new URLSearchParams(window.location.search).has('scenario')
+    // Static imports would pull the dev-only kit/world graph into the production entry.
+    ? (await import('./replayRuntime.ts')).createDevReplay(window.location.search)
+    : undefined,
+)
 if (import.meta.hot !== undefined) import.meta.hot.data.pageRuntime = runtime
 export const { live, telemetry } = runtime

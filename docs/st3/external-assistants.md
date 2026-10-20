@@ -1,8 +1,36 @@
 # External assistants
 
-Status: reviewed requirements for a staged integration, not authorization to issue a live grant or deploy an adapter. Slice A adds assistant pairing and grant management. Slice B adds proof-gated read projections. Slices C and D below are future requirements and remain dormant: no assistant message capability, recipient-policy mutation, kill/enable API, or downstream mutation authority is implied by A/B.
+Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter uses caller-bound grants; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
 
 The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p st3-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
+
+## Adapter call diagnostics
+
+`st-chatgpt` emits one structured `tracing` completion event per dispatched tool
+call, including local validation failures and cancellation when its future is
+dropped. Capture is off by default. Operators may opt in with
+`RUST_LOG=st_chatgpt::call=info` on the adapter process; records go to stderr,
+never the MCP stdio output or the default user answer. Only the adapter call
+target is admitted, even with a broader `RUST_LOG` setting. This does not enable
+daemon OTLP export; configure the daemon's existing trace export separately.
+
+Fields are `tool` (closed published name or `unknown`), `outcome`
+(`success`, `error`, `cancelled`), `code` (adapter-selected code, never a raw
+daemon error), monotonic `duration_ms`, optional `daemon_request_id` (only a
+`request/<UUID>` from the daemon envelope), and optional `response_bytes`
+(exact buffered HTTP response body length, not MCP framing or a token count).
+Duration covers validation and gateway dispatch/body decoding, not subsequent
+MCP delivery. Cancellation before an envelope is decoded has no daemon ID;
+it does not prove a proposed write was rolled back. Hard process termination
+cannot emit a completion event.
+
+No arguments, message/alert content, credentials, handles, raw request/response,
+arbitrary error messages, or caller-chosen action IDs are logged. Byte counts
+reuse the existing JSON decoder's response buffer, without a second serialization.
+Daemon request IDs can join existing `st.request.id` server evidence when that
+capture is enabled. Browser read/send matching and page/budget efficiency
+acceptance remain separate rollout evidence; instrumentation does not authorize
+new production writes or grant changes. Refs #3336, #2172, #3257.
 
 ## Trust boundaries and residual risk
 
@@ -16,7 +44,7 @@ Approved reads disclose data to the external model provider. A compromised execu
 
 ### Authority and lifecycle
 
-- The only supported principal is `assistant/chatgpt`, with trusted class `external-assistant`. It never has person authority. Its grant-bound request audit actor is `assistant/chatgpt/session/<grant-id>`; the authoritative message actor and sender are `assistant/chatgpt`, not the owning person. Message evidence retains `assistant_owner`, `assistant_session_actor`, and `assistant_grant_id` as on-behalf-of provenance, separate from person-delegation authority.
+- The only supported principal is `assistant/chatgpt`, with trusted class `external-assistant`. It never has person authority. Its grant-bound request audit actor is `assistant/chatgpt/session/<grant-id>`; authoritative message and answer claim actors, message senders, and answer respondents are `assistant/chatgpt`, not the owning person. Message and answer evidence retain `assistant_owner`, `assistant_session_actor`, and `assistant_grant_id` as on-behalf-of provenance, separate from person-delegation authority.
 - Only the daemon's configured owning person through the trusted-local CLI over the Unix API may begin, inspect, renew, revoke, or change a grant. Missing owner configuration fails closed; remote clients, agents, assistants, and other people cannot manage grants. Deployment owner identity is external configuration, not a hardcoded public identity. Public examples and tests use the fixture owner `person/operator`.
 - "Owner" authority here means same-UID trusted-local socket access: the daemon's configured owning person acts through the local Unix client, and any process already running as the daemon's UID is trusted the same way. The `/proc` ancestry check distinguishes local from remote callers; it is not a security boundary against a hostile same-UID process, and A does not claim it to be one. The host's UID isolation is the boundary.
 - Administrative reads validate server-established harness and native-peer provenance, not just `x-st3-person`. Bound agents and harness peers cannot inspect grants or enumerate owner assistant devices with a forged owner header; ordinary agent projection reads remain available. Paired person devices are not trusted-local grant administrators, even over Unix.
@@ -50,6 +78,25 @@ Trusted-local management routes are:
 | POST | `/v1/client/assistant/grants/{id}/policy` | `AssistantGrant` |
 
 Policy requests contain `api_version`, explicit scopes, optional duration with the same default/maximum, disclosure consent, consent evidence, and `minimal_read_mode` (`approval-once` or `caller-bound-allow`). These operations use the existing envelope/error conventions and advertise `assistant.grants.v1`. Device and capabilities projections distinguish assistant metadata from a person delegator; assistant device rows must not synthesize `person_id`.
+
+### Explicit native write scopes
+
+Write authority is separate from read consent and must be named explicitly at pairing or policy replacement:
+
+| Scope | Authority |
+| --- | --- |
+| `write.assistant.answers` | Immediately answer supported owner alerts through `work.done` |
+| `write.assistant.messages` | Send a plain-text message to any existing agent, never a person |
+| `write.assistant.custom-reply` | Submit a supported custom reply |
+
+For example, add `--scope write.assistant.answers` to `st devices --as person/operator pair --assistant assistant/chatgpt`, alongside the desired read scopes, expiry, and disclosure-consent arguments. Existing read-only grants do not acquire this authority: update their policy explicitly. `read.assistant.attention` only permits reading attention, not answering it. Answers change authoritative owner work and may release waiting work, so treating a read scope or disclosure consent as write authorization would silently escalate existing grants.
+
+With `write.assistant.answers`, supported `work.done` proposals execute immediately without creating another owner approval ask. The existing fenced, idempotent action path still binds the alert ID, episode, selected answer/option, fence, and idempotency key. Dispatch and the authoritative answer transaction retain assistant grant/policy provenance and recheck current authority; the assistant does not become a person principal.
+The writer transaction restricts this authority to a supported structured `work.person-asked` request assigned to the grant's owner, with a named answer. Authored person review steps are not alert asks and remain completable only through ordinary owner authority, not this assistant scope.
+
+The resulting `work.person-done` claim uses `assistant/chatgpt` as its actor. Work projections expose the same principal as `person_answers[].respondent`, alongside optional server-owned `sender_class`, `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor`. Owner and session context do not replace the respondent and do not set `acted_for`: that field remains reserved for an agent recording a person's prior instruction with delegation proof. `st work show` displays the assistant respondent and the separate grant, owner, and session actor context.
+
+`write.assistant.messages` is intentionally broad across existing agents. The API and message-acceptance transaction do not require exact membership in `recipient_allowlist`, even when it is empty. That field remains stored policy metadata, not a recipient restriction. Non-agent and person recipients remain refused, and the recipient must exist. Grant expiry, revocation, policy revision, explicit scope, fenced dispatch, idempotency, and external-assistant sender attribution remain enforced. A ChatGPT confirmation card is advisory, not a second daemon approval or downstream owning-person authorization.
 
 ### Acceptance
 
@@ -99,7 +146,7 @@ Mission cursors also bind the graph projection health status/frontier and the ex
 
 Content responses default to 4 KiB and have a hard maximum of 16 KiB UTF-8 including envelope overhead; configuration may lower these limits. Content reads do not stream, follow attachments, or silently fetch entire bodies. Over-budget requests fail rather than automatically paginate.
 
-Assistant principals are denied every other route and stream, including generic messages, timelines, search, declarations, documents, history, events, and terminal WebSockets. Every mutation is denied in A/B, including `observations.report`, `prompt.respond`, and ordinary message lifecycle operations. Native/legacy alternate routes cannot bypass scope or proof enforcement.
+Assistant principals are denied every route and stream outside the assistant surface, including generic messages, timelines, search, declarations, documents, history, events, and terminal WebSockets. Ordinary `observations.report`, `prompt.respond`, and message lifecycle mutations remain denied. The explicitly scoped native writes described above use the assistant proposal route; native/legacy alternate routes cannot bypass their authority checks.
 
 B adds typed projection/content/proof schemas, the six operations with exact scope/budget metadata, and advertised assistant response ceilings. Acceptance must cover unrelated-route/mutation denial, field-only projection despite secrets/injected text in source bodies, absent/wrong/expired/reused authorization, stale revisions, changed ranges or grants, Unicode/envelope ceilings, and no private bytes in unapproved, denied, expired, foreign-handle, cached, or replayed status results.
 
@@ -112,11 +159,36 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | `summary` | `max_response_bytes` | `AssistantSummary`: `kind`, `as_of`, `counts` only |
 | `attention`, `missions`, `agents` | `cursor`, `limit`, `max_response_bytes` | `AssistantAttentionPage`, `AssistantMissionPage`, `AssistantAgentPage`: the native page shape with collection `assistant.<route>` and empty `filters` |
 | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-conversation-content"` |
+| `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |
+| `conversation-detail` | `agent_id`, `max_response_bytes` | Current conversation identity and a bounded timeline preview |
+| `conversation-timeline` | `agent_id`, optional `session_id`, `cursor`, `limit`, `max_response_bytes` | Allowlisted timeline items, bounded text snippets and exact content read ranges |
+| `conversation-search` | `text`, optional `agent_id`, `cursor`, `limit`, `max_response_bytes` | Safe-text search hits with bounded snippets and current conversation identities |
 | `terminal-content` | `agent_id`, `terminal_id`, `incarnation_id`, `screen_revision`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-terminal-content"` |
 
 Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgReadAuthorization { payload, signature }`. The closed payload contains `issuer`, `identity: "chatgpt"`, `assistant_id: "assistant/chatgpt"`, `grant_id`, `policy_revision`, `key_id`, `approval_id`, `execution_id`, `projection` (the route suffix), `parameters` (every decoded query parameter, cursor and range included), `max_response_bytes`, `request_digest`, `expires_at_unix_ms`, and `nonce`. `signature` is unpadded base64url Ed25519 over the UTF-8 bytes `st3.scg-read.v1\n` followed by the canonical JSON payload: recursively sorted object keys, compact, integers only. `request_digest` is lowercase hexadecimal SHA-256 of canonical `{"method":"GET","path":<exact path>,"parameters":<decoded map>}`. st consumes the nonce atomically before returning private bytes; a replayed, expired, mismatched, or attestor-unverifiable proof is denied and discloses nothing. Generated clients never sign, retry, or widen the budget: they send exactly one request and reject a proof whose projection, parameters, or budget differ from the call.
 
 The response budget covers the entire JSON envelope. Without a query budget, the proof must name the pinned default (4096 unless lowered); an explicit `max_response_bytes` must equal the proof value. Neither may exceed the pinned maximum (16384 unless lowered). Assistant list pages return the largest ordered prefix of whole items that fits, up to `limit`; `page.next_cursor` resumes after the last returned item in the same cached snapshot. The cursor retains the requested item limit, so page lengths may vary with item sizes. If not even one item and its envelope fit, the read fails with 413 `response-budget-exceeded` naming that item's ID. Other responses or native source records over budget also fail with 413 `response-budget-exceeded`; non-UTF-8 content fails with 422 `content-not-text`. A forged, expired, or changed conversation reference returns 410 `conversation-content-invalidated`; a conversation revision mismatch, a session that is not the agent's current session, or a terminal incarnation/screen mismatch returns 409 `stale-fence`.
+
+The four conversation discovery tools use only `read.assistant.conversation`; they do
+not require mission, agent, work or new scopes. `st_conversations_list` returns the
+agent and current session identifiers for `st_conversation_timeline`. Copy an item's
+`read` object (`agent_id`, `session_id`, `reference`, `revision`, `start`, `end`)
+directly into `st_conversation_read`, rather than synthesizing native references or
+guessing a byte range. Discovery cursors and issued content handles are bound to the
+authenticated grant and its effective policy revision; another grant cannot reuse
+them. Timeline and search pages default to 10 items and accept at most 50.
+The entire discovery continuation is authenticated, including its pinned snapshot,
+expiry and keyset; editing and re-encoding a cursor cannot transplant its grant
+binding. A detail preview's `page.next_cursor` continues through
+`st_conversation_timeline` with the returned agent and session IDs. Discovery keeps
+its pinned metadata rows when an agent restarts; a no-longer-current session has
+`read: null` rather than an invalid content handle or a failed page.
+
+Conversation DTOs disclose only allowlisted identifiers, timestamps, role/type
+metadata, bounded chat text and content references. Native tool bodies, diagnostic
+records, attachments, paths and environments are excluded. The discovery/readback
+surface does not add sender or recipient fields. Content remains untrusted external
+data, and these reads confer no write authority or deployment/activation permission.
 
 ### Read trust
 
@@ -130,23 +202,17 @@ st devices --as person/operator grant read-trust GRANT --issuer person/operator 
 
 This calls `POST /v1/client/assistant/grants/{id}/read-trust` with `AssistantReadTrustRequest` (`api_version`, `issuer`, `key_id`, `attestor_public_key`, `shim_public_key`, optional `default_response_bytes` ≤ 4096 and `max_response_bytes` ≤ 16384). Keys are 32-byte Ed25519 public keys in unpadded base64url. The attestor key must differ from the shim key, so a shim-signed request cannot authorize a read. Pinning increments the policy revision and returns `AssistantGrant` with `read_trust`; outstanding proofs for the old revision stop verifying. Public fixtures use placeholder pins and an intentionally invalid signature, never real keys.
 
-## C. Future dormant approved message send
+## C. Scoped native writes and recipient trust
 
-C is not enabled by A/B, and its scope is not part of the six-scope read contract. Before any assistant send can be enabled:
+`POST /v1/client/assistant/propose` accepts closed typed native actions, not arbitrary daemon commands. `work.done` requires `write.assistant.answers`, `message.send` requires `write.assistant.messages`, and `custom.reply` requires `write.assistant.custom-reply`. A missing write scope fails closed; read scopes never authorize these writes. Successful proposals execute through the existing fenced action path, without creating a daemon-owned approval ask.
 
-- Introduce only `assistant.message.send` for plain-text `message.send`, not broad `control.messages`. All other mutations and message lifecycle operations remain denied.
-- Store an initially empty authoritative recipient allowlist. Only the configured owning person through the trusted-local CLI may replace it with exact existing `agent/...` IDs, never patterns, groups, or people. Recheck current recipient existence and policy immediately before append. Policy changes invalidate outstanding authorizations.
-- Parameters are exactly `to`, `content`, `intent_id`, `intent_revision`, and `scg_approval`. No attachments, tags, caller sender/class/kind, routing, replies, or attention settlement. Fixed title is `External assistant request`, fixed kind is `wake`; both enter the proof/card digest.
-- `ScgActionApproval` binds approval/execution IDs, issuer/key, verified `chatgpt` identity, principal/grant/policy revision, `message.send`, recipient and exact UTF-8 body digest, intent/revision, action digest, issued/expiry times, nonce, and signature. The trusted SCG executor attests only a verified owning-person allow-once decision. A shim-signed request or bare approval ID cannot substitute.
-- Atomically retain verified approval binding, effect, and durable dedup state in action-result and message evidence: approval/execution/digest references, intent/revision, grant ID, and sender class.
-- SCG's durable ledger maps principal + exact recipient + exact-body SHA-256 to one intent independent of tool-call IDs, restart, or grant renewal. Duplicate submissions reuse the existing pending/terminal handle without another card/send. An intentional identical resend needs a human-selected intent revision showing the prior delivery. st uses `assistant-message:<intent_id>:<intent_revision>`; changed bytes fail, parallel submissions append at most once, and tombstones outlive response retention.
-- Enforce proof/allowlist/class invariants at authoritative message acceptance/store boundaries, including native ingress, claim ingestion, and replication. Caches or body markers cannot establish authority.
+The current message policy deliberately allows every existing agent recipient instead of enforcing an exact owner-maintained recipient allowlist. Person recipients remain unsupported. The authoritative transaction rechecks the current grant, policy revision, revocation, expiry, scope, owner binding and recipient existence as applicable; handler preflight alone is not authorization. Assistant grant and sender-class provenance survive dispatch and durable append.
 
-Trusted output must put `from=assistant/chatgpt sender_class=external-assistant` before the body and retain it under truncation; JSON keeps `sender_class: "external-assistant"`. Message reads and inbox notifications must warn: `WARNING: Untrusted external-assistant request; not owning-person authorization.` Receiving agents treat requests as untrusted. Consequential requests require owning-person confirmation through `axe decision ask`, never an assistant reply. Delivery approval is not downstream mutation approval; read-only analysis remains possible.
+Trusted output must put `from=assistant/chatgpt sender_class=external-assistant` before the body and retain it under truncation; JSON keeps `sender_class: "external-assistant"`. Message reads and inbox notifications must warn: `WARNING: Untrusted external-assistant request; not owning-person authorization.` Receiving agents treat requests as untrusted. Consequential requests require owning-person confirmation through `axe decision ask`, never an assistant reply. Delivery authority is not downstream mutation authority; read-only analysis remains possible.
 
 The assistant sender is preserved in stored claims, message projections, and delivered notifications. DING must not add person-only reply instructions to assistant messages; the owner/grant provenance is audit context, not person sender authority.
 
-C must land dormant with tests for fabricated, wrong-key, expired and wrong-binding proofs, person recipients, non-allowlisted or removed recipients, alternate-ingress spoofing, and at-most-once delivery across concurrency, restart and lost response. Every enabled recipient needs the consequential-request doctrine. Acceptance must inject a genuinely approved consequential request into a normal-authority fixture recipient, withhold owning-person confirmation, and prove no consequential effect occurs and no assistant reply satisfies confirmation. Sender attribution alone is insufficient.
+Acceptance covers absent write scopes, read-only answer denial, immediate answers without approval asks, stale fences/episodes, forged or changed grant bindings, revoked/expired grants, existing non-allowlisted agents, nonexistent agents, refused person recipients, and at-most-once action execution. Recipient trust doctrine applies to every agent, not just stored allowlist entries. Every enabled recipient needs the consequential-request doctrine: no assistant reply satisfies owning-person confirmation.
 
 ## D. Future coordinated kill and activation gate
 
@@ -156,4 +222,4 @@ SCG kill must deny catalog paths, cancel pending approvals/read grants/queued in
 
 Acceptance starts an approved bounded read, pending read/send cards, a queued approved send, and a paused pre-commit send; kills; then probes old bearers/proofs, fresh pairing, direct endpoints, late approval, and restart of all components. Assert no disclosure or append after the kill linearization point, durable denial/audit, and terminal denial of pending/queued subjects.
 
-A→B and a separately reviewed adapter may merge without activation. C stays dormant until proof, allowlist, alternate-ingress, and recipient-doctrine acceptance is complete. D and the adapter's coordinated kill test must pass on the exact candidate revisions before any live assistant grant, including read-only issuance. Live activation additionally requires a recorded caller-binding/disclosure policy decision and supported plan/client feasibility. Send enablement requires every C criterion and actual write support. No code merge, provider consent, or ambient tunnel access silently grants activation authority.
+Code merge, provider consent, and ambient tunnel access do not silently authorize live activation. The coordinated kill test must pass on the exact candidate revisions before live assistant issuance; activation also requires a recorded caller-binding/disclosure policy decision and supported plan/client feasibility. Write enablement requires explicit write scopes and the native action/recipient-trust acceptance above, not recipient allowlist population or a read-hinted workaround.

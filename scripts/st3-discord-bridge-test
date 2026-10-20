@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 import urllib.parse
 
@@ -111,6 +111,20 @@ class FakeSt:
 
 
 class BridgeScenarios(unittest.TestCase):
+    def test_delivery_contract_accepts_old_and_fractal_but_not_unknown_versions(self):
+        for contract in ('st3.adapter.delivery.v0', 'fractal.adapter.delivery.v0'):
+            with self.subTest(contract=contract):
+                self.state.put('outbound_cursor', '0')
+                page = {'contract': contract, 'items': [], 'cursor': 1, 'host': 'orchid'}
+                with patch.object(self.st, 'deliveries', return_value=page, create=True):
+                    self.assertTrue(self.link.watch_replies())
+                self.assertEqual(self.state.get('outbound_cursor'), '1')
+        self.state.put('outbound_cursor', '0')
+        page = {'contract': 'fractal.adapter.delivery.v1', 'items': [], 'cursor': 1, 'host': 'orchid'}
+        with patch.object(self.st, 'deliveries', return_value=page, create=True), self.assertRaises(bridge.Stop):
+            self.link.watch_replies()
+        self.assertEqual(self.state.get('outbound_cursor'), '0')
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.path = Path(self.folder.name) / 'state.sqlite'
@@ -449,6 +463,21 @@ class BridgeScenarios(unittest.TestCase):
 
 
 class TransportScenarios(unittest.TestCase):
+    def test_local_api_envelopes_accept_old_and_fractal_transport_labels(self):
+        path = Mock()
+        path.lstat.return_value = Mock(st_mode=bridge.stat.S_IFSOCK | 0o600, st_uid=os.geteuid())
+        client = bridge.St(path)
+        for version in ('st3.v1', 'fractal.v1', 'st3.client.v0', 'fractal.client.v0', 'future.v9'):
+            with self.subTest(version=version):
+                wire = {'api_version': version, 'value': {'accepted': True}}
+                connection = Mock()
+                connection.getresponse.return_value.status = 200
+                connection.getresponse.return_value.read.return_value = json.dumps(wire).encode()
+                with patch.object(bridge, 'UnixConnection', return_value=connection):
+                    expected = wire if version == 'future.v9' else wire['value']
+                    self.assertEqual(client.request('GET', '/v1/client/capabilities'), expected)
+                connection.close.assert_called_once()
+
     def test_cdn_download_is_anonymous_bounded_and_refuses_other_hosts(self):
         client = bridge.Discord(TOKEN)
         item = attachment()

@@ -39,7 +39,7 @@ class WorkflowBoundary(unittest.TestCase):
         self.assertIn('    continue-on-error: true\n', job)
         self.assertIn('      contents: read\n', job)
         self.assertNotRegex(job, r'(?m)^    needs:|secrets\.|GH_TOKEN|contents: write')
-        gate = workflow.split('  linux-gate:\n', 1)[1].split('\n  perf-cost:', 1)[0]
+        gate = workflow.split('  linux-gate:\n', 1)[1].split('\n  isolation-vm:', 1)[0]
         self.assertNotIn('evidence-source', gate)
         self.assertIn('ci-evidence-source-' + chr(36) + '{{ github.run_attempt }}', job)
 

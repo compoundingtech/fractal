@@ -19,6 +19,7 @@ pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
     envelope_tombstoned,
 };
+pub use super::checkpoint_space::CheckpointProofBusy;
 
 pub const DAY_MS: u128 = 86_400_000;
 
@@ -388,21 +389,26 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
 ) -> Result<()> {
     for claim in claims {
         if let Some(operation) = &claim.operation_id {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2",
-                params![operation, claim.id],
-            )?;
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
         super::principals::forget_claim_tx(transaction, &claim.id)?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])?;
+        // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
+        // compiles every trigger program again. Per row that cost several times the delete.
+        transaction
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
+            .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
     }
     for envelope in envelopes {
         let batch: Option<String> = transaction
-            .query_row(
+            .prepare_cached(
                 "SELECT batch_id FROM replica_envelopes
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
+            )?
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h5c9af66a6a3a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash],
                 |row| row.get(0),
             )
             .optional()?
@@ -413,20 +419,18 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
             "replica_envelope_holds",
             "replica_envelopes",
         ] {
-            transaction.execute(
-                &format!(
+            transaction
+                .prepare_cached(&format!(
                     /* sqlite-large-value: allow-for-now lv-h5f5425870484 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
-                ),
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
-            )?;
+                ))?
+                .execute(/* sqlite-large-value: allow-for-now lv-h9bdfd18f2c1e owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash])?;
         }
         if let Some(batch) = batch {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
-                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)",
-                [&batch],
-            )?;
+                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
+                .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
         }
     }
     Ok(())
@@ -664,6 +668,7 @@ fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::Proof
 /// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
 /// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
 fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h346bd8caeba9 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ super::canonical::PROOF_COPY_LEGACY_POSITIONS)?;
     connection.execute_batch(
         /* sqlite-large-value: allow-for-now lv-h67cd460ba33d owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
          DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
@@ -1896,6 +1901,17 @@ pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
     super::checkpoint_completion::reclaim_stats()
 }
 
+/// Hold the proof lock on `scratch`, as a running proof does, until dropped.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_space::ProofOwnership);
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
+    super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
+}
+
 #[cfg(test)]
 mod memory_tests {
     use super::*;
@@ -1928,5 +1944,228 @@ mod memory_tests {
             "the overwritten copy pages belong in a disk rollback journal"
         );
         transaction.rollback().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod proof_position_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// The proof copy's numbering of the sealed set, after keeping only that set.
+    fn proof_order(copy: &Path, sealed: &[String], vfs: Option<&ProofVfs>) -> Vec<String> {
+        let connection = open_checkpoint_copy(copy, vfs).unwrap();
+        if let Some(vfs) = vfs {
+            vfs.begin_proof(&connection).unwrap();
+        }
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT);
+                 INSERT INTO temp.sealed_envelopes VALUES('writer', 1, 'sealed');",
+            )
+            .unwrap();
+        for id in sealed {
+            connection
+                .execute("INSERT INTO temp.sealed_claims VALUES(?1)", [id])
+                .unwrap();
+        }
+        keep_sealed_claims_in_canonical_order(&connection).unwrap();
+        connection
+            .prepare("SELECT id FROM claims ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_proof_copy_orders_the_sealed_set_alone_whatever_duplicates_a_member_holds() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Store::open(&scratch.path().join("store.sqlite3"), "writer", Arc::new(Plain))
+            .unwrap();
+        let sealed = {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            let mut batch = None;
+            let mut ids = Vec::new();
+            for name in ["first", "second", "third"] {
+                let claim = append_claim_record_tx(
+                    &transaction,
+                    "writer",
+                    &format!("note/{name}"),
+                    "example.note",
+                    None,
+                    &json!({"fields": {"name": name}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch.get_or_insert(claim.batch_id.clone());
+                ids.push(claim.id);
+            }
+            for (position, id) in ids.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                            position, raw, state, claim_id, updated_at_unix_ms)
+                         VALUES (?1, 'writer', 1, 'sealed', ?2, X'00', 'valid', ?3, '0')",
+                        params![format!("record/sealed/{position}"), position as i64, id],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+            ids
+        };
+        // File-backed stores prove through the space-guarded VFS; prove both ways.
+        let proofs = scratch.path().join("proofs");
+        let ownership = ProofOwnership::acquire(&proofs).unwrap();
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let vfs = ProofVfs::register(&space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = |name: &str| {
+            let plain = scratch.path().join(format!("{name}.sqlite3"));
+            let guarded = proofs.join(format!("proof-{name}.sqlite3"));
+            ownership.mark(&guarded).unwrap();
+            for path in [&plain, &guarded] {
+                store
+                    .connection
+                    .write()
+                    .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+                    .unwrap();
+            }
+            (plain, guarded)
+        };
+        let plain = copy("plain");
+        // Another member also holds an unsealed duplicate envelope carrying the third claim first.
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                    position, raw, state, claim_id, updated_at_unix_ms)
+                 VALUES ('record/duplicate/0', 'writer', 1, 'duplicate', 0, X'00', 'valid', ?1, '0')",
+                [&sealed[2]],
+            )
+            .unwrap();
+        let with_duplicate = copy("duplicate");
+        for (copy, guarded) in [plain, with_duplicate] {
+            assert_eq!(proof_order(&copy, &sealed, None), sealed);
+            assert_eq!(proof_order(&guarded, &sealed, Some(&vfs)), sealed);
+        }
+        vfs.check_closed().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clone_growth_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const ROW: &str = "INSERT INTO growth VALUES (randomblob(64 * 1024))";
+
+    fn store_with_rows(dir: &Path, rows: usize) -> Store {
+        fs::create_dir(dir.join("proofs")).unwrap();
+        let store = Store::open(&dir.join("store.sqlite3"), "writer", Arc::new(Plain)).unwrap();
+        let writer = store.connection.write();
+        writer.execute_batch("CREATE TABLE growth(body BLOB)").unwrap();
+        for _ in 0..rows {
+            writer.execute(ROW, []).unwrap();
+        }
+        drop(writer);
+        store
+    }
+
+    fn wal_len(store: &Store) -> u64 {
+        fs::metadata(format!("{}-wal", store.path.display())).map_or(0, |metadata| metadata.len())
+    }
+
+    fn rows(copy: &Path) -> i64 {
+        Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT count(*) FROM growth", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Copy through the guarded VFS the way a proof does, after `space` was admitted.
+    fn guarded_copy(store: &Store, space: &SpaceGuard, proofs: &Path, during: impl Fn() + Sync) -> Result<PathBuf> {
+        let ownership = ProofOwnership::acquire(proofs).unwrap();
+        let vfs = ProofVfs::register(space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = proofs.join("proof-growth.sqlite3");
+        ownership.mark(&copy).unwrap();
+        let stop = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    during();
+                }
+            });
+            let result = store.copy_store_to_guarded(&copy, Some(&vfs));
+            stop.store(true, Ordering::Release);
+            result
+        });
+        vfs.check_closed().unwrap();
+        result.map(|_| copy)
+    }
+
+    // A proof is admitted, then its lock and VFS self-test run while the daemon keeps writing.
+    // The raw clone used to be held to the exact main+WAL bytes seen at admission, so one commit
+    // in that window failed `replication checkpoint plan` with a 500.
+    #[test]
+    fn a_wal_grown_after_admission_still_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let admitted_wal = wal_len(&store);
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+        assert!(wal_len(&store) > admitted_wal, "the live WAL grew after admission");
+
+        let copy = guarded_copy(&store, &space, &proofs, || {}).unwrap();
+        assert_eq!(rows(&copy), 16, "the copy is the store as of the copy, not of admission");
+    }
+
+    #[test]
+    fn a_writer_committing_throughout_the_copy_does_not_fail_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let written = AtomicUsize::new(0);
+
+        let copy = guarded_copy(&store, &space, &proofs, || {
+            store.connection.write().execute(ROW, []).unwrap();
+            written.fetch_add(1, Ordering::AcqRel);
+        })
+        .unwrap();
+        let copied = rows(&copy);
+        assert!(copied >= 8, "the copy holds at least the admitted rows: {copied}");
+        assert!(
+            copied <= 8 + i64::try_from(written.load(Ordering::Acquire)).unwrap(),
+            "the copy holds no row that was never committed: {copied}"
+        );
+    }
+
+    #[test]
+    fn growth_past_the_clone_cap_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let mut space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        space.hold_clone_to_admitted_copy();
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+
+        let error = guarded_copy(&store, &space, &proofs, || {}).unwrap_err().to_string();
+        assert!(error.contains("checkpoint raw clone exceeds admitted clone cap"), "{error}");
     }
 }

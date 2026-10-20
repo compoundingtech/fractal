@@ -83,6 +83,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case pageCursorExpired
     case rateLimited
     case agentRosterCutNotReady
+    case messageSelectorsNotReady
     case projectionDetailTooLarge
     case projectionDetailInvalidSource
     case runtimeNotLocal
@@ -145,6 +146,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "projection-detail-invalid-source": .projectionDetailInvalidSource
         case "rate-limited": .rateLimited
         case "agent-roster-cut-not-ready": .agentRosterCutNotReady
+        case "message-selectors-not-ready": .messageSelectorsNotReady
         case "runtime-not-local": .runtimeNotLocal
         case "timeline-history-incomplete": .timelineHistoryIncomplete
         case "conversation-content-invalidated": .conversationContentInvalidated
@@ -205,6 +207,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .projectionDetailInvalidSource: "projection-detail-invalid-source"
         case .rateLimited: "rate-limited"
         case .agentRosterCutNotReady: "agent-roster-cut-not-ready"
+        case .messageSelectorsNotReady: "message-selectors-not-ready"
         case .runtimeNotLocal: "runtime-not-local"
         case .timelineHistoryIncomplete: "timeline-history-incomplete"
         case .conversationContentInvalidated: "conversation-content-invalidated"
@@ -717,7 +720,7 @@ public struct RequestSubject: Codable, Sendable { public var kind, label: String
 public struct RequestAnswerOption: Codable, Sendable { public var id, label, consequence: String; public var outcome: String?; public var conditions: [String]? }
 public struct PersonAnswerInput: Codable, Sendable { public var id, text: String?; public init(id: String? = nil, text: String? = nil) { self.id = id; self.text = text } }
 public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
-public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
+public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
 public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public init(agent: String, reason: String) { self.agent = agent; self.reason = reason } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
@@ -803,7 +806,7 @@ public enum AssistantSenderClass: String, Codable, Sendable { case externalAssis
 public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
     case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal"
-    case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply"
+    case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply", answers = "write.assistant.answers"
 }
 public struct AssistantPairingBegin: Codable, Sendable {
     public let apiVersion, deviceName: String; public let assistantID: AssistantPrincipal; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let consentEvidence: String; public let minimalReadMode: AssistantMinimalReadMode?
@@ -846,6 +849,21 @@ public struct AssistantPageRequest: Codable, Sendable, Equatable {
     public init(cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
     enum CodingKeys: String, CodingKey { case cursor, limit, maxResponseBytes = "max_response_bytes" }
 }
+public struct AssistantAgentDetailRequest: Codable, Sendable, Equatable {
+    public let agentID: String; public let maxResponseBytes: Int?
+    public init(agentID: String, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case agentID = "agent_id", maxResponseBytes = "max_response_bytes" }
+}
+public struct AssistantConversationTimelineRequest: Codable, Sendable, Equatable {
+    public let agentID: String; public let sessionID, cursor: String?; public let limit, maxResponseBytes: Int?
+    public init(agentID: String, sessionID: String? = nil, cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.sessionID = sessionID; self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case agentID = "agent_id", sessionID = "session_id", cursor, limit, maxResponseBytes = "max_response_bytes" }
+}
+public struct AssistantConversationSearchRequest: Codable, Sendable, Equatable {
+    public let text: String; public let agentID, cursor: String?; public let limit, maxResponseBytes: Int?
+    public init(text: String, agentID: String? = nil, cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.text = text; self.agentID = agentID; self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case text, agentID = "agent_id", cursor, limit, maxResponseBytes = "max_response_bytes" }
+}
 public struct AssistantConversationContentRequest: Codable, Sendable, Equatable {
     public let agentID, sessionID, reference, revision: String; public let start, end: UInt64; public let maxResponseBytes: Int?
     public init(agentID: String, sessionID: String, reference: String, revision: String, start: UInt64, end: UInt64, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.sessionID = sessionID; self.reference = reference; self.revision = revision; self.start = start; self.end = end; self.maxResponseBytes = maxResponseBytes }
@@ -871,7 +889,7 @@ public enum AssistantContentRequest: Codable, Sendable, Equatable {
         switch self { case .conversation(let value): try value.encode(to: encoder); case .terminal(let value): try value.encode(to: encoder) }
     }
 }
-public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content" }
+public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content", conversations, conversationDetail = "conversation-detail", conversationTimeline = "conversation-timeline", conversationSearch = "conversation-search" }
 public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt }
 /// Signed by the pinned attestor (Ed25519) over UTF-8 `st3.scg-read.v1\n` + canonical JSON of this payload.
 public struct ScgReadAuthorizationPayload: Codable, Sendable, Equatable {

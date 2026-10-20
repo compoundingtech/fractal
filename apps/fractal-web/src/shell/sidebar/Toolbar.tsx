@@ -1,7 +1,8 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
-import { DialogTrigger, Dialog, Popover, ToggleButton } from 'react-aria-components'
-import { compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { DialogTrigger, Dialog, Popover } from 'react-aria-components'
+import { ChromeControl, compositionLightTheme, NarrowLayoutContext } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { geometryVars as g, typeVars as t, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import {
   Button,
@@ -14,7 +15,6 @@ import {
 } from '../../ui-compat/components.tsx'
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
 
-import { IconButton } from '../../workbench-kit/IconButton.tsx'
 import { parseSidebarQuery, sortModes, type SortMode } from './filter.ts'
 import { SidebarShowMenu } from './ShowMenu.tsx'
 import type { ShowRow } from './show.ts'
@@ -48,6 +48,7 @@ export const SidebarToolbar = ({
   searchStyle,
 }: SidebarToolbarProps) => {
   const light = React.useSyncExternalStore(subscribeScheme, readLightScheme, () => true)
+  const narrow = React.useContext(NarrowLayoutContext)
   const search = React.useRef<HTMLDivElement>(null)
   const shortcut = React.useCallback((node: HTMLDivElement | null) => {
     if (node === null) return
@@ -77,7 +78,7 @@ export const SidebarToolbar = ({
     parsedQuery.facets.length +
     filters.statuses.length
   return (
-    <div ref={shortcut} {...stylex.props(styles.toolbar)}>
+    <div ref={shortcut} {...stylex.props(styles.toolbar, narrow && styles.phoneInset)}>
       <div {...stylex.props(styles.controls)}>
         <SidebarShowMenu
           query={filters.query}
@@ -86,32 +87,22 @@ export const SidebarToolbar = ({
           hosts={hosts}
           {...(light ? { popoverTheme: compositionLightTheme } : {})}
         />
-        <ToggleButton
-          aria-label="Show finished agents"
-          isSelected={!filters.hideEnded && !filters.hideRetired}
-          onChange={(show) => update({ ...filters, hideEnded: !show, hideRetired: !show })}
-          {...stylex.props(styles.toggle)}
-        >
-          Finished
-        </ToggleButton>
+        <ChromeControl icon="check" label="Show finished agents" pressed={!filters.hideEnded && !filters.hideRetired} onPress={() => { const show = filters.hideEnded || filters.hideRetired; update({ ...filters, hideEnded: !show, hideRetired: !show }) }} />
         <div {...stylex.props(styles.menus)}>
           <DialogTrigger>
-            <IconButton
-              size="md"
-              label={`Filter agents${activeCount > 0 ? ` · ${activeCount} active` : ''}`}
-              isActive={activeCount > 0}
-              icon={<FilterIcon />}
-            />
+            <ChromeControl icon="filter" label={`Filter agents${activeCount > 0 ? ` · ${activeCount} active` : ''}`} active={activeCount > 0} />
             <Popover placement="bottom end" {...stylex.props(styles.popover)}>
               <Dialog aria-label="Agent filters" {...stylex.props(styles.dialog)}>
                 <Checkbox
                   isSelected={filters.hideEnded}
+                  stylexStyle={narrow && styles.touchRow}
                   onChange={(hideEnded) => update({ ...filters, hideEnded })}
                 >
                   Hide ended
                 </Checkbox>
                 <Checkbox
                   isSelected={filters.hideRetired}
+                  stylexStyle={narrow && styles.touchRow}
                   onChange={(hideRetired) => update({ ...filters, hideRetired })}
                 >
                   Hide retired
@@ -122,6 +113,7 @@ export const SidebarToolbar = ({
                     <Checkbox
                       key={status}
                       isSelected={filters.statuses.includes(status)}
+                      stylexStyle={narrow && styles.touchRow}
                       onChange={(selected) =>
                         update({
                           ...filters,
@@ -138,6 +130,7 @@ export const SidebarToolbar = ({
                 <Button
                   size="sm"
                   variant="secondary"
+                  stylexStyle={narrow && styles.touchRow}
                   onPress={() =>
                     update({ ...defaultFilters, query: parsedQuery.text, sort: filters.sort })
                   }
@@ -148,12 +141,7 @@ export const SidebarToolbar = ({
             </Popover>
           </DialogTrigger>
           <MenuTrigger>
-            <IconButton
-              size="md"
-              label={`Sort agents · ${sortModes[filters.sort]}`}
-              isActive={filters.sort !== 'manual'}
-              icon={<SortIcon />}
-            />
+            <ChromeControl icon="sort" label={`Sort agents · ${sortModes[filters.sort]}`} active={filters.sort !== 'manual'} />
             <MenuPopover>
               <Menu
                 aria-label="Sort agents within each folder"
@@ -166,6 +154,7 @@ export const SidebarToolbar = ({
                     key={value}
                     id={value}
                     textValue={label}
+                    stylexStyle={narrow && styles.touchRow}
                     suffix={filters.sort === value ? <span aria-hidden="true">✓</span> : undefined}
                   >
                     {label}
@@ -188,41 +177,12 @@ export const SidebarToolbar = ({
             if (event.key === 'Escape') update({ ...filters, query: '' })
             if (event.key === 'ArrowDown' && onEnterResults !== undefined) { event.preventDefault(); onEnterResults() }
           }}
-          stylexStyle={searchStyle}
+          stylexStyle={[searchStyle, narrow && styles.touchSearch]}
         />
       </div>
     </div>
   )
 }
-const FilterIcon = () => (
-  <svg
-    aria-hidden="true"
-    width="16"
-    height="16"
-    viewBox="0 0 16 16"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.5"
-    strokeLinecap="round"
-  >
-    <path d="M2 4h12M4 8h8M6 12h4" />
-  </svg>
-)
-const SortIcon = () => (
-  <svg
-    aria-hidden="true"
-    width="16"
-    height="16"
-    viewBox="0 0 16 16"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.5"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <path d="M4 3v10l-2-2m2 2 2-2M8 4h6M8 8h4M8 12h2" />
-  </svg>
-)
 
 const styles = stylex.create({
   toolbar: {
@@ -237,21 +197,6 @@ const styles = stylex.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: scale.space2,
-  },
-  toggle: {
-    border: 0,
-    borderRadius: scale.radiusSm,
-    padding: '5px 8px',
-    backgroundColor: {
-      default: 'transparent',
-      ':hover': tokens['--ds-gray-alpha-100'],
-      ':is([data-selected])': tokens['--ds-gray-alpha-200'],
-    },
-    color: tokens['--ds-gray-1000'],
-    fontSize: '0.75rem',
-    cursor: 'pointer',
-    outlineColor: tokens['--ds-focus-color'],
-    whiteSpace: 'nowrap',
   },
   popover: {
     backgroundColor: tokens['--ds-background-100'],
@@ -275,4 +220,8 @@ const styles = stylex.create({
     margin: 0,
   },
   menus: { display: 'flex', alignItems: 'center', gap: scale.space1 },
+  // Narrow (phone) hosts: every toolbar control is a 44px touch target; the search text is 16px so iOS does not zoom on focus.
+  phoneInset: { paddingInline: s.md },
+  touchRow: { minHeight: g.touchTarget },
+  touchSearch: { minHeight: g.touchTarget, fontSize: t.touchInputSize },
 })

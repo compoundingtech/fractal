@@ -30,7 +30,7 @@
       "clippy::unnecessary_get_then_check": 1,
       "clippy::unnecessary_lazy_evaluations": 1
     },
-    "st3-api": {
+    "st3-api-core": {
       "clippy::collapsible_if": 2,
       "clippy::manual_next_back": 1
     },

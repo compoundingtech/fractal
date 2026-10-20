@@ -26,9 +26,9 @@ use super::{
     PeerResponse, accepts_deflate, deflate, deflated, inflate,
 };
 use crate::fleet::transport::{
-    Fabric, FabricGrantRefusal, LocalTransports, Route, bindable_tailnet_addresses,
-    default_fabric_protocol, is_tailnet_address, local_addresses, parse_route, resolve_tool,
-    routes_from_endpoints, tailscale_addresses,
+    Fabric, FabricError, FabricErrorClass, FabricGrantRefusal, LocalTransports, Route,
+    bindable_tailnet_addresses, default_fabric_protocol, is_tailnet_address, local_addresses,
+    parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses,
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
 use crate::replication::{InventoryCheckpoint, ReplicationExchange, ReplicationInventory};
@@ -1585,8 +1585,6 @@ async fn dial_peer<B: Backend>(
     // Routes whose one early attempt after an outage is spent, until a probe sees them down again
     // or an exchange over them succeeds. See `wait_peer_retry`.
     let mut early_spent = BTreeSet::new();
-    let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
-    let mut last_attempt_unix_ms = crate::store::now_ms();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1652,11 +1650,6 @@ async fn dial_peer<B: Backend>(
                 continue;
             }
         }
-        // Grant refusals belong to the route. Graph writes, inbound exchanges, presence
-        // and local network changes cannot make that member grant this service.
-        if routes.has_changed().unwrap_or(false) {
-            refused.clear();
-        }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
         let attempt_started = tokio::time::Instant::now();
@@ -1664,36 +1657,15 @@ async fn dial_peer<B: Backend>(
         let selected = {
             let routes = routes.borrow_and_update();
             let now = tokio::time::Instant::now();
-            refused.retain(|(route, until)| routes.contains(route) && *until > now);
             if preferred_retry.is_some_and(|deadline| now >= deadline) {
                 route = 0;
                 preferred_retry = None;
             }
-            (0..routes.len())
-                .map(|offset| routes[(route.wrapping_add(offset)) % routes.len()].clone())
-                .find(|candidate| !refused.iter().any(|(route, _)| route == candidate))
+            (!routes.is_empty()).then(|| routes[route % routes.len()].clone())
         };
         let preferred_route = selected
             .as_ref()
             .map(|selected| routes.borrow().first() == Some(selected));
-        if selected.is_none() && !refused.is_empty() {
-            let deadline = refused.iter().map(|(_, until)| *until).min().unwrap();
-            record_worker(
-                &backend,
-                &name,
-                "backoff",
-                last_attempt_unix_ms,
-                Some(deadline.saturating_duration_since(tokio::time::Instant::now())),
-                None,
-            )
-            .await;
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => {}
-                _ = routes.changed() => { refused.clear(); }
-            }
-            continue;
-        }
-        last_attempt_unix_ms = attempt_unix_ms;
         record_worker(
             &backend,
             &name,
@@ -1709,90 +1681,25 @@ async fn dial_peer<B: Backend>(
             .clone()
             .filter(|route| matches!(route, Route::Fabric { .. }));
         let url = match selected {
-            Some(Route::Http(url)) => Some(url),
-            Some(selected @ Route::Fabric { .. }) => {
-                let Route::Fabric { node, protocol } = &selected else {
-                    unreachable!()
-                };
-                match &fleet.fabric {
-                    Some(fabric) => match fabric.dial(node, protocol).await {
-                        Ok(address) => Some(format!("http://{address}")),
-                        Err(error) => {
-                            if error.is::<FabricGrantRefusal>() {
-                                refused.push((
-                                    selected,
-                                    tokio::time::Instant::now() + fabric_refusal_delay(),
-                                ));
-                                super::telemetry::record_error(
-                                    &name,
-                                    super::telemetry::ErrorReason::Refused,
-                                );
-                                let _ = backend
-                                    .record_failure(
-                                        &name,
-                                        "refused",
-                                        &error.to_string(),
-                                        Some(carrier),
-                                    )
-                                    .await;
-                                route = route.wrapping_add(1);
-                                continue;
-                            }
-                            super::telemetry::record_error(
-                                &name,
-                                super::telemetry::ErrorReason::Down,
-                            );
-                            let _ = backend
-                                .record_failure(&name, "down", &error.to_string(), Some(carrier))
-                                .await;
-                            None
-                        }
-                    },
-                    None => None,
-                }
-            }
-            None => None,
-        };
-        let Some(url) = url else {
-            route = route.wrapping_add(1);
-            let delay = retry_delay(backoff.next(), &fleet, &name);
-            record_worker(
-                &backend,
-                &name,
-                "backoff",
-                attempt_unix_ms,
-                Some(delay),
-                preferred_route.map(|preferred| (preferred, preferred_retry)),
-            )
-            .await;
-            if wait_peer_retry(
-                &backend,
-                attempt_unix_ms,
-                delay,
-                &mut routes,
-                &mut inbound_changes,
-                &mut activity_changes,
-                &mut connectivity,
-                &fleet,
-                &name,
-                attempt_started,
-                last_http_success.as_ref(),
-                &http,
-                // No route was dialled, so no route was found unanswering.
-                None,
-                &mut early_spent,
-            )
-            .await
-            {
-                backoff = PeerBackoff::default();
-            }
-            continue;
+            Some(Route::Http(url)) => Ok(url),
+            Some(Route::Fabric { node, protocol }) => match &fleet.fabric {
+                Some(fabric) => fabric
+                    .dial(&node, &protocol)
+                    .await
+                    .map(|address| format!("http://{address}")),
+                None => Err(anyhow::Error::new(RouteFailure::CarrierUnavailable)),
+            },
+            None => Err(anyhow::Error::new(RouteFailure::CarrierUnavailable)),
         };
         let peer = PeerConfig {
             name: name.clone(),
-            url,
+            url: url.as_ref().cloned().unwrap_or_default(),
         };
-        match exchange_via(&http, &backend, &node, &peer, &auth, &fleet, carrier).await {
+        let result = match url {
+            Ok(_) => exchange_via(&http, &backend, &node, &peer, &auth, &fleet, carrier).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(moved) => {
                 if route > 0 {
                     // Keep a working fallback while a transient preferred-route failure cools
@@ -1840,35 +1747,29 @@ async fn dial_peer<B: Backend>(
                     tokio::time::sleep_until(not_before).await;
                 }
             }
-            Err(error) => {
+            Err(mut error) => {
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
                     fleet.mark_removed(&peer.name, removed);
                     continue;
                 }
-                // A peer can leave an HTTP stream open without making progress. Once that
-                // exchange times out, discard the pooled connection so the next attempt opens
-                // a fresh stream, and try the next route.
-                http = replication_http_client();
-                route = route.wrapping_add(1);
                 // `fabric dial` never connects, so the member's refusal reaches us only as a
                 // tunnel that closed. Ask Fabric whether that is what happened.
                 if let (Some(fabric_route), Some(fabric)) = (&fabric_route, &fleet.fabric)
-                    && error.downcast_ref::<reqwest::Error>().is_some()
+                    && route_failure(&error) != RouteFailure::Application
                     && let Route::Fabric { node, protocol } = fabric_route
                     && let Some(refusal) = fabric.refusal(node, protocol).await
                 {
-                    refused.push((
-                        fabric_route.clone(),
-                        tokio::time::Instant::now() + fabric_refusal_delay(),
-                    ));
-                    let _ = backend
-                        .record_failure(&peer.name, "refused", &refusal.to_string(), Some(carrier))
-                        .await;
-                    continue;
+                    error = refusal.into();
+                }
+                if advance_failed_route(&mut route, &error) {
+                    // A stalled or broken stream must not be reused on the next attempt.
+                    http = replication_http_client();
                 }
                 let overloaded = error.is::<PeerOverloaded>();
                 let status = if overloaded {
                     "overloaded"
+                } else if error.is::<FabricGrantRefusal>() {
+                    "refused"
                 } else if error.to_string().contains("signature")
                     || error.to_string().contains("fleet")
                 {
@@ -1906,7 +1807,10 @@ async fn dial_peer<B: Backend>(
                     },
                     last_http_success.as_ref(),
                     &http,
-                    (is_http && exchange_unanswered(&error)).then_some(peer.url.as_str()),
+                    (is_http
+                        && route_failure(&error) != RouteFailure::Application
+                        && exchange_unanswered(&error))
+                    .then_some(peer.url.as_str()),
                     &mut early_spent,
                 )
                 .await
@@ -1965,16 +1869,110 @@ fn retry_delay(delay: Duration, fleet: &FleetContext, name: &str) -> Duration {
     }
 }
 
-/// Probe grants again without depending on Fabric's event version. Even the shortest jitter
-/// allows at most three dials per hour, including the first refusal. Never apply worker caps.
-fn fabric_refusal_delay() -> Duration {
-    let mut random = [0; 2];
-    let _ = getrandom::fill(&mut random);
-    fabric_refusal_delay_with_jitter(u16::from_le_bytes(random))
+/// Route policy is intentionally separate from health/diagnostic labels. Unknown errors
+/// (including local backend errors containing network causes) stay on the current route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouteFailure {
+    Application,
+    Connect,
+    Stream,
+    Timeout,
+    CarrierUnavailable,
 }
 
-fn fabric_refusal_delay_with_jitter(jitter: u16) -> Duration {
-    Duration::from_millis(1800 * (800 + u64::from(jitter) % 401))
+impl std::fmt::Display for RouteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "replication route failure: {self:?}")
+    }
+}
+
+impl std::error::Error for RouteFailure {}
+
+fn route_failure(error: &anyhow::Error) -> RouteFailure {
+    if let Some(class) = error.downcast_ref::<RouteFailure>() {
+        return *class;
+    }
+    if error
+        .downcast_ref::<FabricError>()
+        .is_some_and(|error| error.class == FabricErrorClass::Fault)
+    {
+        return RouteFailure::CarrierUnavailable;
+    }
+    RouteFailure::Application
+}
+
+fn advance_failed_route(route: &mut usize, error: &anyhow::Error) -> bool {
+    let advance = route_failure(error) != RouteFailure::Application;
+    if advance {
+        *route = route.wrapping_add(1);
+    }
+    advance
+}
+
+/// Only call at the outbound HTTP send boundary, never around backend work.
+fn request_route_failure(error: reqwest::Error) -> anyhow::Error {
+    let class = if error.is_builder() || error.is_redirect() || error.is_status() {
+        RouteFailure::Application
+    } else if error.is_timeout() {
+        RouteFailure::Timeout
+    } else if error.is_connect() {
+        RouteFailure::Connect
+    } else {
+        stream_route_failure(&error)
+    };
+    anyhow::Error::new(error).context(class)
+}
+
+/// Reading raw response bytes can fail on transport or HTTP framing. Reqwest's
+/// broad "decode" category alone does not distinguish these.
+fn response_route_failure(error: reqwest::Error) -> anyhow::Error {
+    let class = if error.is_timeout() {
+        RouteFailure::Timeout
+    } else {
+        stream_route_failure(&error)
+    };
+    anyhow::Error::new(error).context(class)
+}
+
+/// Reqwest's request/decode categories also include HTTP parser failures. Only
+/// typed stream evidence permits failover; protocol and unknown causes stay put.
+fn stream_route_failure(error: &(dyn std::error::Error + 'static)) -> RouteFailure {
+    let mut cause = Some(error);
+    let mut stream = false;
+    while let Some(error) = cause {
+        if let Some(error) = error.downcast_ref::<hyper::Error>() {
+            if error.is_parse() || error.is_user() {
+                return RouteFailure::Application;
+            }
+            stream |= error.is_incomplete_message()
+                || error.is_closed()
+                || error.is_body_write_aborted();
+        }
+        // Tokio-rustls reports post-handshake alerts/bad records inside an I/O
+        // InvalidData wrapper. The kind alone is ambiguous (HTTP framing can use
+        // it too), so require the typed TLS cause rather than widening all I/O.
+        stream |= error.is::<rustls::Error>();
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            stream |= error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<rustls::Error>());
+            stream |= matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        cause = error.source();
+    }
+    if stream {
+        RouteFailure::Stream
+    } else {
+        RouteFailure::Application
+    }
 }
 
 /// Whether an exchange failed before the peer sent any response head: its connection could not
@@ -2487,10 +2485,15 @@ async fn fetch_checkpoint_manifest_page(
         .body(body)
         .send()
         .await
+        .map_err(request_route_failure)
         .with_context(|| format!("checkpoint request to peer {} failed", peer.name))?;
     let status = response.status();
     let headers = response.headers().clone();
-    let bytes = response.bytes().await?.to_vec();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(response_route_failure)?
+        .to_vec();
     let bytes = if deflated(&headers) {
         inflate(
             &bytes,
@@ -3193,6 +3196,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     let response = request
         .send()
         .await
+        .map_err(request_route_failure)
         .with_context(|| {
             format!(
                 "replication request to peer {} failed before headers within {} seconds at `{endpoint}`",
@@ -3205,6 +3209,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     let bytes = response
         .bytes()
         .await
+        .map_err(response_route_failure)
         .with_context(|| {
             format!(
                 "replication response body from peer {} failed after {} ms",

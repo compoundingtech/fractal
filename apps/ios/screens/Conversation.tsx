@@ -352,10 +352,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     setDictated(true);
   }
   // Debug builds only: type a message and send it, as a person would, so a recording can show
-  // what the list does on send (EXPO_PUBLIC_ST3_TEST_SEND).
+  // what the list does on send (EXPO_PUBLIC_FRACTAL_TEST_SEND).
   const [devSend, setDevSend] = useState(0);
   useEffect(() => {
-    const text = __DEV__ ? process.env.EXPO_PUBLIC_ST3_TEST_SEND : undefined;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    const text = __DEV__ ? (process.env.EXPO_PUBLIC_FRACTAL_TEST_SEND ?? process.env.EXPO_PUBLIC_ST3_TEST_SEND) : undefined;
     if (!text || !loaded || !agent) return;
     // `\n` in the variable is a new line, so a recording can show a tall box after a send.
     const typed = setTimeout(() => setDraft(`${text.replaceAll('\\n', '\n')} ${new Date().toISOString().slice(11, 19)}`), 3_000);
@@ -364,10 +365,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [loaded, agent?.id]);
   useEffect(() => { if (devSend) void send(); }, [devSend]);
   // Debug builds only: scroll back to the oldest entry every few seconds, as a person reading
-  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_ST3_TEST_SCROLL_BACK
+  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK
   // is how many times).
   useEffect(() => {
-    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK ?? process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
     if (!left || !loaded) return;
     const timer = setInterval(() => {
       if (left-- <= 0) { clearInterval(timer); return; }
