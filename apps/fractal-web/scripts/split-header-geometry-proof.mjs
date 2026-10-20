@@ -12,7 +12,8 @@ const out = process.env.SPLIT_PROOF_DIR
 if (out) await mkdir(out, { recursive: true })
 const loaded = await loadConfigFromFile({ command: 'serve', mode: 'development' }, `${app}/vite.config.ts`, app)
 const server = await createServer({ ...loaded.config, configFile: false, root: `${app}/src/web`,
-  optimizeDeps: { ...loaded.config.optimizeDeps, entries: ['split-header-geometry.browser.html'], include: ['react', 'react-dom/client', '@assistant-ui/react'] },
+  resolve: { ...loaded.config.resolve, dedupe: ['react', 'react-dom'] },
+  optimizeDeps: { ...loaded.config.optimizeDeps, force: true, entries: ['split-header-geometry.browser.html'], include: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', '@assistant-ui/react', '@effect/atom-react'] },
   plugins: loaded.config.plugins.flat().filter(plugin => plugin?.name !== 'wf:shared-client-gateway'),
   server: { ...loaded.config.server, host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
 })
