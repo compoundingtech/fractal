@@ -233,4 +233,36 @@ mod tests {
             oracle(&older, other)
         );
     }
+
+    #[test]
+    fn assistant_owner_pages_match_historical_fold_without_building_whole_map() {
+        let store = Store::open_memory("node").unwrap();
+        for number in 0..32 {
+            append(&store, &format!("agent/{number:03}"), "runtime.observed",
+                json!({"runtime_id":"pty","incarnation_id":"original"}));
+        }
+        let through = store.index().unwrap();
+        append(&store, "agent/000", "runtime.observed",
+            json!({"runtime_id":null,"incarnation_id":"new"}));
+        append(&store, "agent/future", "runtime.observed", json!({"runtime_id":"future"}));
+        let expected = oracle(&store, through);
+        let mut actual = Owners::new();
+        let mut after = None;
+        loop {
+            let page = store.assistant_conversation_owners_page(after.as_deref(), 3, through).unwrap();
+            assert!(page.len() <= 4);
+            let more = page.len() > 3;
+            for (id, owner) in page.into_iter().take(3) {
+                assert!(after.as_ref().is_none_or(|after| after < &id));
+                after = Some(id.clone());
+                actual.insert(id, owner);
+            }
+            if !more { break; }
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(store.assistant_conversation_owners_page(None, 0, through).unwrap().len(), 1);
+        assert!(store.assistant_conversation_owners_page(Some("agent/zzz"), 3, through).unwrap().is_empty());
+        assert!(store.assistant_conversation_owners_page(None, 3, store.index().unwrap() + 1).is_err());
+        assert!(store.smalltalk.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    }
 }

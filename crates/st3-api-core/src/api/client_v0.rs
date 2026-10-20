@@ -342,6 +342,8 @@ pub struct ClientSession {
     pub local_peer: bool,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
+    /// Internal assistant projection option, never negotiated by native clients.
+    pub assistant_content_handles: bool,
     pub messages_paging: bool,
     pub scopes: std::collections::BTreeSet<String>,
 }
@@ -359,6 +361,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
@@ -397,6 +400,7 @@ impl ClientSession {
                 local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
+                assistant_content_handles: false,
                 messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
                     .into_iter()
@@ -416,6 +420,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
         })
@@ -432,6 +437,7 @@ impl ClientSession {
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
@@ -683,6 +689,7 @@ pub fn paired_client_session(
         local_peer: false,
         custom_forms,
         conversation_blocks: false,
+        assistant_content_handles: false,
         messages_paging: false,
         scopes,
     })
@@ -1779,6 +1786,16 @@ pub fn key_grant_label(body: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub fn session_message_content(session: &ClientSession, session_id: &str, claim: &ClaimRecord) -> Value {
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    let mut body = json!({"media_type":"text/plain", "text":fields.get("content").and_then(Value::as_str).unwrap_or_default()});
+    if session.assistant_content_handles {
+        body["blocks"] = json!([{"kind":"raw_text", "source_type":"content", "payload":{"body_ref":true},
+            "continuation":{"ref":conversation_blocks::message_reference(session_id, &claim.id)}}]);
+    }
+    body
+}
+
 pub fn session_message_body(state: &AppState, claim: &ClaimRecord) -> Value {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     let mut body = json!({
@@ -1887,6 +1904,7 @@ fn offset_continuation_header(
 pub fn native_session_messages(
     state: &AppState,
     snapshot: &ClientSnapshot,
+    session: &ClientSession,
     session_id: &str,
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Vec<Value>, ApiError> {
@@ -1911,7 +1929,7 @@ pub fn native_session_messages(
             let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
             let base = claim.store_index.saturating_mul(4);
             items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim)}));
-            items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":{"media_type":"text/plain","text":fields.get("content").and_then(Value::as_str).unwrap_or_default()}}));
+            items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
         items.sort_by(timeline_order);
     }
@@ -1979,7 +1997,7 @@ pub fn native_timeline_page(
 ) -> Result<Json<Value>, ApiError> {
     let order = native_timeline_order(managed);
     let graph = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session_id, managed)?
+        native_session_messages(state, snapshot, session, session_id, managed)?
     } else {
         Vec::new()
     };
@@ -2175,7 +2193,7 @@ pub fn native_slice_page_at_generation(
         limit + 1
     };
     let messages = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session_id, managed)?
+        native_session_messages(state, snapshot, session, session_id, managed)?
     } else {
         Vec::new()
     };
@@ -3380,10 +3398,7 @@ pub fn timeline_first_page(
             items.push(json!({
                 "id": entry_id(&claim, "content"), "sequence": base_sequence + 1,
                 "revision": 1, "timestamp": timestamp, "role": role, "type": "content",
-                "final": true, "body": {
-                    "media_type": "text/plain",
-                    "text": fields.get("content").and_then(Value::as_str).unwrap_or_default()
-                }
+                "final": true, "body": session_message_content(session, &session_id, &claim)
             }));
         }
     }
