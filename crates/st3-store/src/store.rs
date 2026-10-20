@@ -83,6 +83,7 @@ pub mod roster_controls;
 pub mod roster_fresh_proof_tests;
 pub mod step_labels;
 pub mod operation_audit;
+pub mod push_registrations;
 pub mod mission_provenance;
 pub mod agent_queue_values;
 pub mod backup_format;

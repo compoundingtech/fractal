@@ -3,7 +3,7 @@
 // Clients that omit that token retain the legacy message-list shape and paging contract.
 import { API_VERSION } from './Models.generated.ts';
 import type {
-    ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
+    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
     ResourcesFilter, ResourcesPage, DirectiveNotes,
     Arrangement, ArrangementId, ArrangementPage,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -314,7 +314,8 @@ export class St3Client {
         if (!response.ok || 'error_version' in payload) {
             throw new ClientError(payload as ErrorEnvelope, response.status);
         }
-        if ((path !== '/v1/client/observations' && !('snapshot' in payload)) || !('value' in payload)) {
+        const localCommand = path === '/v1/client/observations' || path === '/v1/client/push-registration';
+        if ((!localCommand && !('snapshot' in payload)) || !('value' in payload)) {
             throw new Error('Incomplete st client API response');
         }
         return payload as EnvelopeOf<T>;
@@ -395,6 +396,15 @@ export class St3Client {
     /** Local diagnostic acceptance, without a snapshot fence or durable action receipt. */
     async observationsReport(report: ObservationReport, requestOptions: RequestOptions = {}): Promise<ObservationResponse> {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
+    }
+
+    /** Replace this paired device's local-only registration, without a graph receipt. */
+    async pushRegister(registration: PushRegistration, requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
+        return this.request('POST', '/v1/client/push-registration', registration, undefined, undefined, requestOptions);
+    }
+
+    async pushUnregister(requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
+        return this.request('DELETE', '/v1/client/push-registration', undefined, undefined, undefined, requestOptions);
     }
 
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {

@@ -527,17 +527,13 @@ fn struct_block<'a>(source: &'a str, declaration: &str) -> Result<&'a str> {
     Ok(&tail[..end])
 }
 
-fn schema_properties(definition: &Value) -> Option<&serde_json::Map<String, Value>> {
-    definition
-        .get("properties")
-        .and_then(Value::as_object)
-        .or_else(|| {
-            definition
-                .get("allOf")?
-                .as_array()?
-                .iter()
-                .find_map(|part| part.get("properties").and_then(Value::as_object))
-        })
+fn schema_properties(definition: &Value) -> impl Iterator<Item = &serde_json::Map<String, Value>> {
+    definition.get("properties").and_then(Value::as_object).into_iter().chain(
+        ["allOf", "oneOf"].into_iter().flat_map(move |key| {
+            definition.get(key).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|part| part.get("properties").and_then(Value::as_object))
+        }),
+    )
 }
 
 fn rust_field(name: &str) -> String {
@@ -600,8 +596,10 @@ fn validate_model(
         }
         return Ok(());
     }
-    let properties = schema_properties(model)
-        .with_context(|| format!("client schema `{definition}` has no properties"))?;
+    let mut properties = schema_properties(model).peekable();
+    if properties.peek().is_none() {
+        bail!("client schema `{definition}` has no properties");
+    }
     let rust_block = struct_block(rust, &format!("pub struct {rust_name} {{"))?;
     let swift_block = struct_block(swift, &format!("public struct {swift_name}:"))?;
     // Resource branches may narrow a header field such as `id` to its family reference;
@@ -612,7 +610,7 @@ fn validate_model(
             .any(|branch| branch["$ref"] == "#/$defs/ResourceHeader")
     }) && rust_block.contains("pub header: ResourceHeader,");
     let header = &schema["$defs"]["ResourceHeader"]["properties"];
-    for property in properties.keys().filter(|name| {
+    for property in properties.flat_map(|properties| properties.keys()).filter(|name| {
         name.as_str() != "kind" && !(header_backed && header.get(name.as_str()).is_some())
     }) {
         let rust_field = rust_field(property);
@@ -747,6 +745,9 @@ fn validate_surfaces(
         "ObservationReport",
         "ObservationAccepted",
         "ObservationResponse",
+        "PushRegistration",
+        "PushRegistrationStatus",
+        "PushRegistrationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
@@ -802,6 +803,8 @@ fn validate_surfaces(
     }
     for token in [
         "pub async fn observations_report",
+        "pub async fn push_register",
+        "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -819,6 +822,8 @@ fn validate_surfaces(
         "cursor: String?",
         "func events(",
         "func observationsReport(",
+        "func pushRegister(",
+        "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",
@@ -1708,5 +1713,16 @@ mod tests {
             std::fs::remove_file(&path)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn union_model_validation_covers_every_branch_field() {
+        let model = serde_json::json!({"oneOf": [
+            {"properties": {"registered": {"const": false}}},
+            {"properties": {"registered": {"const": true}, "environment": {"type": "string"}}}
+        ]});
+        let fields = schema_properties(&model).flat_map(|properties| properties.keys())
+            .map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
     }
 }

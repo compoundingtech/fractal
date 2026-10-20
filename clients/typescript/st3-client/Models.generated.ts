@@ -1239,6 +1239,7 @@ export type Device = ResourceHeader & {
   person_id?: Id;
   policy_revision?: number;
   principal?: AssistantPrincipal;
+  push?: PushRegistrationStatus;
   scopes: Array<string>;
   sender_class?: AssistantSenderClass;
   session_actor: Id;
@@ -2203,6 +2204,28 @@ export type PublicationDefinition = {
   subject: string;
   token: string;
 };
+
+export type PushEnvironment = "development" | "production";
+
+export type PushRegistration = {
+  app_version: string;
+  bundle_id: string;
+  environment: PushEnvironment;
+  token: string;
+};
+
+export type PushRegistrationResponse = {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  request_id: RequestId;
+  value: PushRegistrationStatus;
+};
+
+export type PushRegistrationStatus = ({
+  registered: false;
+} | {
+  environment: PushEnvironment;
+  registered: true;
+});
 
 export type ReplicatedNotice = {
   complete: boolean;
