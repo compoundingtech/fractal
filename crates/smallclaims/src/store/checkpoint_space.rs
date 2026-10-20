@@ -136,6 +136,21 @@ fn remove_if_present(path: &Path, failures: &mut Vec<String>) {
     }
 }
 
+/// Another proof holds the directory lock. It is released when that proof finishes, so a caller
+/// that can wait, such as a dry-run plan, may try again.
+#[derive(Debug)]
+pub struct CheckpointProofBusy {
+    pub dir: PathBuf,
+}
+
+impl std::fmt::Display for CheckpointProofBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "another checkpoint proof owns {}", self.dir.display())
+    }
+}
+
+impl std::error::Error for CheckpointProofBusy {}
+
 /// One proof owns the directory lock until its copy and every sidecar have been removed. A
 /// surviving `.owner` file names an orphan; a following process may sweep it only while holding
 /// the lock. An unmarked legacy proof file is refused rather than assumed to be abandoned.
@@ -154,7 +169,11 @@ impl ProofOwnership {
             .open(dir.join("proof.lock"))?;
         // SAFETY: the descriptor stays open for the ownership lifetime.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error())
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(CheckpointProofBusy { dir: dir.to_owned() }.into());
+            }
+            return Err(error)
                 .with_context(|| format!("another checkpoint proof owns {}", dir.display()));
         }
         let ownership = Self {

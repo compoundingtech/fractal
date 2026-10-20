@@ -5354,8 +5354,12 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
     let store = daemon.state.store.clone();
     let notify = daemon.state.notify.clone();
     let events = daemon.state.event_notify.clone();
+    // The owner stands in for the seat's runtime. It waits on a deadline, not a count of 10 ms sleeps, because
+    // under CI load those sleeps and the CLI's own start-up both stretch; this test covers declarations
+    // surviving restarts, not how fast a seat becomes ready.
     let owner = tokio::spawn(async move {
-        for _ in 0..300 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline {
             if store.selected_desired_token(SEAT).unwrap().is_some() {
                 for (kind, fields) in [
                     (
@@ -5386,29 +5390,29 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the CLI did not declare its new seat");
+        panic!("the CLI did not declare its new seat within 20 s");
     });
-    cli_value(
-        daemon
-            .cli(
+    let created = daemon
+        .cli(
+            PERSON,
+            &[
+                "agents",
+                "new",
+                "example/cli-seat",
+                "--workspace",
+                daemon.root.path().to_str().unwrap(),
+                "--host",
+                NODE,
+                "--as",
                 PERSON,
-                &[
-                    "agents",
-                    "new",
-                    "example/cli-seat",
-                    "--workspace",
-                    daemon.root.path().to_str().unwrap(),
-                    "--host",
-                    NODE,
-                    "--as",
-                    PERSON,
-                    "--timeout",
-                    "3s",
-                ],
-            )
-            .await,
-    );
+                "--timeout",
+                "15s",
+            ],
+        )
+        .await;
+    // Join the owner first, so a declaration that never appeared fails as that, not as a readiness timeout.
     owner.await.unwrap();
+    cli_value(created);
     for (command, expected) in [("stop", "stop"), ("start", "agent")] {
         daemon.restart().await;
         cli_value(
