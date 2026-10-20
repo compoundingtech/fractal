@@ -445,6 +445,8 @@ print("passed: merge-group shards preserve receipts and the semantic gate valida
 graph_check = root / "scripts/ci-fractal-web-kit-graph"
 detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
 assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
+roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "apps/fractal-web/packages/st3-sdk/src/effect/resourceDecode.ts"]
+assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/st3-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
