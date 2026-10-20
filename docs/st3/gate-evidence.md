@@ -136,6 +136,28 @@ failed remote push leaves the local refs alone. A second run finds nothing to do
 and refs that are not well-formed records are never touched. Take a bundle first when running it by hand:
 `git bundle create evidence-notes.bundle 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
 
+### Records as tags (in progress)
+
+No ruleset can protect `refs/notes/*` (GitHub refuses the target pattern), so anyone with write access can delete a
+newer failing record and let an older pass decide again, and git keeps no trace of the deletion. The records are
+therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no deletion, no update), whose only
+bypass is the App that `evidence-gc` uses. Until then the exposure is bounded: nothing rejects, a pull request skip is
+undone by the merge queue's full run, and one run in five is sampled. The order, each step its own pull request:
+
+1. The tag release workflow ignores `evidence/**` tags (done).
+2. No workflow checkout fetches them. `fetch-depth: 0` fetches every tag, and 5,000 records as tags added 81.5 MiB and
+   16 s to a full fetch (measured 2026-10-19), mostly source objects of tested commits that no branch holds. Every
+   full-history checkout is now `fullHistoryCheckoutSteps` in `.github/workflows/workspace-ci.ts`: a one-commit checkout,
+   then one fetch of every branch and tag with the negative refspec `^refs/tags/evidence/*`. Deepening the shallow clone
+   took 21 s against 11 s for a full fetch, so the step drops the shallow marker, fetches as a fresh clone would
+   (`--refetch`, git 2.36 or later) and checks connectivity: 15 s in all, against 11 s for `fetch-depth: 0` today
+   (2026-10-20, from hetz2). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
+   against a real repository.
+   A plain `git fetch` does not follow these tags either: a record's tag points at a commit no fetched branch holds.
+   A fresh `git clone` does fetch them.
+3. The verifier and the gate read tags first and notes as the legacy layout; then the producers write tags.
+4. The tag ruleset, and `evidence-gc` moves to the App.
+
 ## Trust and custody
 
 The CLI never takes a JSON payload or a signing key. `put` imports an
