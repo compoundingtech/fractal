@@ -51,7 +51,6 @@ try {
       await page.keyboard.press('Escape')
       await page.getByRole('dialog').waitFor({ state: 'hidden' })
     }
-    await page.getByRole('navigation', { name: 'Breadcrumb', exact: true }).click()
     await page.mouse.move(800, 500)
     await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur())
     await page.getByRole('tooltip').waitFor({ state: 'hidden' })
