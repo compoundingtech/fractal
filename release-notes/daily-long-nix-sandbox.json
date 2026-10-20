@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily long lanes no longer ask the Nix installer for the strict sandbox, which failed every lane at Install Nix on Namespace runners",
+  "replay": {"status": "none", "detail": "CI only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Same scoping every other Nix workflow already uses (nix-sandbox-scope.ts); no required check changes."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "Re-running an old failed daily run reuses its old workflow file and fails again; dispatch a new run instead."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}
