@@ -3,7 +3,7 @@ use super::*;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h17cb835adeef owner=fractal_store::store::push_registrations TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_push_registrations (
+        /* sqlite-large-value: allow-for-now lv-h767c9992c3a8 owner=fractal_store::store::push_registrations TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_push_registrations (
             person TEXT NOT NULL, device_id TEXT NOT NULL, pairing_grant TEXT NOT NULL,
             pairing_index INTEGER NOT NULL, expires_at INTEGER NOT NULL,
             token TEXT NOT NULL, environment TEXT NOT NULL CHECK(environment IN ('development','production')),
@@ -114,7 +114,7 @@ impl Store {
                 return Ok(None);
             }
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h0af18dcaceff owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_push_registrations
+                /* sqlite-large-value: allow-for-now lv-he9aaed126f62 owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_push_registrations
                  WHERE pairing_grant=?1 AND pairing_index=?2 AND person=?3 AND device_id=?4",
                 params![proof.grant, proof.pairing_index, proof.person, proof.device],
             )?;
@@ -145,7 +145,7 @@ impl Store {
                    AND json_type(body,'$.fields.device_id')='text'
                    AND json_type(body,'$.fields.expires_at_unix_ms')='integer'
                  ORDER BY store_index DESC LIMIT 1",
-            )?.query_row(/* sqlite-large-value: allow-for-now lv-h36701f503eee owner=fractal_store::store::push_registrations TODO=trace-statement-and-value-representation */ params![grant, self.origin(), person, actor], |row| {
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-h65bca885cad6 owner=fractal_store::store::push_registrations TODO=trace-statement-and-value-representation */ params![grant, self.origin(), person, actor], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             }).optional()?;
             let Some((index, device, expiry)) = pairing else { return Ok(None); };
@@ -155,12 +155,12 @@ impl Store {
                 params![grant, index], |row| row.get(0),
             )?;
             if revoked || expiry <= now() || device.is_empty() {
-                tx.execute(/* sqlite-large-value: allow-for-now lv-hb3b52ac03853 owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_push_registrations WHERE pairing_grant=?1", [grant])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h1a64f1c87528 owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_push_registrations WHERE pairing_grant=?1", [grant])?;
                 return Ok(None);
             }
             if let Some(registration) = registration {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-h540d55cace8e owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_push_registrations(person,device_id,pairing_grant,pairing_index,expires_at,token,environment,bundle_id,app_version)
+                    /* sqlite-large-value: allow-for-now lv-h21fc474d17db owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_push_registrations(person,device_id,pairing_grant,pairing_index,expires_at,token,environment,bundle_id,app_version)
                      VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
                      ON CONFLICT(person,device_id) DO UPDATE SET pairing_grant=excluded.pairing_grant,
                      pairing_index=excluded.pairing_index,expires_at=excluded.expires_at,token=excluded.token,
@@ -170,7 +170,7 @@ impl Store {
                 )?;
                 Ok(Some(PushRegistrationStatus { registered: true, environment: Some(registration.environment) }))
             } else {
-                tx.execute(/* sqlite-large-value: allow-for-now lv-h937a342a62d9 owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_push_registrations WHERE person=?1 AND device_id=?2", params![person, device])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h4cda0953402d owner=fractal_store::store::push_registrations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_push_registrations WHERE person=?1 AND device_id=?2", params![person, device])?;
                 Ok(Some(PushRegistrationStatus::unregistered()))
             }
         }).map_err(|_| anyhow::anyhow!("local push registration transaction failed"))?
@@ -182,7 +182,7 @@ impl Store {
     pub fn sweep_push_registrations(&self, now: u64) -> Result<usize> {
         self.connection.batched(|tx| -> Result<usize> {
             Ok(tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h1150d5ab44b0 owner=fractal_store::store::push_registrations TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_push_registrations WHERE expires_at<=?1 OR NOT EXISTS(
+                /* sqlite-large-value: allow-for-now lv-hdd26424ed620 owner=fractal_store::store::push_registrations TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_push_registrations WHERE expires_at<=?1 OR NOT EXISTS(
                     SELECT 1 FROM claims WHERE subject=pairing_grant AND store_index=pairing_index
                     AND kind='custom.client.pairing-completed') OR EXISTS(
                     SELECT 1 FROM claims WHERE subject=pairing_grant AND store_index>pairing_index

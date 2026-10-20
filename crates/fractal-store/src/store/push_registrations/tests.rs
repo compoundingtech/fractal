@@ -212,7 +212,7 @@ fn push_terminal_cleanup_database_errors_are_redacted() {
     let store = Store::open_memory("push-owner").unwrap();
     grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
     let proof = cleanup_proof(&store, GRANT);
-    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h3bff6c20fc1b owner=fractal_store::store::push_registrations::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE local_push_registrations").unwrap();
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h99b338a5fab1 owner=fractal_store::store::push_registrations::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE local_push_registrations").unwrap();
     let error = store.cleanup_push_registration(&proof).unwrap_err();
     assert_eq!(error.to_string(), "local push registration cleanup failed");
     let diagnostic = format!("{error:?}");
@@ -502,7 +502,7 @@ fn push_local_schema_upgrades_old_store_and_registration_survives_restart_then_e
             .lock()
             .expect("fixture writer")
             .execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h61e87ebfcf78 owner=fractal_store::store::push_registrations::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER local_push_pairing_changed; DROP TABLE local_push_registrations;",
+                /* sqlite-large-value: allow-for-now lv-h4fda60fc12ea owner=fractal_store::store::push_registrations::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER local_push_pairing_changed; DROP TABLE local_push_registrations;",
             )
             .unwrap();
     }

@@ -148,7 +148,7 @@ async fn push_secret_expiry_cleanup_runs_at_startup_without_any_attention_reader
         .connection
         .lock()
         .expect("fixture writer")
-        .execute(/* sqlite-large-value: allow-for-now lv-hc0139dd1456b owner=fractal_api_client_v0::api::client_v0::push_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_push_registrations SET expires_at=0", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-haf9eb5d7bcff owner=fractal_api_client_v0::api::client_v0::push_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_push_registrations SET expires_at=0", [])
         .unwrap();
     super::super::client_push::start_push_registration_cleanup(&state);
     tokio::time::timeout(Duration::from_secs(10), async {
