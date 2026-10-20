@@ -18,9 +18,9 @@ verifiers accept both predicate types:
 permanent signed-history decoder exception named in
 [#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
 attestations are never rewritten. All other predicate URIs are rejected.
-The Rust observers and `scripts/evidence-sign` still write
-`https://smalltalk.dev/evidence/gate/v1`. The signer switches only in a later
-release, after this dual-URI verifier release is on main. Its fields are:
+The Rust observers and `scripts/evidence-sign` write
+`https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers
+also accept records produced by older signers. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
