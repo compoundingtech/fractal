@@ -784,8 +784,7 @@ replay.actions  // actions the client submitted, in order, for test assertions
   `manualClock()` exposes `advance(ms)` for tests. The clock releases timeline events;
   opens and socket callbacks are delivered as later tasks, never reentrantly from `send()` or
   `close()`. Replies and timeline frames share one FIFO MessageChannel task queue, with one
-  event per task (not a microtask). MessageChannel is outside
-  [Playwright clock's faked APIs](https://playwright.dev/docs/api/class-clock#clock-install),
+  event per task (not a microtask). Playwright's `clock.install` does not fake MessageChannel,
   so delivery works while its timers and Date are paused. Where supported (Node/Bun), idle
   ports are unref'd; pending work refs the receiving port until the queue becomes idle.
   Replay teardown closes both ports.
