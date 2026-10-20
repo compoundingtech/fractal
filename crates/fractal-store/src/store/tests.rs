@@ -39,7 +39,7 @@ mod mission_eval_reuse_tests {
 
 mod subject_reference_readmission_tests {
     use super::*;
-    /* sqlite-large-value: allow-for-now lv-haa08848c6d15 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subject_reference_readmission_tests.rs");
+    /* sqlite-large-value: allow-for-now lv-hd729ec9593f5 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subject_reference_readmission_tests.rs");
 }
 
 mod run_capacity_tests {

@@ -4,7 +4,7 @@
 //!
 //! The stamp is a `CLI_BUILD_STAMP` JSON blob, the same env var + shape the rest
 //! of the fleet uses (TS `@overeng/utils/node/cli-version`; the otel-scrape Rust
-//! reader). The final binary bakes it at compile time (crates/st-build-stamp) and
+//! reader). The final binary bakes it at compile time (crates/fractal-build-stamp) and
 //! hands it here at startup through [`set_build_stamps`], so a new commit rebuilds
 //! only the binaries, not this library and everything above it:
 //!   - `CLI_BUILD_STAMP` — a release stamp from the archive builder, or a **NixStamp** the flake bakes from `self` (the flake
