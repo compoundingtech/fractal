@@ -123,10 +123,9 @@ const separator = () => host.querySelector<HTMLElement>('[role="separator"][aria
 const close = () => host.querySelector<HTMLButtonElement>('button[aria-label="Close changes"]')!
 const openChanges = async () => {
   if (toggle().getAttribute('aria-pressed') !== 'true') await act(async () => toggle().click())
-  await act(async () => vi.dynamicImportSettled())
-  // Import settlement does not guarantee that React committed the Suspense content.
+  // Mocked module factories can outlive import tracking; wait for the committed captured diff.
   await vi.waitFor(async () => {
-    await act(async () => {})
+    await act(async () => vi.dynamicImportSettled())
     expect(host.querySelector('[data-testid="diff-code"]')).not.toBeNull()
   })
 }

@@ -19,7 +19,8 @@ record is trusted (reason=no-record), so the check runs. Any failure computes no
   web-skip-proof inputs <check> [--base REF]    print the derived literal input list
   web-skip-proof claims PATH... [--base REF]    owned:<checks> or not-mine, per path (the plugin's claims())
 
-Fetch the head tree's evidence notes first (`git fetch origin '+refs/notes/evidence/<tree>/*:refs/notes/evidence/<tree>/*'`, plus
+Fetch the head tree's evidence records first (`git fetch origin '+refs/tags/evidence/<tree>/*:refs/tags/evidence/<tree>/*'
+'+refs/notes/evidence/<tree>/*:refs/notes/evidence/<tree>/*'`, plus `refs/tags/evidence/input/<check>/<key>/*` and
 `refs/notes/evidence-input/<check>/<key>/*` for a check with a key); `--fetch` does it. Never the whole namespace.
 """
 
@@ -109,7 +110,8 @@ def decide(name, selector, base, head, repository, policy_inputs, scratch):
         return line
     line['key'] = key
     if FETCH['origin'] and re.fullmatch(r'[0-9a-f]{40,64}', key) and re.fullmatch(r'[A-Za-z0-9._-]+', name):
-        subprocess.run(['git', 'fetch', '-q', 'origin', f'+refs/notes/evidence-input/{name}/{key}/*:refs/notes/evidence-input/{name}/{key}/*'], capture_output=True)
+        subprocess.run(['git', 'fetch', '-q', '--no-tags', 'origin', f'+refs/tags/evidence/input/{name}/{key}/*:refs/tags/evidence/input/{name}/{key}/*',
+                        f'+refs/notes/evidence-input/{name}/{key}/*:refs/notes/evidence-input/{name}/{key}/*'], capture_output=True)
     if policy_inputs is None:
         line['reason'] = 'no-record'  # no declared policy: no record is trusted for this check yet
         return line
@@ -139,7 +141,7 @@ def main(argv):
     base, head = git('rev-parse', '--verify', f'{args.base}^{{commit}}').strip(), git('rev-parse', '--verify', f'{args.head}^{{commit}}').strip()
     if args.fetch:  # this head tree's own records (one prefix); the input-keyed ones are fetched per check below
         tree = git('rev-parse', '--verify', f'{head}^{{tree}}').strip()
-        git('fetch', '-q', 'origin', f'+refs/notes/evidence/{tree}/*:refs/notes/evidence/{tree}/*')
+        git('fetch', '-q', '--no-tags', 'origin', f'+refs/tags/evidence/{tree}/*:refs/tags/evidence/{tree}/*', f'+refs/notes/evidence/{tree}/*:refs/notes/evidence/{tree}/*')
         FETCH['origin'] = True
     with tempfile.TemporaryDirectory() as scratch:
         select = selectors(base, scratch)

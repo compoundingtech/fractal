@@ -13,6 +13,7 @@ import { timeContext } from '../kit/time.ts'
 import { foldSlice } from '../kit/fold.ts'
 import { SLICE_KINDS, type HttpCondition, type Selector, type SliceKind, type TimelineEvent, type WireResource } from '../kit/slice.ts'
 import type { World } from '../kit/world.ts'
+import { deliveryTasks } from './tasks.ts'
 
 export { manualClock, realClock, type Clock, type ManualClock } from '../clock.ts'
 
@@ -22,6 +23,12 @@ export interface Replay {
   readonly actions: ActionRequest[]
   readonly served: () => ReadonlySet<SliceKind>
   readonly close: () => void
+}
+
+/** A replay created by the kit, with task-delivery synchronization for tests. */
+export interface ReplayHandle extends Replay {
+  /** Waits for queued socket events, including replies queued by their handlers. Does not advance the clock. */
+  readonly flush: () => Promise<void>
 }
 
 type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string }
@@ -95,9 +102,10 @@ const requestMatches = (url: URL, when?: HttpCondition): boolean =>
   (when?.cursor === undefined || url.searchParams.has('cursor') === (when.cursor === 'present')) &&
   Object.entries(when?.query ?? {}).every(([key, value]) => url.searchParams.get(key) === value)
 
-/** Socket opens are clock tasks, not microtasks: manual-clock callers release them with advance(0). */
-export const createReplay = (world: World, { clock }: { readonly clock: Clock }): Replay => {
+/** Socket callbacks run as FIFO tasks independently of the scenario clock. */
+export const createReplay = (world: World, { clock }: { readonly clock: Clock }): ReplayHandle => {
   const consumed = new Set<SliceKind>()
+  const deliveries = deliveryTasks()
   const actions: ActionRequest[] = []
   const connections = new Set<Connection>()
   const pendingOpens = new Map<Connection, () => void>()
@@ -195,9 +203,15 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
   }
   const emit = (connection: Connection, frame: Record<string, unknown>) => {
     if (!connection.open || connection.closed) return
-    if (!connection.legacy) connection.socket.onmessage?.({ data: JSON.stringify(frame) })
-    else if (frame.kind === 'screen') connection.socket.onmessage?.({ data: JSON.stringify(envelope(frame.value)) })
-    else if (frame.kind === 'error') connection.socket.onmessage?.({ data: JSON.stringify(errorEnvelope(typeof frame.code === 'string' ? frame.code : 'terminal-unavailable', String(frame.message), frame.retryable === true)) })
+    const value = !connection.legacy ? frame
+      : frame.kind === 'screen' ? envelope(frame.value)
+      : frame.kind === 'error' ? errorEnvelope(typeof frame.code === 'string' ? frame.code : 'terminal-unavailable', String(frame.message), frame.retryable === true)
+      : undefined
+    if (value === undefined) return
+    const data = JSON.stringify(value)
+    deliveries.enqueue(() => {
+      if (!closed && connection.open && !connection.closed) connection.socket.onmessage?.({ data })
+    })
   }
   const refuse = (connection: Connection, sub: Subscription, code: string, retryable: boolean) => {
     emit(connection, { kind: 'error', id: sub.id, collection: sub.collection, code, message: code, retryable })
@@ -282,7 +296,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     connection.subscriptions.clear()
     connections.delete(connection)
     pendingOpens.delete(connection)
-    connection.socket.onclose?.({ code, reason })
+    deliveries.enqueue(() => connection.socket.onclose?.({ code, reason }), { preserveOnClear: true })
   }
   const dispatch = (kind: SliceKind, event: TimelineEvent) => {
     switch (event._tag) {
@@ -378,12 +392,12 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       case 'open-hold': opensHeld = true; return
       case 'open-release':
         opensHeld = false
-        for (const open of pendingOpens.values()) schedule(clock.now(), open)
+        for (const open of pendingOpens.values()) open()
         pendingOpens.clear()
         return
       case 'close':
         blockedUntil = Infinity
-        for (const connection of [...connections]) finishConnection(connection, event.code, event.reason)
+        for (const connection of [...connections]) deliveries.enqueue(() => finishConnection(connection, event.code, event.reason))
         return
       case 'reopen': blockedUntil = clock.now() + event.after_ms; return
       case 'http-error': case 'http-raw': {
@@ -536,7 +550,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         return
       }
       if (opensHeld) {
-        pendingOpens.set(connection, open)
+        pendingOpens.set(connection, () => deliveries.enqueue(open))
         return
       }
       if (failedOpens > 0 || clock.now() < blockedUntil) {
@@ -555,7 +569,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         first(connection, sub)
       }
     }
-    schedule(clock.now(), open)
+    deliveries.enqueue(open)
     return connection.socket
   }
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -762,11 +776,13 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     const value = { kind: 'page', collection: route, filters, items: items.slice(start, start + limit), page: pageInfo(items.length, start + limit), ...(sync === undefined ? {} : { sync }) }
     return json(envelope(value))
   }
-  return { socket, fetch: fetchImpl, actions, served: () => new Set(consumed), close: () => {
+  return { socket, fetch: fetchImpl, actions, served: () => new Set(consumed), flush: deliveries.flush, close: () => {
     if (closed) return
     closed = true
     for (const cancel of cancellations) cancel()
     cancellations.clear()
+    deliveries.clear()
     for (const connection of [...connections]) finishConnection(connection, 1000, '')
+    deliveries.enqueue(deliveries.close)
   } }
 }

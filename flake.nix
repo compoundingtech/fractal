@@ -169,6 +169,16 @@
           baseline = builtins.fromJSON (builtins.readFile ./.github/messaging-compat-baseline.json);
         };
 
+        # The pinned fleet-compatibility release bundle as the archive itself (a fixed-output fetch), for
+        # checks that run scripts/compat-baseline in the sandbox, which has no network. The script
+        # still verifies its checksum and BUILD.json.
+        fleetBaselineArchive =
+          let
+            pin = builtins.fromJSON (builtins.readFile ./.github/fleet-compat-baseline.json);
+            bundle = pin.bundles.${pkgs.stdenv.hostPlatform.rust.rustcTarget} or null;
+          in
+          if bundle == null then null else pkgs.fetchurl { inherit (bundle) url sha256; };
+
         # Give the historical binary a distinct name in the check-only PATH.
         # Resolving it there keeps its store identity out of the runtime derivation.
         messagingCompat = pkgs.runCommand "st3-messaging-compat" { } ''
@@ -1409,6 +1419,8 @@
         checks.wasm-resolver-feature = st2WasmResolver;
         checks.wasip2-resource-providers = st2ProviderRuntime;
         checks.provider-components = st2ProviderComponents;
+        # The `typescript-client` required check: the frozen pnpm installation is a fixed-output derivation.
+        checks.typescript-client = import ./nix/typescript-client.nix { inherit effect-utils system version; self = ./.; };
         # Exercise the shipped binary, not a cargo-side surrogate: its version entrypoint runs and
         # the same artifact strictly admits a catalog carrying a real wasm profile module.
         checks.wasm-resolver-artifact = pkgs.runCommand "st2-wasm-resolver-artifact-${version}" { } ''
@@ -1593,8 +1605,10 @@
         # the one test that needs a repository gets a throwaway one (its commit ID is an opaque
         # value there) and `tar` is declared for the cache test.
         checks.genie-freshness = pkgs.runCommand "genie-freshness-${version}" {
+          COMPAT_BASELINE_ARCHIVE = fleetBaselineArchive;
           nativeBuildInputs = [
             effect-utils.packages.${system}.genie
+            pkgs.bubblewrap
             pkgs.git
             pkgs.gnutar
             pkgs.jq
@@ -1613,7 +1627,14 @@
           git init --quiet
           git add -A
           git -c user.name=nix -c user.email=nix@localhost commit --quiet -m source
-          bash scripts/ci-genie-freshness
+          # The tests run scripts and git hooks by their `#!/usr/bin/env` line, as they do on a developer's
+          # machine; the sandbox has no /usr/bin/env. Run them in a fresh root that has one (and no
+          # network), so no test needs to change.
+          bwrap --bind /nix /nix --bind "$PWD" "$PWD" --bind "$HOME" "$HOME" --ro-bind /etc /etc \
+            --dev /dev --proc /proc --tmpfs /tmp \
+            --dir /usr/bin --ro-bind ${pkgs.coreutils}/bin/env /usr/bin/env \
+            --dir /bin --ro-bind ${pkgs.bash}/bin/sh /bin/sh \
+            --unsetenv PYTHONPATH --unshare-net --chdir "$PWD" -- bash scripts/ci-genie-freshness
           touch "$out"
         '';
 

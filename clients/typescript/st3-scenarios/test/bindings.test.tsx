@@ -1,9 +1,10 @@
+import * as React from 'react'
 import { composeStory } from '@storybook/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { ANCHOR_MS, catalog, foldSlice, loadWorld, manualClock, syncStatusAt, type SliceKind } from '../src/index.ts'
-import { createReadTracker, ScenarioProvider, useScenarioSlice, type WireSlice } from '../src/react/index.ts'
+import { createReadTracker, ScenarioProvider, ScenarioReadBoundary, useScenarioSlice, type WireSlice } from '../src/react/index.ts'
 import { scenarioArgTypes, scenarioGlobalTypes } from '../src/storybook/index.ts'
 import { scenarioStoryCheck, ScenarioStoryCheckError, withScenario, type ScenarioStoryCheckOptions } from '../src/storybook/check.ts'
 import { defaultVariants, worldNames } from '../src/storybook/manifest.ts'
@@ -157,9 +158,9 @@ describe('Storybook scenario binding', () => {
     expect(result.reads).toEqual(new Set(['sync']))
     expect(result.checks.find(({ check }) => check === 2)?._tag).toBe('Skipped')
     expect(result.checks.find(({ check }) => check === 3)?._tag).toBe('Skipped')
-    const invalid = { ...Invariant, parameters: { scenario: { slices: ['sync'], invariant: { sync: ' ' } } } }
+    const invalid = { ...Invariant, parameters: { scenario: { _tag: 'slices', slices: ['sync'], invariant: { sync: ' ' } } } }
     expect(() => scenarioStoryCheck(invalid, meta)).toThrow('invariant sync requires a reason')
-    const fixedInvariant = { ...Fixed, parameters: { scenario: { slices: ['roster'], invariant: { roster: 'Intentionally fixed layout' } } } }
+    const fixedInvariant = { ...Fixed, parameters: { scenario: { _tag: 'slices', slices: ['roster'], invariant: { roster: 'Intentionally fixed layout' } } } }
     expect(scenarioStoryCheck(fixedInvariant, meta).failures.some(({ check }) => check === 1)).toBe(true)
   })
 
@@ -229,5 +230,106 @@ describe('Storybook scenario binding', () => {
     expect(result._tag).toBe('Passed')
     expect(result.checks.find(({ check }) => check === 2)?._tag).toBe('Passed')
     expect(result.checks.find(({ check }) => check === 3)?._tag).toBe('Skipped')
+  })
+
+  it('rejects missing and legacy untagged declarations', () => {
+    expect(() => scenarioStoryCheck({ render: () => <p>Fixed</p> }, {})).toThrow('requires parameters.scenario declaration')
+    expect(() => scenarioStoryCheck({ render: () => <p>Fixed</p>, parameters: { scenario: { slices: [] } } }, {})).toThrow('requires a valid _tag')
+  })
+
+  it('rejects empty slice declarations in the checker and runtime decorator', () => {
+    const story = { render: () => <p>Fixed</p>, parameters: { scenario: { _tag: 'slices', slices: [] } } }
+    expect(() => scenarioStoryCheck(story, {})).toThrow('requires at least one slice')
+    const Composed = composeStory(story, {}, { decorators: [withScenario] })
+    expect(() => renderToStaticMarkup(<Composed />)).toThrow('requires at least one slice')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects changing between slices and %s modes in either direction', (_tag) => {
+    const render = () => <p>Fixed</p>
+    const slices = { _tag: 'slices', slices: ['roster'] } as const
+    const exemption = { _tag, reason: 'Isolated visual contract' }
+    const message = 'a story must not change scenario mode from meta; declare the mode per story or split the meta'
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: exemption } }, {
+      parameters: { scenario: slices },
+    })).toThrow(message)
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: slices } }, {
+      parameters: { scenario: exemption },
+    })).toThrow(message)
+  })
+
+  it('rejects changing exemption modes between meta and story', () => {
+    const render = () => <p>Fixed</p>
+    for (const [metaMode, storyMode] of [['primitive', 'contract-fixture'], ['contract-fixture', 'primitive']] as const) {
+      expect(() => scenarioStoryCheck({ render, parameters: {
+        scenario: { _tag: storyMode, reason: 'Story contract' },
+      } }, { parameters: {
+        scenario: { _tag: metaMode, reason: 'Meta contract' },
+      } })).toThrow('a story must not change scenario mode from meta; declare the mode per story or split the meta')
+    }
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('explains recursively merged slices under a %s runtime exemption', (_tag) => {
+    const Composed = composeStory({
+      render: () => <p>Fixed</p>,
+      parameters: { scenario: { _tag, reason: 'Isolated visual contract' } },
+    }, {
+      parameters: { scenario: { _tag: 'slices', slices: ['roster'] } },
+    }, { decorators: [withScenario] })
+    expect(() => renderToStaticMarkup(<Composed />)).toThrow('cannot declare slices or scenario configuration; a story must not change scenario mode from meta; declare the mode per story or split the meta')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('reports the reasoned %s exemption without scenario checks', (_tag) => {
+    const exemption = { _tag, reason: 'Isolated visual contract, not scenario data' }
+    const result = scenarioStoryCheck({ render: () => <p>Fixture</p>, parameters: { scenario: exemption } }, {}, { scenario: 'not-a-world' })
+    expect(result._tag).toBe('Passed')
+    expect(result.exemptions).toEqual([exemption])
+    expect(result.reads.size).toBe(0)
+    expect(result.checks.every(({ _tag }) => _tag === 'Skipped')).toBe(true)
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects dishonest %s wiring and empty reasons', (_tag) => {
+    const render = () => <p>Fixture</p>
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: { _tag, reason: ' ' } } }, {})).toThrow('requires a reason')
+    const scenario = { _tag, reason: 'Isolated contract' }
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: { ...scenario, slices: [] } } }, {})).toThrow('cannot declare slices')
+    for (const args of [{ roster: 'default' }, { conversation: undefined }]) {
+      expect(() => scenarioStoryCheck({ render, args, parameters: { scenario } }, {})).toThrow('cannot supply scenario args')
+    }
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario } }, { args: { sync: 'default' } })).toThrow('cannot supply scenario args')
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario } }, {}, { args: { terminal: 'default' } })).toThrow('cannot supply scenario args')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects a hook under %s even inside a nested provider', (_tag) => {
+    const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
+    const render = () => <ScenarioProvider world={world}><Consumer /></ScenarioProvider>
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: { _tag, reason: 'Invalid hook exemption' } } }, {})).toThrow('useScenarioSlice is forbidden')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects a forbidden %s read swallowed by an SSR Suspense fallback', (_tag) => {
+    const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
+    const story = {
+      render: () => <React.Suspense fallback={<p>Recovered render</p>}>
+        <ScenarioReadBoundary reason="nested restriction">
+          <ScenarioProvider world={world}><Consumer /></ScenarioProvider>
+        </ScenarioReadBoundary>
+      </React.Suspense>,
+      parameters: { scenario: { _tag, reason: 'Invalid hook exemption' } },
+    }
+    // SSR turns the thrown hook error into a Suspense fallback rather than propagating it.
+    const Composed = composeStory(story, {}, { decorators: [withScenario] })
+    expect(renderToStaticMarkup(<Composed />)).toContain('<p>Recovered render</p>')
+    expect(() => scenarioStoryCheck(story, {})).toThrow('useScenarioSlice is forbidden')
+    expect(() => scenarioStoryCheck(story, {}, { assert: true })).toThrow('useScenarioSlice is forbidden')
+    // A failed check must not contaminate the next independent exemption check.
+    expect(scenarioStoryCheck({
+      render: () => <p>Independent fixture</p>,
+      parameters: { scenario: { _tag, reason: 'No scenario reads' } },
+    }, {})._tag).toBe('Passed')
+  })
+
+  it('rejects a hook without a declaration through the runtime decorator', () => {
+    const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
+    const Composed = composeStory({ render: Consumer }, {}, { decorators: [withScenario] })
+    expect(() => renderToStaticMarkup(<Composed />)).toThrow('no parameters.scenario declaration')
   })
 })

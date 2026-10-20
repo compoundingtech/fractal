@@ -117,6 +117,11 @@ leave existing declarations and owned sets intact. This narrow field reads workf
 workflows, successes, cancellations and timeouts produce no P0 delivery. It fetches no logs or
 artifacts and never dispatches a workflow.
 
+Performance now runs only by manual dispatch; its load jobs run on `main` once a day in the daily
+long lanes (`daily-long.yml`, see [CI operations](ci.md#daily-long-lanes)). So no `push` run of
+`perf.yml` exists for this field to report. A red `daily-perf-load` reaches the daily lanes' one
+`Daily long-lane run failed` issue instead. Pointing this field at the daily run is a separate change.
+
 Each message has a P0 title and tag, and JSON content with `priority`, `repository`, `run_id`,
 `run_attempt`, `head_sha`, `workflow`, `workflow_path`, `url` and the selected status/event/branch.
 One message names one failed run attempt. The first successful snapshot for each recipient and

@@ -201,6 +201,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert (extracted / 'st-bench/sample').read_text() == 'st-bench'
     # API ordering includes untrusted entries: none may supply caches or a baseline.
     runs = [dict(run, id=9, event='pull_request')] + [dict(run, id=i) for i in range(8, 0, -1)]
+    daily_runs, jobs_by_run = [], {}
     downloads = []
     candidates = []
     previous = pr_run
@@ -218,8 +219,12 @@ with tempfile.TemporaryDirectory() as tmp:
             return previous
         if 'event=pull_request' in path:
             return dict(workflow_runs=candidates)
-        if '/workflows/' in path:
+        if '/workflows/daily-long.yml/' in path:
+            return dict(workflow_runs=daily_runs)
+        if '/workflows/perf.yml/' in path:
             return dict(workflow_runs=runs)
+        if '/jobs?' in path:
+            return dict(jobs=jobs_by_run[int(path.split('/runs/', 1)[1].split('/', 1)[0])])
         assert '/runs/9/' not in path
         if missing_previous_artifacts and '/runs/10/' in path:
             return dict(artifacts=[])
@@ -320,6 +325,30 @@ with tempfile.TemporaryDirectory() as tmp:
     with contextlib.redirect_stdout(io.StringIO()):
         module.restore()
     assert all(selected != 10 for selected, _ in downloads)
+    # Main's daily long lanes: the load job's own conclusion decides, never the whole run's. A red
+    # unrelated lane keeps a passing load as a baseline; a skipped load supplies nothing; a failed load
+    # supplies snapshots only. They interleave with perf.yml's older main runs by creation time.
+    daily = '.github/workflows/daily-long.yml'
+    daily_runs[:] = [dict(run, id=23, path=daily, conclusion='failure', created_at='2026-10-21T05:07:00Z'),
+                     dict(run, id=22, path=daily, conclusion='success', created_at='2026-10-20T05:07:00Z'),
+                     dict(run, id=21, path=daily, conclusion='failure', created_at='2026-10-19T05:07:00Z')]
+    jobs_by_run.update({23: [dict(name='daily-isolation-vm', conclusion='failure'), dict(name='daily-perf-load', conclusion='success')],
+                        22: [dict(name='daily-perf-load', conclusion='skipped')],
+                        21: [dict(name='daily-perf-load', conclusion='failure')]})
+    assert module.trusted(dict(daily_runs[0], conclusion='success'))
+    assert not module.trusted(dict(daily_runs[0], path='.github/workflows/fleet.yml', conclusion='success'))
+    downloads.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        module.restore()
+    assert set(downloads[:2]) == {(23, 'build-recipe'), (23, 'stores-recipe')}, downloads
+    assert downloads[2:] == [(23, 'perf-load-logs')] + [(i, 'perf-load-logs') for i in range(8, 4, -1)], downloads
+    jobs_by_run[23] = [dict(name='daily-perf-load', conclusion='failure')]
+    downloads.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        module.restore()
+    assert set(downloads[:2]) == {(23, 'build-recipe'), (23, 'stores-recipe')}, 'a failed load still keeps its valid snapshots'
+    assert downloads[2:] == [(i, 'perf-load-logs') for i in range(8, 3, -1)], 'a failed load never becomes a baseline'
+    daily_runs.clear()
     os.environ.update(GITHUB_EVENT_NAME='pull_request', GITHUB_RUN_ATTEMPT='1')
     candidates.clear()
     def incomplete(archive, destination, names):
