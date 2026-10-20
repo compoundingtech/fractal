@@ -1552,6 +1552,11 @@ class WorkflowStructure(unittest.TestCase):
                 signed += 1
                 env = re.search(r'^          GATE_SKIP: (.*)$', chunk, re.M)
                 self.assertIsNotNone(env, f'{name} signs without being told when its gate skipped')
+                if name == 'fractal-web-execution':
+                    # A lane with no gate: its paths decide whether it runs, nothing ever skips it on a prior note.
+                    self.assertIn(env.group(1).strip(), ('false', '"false"', "'false'"), name)
+                    self.assertNotIn('needs.', env.group(1), name)
+                    continue
                 referenced = set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', env.group(1)))
                 self.assertTrue(referenced, name)
                 # Every gate it reads must be one of its needs, and the check's own gate must be among them.
@@ -1600,7 +1605,7 @@ class WorkflowStructure(unittest.TestCase):
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
         names = [line.strip()[2:] for line in needs.splitlines()]
-        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith('evidence-gate-'))
+        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith(('evidence-gate-', 'fractal-web-')))
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], derived)
         self.assertEqual(GATE_ARGV, derived)

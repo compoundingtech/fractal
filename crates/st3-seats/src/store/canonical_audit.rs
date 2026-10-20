@@ -63,6 +63,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "retired_envelopes",
         "retired_claim_withdrawals",
         "retired_envelope_withdrawals",
+        "writer_heads",
         "projection_health",
         "replication_peers",
         "replication_refusals",

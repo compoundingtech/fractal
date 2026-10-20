@@ -92,6 +92,7 @@ mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
 mod launch_cli;
+mod migrate_cli;
 mod replication_cli;
 mod terminals_cli;
 mod uninstall_cli;
@@ -316,6 +317,11 @@ enum Command {
     },
     /// Remove st3 from this machine: leave its fleet, then its services, state, and settings.
     Uninstall(UninstallArgs),
+    /// Cut over this host from legacy directories and services to pre-staged Fractal services.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
     /// Join machines into a fleet: create, invite, join, and inspect members.
     Fleet {
         #[command(subcommand)]
@@ -2084,6 +2090,40 @@ enum RepairCommand {
 }
 
 #[derive(Subcommand)]
+enum MigrateCommand {
+    /// Migrate the default host after its Fractal services have been staged disabled.
+    Host(migrate_cli::HostArgs),
+}
+
+#[cfg(test)]
+mod host_migration_cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_host_cutover_modes_and_rejects_conflicting_modes() {
+        for flags in [vec![], vec!["--dry-run"], vec!["--rollback"]] {
+            let cli = Cli::try_parse_from(["st", "migrate", "host"].into_iter().chain(flags)).unwrap();
+            assert!(matches!(cli.command, Command::Migrate { command: MigrateCommand::Host(_) }));
+        }
+        assert!(Cli::try_parse_from(["st", "migrate", "host", "--dry-run", "--rollback"]).is_err());
+    }
+
+    #[test]
+    fn service_staging_is_explicit_and_normal_install_remains_the_default() {
+        for (args, expected) in [
+            (vec!["st", "service", "install"], false),
+            (vec!["st", "service", "install", "--stage-fractal"], true),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Service { command: ServiceCommand::Install { stage_fractal, .. } } = cli.command else {
+                panic!("expected service install");
+            };
+            assert_eq!(stage_fractal, expected);
+        }
+    }
+}
+
+#[derive(Subcommand)]
 enum StoreCommand {
     /// Build and verify mandatory owner indexes offline; stop all store writers first.
     PrepareIndexes {
@@ -2099,6 +2139,9 @@ enum ServiceCommand {
     Install {
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Install future Fractal definitions disabled without starting or loading services.
+        #[arg(long)]
+        stage_fractal: bool,
     },
     /// Show whether the daemon and replication services are installed and running.
     Status,
@@ -4789,6 +4832,17 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Setup(args) = cli.command {
         return crate::setup::run(args).await.map(|_| ());
     }
+    // Staging must bypass normal service-family conflict checks and all install
+    // initialization: the legacy daemon and definitions intentionally remain live.
+    if let Command::Service {
+        command: ServiceCommand::Install { config, stage_fractal: true },
+    } = &cli.command
+    {
+        return st3::service::stage_fractal(
+            Config::load_unvalidated(config.as_deref())?,
+            config.as_deref(),
+        );
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -5078,6 +5132,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Uninstall(args) => run_uninstall(&endpoint, args).await,
+        Command::Migrate { command: MigrateCommand::Host(args) } => {
+            migrate_cli::run(&endpoint, args, cli.json).await
+        }
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
@@ -10640,7 +10697,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
 
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
     match command {
-        ServiceCommand::Install { config } => {
+        ServiceCommand::Install { config, stage_fractal } => {
+            if stage_fractal {
+                return st3::service::stage_fractal(
+                    Config::load_unvalidated(config.as_deref())?,
+                    config.as_deref(),
+                );
+            }
             st3::service::install_from_config_path(
                 Config::load_with_fleet(config.as_deref())?,
                 config.as_deref(),

@@ -758,12 +758,12 @@ pub fn prepare_one(
             }
         }
     }
-    // Plain Codex content also carries internal source-record blocks. Preserve a
-    // separate continuation to its text body rather than exposing the raw record.
+    // Assistant projections also need handles for short chat replies. Preserve a separate
+    // text continuation without changing ordinary native clients' display-block layout.
     if session.conversation_blocks && original["body"]["media_type"] == "text/plain"
-        && original["body"]["text"].as_str().is_some_and(|text| text.len() > VALUE_BYTES)
+        && original["body"]["text"].as_str().is_some_and(|text| text.len() > VALUE_BYTES || session.assistant_content_handles)
         && body.get("blocks").and_then(Value::as_array)
-            .is_none_or(|blocks| blocks.iter().all(|block| block["kind"] == "source_record"))
+            .is_none_or(|blocks| session.assistant_content_handles || blocks.iter().all(|block| block["kind"] == "source_record"))
     {
         let blocks = body.entry("blocks").or_insert_with(|| json!([])).as_array_mut().expect("blocks array");
         blocks.push(json!({"id":format!("{}/text",original["id"].as_str().unwrap_or("content")),
@@ -869,16 +869,46 @@ pub fn legacy(value: &mut Value, session: &ClientSession) {
     }
 }
 
-/// One authenticated plain-text payload for an assistant content read, with the entry
-/// revision its reference pins. The native record is read within `record_bytes`: a larger
-/// record is refused, never read whole. Attachments, images, tool payloads and other
-/// structured bodies are refused rather than rendered.
+/// Canonical stored-message text has no transcript locator. Authenticate its immutable
+/// claim identity and session separately, then reuse the assistant grant wrapper above it.
+pub fn message_reference(session: &str, claim: &str) -> String {
+    use hmac::Mac as _;
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(session, claim)).expect("message locator encodes"));
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&*REF_KEY).expect("reference key");
+    mac.update(b"st-conversation-message-v1:");
+    mac.update(payload.as_bytes());
+    format!("message.{}.{}", hex::encode(mac.finalize().into_bytes()), payload)
+}
+
+fn message_text(state: &AppState, session: &str, wanted: &str, max_bytes: usize) -> Result<(String, Value), ApiError> {
+    use hmac::Mac as _;
+    let (signature, payload) = wanted.strip_prefix("message.").and_then(|value| value.split_once('.')).ok_or_else(invalidated)?;
+    if wanted.len() > 4096 { return Err(invalidated()); }
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&*REF_KEY).expect("reference key");
+    mac.update(b"st-conversation-message-v1:");
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&hex::decode(signature).map_err(|_| invalidated())?).map_err(|_| invalidated())?;
+    let (bound_session, claim): (String, String) = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).map_err(|_| invalidated())?)
+        .map_err(|_| invalidated())?;
+    if bound_session != session { return Err(invalidated()); }
+    let (_, text) = state.store.conversation_message_text_bounded(&claim, max_bytes).map_err(ApiError::internal)?
+        .ok_or_else(invalidated)?;
+    let text = text.ok_or_else(|| ApiError {
+        status: StatusCode::PAYLOAD_TOO_LARGE, code: "response-budget-exceeded".into(),
+        message: "the referenced message text exceeds the assistant read budget".into(), details: Box::default(),
+    })?;
+    Ok((text, json!(1)))
+}
+
+/// Read authenticated canonical-message or native-record plain text within `record_bytes`.
+/// Oversized text, attachments, images, and structured payloads are never copied to the caller.
 pub fn assistant_text(
     state: &AppState,
     session_id: &str,
     wanted: &str,
     record_bytes: usize,
 ) -> Result<(String, Value), ApiError> {
+    if wanted.starts_with("message.") { return message_text(state, session_id, wanted, record_bytes); }
     let locator = locator(wanted, session_id)?;
     if locator.image {
         return Err(not_text());

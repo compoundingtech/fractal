@@ -224,7 +224,7 @@ impl ClientTransportBoundary {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientSnapshot {
     pub id: String,
-    host_id: String,
+    pub host_id: String,
     pub store_index: u64,
     projection_version: String,
     pub created_at: String,
@@ -387,7 +387,8 @@ impl ApiError {
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
-            "database-busy" | "database-locked" | "message-selectors-not-ready" => StatusCode::SERVICE_UNAVAILABLE,
+            "database-busy" | "database-locked" | "message-selectors-not-ready"
+            | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
@@ -961,7 +962,11 @@ async fn response_envelope_unbounded(
         && !client_request
         && request.uri().path() != "/v1/health")
         .then(client_v0::fabric_boundary_forbidden);
-    let cursor_snapshot = client_request.then(|| {
+    // Conversation continuations carry projection/grant authentication. Their
+    // readers recover pinned snapshots only after verifying that wrapper.
+    let cursor_snapshot = (client_request
+        && request_path != "/v1/client/assistant/conversations"
+        && !request_path.starts_with("/v1/client/assistant/conversation-")).then(|| {
         request
             .uri()
             .query()
@@ -1786,7 +1791,7 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
     })
 }
 
-fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
+pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
     if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
@@ -7946,6 +7951,10 @@ fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T
 #[cfg(test)]
 #[path = "api/replication_guard_tests.rs"]
 mod replication_guard_tests;
+
+#[cfg(test)]
+#[path = "api/checkpoint_plan_tests.rs"]
+mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
