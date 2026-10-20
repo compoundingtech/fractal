@@ -3239,6 +3239,9 @@ fn client_agent_cards_presented(
     let usage_summaries = store.usage_summaries_at(&agent_subjects, Some(snapshot_index))?;
     let member_faults = store.member_reconcile_faults_for(&agent_subjects, snapshot_index)?;
     let retired_subjects = store.retired_owned_subjects_at(snapshot_index)?;
+    let terminal_subjects = crate::store::retirements::retired_subjects_at(
+        &store.readers.get(), &agent_subjects, snapshot_index,
+    )?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
         Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
@@ -3419,7 +3422,7 @@ fn client_agent_cards_presented(
                 Some("snapshotting" | "fencing-source" | "transferring" | "restoring") if state == "stopped" => "suspended",
                 _ => state,
             };
-            let state = if subject.desired.as_ref().is_some_and(|desired| desired.get("retirement").is_some()) {
+            let state = if terminal_subjects.contains(&subject.subject) {
                 "retired"
             } else { state };
             let runtime_id = fields
