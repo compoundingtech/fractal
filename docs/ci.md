@@ -995,7 +995,12 @@ lanes that need a VM, real sockets across daemon restarts, or an older st3. Toda
 producer they consume. It also runs the cost check as `daily-perf-cost` (see
 [Performance gate](#performance-gate)) as Main upkeep runs it, and the load tests as
 `daily-perf-load`, `daily-perf-load-hog` and `daily-perf-load-hog-macos` from the job definitions
-the Performance workflow dispatches (`.github/workflows/perf-load.ts`). The others run exactly as Workspace CI runs them, because both workflows build
+the Performance workflow dispatches (`.github/workflows/perf-load.ts`). `daily-macos-check` runs
+`cargo check --workspace --all-targets --locked` (the flags clippy uses on Linux and macOS) on the same
+Namespace Mac and from the same checkout and Nix setup as `daily-perf-load-hog-macos`: macOS CI no
+longer runs on each push to `main`, so a Linux-only item that a macOS build still reaches, such as
+a test-support module that uses `api::tile_endpoint`, turns this lane red the same day. It runs no
+tests, builds cold and keeps no cache, and has 45 minutes. The others run exactly as Workspace CI runs them, because both workflows build
 the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
 `.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
 no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no

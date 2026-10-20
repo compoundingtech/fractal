@@ -71,6 +71,18 @@ assert 'namespace-profile-macos-arm64' in blocks['perf-load-hog-macos']
 assert 'scripts/ci-perf-cache pack' in blocks['perf-load'], "main's daily load publishes the snapshots"
 print('passed: daily-perf-load, daily-perf-load-hog and daily-perf-load-hog-macos run on main every day and report red')
 
+# One cheap macOS compile check: the whole workspace and its tests type-checked on the Mac the hog run uses,
+# on main, with no tests run and no cache kept, so a macOS compile break is red the same day.
+macos_check = blocks['daily-macos-check']
+assert declared.get('daily-macos-check') == 'daily-macos-check', declared
+assert macos_check.startswith("    name: daily-macos-check\n    if: github.ref == 'refs/heads/main'\n    runs-on:"), macos_check
+assert macos_check.split('runs-on: ', 1)[1].split('\n', 1)[0] == blocks['perf-load-hog-macos'].split('runs-on: ', 1)[1].split('\n', 1)[0], 'the same Mac as the hog run'
+assert 'timeout-minutes: 45\n' in macos_check and 'CARGO_INCREMENTAL: "0"' in macos_check and 'CARGO_PROFILE_TEST_DEBUG: "0"' in macos_check
+assert 'run: nix develop -c cargo check --workspace --all-targets --locked\n' in macos_check, macos_check
+assert 'continue-on-error' not in macos_check and 'needs:' not in macos_check, 'a red check is red in needs'
+assert 'nextest' not in macos_check and 'cargo test' not in macos_check and 'actions/cache' not in macos_check, 'one check, no tests, no cache'
+print('passed: daily-macos-check type-checks the workspace on the macOS runner on main every day and reports red')
+
 
 def run(needs, issues, jobs_exit=0):
     with tempfile.TemporaryDirectory() as scratch:
