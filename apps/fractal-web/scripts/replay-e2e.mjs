@@ -4,6 +4,7 @@ import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
+import { loadWorld } from '@smalltalk/st3-scenarios'
 
 // Run in the web Nix shell: its Playwright driver and Chromium are also used by the kit gate.
 const started = performance.now()
@@ -11,6 +12,14 @@ const app = fileURLToPath(new URL('..', import.meta.url))
 const scenario = 'first-run-onboarding'
 const sentence = 'The first mission is running. Checking sprout now.'
 const epoch = new Date('2026-10-01T12:00:00.000Z')
+const conversation = loadWorld(scenario, { now: epoch }).slices.conversation
+const threadCreated = conversation.timeline.find(event => event._tag === 'thread-create')
+const sentenceArrives = conversation.timeline.find(event =>
+  (event._tag === 'entries' || event._tag === 'replace') &&
+  event.items.some(item => item.type === 'content' && item.body?.text === sentence))
+assert(threadCreated && sentenceArrives, 'Onboarding must declare its recorded thread and sentence frames')
+assert(threadCreated.at_ms > 2000 && sentenceArrives.at_ms > threadCreated.at_ms,
+  'The recorded conversation must start after Builder appears and before its sentence arrives')
 const violations = []
 const errors = []
 let server, browser, devtools
@@ -151,7 +160,15 @@ try {
       .evaluateAll(rows => rows.map(row => row.getAttribute('data-sidebar-tree-key')))
     assert(groups.every(key => key === 'wf/unfiled'), `Unexpected folder rows: ${JSON.stringify(groups)}`)
   }
-  // Onboarding creates its conversation at +5s. Keep it unopened until then, without a retry.
+  // Use the adopted recording's frame boundaries for the empty-to-populated transcript proof.
+  const replayStartedAt = await page.evaluate(() => Date.now())
+  const advanceReplayTo = async (offset) => {
+    const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
+    assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
+    await page.clock.runFor(offset - elapsed)
+  }
+  const paneResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   // Open replay sockets and publish the initial RAF batch, still well before the +2s frame.
   await page.clock.runFor(100)
@@ -164,16 +181,26 @@ try {
   await agent.waitFor({ state: 'visible' })
   assert.equal(await agent.count(), 1, 'after +2s: replay inserts Sprout Builder')
   await noFolders()
-  await page.clock.runFor(3000)
-  await page.clock.runFor(32)
+  await advanceReplayTo(Math.floor((2000 + threadCreated.at_ms) / 2))
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
-  assert.equal(await page.getByText(sentence, { exact: true }).count(), 0)
-  await page.clock.runFor(2000)
-  await page.clock.runFor(32)
-  await page.getByTestId('transcript-scroll').getByText(sentence, { exact: true }).waitFor({ state: 'visible' })
-  console.log('PASS timed replay: empty roster → Sprout Builder (+2s) → conversation sentence (+7s)')
+  await (await paneResponse).finished()
+  const pane = page.getByTestId('conversation-history-host')
+  const transcript = page.getByTestId('transcript-scroll')
+  while (!await pane.isVisible() || !await transcript.getByTestId('transcript-empty').isVisible()) {
+    const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
+    assert(elapsed + 1 < threadCreated.at_ms,
+      `Real pane must show an empty transcript before +${threadCreated.at_ms}ms (at +${elapsed}ms)`)
+    await page.clock.runFor(1)
+  }
+  assert(await page.evaluate(start => Date.now() - start, replayStartedAt) < threadCreated.at_ms,
+    'Empty transcript must be observed before the recorded thread-creation boundary')
+  assert.equal(await transcript.getByText(sentence, { exact: true }).count(), 0,
+    'The recorded sentence must be absent from the observed empty transcript')
+  await advanceReplayTo(sentenceArrives.at_ms + 32)
+  await transcript.getByText(sentence, { exact: true }).waitFor({ state: 'visible' })
+  console.log(`PASS timed replay: Sprout Builder (+2s) → observed empty transcript (before +${threadCreated.at_ms}ms) → recorded sentence (+${sentenceArrives.at_ms}ms)`)
   await page.reload()
   await page.clock.runFor(100)
   await roster.waitFor({ state: 'visible' })
