@@ -10,6 +10,9 @@ struct Runtime {
     observation: Mutex<Option<RuntimeObservation>>,
     starts: Mutex<Vec<MemberSpec>>,
     stops: Mutex<Vec<String>>,
+    /// Stops that time out although the process exits just after, as a PTY daemon that
+    /// outlives `pty kill`'s seven-second wait does.
+    late_stops: Mutex<u32>,
 }
 impl RuntimeControl for Runtime {
     fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> Result<Option<String>> {
@@ -50,6 +53,11 @@ impl RuntimeControl for Runtime {
         );
         self.stops.lock().unwrap().push(expected.unwrap().into());
         observed.status = "exited".into();
+        let mut late = self.late_stops.lock().unwrap();
+        if *late > 0 {
+            *late -= 1;
+            anyhow::bail!("stop PTY failed: daemon PID 1 is still running after 7s");
+        }
         Ok(())
     }
     fn kill(&self, id: &str, terminal: bool, expected: Option<&str>) -> Result<()> {
@@ -1842,4 +1850,33 @@ fn a_predecessor_still_observed_running_is_replaced_once_after_reopen() {
         Some("replacement-1")
     );
     assert!(crash_loop_parks(&seat.store).is_empty());
+}
+
+#[test]
+fn a_suspend_whose_stop_timed_out_before_the_exit_leaves_no_fault() {
+    let seat = Seat::new();
+    *seat.runtime.late_stops.lock().unwrap() = 1;
+    seat.snapshotting();
+    seat.reconcile();
+    assert!(seat.store.member_reconcile_fault(SUBJECT, None).unwrap().is_some());
+    seat.reconcile();
+    assert_eq!(
+        crate::suspension::current(&seat.store, SUBJECT).unwrap().unwrap().phase,
+        "suspended"
+    );
+    // The fault clears before the completion, not after it, so `agents suspend`, which
+    // returns at the completion, never reports a suspended seat as failed.
+    let completed = seat
+        .store
+        .claims_for(SUBJECT, Some("runtime.action.succeeded"))
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.body["fields"]["operation_status"] == "suspended")
+        .unwrap();
+    assert_eq!(
+        seat.store
+            .member_reconcile_fault(SUBJECT, Some(completed.store_index))
+            .unwrap(),
+        None
+    );
 }
