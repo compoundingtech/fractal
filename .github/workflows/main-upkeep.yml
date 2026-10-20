@@ -983,6 +983,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 24.18.0
@@ -998,12 +1016,11 @@ jobs:
           path: "${{ runner.temp }}/pnpm-store"
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
       - name: Fill missing dependencies
+        shell: bash
+        run: "nix develop '.#web' -c pnpm fetch"
         if: steps.typescript-cache.outputs.cache-hit != 'true'
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
-        run: |
-          corepack enable
-          pnpm fetch
       - name: Report job cache coverage
         if: always()
         shell: bash

@@ -85,6 +85,18 @@ class Gc(unittest.TestCase):
         self.f.git('update-ref', ref, record)
         return ref
 
+    def both(self, commit, tree, days_ago):
+        """A record filed the way producers file it during the move to tags: as a tag and as a note naming the same commit."""
+        record = self.record(commit, tree, days_ago)
+        self.f.git('update-ref', f'refs/tags/evidence/{tree}/{record}', record)
+        return record
+
+    def index_both(self, check, tree, record):
+        ref = self.index(check, tree, record)
+        tag = 'refs/tags/evidence/input/' + ref[len('refs/notes/evidence-input/'):]
+        self.f.git('update-ref', tag, record)
+        return ref, tag
+
     def refs(self, prefix='refs/notes'):
         return set(self.f.git('for-each-ref', '--format=%(refname)', prefix).splitlines())
 
@@ -260,6 +272,61 @@ class Gc(unittest.TestCase):
         self.assertEqual((code, result['mode']), (0, 'dry-run'))
         self.assertEqual(self.run_gc('--head', pr[0], '--apply')[0], 0)
         self.assertIn(f'refs/notes/evidence/{pr[1]}/{record}', self.refs())
+
+    def test_a_record_filed_as_a_tag_and_a_note_gets_one_decision_for_both_names(self):
+        old, recent, pr = self.world()
+        head = self.both(pr[0], pr[1], 29)
+        kept = self.both(recent[0], recent[1], 5)
+        doomed = self.both(old[0], old[1], 19)
+        shared = self.index_both('unit', pr[1], head)
+        stale = self.index_both('unit', old[1], doomed)
+        code, result, _ = self.run_gc('--head', pr[0], '--apply')
+        self.assertEqual(code, 0, result)
+        self.assertEqual(self.refs('refs/tags/evidence'), {f'refs/tags/evidence/{pr[1]}/{head}', f'refs/tags/evidence/{recent[1]}/{kept}', shared[1]})
+        self.assertEqual(self.refs('refs/notes/evidence'), {f'refs/notes/evidence/{pr[1]}/{head}', f'refs/notes/evidence/{recent[1]}/{kept}'})
+        self.assertEqual(self.refs('refs/notes/evidence-input'), {shared[0]})
+        self.assertFalse(set(stale) & self.refs('refs'))
+        self.assertEqual((result['refs_before'], result['refs_after'], result['records_before'], result['records_after']), (10, 6, 5, 3))
+        self.assertEqual(result['protected_records'], 3)
+        self.assertEqual(result['reasons']['deleted: unprotected'], 2, 'the tag and the note of the one unprotected record')
+        self.f.git('update-ref', '-d', f'refs/notes/evidence/{pr[1]}/{head}')
+        code, verified = self.f.verify(pr[1])
+        self.assertEqual((code, verified['record']), (0, head), 'the open head still verifies from its tag')
+
+    def test_a_record_with_two_names_counts_once_against_the_soft_limit_and_the_cap(self):
+        old, recent, pr = self.world()
+        head = self.both(pr[0], pr[1], 29)
+        young = [self.both(old[0], f'{n}' * 40, 0.5 - n / 100) for n in range(1, 5)]  # all inside the grace period; 1 is the oldest
+        code, result, _ = self.run_gc('--head', pr[0], '--soft', '3', '--apply')
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['reasons']['deleted: over the soft limit (oldest first)'], 4, 'two records, both names of each')
+        for prefix in ('refs/tags/evidence', 'refs/notes/evidence'):
+            self.assertEqual({name.rsplit('/', 1)[1] for name in self.refs(prefix)}, {head, young[2], young[3]}, prefix)
+        # Five records under ten names: over a cap of 4 records, not over one of 5.
+        for n in range(4):
+            self.both(pr[0], pr[1], 28 - n / 10)
+        self.assertEqual(self.run_gc('--head', pr[0], '--soft', '3', '--cap', '5', '--apply')[0], 0)
+        code, result, _ = self.run_gc('--head', pr[0], '--soft', '3', '--cap', '4', '--apply')
+        self.assertEqual(code, 3, result)
+        self.assertEqual((result['protected_records'], result['protected_refs']), (5, 10))
+
+    def test_a_remote_loses_both_names_and_fetch_reads_the_tags(self):
+        old, recent, pr = self.world()
+        head = self.both(pr[0], pr[1], 28)
+        doomed = self.both(old[0], 'a' * 40, 10)
+        bare = self.f.root / 'remote.git'
+        subprocess.run(['git', 'init', '-q', '--bare', str(bare)], check=True)
+        self.f.git('remote', 'add', 'origin', str(bare))
+        self.f.git('push', '-q', 'origin', 'main:main', *[f'{ref}:{ref}' for ref in self.refs('refs/notes/evidence') | self.refs('refs/tags/evidence')])
+        for ref in self.refs('refs/tags/evidence'):
+            self.f.git('update-ref', '-d', ref)  # only --fetch can bring the tags back
+        code, result, _ = self.run_gc('--head', pr[0], '--remote', 'origin', '--fetch', '--apply')
+        self.assertEqual(code, 0, result)
+        self.assertEqual((result['refs_before'], result['records_before']), (4, 2), result)
+        remote = set(subprocess.run(['git', '-C', str(bare), 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence', 'refs/tags/evidence'],
+                                    capture_output=True, text=True).stdout.split())
+        self.assertEqual(remote, {f'refs/notes/evidence/{pr[1]}/{head}', f'refs/tags/evidence/{pr[1]}/{head}'})
+        self.assertNotIn(doomed, ' '.join(remote))
 
     def test_bad_arguments_are_refused(self):
         self.world()

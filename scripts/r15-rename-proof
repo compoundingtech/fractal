@@ -191,7 +191,7 @@ def executable_command_guard(tree, protected, crates, public_commands=()):
 
 def documented_flake_selector_guard(tree, outputs):
     """Resolve local and this repository's documented selectors at the exact head."""
-    checked, errors = 0, []
+    checked, placeholders, errors = 0, 0, []
     selector = re.compile(
         r'(?:\.|github:compoundingtech/smalltalk(?:/[^#\s`"\']+)?)#'
         r'(?P<attribute>[A-Za-z0-9_<>${}.-]+)')
@@ -214,8 +214,12 @@ def documented_flake_selector_guard(tree, outputs):
                 kind, system, name = parts
                 systems = (list(outputs[kind]) if system in ('<system>', '${system}')
                            else [system])
+                name_placeholder = name in ('NAME', '<name>', '${name}')
+                if name_placeholder or system in ('<system>', '${system}'):
+                    placeholders += 1
                 resolved = bool(systems) and all(
-                    name in outputs[kind].get(candidate, []) for candidate in systems)
+                    bool(outputs[kind].get(candidate, [])) if name_placeholder
+                    else name in outputs[kind].get(candidate, []) for candidate in systems)
             else:
                 resolved = False
             if not resolved:
@@ -223,7 +227,8 @@ def documented_flake_selector_guard(tree, outputs):
                                'line': text.count('\n', 0, match.start()) + 1,
                                'selector': match[0], 'attribute': attribute,
                                'reason': 'documented selector has no matching HEAD flake output'})
-    return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'unresolved': errors}
+    return {'result': 'FAIL' if errors else 'PASS', 'checked': checked,
+            'placeholder_selectors': placeholders, 'unresolved': errors}
 
 
 def script_directory_literal_guard(tree):

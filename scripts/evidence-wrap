@@ -11,9 +11,9 @@ signer (scripts/evidence-sign, behind a sekrets grant; this script never sees th
 recomputes the tree and flake.lock itself and signs. A failing command is recorded too: a
 failure is a record, not a missing record.
 
-The note is imported as refs/notes/evidence/<tree>/<record> in this checkout. With --push REMOTE it
-is also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it
-only helps when the commit you push has the tree CI will test (a branch current with main).
+The note is imported as refs/tags/evidence/<tree>/<record> in this checkout and, while gates on older bases
+read only notes, as refs/notes/evidence/<tree>/<record> naming the same record. With --push REMOTE both are
+also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it only helps when the commit you push has the tree CI will test (a branch current with main).
 
 With --aggregate FILE nothing is run: FILE is JSON {"command": [...], "exit_code": N, "output": ANY,
 "inputs": {name: string}} written by a job that summarizes other jobs (an aggregate gate). The
@@ -173,7 +173,7 @@ def main(argv):
         }
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
-            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs'}
+            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs', 'runner'}
             if set(facts) - known or not {'command', 'exit_code'} <= set(facts) or ('output' in facts) == ('output_sha256' in facts):
                 raise Failure('--aggregate FILE must hold command, exit_code, exactly one of output or output_sha256, and optionally inputs')
             command, exit_code = facts['command'], facts['exit_code']
@@ -196,6 +196,8 @@ def main(argv):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}
+        if args.aggregate and facts.get('runner'):
+            request['runner'] = facts['runner']
         signer = json.loads(args.signer)
         done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300)
         if done.returncode != 0:
@@ -213,10 +215,11 @@ def main(argv):
             print(json.dumps(summary, indent=2), file=sys.stderr)
             return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
-        ref = f'refs/notes/evidence/{tree}/{record}'
-        if not git('for-each-ref', '--format=%(objectname)', ref).stdout.strip():
-            git('update-ref', ref, record, '0' * len(record))
-        result = {'record': record, 'ref': ref, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
+        ref, tag = f'refs/notes/evidence/{tree}/{record}', f'refs/tags/evidence/{tree}/{record}'
+        for name in (tag, ref):
+            if not git('for-each-ref', '--format=%(objectname)', name).stdout.strip():
+                git('update-ref', name, record, '0' * len(record))
+        result = {'record': record, 'ref': ref, 'tag': tag, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
                   'verified': False, 'pushed': False}
         if exit_code == 0 and Path(args.verifier).exists():
             keys = ['--keys', args.keys] if args.keys else None
@@ -242,7 +245,7 @@ def main(argv):
                 header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
                 extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
                          'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
-            pushed = git('push', '--quiet', args.push, f'{ref}:{ref}', check=False, env_extra=extra)
+            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', check=False, env_extra=extra)
             if pushed.returncode != 0:
                 text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
                 raise Failure(f'push failed: {text.strip()[-500:]}')

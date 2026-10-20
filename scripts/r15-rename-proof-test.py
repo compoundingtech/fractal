@@ -53,12 +53,15 @@ class RenameProof(unittest.TestCase):
             path = tree / 'docs/build.md'
             valid = ('nix build .#st-chatgpt\nnix develop .#web\n'
                      'nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt\n'
-                     'nix build .#checks.<system>.genie-freshness\n')
+                     'nix build .#checks.<system>.genie-freshness\n'
+                     'nix build .#checks.<system>.NAME\n')
             path.write_text(valid)
-            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['checked'], 4)
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['checked'], 5)
             self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'PASS')
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['placeholder_selectors'], 2)
             for invalid in ('nix build .#fractal-chatgpt', 'nix build .#web',
                             'nix build .#checks.x86_64-linux.suite',
+                            'nix build .#checks.unknown.NAME',
                             'nix build github:compoundingtech/smalltalk/main#missing'):
                 path.write_text(valid + invalid)
                 self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'FAIL')
