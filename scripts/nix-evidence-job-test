@@ -22,6 +22,7 @@ class NixEvidenceJobs(unittest.TestCase):
             self.assertIn("github.event_name == 'merge_group'", body)
             self.assertRegex(body, r'continue-on-error: true\n')
             self.assertIn('environment:', body)
+            self.assertRegex(body, r'timeout-minutes: 20\n')  # 163 s cold, 0.4 s warm: a hang must not hold a ci1-priority runner
 
     def test_no_job_depends_on_them_and_no_gate_waits_for_them(self):
         for name in re.findall(r'^  ([a-z][a-z0-9-]*):\n', TEXT, re.M):
