@@ -107,7 +107,7 @@ test('all integer widths and up to eight resources obey independent equal-cell f
   for (let count = 1; count <= 8; count += 1) {
     for (let width = 0; width <= 1200; width += 1) {
       const expectedCell = Math.max(24, Math.min(128, (width - 4 * (count - 1)) / count))
-      const expectedCollapse = Math.max(360, count * 56 + 4 * (count - 1))
+      const expectedCollapse = count === 1 ? 56 : Math.max(360, count * 56 + 4 * (count - 1))
       for (const previousMode of [undefined, 'labels', 'icons'] as const) {
         const result = layout(width, previousMode, count)
         near(result.cellWidth, expectedCell, 'equal cell floor/cap/budget')
@@ -117,6 +117,18 @@ test('all integer widths and up to eight resources obey independent equal-cell f
       }
     }
   }
+})
+
+test('a lone resource paints its title whenever its own label fits', () => {
+  // Narrow pane header: one Details tab in a 108px strip, far below the multi-resource floor.
+  const lone = layout(108, undefined, 1)
+  equal(lone, { mode: 'labels', cellWidth: 108, contentWidth: 108, collapseBelow: 56, expandAt: 72 }, 'single resource uses content-fit budget')
+  equal(layout(108, undefined, 2).mode, 'icons', 'siblings keep the measured floor')
+  for (const width of [55.75, 56, 71.75, 72]) {
+    equal(layout(width, 'labels', 1).mode, width >= 56 ? 'labels' : 'icons', `lone collapse ${width}`)
+    equal(layout(width, 'icons', 1).mode, width >= 72 ? 'labels' : 'icons', `lone restore ${width}`)
+  }
+  equal(layout(2000, undefined, 1, 112.25).mode, 'icons', 'an impossible lone label still collapses')
 })
 
 test('mode, identity and title changes do not alter allocation or mutate inputs', () => {

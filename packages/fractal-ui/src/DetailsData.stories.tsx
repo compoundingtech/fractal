@@ -186,7 +186,9 @@ function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens ·
   const section = spend(root)
   const tokenRow = section.querySelector('[data-details-token-label]')?.closest('div')
   requireContract(tokenRow?.querySelector('[data-details-token-label]')?.textContent === tokenLabel, 'Token scope inherited monetary scope')
-  requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&tokenRow?.querySelector('button[aria-label="Cumulative tokens accumulation window: unavailable"]')?.textContent==='—', 'Token accumulation window was fabricated')
+  requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-not-reported="fields"] button[data-details-not-reported-field="token window"]'), 'Token accumulation window was fabricated')
+  // Reported metrics paint; the missing descendant amount and token window share one summary, never per-field dashes.
+  requireContract(section.querySelectorAll('[data-details-not-reported]').length===1&&section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject')==='subagent spend, token window'&&!section.querySelector('[data-details-metric="subagent-usd"],[data-details-missing-value]')&&!/—|Window|Attribution/.test(section.textContent??''), 'Partial spend group repeats per-field missing values')
   const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · self'))?.closest('div')
   const monetaryText = monetaryRow?.textContent
   requireContract(typeof monetaryText === 'string', 'Monetary accumulation window inherited token window')
@@ -199,6 +201,10 @@ function assertPercentOnly(root: HTMLElement) {
   requireContract(!/\b\d[\d.,kKmM ]*\s+tokens\b|\bCapacity\b/.test(section.textContent ?? ''), 'Context occupancy rendered token counts')
   const meter = within(section as HTMLElement).getByRole('meter', { name: 'Context occupancy' })
   requireContract(meter.getAttribute('aria-valuemax') === '100' && meter.getAttribute('aria-valuenow') === '37.4', 'Reported-percent-only context was discarded')
+  const value = section.querySelector<HTMLElement>('[data-details-occupancy]')
+  requireContract(value?.dataset.detailsOccupancy === 'reported' && value.textContent === '37%' && !section.querySelector('[data-details-occupancy-estimated]') && meter.getAttribute('aria-valuetext') === '37 percent', 'Reported percentage was marked estimated')
+  // Unreported token counts are not displayed facts; only the missing compaction facts are named, once.
+  requireContract(section.querySelectorAll('[data-details-not-reported]').length === 1 && section.querySelector('[data-details-not-reported]')?.getAttribute('data-details-unavailable-subject') === 'compactions, last compaction' && !section.querySelector('[data-details-missing-value]') && !/—|Used tokens|Context window/.test(section.textContent ?? ''), 'Partial context group lacks one Not reported summary')
 }
 function falsifyText(root:HTMLElement,selector:string,value:string):HTMLElement {
  const wrong=root.cloneNode(true) as HTMLElement
@@ -255,7 +261,7 @@ async function checkCoverage(canvasElement: HTMLElement) {
 async function checkNotCovered(canvasElement: HTMLElement) {
   const root = scenarioPane(canvasElement, 'notCovered')
   const trigger = within(spend(root)).getByRole('button', { name: 'Not tracked for Claude Code' })
-  trigger.focus()
+  await focusInView(trigger)
   requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Coverage explanation is not keyboard reachable')
   await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
   await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the coverage trigger'))
@@ -470,6 +476,21 @@ async function checkContextPercentOnly(canvasElement: HTMLElement) {
     const wrong=root.cloneNode(true) as HTMLElement
     within(wrong).getByRole('meter',{name:'Context occupancy'}).setAttribute('aria-valuemax','1000000')
     await rejectsControl('Reported-percent-only context was discarded', () => assertPercentOnly(wrong))
+    const estimated=root.cloneNode(true) as HTMLElement,value=estimated.querySelector('[data-details-chart^="C"] [data-details-occupancy]')
+    requireContract(value,'Missing reported occupancy control target')
+    value.append(Object.assign(estimated.ownerDocument.createElement('button'),{textContent:'est.'}));value.setAttribute('data-details-occupancy','estimated')
+    await rejectsControl('Reported percentage was marked estimated', () => assertPercentOnly(estimated))
+    const dashed=root.cloneNode(true) as HTMLElement,line=dashed.querySelector('[data-details-chart^="C"] [data-details-not-reported]')
+    requireContract(line,'Missing context summary control target')
+    line.after(Object.assign(dashed.ownerDocument.createElement('span'),{textContent:'Compactions —'}))
+    await rejectsControl('Partial context group lacks one Not reported summary', () => assertPercentOnly(dashed))
+}
+async function checkIndependentSummary(canvasElement: HTMLElement) {
+    const root = scenarioPane(canvasElement, 'independent')
+    const wrong=root.cloneNode(true) as HTMLElement,line=spend(wrong).querySelector('[data-details-not-reported]')
+    requireContract(line,'Missing spend summary control target')
+    line.after(Object.assign(wrong.ownerDocument.createElement('span'),{textContent:'Window —'}))
+    await rejectsControl('Partial spend group repeats per-field missing values', () => assertIndependent(wrong))
 }
 export const ContextSamplesPercentOnly: Story = {
   args: { scenario: 'percentSamples', variants: { overview: 'O2', context: 'C3', spend: 'S1', resources: 'R1', empty: 'E3' } },
@@ -522,7 +543,7 @@ export const AllStates: Story = {
     await rejectsControl('Known-empty resources became unavailable',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownEmpty Workspace"] p','Unavailable')))
     await rejectsControl('First-read timing rendered a settled value',()=>assertAllStates(mutated(canvasElement,'section[aria-label="timing"] [data-details-skeleton="duration"]',node=>node.remove())))
     // Every scenario pane here is the state a single-scenario story would mount, so its contract runs in place.
-    for (const check of [checkCoverage, checkNotCovered, checkDescendantListWindow, checkIndependentMetricScopes, checkNativeWindows, checkSession, checkPartialDescendantFacts, checkContextPercentOnly, checkInvalidCoverage, checkTiming, checkFirstReadResources]) await check(canvasElement)
+    for (const check of [checkCoverage, checkNotCovered, checkDescendantListWindow, checkIndependentMetricScopes, checkIndependentSummary, checkNativeWindows, checkSession, checkPartialDescendantFacts, checkContextPercentOnly, checkInvalidCoverage, checkTiming, checkFirstReadResources]) await check(canvasElement)
   },
 }
 /** Clones the canvas and applies one mutation to every match, so the live tree stays intact. */
@@ -559,9 +580,18 @@ export const ReportedWindowNarrow: Story = {
     await waitFor(() => assertReportedNarrow(root))
   },
 }
+/** Reveal the trigger before keyboard focus: React Aria closes tooltips on ancestor scroll. */
+async function focusInView(trigger: HTMLElement) {
+  const view = trigger.ownerDocument.defaultView!
+  trigger.scrollIntoView({ block: 'center', behavior: 'instant' })
+  // Deliver reveal scroll events before opening the tooltip, including nested pane scrolls.
+  await new Promise<void>(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())))
+  await userEvent.keyboard('{Shift>}{/Shift}')
+  trigger.focus({ preventScroll: true })
+}
 /** Opens a value's tooltip from the keyboard and returns it once it carries the expected text, skipping a closing sibling. */
 async function tooltipFor(canvas: HTMLElement, trigger: HTMLElement, expected: string, cause: string): Promise<HTMLElement> {
-  trigger.focus()
+  await focusInView(trigger)
   requireContract(canvas.ownerDocument.activeElement === trigger, 'Timing value is not keyboard reachable')
   await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
   await waitFor(() => requireContract(canvas.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the timing value'))
@@ -602,9 +632,10 @@ async function checkFirstReadResources(canvasElement: HTMLElement) {
     await rejectsControl('First-read or settled resource section was filtered out', () => assertResourceRead(mutated(root, `section[aria-label="${prefix}Declared bindings"]`, node => node.remove()), 'firstRead', prefix))
     const trigger = root.querySelector<HTMLElement>('[data-details-unreported-section="Reviews"]')
     requireContract(trigger, 'Reviews absence is not keyboard reachable')
-    trigger.focus()
-    await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
-    await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the Reviews absence'))
+    await focusInView(trigger)
+    // Tabbing into the next AllStates scenario scrolls this trigger out of view at 440px
+    // and intentionally dismisses its tooltip. Keep this source-reason check in its pane.
+    await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Reviews absence did not receive keyboard focus'))
     await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Reviews are not supplied by this source.', 'Reviews absence lost its source reason'))
     await userEvent.keyboard('{Escape}')
 }

@@ -92,6 +92,41 @@ function assertCombined(root:HTMLElement,states:readonly string[]){
   for(const state of states)requireContract(root.querySelectorAll(`[data-details-all-state="${state}"] [data-testid="details-pane"][data-details-pane-state="${state}"]`).length===1,'Combined AllStates omitted a named state')
   panes.forEach(pane=>{requireContract(!/\bUnknown\b/.test(pane.textContent??''),'Combined AllStates exposed a raw missing-value tag');assertSections(pane as HTMLElement)})
 }
+/** The partial fixture reports only cumulative tokens; every other spend fact is named once, in source order. */
+const partialSpendFields='total spend, main session spend, subagent spend, token scope, token window, attribution'
+function metricSection(root:HTMLElement,state:string,name:'Context'|'Spend'){const section=root.querySelector<HTMLElement>(`[data-details-all-state="${state}"] section[aria-label$="${name}"]`);requireContract(section,`Missing ${state} ${name} section`);return section}
+function assertMetricLines(root:HTMLElement){
+  for(const name of ['Context','Spend'] as const){
+    const section=metricSection(root,'unknown',name),line=section.querySelector<HTMLElement>('[data-details-not-reported]')
+    requireContract(line?.dataset.detailsNotReported==='group'&&line.textContent===`${name}·not reported`&&line.parentElement?.childElementCount===1&&!section.querySelector('[data-details-missing-value],dl,[role="meter"]')&&!section.textContent?.includes('—'),'Unreported group repeats per-field dashes')
+  }
+  const spend=metricSection(root,'partial','Spend'),summary=spend.querySelectorAll<HTMLElement>('[data-details-not-reported]')
+  requireContract(summary.length===1&&summary[0]?.dataset.detailsNotReported==='fields'&&summary[0].textContent===`Not reported: ${partialSpendFields}`&&spend.querySelector('[data-details-token-label]')?.textContent==='Cumulative tokens'&&!spend.querySelector('[data-details-missing-value]')&&!spend.textContent?.includes('—')&&!/Recorded spend|Window|Attribution/.test(spend.textContent??''),'Partial group lacks one Not reported summary')
+  for(const state of ['busy','partial'] as const){
+    const context=metricSection(root,state,'Context'),value=context.querySelector<HTMLElement>('[data-details-occupancy]')
+    requireContract(value?.dataset.detailsOccupancy==='estimated'&&value.textContent==='6%est.'&&context.querySelector('[role="meter"]')?.getAttribute('aria-valuetext')==='6 percent, estimated from tokens'&&!context.querySelector('[data-details-not-reported]')&&!/reported percentage/i.test(context.textContent??''),'Token-derived occupancy is not marked estimated')
+  }
+}
+/** Keyboard focus alone must reveal a trigger's provenance; blur dismisses it without touching the pane's Escape. */
+async function keyboardTooltip(trigger:HTMLElement){
+  const body=within(trigger.ownerDocument.body);trigger.focus();await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
+  const text=(await body.findByRole('tooltip')).textContent;trigger.blur()
+  await waitFor(()=>requireContract(!body.queryByRole('tooltip'),'Provenance tooltip stayed open after blur'))
+  return text
+}
+async function checkMetricLines(canvasElement:HTMLElement){
+  assertMetricLines(canvasElement)
+  const mutate=async(cause:string,selector:string,change:(node:HTMLElement)=>void)=>{const wrong=canvasElement.cloneNode(true) as HTMLElement,node=wrong.querySelector<HTMLElement>(selector);requireContract(node,`Missing negative control target: ${selector}`);change(node);await rejectsControl(cause,()=>assertMetricLines(wrong))}
+  await mutate('Unreported group repeats per-field dashes','[data-details-all-state="unknown"] section[aria-label$="Spend"] [data-details-not-reported]',node=>node.after(Object.assign(node.ownerDocument.createElement('span'),{textContent:'Window —'})))
+  await mutate('Partial group lacks one Not reported summary','[data-details-all-state="partial"] section[aria-label$="Spend"] [data-details-not-reported]',node=>node.before(node.cloneNode(true)))
+  await mutate('Token-derived occupancy is not marked estimated','[data-details-all-state="busy"] section[aria-label$="Context"] [data-details-occupancy-estimated]',node=>node.remove())
+  const estimate=metricSection(canvasElement,'busy','Context').querySelector<HTMLElement>('button[data-details-occupancy-estimated]');requireContract(estimate,'Missing estimated occupancy trigger')
+  requireContract(await keyboardTooltip(estimate)==='Harness did not report a percentage; estimated from tokens.','Estimated occupancy lost its explanation')
+  const group=within(metricSection(canvasElement,'unknown','Spend')).getByRole('button',{name:'Spend: not reported'})
+  requireContract((await keyboardTooltip(group))?.includes('Total spend: no-provider'),'Unreported group lost its provenance tooltip')
+  const field=within(metricSection(canvasElement,'partial','Spend')).getByRole('button',{name:'Token window: not reported'})
+  requireContract(await keyboardTooltip(field)==='no-provider','Not reported field lost its provenance tooltip')
+}
 export const AllStates:Story={
   args:{opening:'Restored',width:1440},
   render:function Render({scheme}:Args){
@@ -100,7 +135,7 @@ export const AllStates:Story={
     return <div role="main" aria-label="Details state comparison" {...stylex.props(styles.canvas,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal><Button ref={restoreRef} onPress={()=>setVisible(combinedStates)} {...stylex.props(styles.control)}>Restore all states</Button><div {...stylex.props(styles.comparison)}>{visible.map(state=><section key={state} aria-label={`Details ${state}`} data-details-all-state={state} {...stylex.props(styles.card)}><DetailsLabelContext.Provider value={`${state} `}><DetailsPane {...detailsStoryInputs(state)} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state={state} intent={{hiddenSections:[]}} onIntentChange={()=>{}} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}} onClose={()=>setVisible(current=>current.filter(item=>item!==state))} closeFocusTarget={()=>restoreRef.current}/></DetailsLabelContext.Provider></section>)}</div></ThemePortal></div>
   },
   play:async({canvasElement})=>{
-    assertCombined(canvasElement,combinedStates)
+    assertCombined(canvasElement,combinedStates);await checkMetricLines(canvasElement)
     const wrong=canvasElement.cloneNode(true) as HTMLElement
     wrong.querySelector('[data-testid="details-pane"]')?.remove()
     await rejectsControl('Combined AllStates omitted a production pane',()=>assertCombined(wrong,combinedStates))

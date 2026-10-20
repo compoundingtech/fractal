@@ -4,7 +4,7 @@ import { Button, Checkbox, Dialog, DialogTrigger, Heading, Popover, ProgressBar,
 import { DetailsResources, DetailsLabelContext } from './DetailsResources'
 import type { DetailsState, DetailsOverview, DetailsSection } from './model'
 import { DetailsCharts, DetailsChartsPending, hasDetailsChartData, pendingShapeFromTrace, type DetailsPendingShape } from './DetailsCharts'
-import { contextPercent, type TraceSeries } from './trace-series'
+import { contextOccupancy, type TraceSeries } from './trace-series'
 import { PaneSyncStatus } from '../st3-views/PaneSyncStatus'
 import { PaneHeaderAccessory } from '../workbench/PaneLayer'
 import type { SyncStatus } from '../st3-views/sync-status'
@@ -120,7 +120,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const sectionControlsVisible=!pending&&(syncStatus._tag==='Live'||syncStatus._tag==='Stale')
   const sectionNames=['Overview','Context','Spend',...sections.map(section=>section.title)]
   const context=trace.meters.context
-  const occupancy=contextPercent(context)
+  const occupancy=contextOccupancy(context)
   const spend=trace.meters.spend
   const dataOnly=variants.empty==='E3'
   const consolidateUnavailable=state==='new'&&dataOnly
@@ -133,7 +133,8 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const pendingSpend=pendingTrace.meters.spend.totalUsd
   const pendingContext=pendingTrace.meters.context
   const pendingOverviewLine=[pendingOverview.harness,pendingOverview.age].filter(Boolean).join(' · ')+(pendingSpend._tag==='Known'?` · ${pendingTrace.meters.spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}$${pendingSpend.value.toFixed(2)}`:'')
-  const pendingContextLine=`Context ${Math.round(contextPercent(pendingContext)??0)}%`
+  const pendingOccupancy=contextOccupancy(pendingContext)
+  const pendingContextLine=`Context ${Math.round(pendingOccupancy?.percent??0)}%${pendingOccupancy?.estimated?' est.':''}`
   const headerAccessory=<PaneHeaderAccessory inlineFallback={onClose!==undefined}>
     <PaneSyncStatus status={syncStatus} label="agent details" now={now} observedAt={observedAt} detailsOpen={detailsOpen} onDetailsOpenChange={setDetailsOpen} onRetry={retry}/>
     {/* Without settled content the control's slot stays reserved, so the header's action group never resizes. */}
@@ -167,7 +168,8 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
           <div data-details-overview-line {...stylex.props(styles.line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}<OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
           {variants.overview==='O2'&&<>
             <div data-details-overview-line {...stylex.props(styles.line)}><OverviewValue label="Harness" value={overview.harness}/><span>·</span><OverviewValue label="Incarnation age" value={overview.age}/>{spend.totalUsd._tag==='Known'&&<> · {spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</>}</div>
-            {occupancy!==undefined&&<ProgressBar aria-label="Context window" value={occupancy} maxValue={100}>{({percentage})=><><span {...stylex.props(styles.muted)}>Context {Math.round(percentage??0)}%</span><div {...stylex.props(meterStyles.track)}><div {...stylex.props(meterStyles.fill(percentage??0))}/></div></>}</ProgressBar>}
+            {/* Progressbar children are presentational: the estimate is painted and announced here; the Context section's `est.` trigger carries the explanation. */}
+            {occupancy!==undefined&&<ProgressBar aria-label="Context window" value={occupancy.percent} maxValue={100} valueLabel={`${Math.round(occupancy.percent)}%${occupancy.estimated?', estimated from tokens':''}`}>{({percentage})=><><span data-details-occupancy={occupancy.estimated?'estimated':'reported'} {...stylex.props(styles.muted)}>Context {Math.round(percentage??0)}%{occupancy.estimated?' est.':''}</span><div {...stylex.props(meterStyles.track)}><div {...stylex.props(meterStyles.fill(percentage??0))}/></div></>}</ProgressBar>}
           </>}
         </>}
         </>}

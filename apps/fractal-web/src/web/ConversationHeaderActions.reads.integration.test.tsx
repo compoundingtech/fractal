@@ -144,7 +144,10 @@ it('opens Resources as a non-modal complementary panel that returns focus on Esc
   expect(document.querySelectorAll('body > [aria-hidden="true"]').length).toBe(0)
   expect(trigger.getAttribute('aria-expanded')).toBe('true')
   expect(trigger.getAttribute('aria-controls')).toBe(panel.id)
-  expect(panel.contains(document.activeElement)).toBe(true)
+  // Opening focuses the panel heading, a programmatic-only target; the region itself is not focusable.
+  expect(document.activeElement).toBe(panel.querySelector('h2[tabindex="-1"]'))
+  expect(document.activeElement!.textContent).toBe('Resources')
+  expect(panel.hasAttribute('tabindex')).toBe(false)
   await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
   // React Aria restores focus on the frame after the scope unmounts.
   await act(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))

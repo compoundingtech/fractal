@@ -23,8 +23,8 @@ const Host = () => {
   const [open, setOpen] = React.useState(false)
   return React.createElement(React.Fragment, null,
     React.createElement('main', { 'aria-label': 'Workspace' }, React.createElement('button', { id: 'opener', onClick: () => setOpen(value => !value) }, 'Resources')),
-    open && React.createElement(SidePanel, { 'aria-label': 'Agent resources', id: 'panel', onClose: () => setOpen(false) },
-      React.createElement('button', { id: 'close', onClick: () => setOpen(false) }, 'Close resources'),
+    open && React.createElement(SidePanel, { 'aria-label': 'Agent resources', heading: 'Resources', id: 'panel', onClose: () => setOpen(false),
+      actions: React.createElement('button', { id: 'close', onClick: () => setOpen(false) }, 'Close resources') },
       React.createElement('button', { id: 'child', onKeyDown: event => { if (event.key === 'Escape') event.preventDefault() } }, 'Child with its own Escape')))
 }
 
@@ -47,7 +47,20 @@ test('opens as a labelled complementary region without inerting or hiding the ap
     assert.equal(panel.getAttribute('role'), null)
     assert.equal(panel.getAttribute('aria-modal'), null)
     assert.equal(document.querySelectorAll('[inert], [aria-hidden="true"]').length, 0)
-    assert.ok(panel.contains(document.activeElement), 'focus moves into the panel on open')
+    // Initial focus lands on the heading: a programmatic-only target, not the region or a control.
+    const heading = panel.querySelector('h2')
+    assert.equal(document.activeElement, heading, 'focus moves to the panel heading on open')
+    assert.equal(heading.textContent, 'Resources')
+    assert.equal(heading.tabIndex, -1, 'the heading is never in the tab order')
+    assert.equal(panel.hasAttribute('tabindex'), false, 'the region itself is not focusable')
+    assert.equal(panel.querySelector('header').contains(document.getElementById('close')), true, 'actions sit beside the heading')
+    // Escape from the focused heading closes and restores the opener.
+    await act(async () => keydown(heading, 'Escape'))
+    await frame()
+    assert.equal(document.getElementById('panel'), null)
+    assert.equal(document.activeElement, opener, 'heading Escape returns focus to the opener')
+    await act(async () => opener.click())
+    assert.equal(document.activeElement, document.querySelector('#panel h2'), 'reopening focuses the heading again')
     // Focus is not trapped: the workspace stays focusable while the panel is open.
     await act(async () => opener.focus())
     assert.equal(document.activeElement, opener)

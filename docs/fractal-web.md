@@ -224,7 +224,7 @@ the explicit reported-details popover remains interactive.
 The conversation header's Resources control opens the kit's non-modal `SidePanel`, a
 labelled complementary region rather than a dialog: the workspace is never inerted or
 hidden. The trigger names the panel with `aria-controls`, and Escape or Close resources
-closes it and returns focus to the trigger. The panel renders under the owning scheme
+closes it and returns focus to the trigger. Opening focuses the panel heading without outlining the whole region; Tab proceeds to its controls and remains free to leave the panel. The panel renders under the owning scheme
 root. Below 640 px the Resources trigger keeps its accessible name but shows only the
 folder icon; wider headers also show the text label. Todos is its first section; a missing
 harness snapshot is named rather than shown as an empty list. Hover, focus and press start

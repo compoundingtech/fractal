@@ -78,8 +78,7 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   // commits the panel in the same frame instead of restyling the whole app.
   return <div {...stylex.props(styles.actions)}>
     <ChromeControl icon="folder" label="Resources" active={resourcesOpen} expanded={resourcesOpen} {...(resourcesOpen ? { controls: panelId } : {})} onPrefetch={prefetch} onPress={() => onOpenChange(!resourcesOpen)} {...(disabledReason === undefined ? {} : { disabledReason })} />
-    {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" onClose={() => onOpenChange(false)}>
-      <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => onOpenChange(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
+    {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => onOpenChange(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button>} onClose={() => onOpenChange(false)}>
       <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
     </SidePanel> : null}
     <Aria.DialogTrigger>
@@ -154,7 +153,6 @@ const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: s.md },
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
   contents: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
-  heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   sectionTitle: { fontSize: t.uiSize, marginBlock: s.md },
   list: { listStyle: 'none', padding: 0 },
   resource: { padding: s.md, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6 },

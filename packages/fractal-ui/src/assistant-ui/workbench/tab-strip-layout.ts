@@ -1,6 +1,10 @@
 export type TabStripMode = 'labels' | 'icons'
 
-/** Product thresholds use measured strip space, never the enclosing pane width. */
+/**
+ * Product thresholds use measured strip space, never the enclosing pane width. The floor keeps
+ * several resources from sharing cramped labels; a lone resource competes with no sibling, so
+ * only its own content-fit budget decides whether its title is painted.
+ */
 export const TAB_STRIP_POLICY = Object.freeze({ measuredWidthFloor: 360, restoreHeadroom: 16 })
 
 export interface TabStripLayoutInput {
@@ -48,7 +52,7 @@ export const layoutTabStrip = ({
     minimumCell = Math.max(minimumCell, Math.max(0, item.minimumLabelWidth) + 2 * padding)
   }
   const requiredLabelBudget = minimumCell > cap ? Infinity : count * minimumCell + gaps
-  const collapseBelow = Math.max(TAB_STRIP_POLICY.measuredWidthFloor, requiredLabelBudget)
+  const collapseBelow = count === 1 ? requiredLabelBudget : Math.max(TAB_STRIP_POLICY.measuredWidthFloor, requiredLabelBudget)
   const expandAt = collapseBelow + TAB_STRIP_POLICY.restoreHeadroom
   const cellWidth = count === 0 ? 0 : Math.max(floor, Math.min(cap, (width - gaps) / count))
   const contentWidth = count === 0 ? 0 : count * cellWidth + gaps

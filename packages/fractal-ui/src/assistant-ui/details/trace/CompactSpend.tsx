@@ -12,7 +12,7 @@ export interface CompactSpendProps {
   readonly showTotals?: boolean
 }
 
-/** Ported CompactSpend: separate self / full-subtree cumulative costs and honest retained marks. */
+/** Ported CompactSpend: separate self / full-subtree cumulative costs and honest retained marks; the Spend group's Not reported line names any absent series. */
 export const CompactSpend = ({ lane, descendantSpend, showTotals = true }: CompactSpendProps): ReactNode => {
   const descendantUsd = descendantSpend.totalUsd
   const descendantSeries = [descendantSpend.cumulativeValues]
@@ -34,12 +34,10 @@ export const CompactSpend = ({ lane, descendantSpend, showTotals = true }: Compa
   const hasDescendantSeries = descendantSpend.cumulativeValues.length > 0
   return <div {...stylex.props(styles.root)} aria-label="Session and descendant spend">
     {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}>Main session <strong>{lane.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane.totalUsd.detail ?? lane.totalUsd.reason}/>}</strong></span><span {...stylex.props(styles.descendants)}>Subagents <strong>{descendantUsd._tag === 'Known' ? money.format(descendantUsd.value) : <MissingDetailsValue label="Subagent spend" reason={descendantUsd.detail ?? descendantUsd.reason}/>}</strong></span></div>}
-    {hasSeries || hasDescendantSeries ? <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
+    {(hasSeries || hasDescendantSeries) && <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
       {hasSeries && <path d={path([lane.cumulativeValues])} fill="none" stroke={accent.primary} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
       {hasDescendantSeries && <path d={path(descendantSeries)} fill="none" stroke={text.fgSoft} strokeWidth={1.5} strokeDasharray="4 2" vectorEffect="non-scaling-stroke" />}
-    </svg> : <span {...stylex.props(styles.note)}>Spend series <MissingDetailsValue label="Spend series" reason="Session and descendant spend series were not retained."/></span>}
-    {hasSeries && !hasDescendantSeries && <span {...stylex.props(styles.note)}>Subagent series <MissingDetailsValue label="Subagent spend series" reason="Descendant spend series was not retained."/></span>}
-    {!hasSeries && hasDescendantSeries && <span {...stylex.props(styles.note)}>Main session series <MissingDetailsValue label="Main session spend series" reason="Session spend series was not retained."/></span>}
+    </svg>}
     {(hasSeries || hasDescendantSeries) && <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>}
     <p {...stylex.props(styles.note)}>API-equivalent · retained role observations{partial ? ' · chart and reported accumulation windows differ' : ''}</p>
 </div>
@@ -48,9 +46,7 @@ export const CompactSpend = ({ lane, descendantSpend, showTotals = true }: Compa
 /** Loading twin of CompactSpend: same wrappers, gaps and 4:1 chart box, ink instead of values. */
 export const CompactSpendPending = ({showTotals=true,footprint={series:true,descendants:true,partial:false}}:{readonly showTotals?:boolean;readonly footprint?:{readonly series:boolean;readonly descendants:boolean;readonly partial:boolean}}): ReactNode => <div aria-hidden="true" inert {...stylex.props(styles.root)}>
   {showTotals&&<div {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span><span {...stylex.props(styles.descendants)}><span {...stylex.props(styles.pendingText)}>Subagents <strong>$0.00</strong></span></span></div>}
-  {footprint.series || footprint.descendants ? <DetailsSkeletonPlot spend /> : <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Spend series —</span></span>}
-  {footprint.series && !footprint.descendants && <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Subagent series —</span></span>}
-  {!footprint.series && footprint.descendants && <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Main session series —</span></span>}
+  {(footprint.series || footprint.descendants) && <DetailsSkeletonPlot spend />}
   {(footprint.series || footprint.descendants) && <div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div>}
   <p {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent · retained role observations{footprint.partial ? ' · chart and reported accumulation windows differ' : ''}</span></p>
 </div>

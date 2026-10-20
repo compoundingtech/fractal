@@ -338,6 +338,43 @@ async function thresholdPlay({ canvasElement }: { canvasElement: HTMLElement }) 
   } finally { stage.style.width = originalWidth }
   await containmentPlay({ canvasElement })
 }
+/** A lone resource in a narrow header never paints an empty icon pill: its title fits, so it is shown. */
+async function loneResourcePlay({ canvasElement }: { canvasElement: HTMLElement }) {
+  const strip = await stripFor(canvasElement)
+  const tab = within(strip).getByRole('tab', { name: 'Details', selected: true })
+  const label = tab.querySelector<HTMLElement>('[data-tab-label]')!
+  const assertLabelled = () => {
+    const measured = Number(strip.dataset.tabMeasuredWidth)
+    requireContract(measured < 360, 'Lone fixture is not narrower than the multi-resource floor')
+    requireContract(Number(strip.dataset.tabCollapseBelow) < measured, 'Lone resource kept the multi-resource floor')
+    requireContract(strip.dataset.tabMode === 'labels' && painted(label) && label.textContent === 'Details', 'Lone resource paints an icon-only pill')
+    requireContract(label.scrollWidth <= label.clientWidth, 'Lone title is truncated despite fitting')
+    requireContract(tab.getAttribute('aria-label') === 'Details', 'Missing full accessible name')
+  }
+  assertSelected(tab)
+  assertLabelled()
+  assertPaint(strip)
+  const mode = strip.dataset.tabMode!
+  strip.dataset.tabMode = 'icons'
+  label.toggleAttribute('data-icon-only', true)
+  try { await rejectsControl('Lone resource paints an icon-only pill', assertLabelled) } finally { strip.dataset.tabMode = mode; label.toggleAttribute('data-icon-only', false) }
+  // Responsive collapse still applies once the title cannot fit its own content budget. Bound
+  // the strip's own box: header actions fold by container query, so a stage width is not exact.
+  const root = strip.parentElement!
+  const originalMax = root.style.maxWidth
+  const collapse = Number(strip.dataset.tabCollapseBelow)
+  try {
+    root.style.maxWidth = `${collapse - 1}px`
+    await frames()
+    requireContract(Number(strip.dataset.tabMeasuredWidth) < collapse && strip.dataset.tabMode === 'icons', 'Unfit lone title did not collapse')
+    assertPaint(strip)
+    root.style.maxWidth = originalMax
+    await frames()
+    assertLabelled()
+  } finally { root.style.maxWidth = originalMax }
+  await frames()
+  assertPaint(strip)
+}
 interface Shift extends PerformanceEntry { value: number; hadRecentInput: boolean; sources?: readonly { node?: Node; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }[] }
 async function stabilityPlay({ canvasElement }: { canvasElement: HTMLElement }) {
   const strip = await stripFor(canvasElement)
@@ -405,6 +442,7 @@ async function stabilityPlay({ canvasElement }: { canvasElement: HTMLElement }) 
 // Every story runs in both schemes through the kit gate's `scheme` arg, so stories vary only state.
 export const Wide: Story = { play: interactionPlay }
 export const Threshold: Story = { args: { layout: group(panes.slice(0, 2)), mountedWidth: 376 }, play: thresholdPlay }
+export const LoneDetailsNarrow: Story = { args: { layout: group(panes.slice(0, 1)), mountedWidth: 400 }, play: loneResourcePlay }
 export const Mounted159SelectedFirst: Story = { args: { mountedWidth: 159, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
 export const Mounted160SelectedFirst: Story = { args: { mountedWidth: 160, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
 export const Mounted159SelectedLast: Story = { args: { mountedWidth: 159, focusedPaneKey: paneKey(panes.at(-1)!) }, play: containmentPlay }

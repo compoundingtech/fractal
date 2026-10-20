@@ -123,6 +123,19 @@ function assertHuman(pane: HTMLElement) {
       requireContract(!channels || Number(channels[2]) <= Math.max(Number(channels[1]), Number(channels[3])) + 20, 'Details paints green status or metric ink')
     }
   }
+  assertMetricGroups(pane)
+}
+/** Context and Spend name every missing field once: one `Spend · not reported` line, or reported fields plus one `Not reported:` summary; never per-field dashes. */
+function assertMetricGroups(pane: HTMLElement) {
+  for (const name of ['Context', 'Spend']) {
+    const section = pane.querySelector<HTMLElement>(`section[aria-label$="${name}"]`)
+    if (!section) continue
+    const lines = section.querySelectorAll<HTMLElement>('[data-details-not-reported]')
+    requireContract(lines.length <= 1 && !section.querySelector('[data-details-missing-value]') && !(section.textContent ?? '').includes('—'), 'Metric group paints per-field missing values')
+    const line = lines[0]
+    if (line?.dataset.detailsNotReported === 'group') requireContract(line.parentElement?.childElementCount === 1 && line.textContent === `${name}·not reported` && line.querySelector(`button[aria-label="${name}: not reported"]`), 'Unreported metric group paints more than its one line')
+    if (line?.dataset.detailsNotReported === 'fields') requireContract(line.textContent?.startsWith('Not reported:') && line.querySelectorAll('button[data-details-not-reported-field]').length === line.getAttribute('data-details-unavailable-subject')?.split(', ').length, 'Partial metric group lacks one keyboard-reachable Not reported summary')
+  }
 }
 function rgb(value: string): number[] | undefined {
   const values = value.match(/[\d.]+/g)?.map(Number)
@@ -154,7 +167,7 @@ function assertCraft(pane: HTMLElement, item: Case) {
     requireContract(!pane.querySelector('[data-details-source-note]'), 'New agent repeats source unavailability')
     for (const section of pane.querySelectorAll('section')) requireContract(section.querySelector('strong,dd,[data-details-data-row],[data-details-resource-row],svg[role="img"]'), 'New agent offers an empty disclosure')
   }
-  if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-missing-value]`), 'Unknown source omits a field-specific explanation')
+  if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-not-reported="group"]`), 'Unknown source omits its single not-reported line')
   const history = pane.querySelector('section[aria-label$="History"]')
   if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Incarnation/}).length>0, 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
@@ -304,7 +317,7 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
   if (meter.tokensScope._tag === 'Unknown') {
     requireContract(!/including subagents|excludes subagents|this agent|observed agent incarnations/i.test(label), 'Unreported total makes an unproven scope claim')
     if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and descendant spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
-    requireContract(spend.querySelector('button[aria-label="Cumulative tokens scope: unavailable"]')?.textContent==='—', 'Unreported token total lacks its exact scope explanation')
+    requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token scope"]'), 'Unreported token total lacks its exact scope explanation')
   } else {
     requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent incarnations' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
     if (meter.tokensWindow._tag === 'Known') {
@@ -312,7 +325,7 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
       if (window._tag === 'AllTime') requireContract(period === 'all time', 'Reported all-time window is absent')
       else if (window._tag === 'Interval') { const from = new Date(window.fromMs).toISOString(), to = new Date(window.toMs).toISOString(); requireContract(period.includes(from.slice(0, 10)) && period.includes(from.slice(11, 16)) && period.includes(to.slice(11, 16)) && period.includes('UTC'), 'Reported accumulation interval is absent from its separate date line') }
       else requireContract(period.includes(window.label), 'Reported accumulation window label is absent')
-    } else requireContract(spend.querySelector('button[aria-label="Cumulative tokens accumulation window: unavailable"]')?.textContent==='—'&&!spend.textContent?.includes('all time'), 'Unreported accumulation window claims all-time scope')
+    } else requireContract(spend.querySelector('[data-details-not-reported] button[data-details-not-reported-field="token window"]')&&!spend.textContent?.includes('all time'), 'Unreported accumulation window claims all-time scope')
   }
 }
 function assertContext(pane: HTMLElement, trace: TraceSeries) {
@@ -426,7 +439,8 @@ export const TraceContracts: Story = { args: { cases: [...traceCases, ...bucketC
     }
     if (!item.name.includes('/')) return
     const spend = pane.querySelector('section[aria-label="Spend"]')!, text = spend.textContent ?? '', amounts = text.match(/\$\d[\d,.]*/g) ?? []
-    if (item.name.includes('/unknown/')) requireContract(amounts.length === 0 && spend.querySelector('[data-details-missing-value]'), 'Unknown spend source renders inferred currency')
+    const line = spend.querySelector<HTMLElement>('[data-details-not-reported]')
+    if (item.name.includes('/unknown/')) requireContract(amounts.length === 0 && line && (line.dataset.detailsNotReported === 'group' || line.querySelector('[data-details-not-reported-field="total spend"]')), 'Unknown spend source renders inferred currency')
     else if (item.name.includes('/zero/')) requireContract(amounts.length > 0 && amounts.every(amount => amount === '$0.00'), 'Known zero spend is absent or fabricated')
     else requireContract(meter.mainUsd._tag === 'Known' && text.includes(`$${meter.mainUsd.value.toFixed(2)}`), 'Known source spend total is omitted')
   })
@@ -517,7 +531,7 @@ export const E3ChartMatrix: Story = { args: { cases: e3Cases }, play: async ({ c
       requireContract(section, 'E3 omits its chart section')
       const body = section.querySelector(`[data-details-chart="${name === 'Context' ? item.variants.context : item.variants.spend}"]`)!
       const data = hasDetailsChartData({ trace: item.trace!, context: item.variants.context, spend: item.variants.spend, section: name === 'Context' ? 'context' : 'spend', empty: 'E3' })
-      if (!data) requireContract(body.querySelector('[data-details-missing-value]'), 'E3 hides unavailable field explanations')
+      if (!data) requireContract(body.querySelector('[data-details-not-reported="group"]'), 'E3 hides unavailable field explanations')
       else requireContract(body.querySelector('[data-details-data-row],dl,svg[role="img"]'), 'E3 drops known chart rows')
     }
     if (item.trace!.meters.spend.tokens._tag === 'Known') assertScope(pane, item.trace!)

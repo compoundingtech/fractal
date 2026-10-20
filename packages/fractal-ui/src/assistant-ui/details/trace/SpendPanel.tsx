@@ -24,7 +24,7 @@ export interface SpendPanelProps {
   readonly split?: TraceCostSplit
 }
 
-/** SpendPanel's retained-evidence aggregation and stacked SVG, plus the four-way split bars. */
+/** SpendPanel's retained-evidence aggregation and stacked SVG, plus the four-way split bars; the Spend group's Not reported line names an absent series or split. */
 export const SpendPanel = ({ lane, componentsKnown = true, showTotals = true, split }: SpendPanelProps): ReactNode => {
   const componentSamples = lane?.samples.map((sample) => ({ ts: sample.ts, components: sample.cumulativeUsdByComponent })) ?? []
   const attributed = componentsKnown && componentSamples.length > 0 && componentSamples.every(({ components }) => hasComponents(components))
@@ -42,7 +42,7 @@ export const SpendPanel = ({ lane, componentsKnown = true, showTotals = true, sp
   const attributedTotal = componentTotals.reduce((total, component) => total + component.value, 0)
   return <div {...stylex.props(styles.root)}>
     <div data-details-data-row={showTotals && lane?.totalUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.header)}>{showTotals && <span>Main session <strong>{lane?.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane?.totalUsd._tag === 'Unknown' ? lane.totalUsd.detail ?? lane.totalUsd.reason : 'Session spend total was not supplied.'}/>}</strong></span>}<span {...stylex.props(styles.note)}>API-equivalent</span></div>
-    {hasSeries ? <>
+    {hasSeries && <>
       <svg {...stylex.props(styles.chart)} viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={attributed ? 'Cumulative API-equivalent spend split by input, cache read, cache write and output' : 'Cumulative main-session API-equivalent spend'}>
         <path d={`M${CHART_INSET} ${baseline}H${CHART_WIDTH - CHART_INSET}`} stroke={border.borderStrong} />
         {attributed && SPEND_COMPONENTS.map((component, componentIndex) => {
@@ -53,8 +53,7 @@ export const SpendPanel = ({ lane, componentsKnown = true, showTotals = true, sp
         <path d={totalPath} fill="none" stroke={text.fg} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
       </svg>
       <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>
-    </> : <span {...stylex.props(styles.note)}>Spend series <MissingDetailsValue label="Spend series" reason="Session spend series was not retained."/></span>}
-    {componentTotals.length === 0 && <span {...stylex.props(styles.note)}>Spend split <MissingDetailsValue label="Four-way spend split" reason="Provider does not supply component attribution."/></span>}
+    </>}
     {componentTotals.length > 0 && <dl {...stylex.props(styles.breakdown)} aria-label="Four-way session spend split">{componentTotals.map((component) => <div key={component.id} {...stylex.props(styles.component)}>
       <dt {...stylex.props(styles.label)}>{component.label}</dt>
       <dd {...stylex.props(styles.bar)}><svg {...stylex.props(styles.splitBar)} viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"><rect width={100} height={8} fill={surface.rowActive} /><rect width={attributedTotal > 0 ? component.value / attributedTotal * 100 : 0} height={8} fill={component.color} /></svg></dd>
@@ -67,8 +66,7 @@ export const SpendPanel = ({ lane, componentsKnown = true, showTotals = true, sp
 /** Loading twin of SpendPanel: same wrappers, gaps and chart box, ink instead of values. */
 export const SpendPanelPending = ({showTotals=true,footprint={series:true,split:true,partial:false}}:{readonly showTotals?:boolean;readonly footprint?:{readonly series:boolean;readonly split:boolean;readonly partial:boolean}}): ReactNode => <div aria-hidden="true" inert {...stylex.props(styles.root)}>
   <div {...stylex.props(styles.header)}>{showTotals&&<span><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span>}<span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent</span></span></div>
-  {footprint.series ? <><DetailsSkeletonPlot /><div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div></> : <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Spend series —</span></span>}
-  {!footprint.split && <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Spend split —</span></span>}
+  {footprint.series && <><DetailsSkeletonPlot /><div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div></>}
   {footprint.split && <dl {...stylex.props(styles.breakdown)}>{SPEND_COMPONENTS.map((component) => <div key={component.id} {...stylex.props(styles.component)}>
     <dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{component.label}</span></dt>
     <dd {...stylex.props(styles.bar)}><span {...stylex.props(styles.pendingBar)} /></dd>

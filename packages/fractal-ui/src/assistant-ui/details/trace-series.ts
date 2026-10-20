@@ -48,8 +48,13 @@ export interface TraceSeries {
  readonly history:TraceFact<readonly TraceIncarnation[]>
 }
 
-/** A reported percentage is usable without underlying token counts. */
-export const contextPercent = (context: TraceSeries['meters']['context']): number | undefined => {
- if(context.reportedPercent._tag==='Known')return context.reportedPercent.value
- return context.usedTokens._tag==='Known'&&context.windowTokens._tag==='Known'&&context.windowTokens.value>0?context.usedTokens.value/context.windowTokens.value*100:undefined
+/** Harness-reported occupancy, or an estimate from reported tokens when the harness gives no percentage. */
+export type ContextOccupancy = {readonly percent:number;readonly estimated:boolean}
+export const contextOccupancy = (context: TraceSeries['meters']['context']): ContextOccupancy | undefined => {
+ if(context.reportedPercent._tag==='Known')return {percent:context.reportedPercent.value,estimated:false}
+ return context.usedTokens._tag==='Known'&&context.windowTokens._tag==='Known'&&context.windowTokens.value>0?{percent:context.usedTokens.value/context.windowTokens.value*100,estimated:true}:undefined
 }
+/** A reported percentage is usable without underlying token counts. */
+export const contextPercent = (context: TraceSeries['meters']['context']): number | undefined => contextOccupancy(context)?.percent
+/** The one explanation every estimated occupancy carries. */
+export const estimatedOccupancyExplanation = 'Harness did not report a percentage; estimated from tokens.'

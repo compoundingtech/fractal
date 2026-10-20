@@ -18,11 +18,10 @@ const PanelSurface = ({ scheme = 'dark', width = 1440, initiallyOpen = false }: 
       <ol {...stylex.props(styles.transcript)}>{Array.from({ length: 24 }, (_, index) => <li key={index}>Transcript entry {index + 1}: the workspace stays readable and interactive while the panel is open.</li>)}</ol>
       <Button {...stylex.props(styles.button)}>Workspace action</Button>
     </main>
-    {open && <SidePanel id={panelId} aria-label="Agent resources" onClose={() => setOpen(false)}>
-      <header {...stylex.props(styles.panelHeader)}><strong>Resources</strong><Button aria-label="Close resources" onPress={() => setOpen(false)} {...stylex.props(styles.button)}>Close resources</Button></header>
+    {open && <SidePanel id={panelId} aria-label="Agent resources" heading="Resources" actions={<Button aria-label="Close resources" onPress={() => setOpen(false)} {...stylex.props(styles.button)}>Close resources</Button>} onClose={() => setOpen(false)}>
       <div {...stylex.props(styles.panelBody)}>
-        <section aria-label="Todos"><h2 {...stylex.props(styles.title)}>Todos</h2><p>No harness todo snapshot observed.</p></section>
-        <section aria-label="Observed resources"><h2 {...stylex.props(styles.title)}>Observed resources</h2><ul>{['Project notes', 'Build checkout', 'Review thread'].map(name => <li key={name}>{name}</li>)}</ul></section>
+        <section aria-label="Todos"><h3 {...stylex.props(styles.title)}>Todos</h3><p>No harness todo snapshot observed.</p></section>
+        <section aria-label="Observed resources"><h3 {...stylex.props(styles.title)}>Observed resources</h3><ul>{['Project notes', 'Build checkout', 'Review thread'].map(name => <li key={name}>{name}</li>)}</ul></section>
       </div>
     </SidePanel>}
   </div>
@@ -36,7 +35,7 @@ const nonModalPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEle
   const panel = await canvas.findByRole('complementary', { name: 'Agent resources' })
   await expect(opener).toHaveAttribute('aria-expanded', 'true')
   await expect(opener).toHaveAttribute('aria-controls', panel.id)
-  await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true))
+  await waitFor(() => expect(within(panel).getByRole('heading', { level: 2, name: 'Resources' })).toHaveFocus())
   // Non-modal: the workspace is neither inert nor hidden, and stays operable.
   await expect(root.ownerDocument.querySelectorAll('[inert]').length).toBe(0)
   await expect(canvas.getByRole('main', { name: 'Workspace' }).closest('[aria-hidden="true"]')).toBeNull()
@@ -57,12 +56,37 @@ const nonModalPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEle
   root.dataset.proof = 'passed'
 }
 
+/** Opening places focus on the heading without painting a ring; Tab then reaches the first control with its normal keyboard ring. */
+const initialFocusPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  const root = canvasElement.querySelector<HTMLElement>('[data-side-panel-story]')!
+  const panel = await within(root).findByRole('complementary', { name: 'Agent resources' })
+  const heading = within(panel).getByRole('heading', { level: 2, name: 'Resources' })
+  const close = within(panel).getByRole('button', { name: 'Close resources' })
+  const ring = (element: Element) => getComputedStyle(element).outlineStyle
+  await waitFor(() => expect(heading).toHaveFocus())
+  await expect(heading).toHaveAttribute('tabindex', '-1')
+  await expect(panel).not.toHaveAttribute('tabindex')
+  // Neither the region nor the programmatically focused heading paints a ring.
+  await expect(ring(panel)).toBe('none')
+  await expect(ring(heading)).toBe('none')
+  await expect(ring(close)).toBe('none')
+  // Keyboard focus on the first control keeps the visible kit ring; the region stays quiet.
+  await userEvent.tab()
+  await expect(close).toHaveFocus()
+  await expect(ring(close)).toBe('solid')
+  await expect(ring(panel)).toBe('none')
+  // Not trapped: Shift+Tab skips the heading (never tabbable) and leaves for the workspace.
+  await userEvent.tab({ shift: true })
+  await expect(within(root).getByRole('button', { name: 'Workspace action' })).toHaveFocus()
+  root.dataset.proof = 'passed'
+}
+
 // The kit gate runs every story at 440/1440 in both schemes and passes `scheme` as an arg; `width` clamps to the viewport.
 const meta = { title: 'Fractal/Shell/Side panel', component: PanelSurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 } } satisfies Meta<typeof PanelSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 export const NonModal: Story = { play: nonModalPlay }
-export const Open: Story = { args: { initiallyOpen: true } }
+export const Open: Story = { args: { initiallyOpen: true }, play: initialFocusPlay }
 
 const styles = stylex.create({
   surface: { position: 'relative', height: 900, display: 'flex', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
@@ -70,7 +94,6 @@ const styles = stylex.create({
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md },
   transcript: { margin: 0, paddingInlineStart: s.lg, display: 'flex', flexDirection: 'column', gap: s.sm },
   button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: c.rowHover, color: c.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
-  panelHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   panelBody: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   title: { fontSize: t.uiSize, marginBlock: s.md },
 })

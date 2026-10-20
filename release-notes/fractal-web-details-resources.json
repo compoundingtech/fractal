@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Additive: Fractal UI exports SidePanel and SidePanelProps from its shell entry and optional DetailsDisplayObservation.pending/detail and DetailsSection.pending fields. Hosts omitting these fields retain the reported-total Subagents badge, visible known-zero observations, and wrapped role/model/session titles. Details reads use existing client read endpoints and request redacted declaration values only. Resources is no longer a dialog; it is a labelled complementary region named by the trigger's aria-controls."
+    "detail": "Additive: Fractal UI exports SidePanel and SidePanelProps from its shell entry; SidePanel requires a visible heading and accepts optional header actions. Optional DetailsDisplayObservation.pending/detail and DetailsSection.pending fields reserve reported content. Hosts omitting these fields retain the reported-total Subagents badge, visible known-zero observations, and wrapped role/model/session titles. Details reads use existing client read endpoints and request redacted declaration values only. Resources is a labelled complementary region named by the trigger's aria-controls, not a dialog; opening focuses its heading without outlining the whole panel."
   },
   "downtime": {
     "status": "none",
