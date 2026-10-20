@@ -490,6 +490,33 @@ fn compare_shared(expected: &Store, actual: &Store, phase: &str, mismatches: &mu
 }
 
 fn write_audit_history(source: &Store) {
+    // Real creation and revocation claims keep task_grants in the shuffled replay and
+    // checkpoint history; the digest test below mutates and rolls back every shared column.
+    let manifest: st3_schema::task_grants::TaskManifest = serde_json::from_value(json!({
+        "version": 1,
+        "title": "Example audit grant",
+        "requester": {
+            "principal": "person/robin", "run": "example-run",
+            "step": "example-step", "incarnation": "example-1"
+        },
+        "window": {
+            "notBefore": "2100-01-01T00:00:00Z",
+            "notAfter": "2100-01-01T01:00:00Z"
+        },
+        "provider": {
+            "name": "example", "browserProfile": "example",
+            "origins": ["https://example.com"]
+        },
+        "browserSteps": [], "writes": [], "readers": []
+    })).unwrap();
+    let request = st3_schema::task_grants::CreateTaskGrantRequest {
+        digest: manifest.digest().unwrap(),
+        manifest,
+        op_proxy_case_id: "example-audit-case".into(),
+    };
+    let grant = source.create_task_grant(&request).unwrap();
+    source.revoke_task_grant(&grant.grant_id, "example audit cancellation").unwrap().unwrap();
+
     source.register_custom_kind(&custom::RegistrationRequest {
         manifest: serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hf3b536a975c9 owner=st3_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json")).unwrap(),
         actor: "agent/garden/seed".into(),

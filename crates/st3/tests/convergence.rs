@@ -1608,10 +1608,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v3, seeds 5 and 34
-/// never reach a trim; every other fixed seed must. This list is tied to the corpus because
-/// claim generation consumes the same RNG as the schedule.
-const NEVER_TRIMS: &[u64] = &[5, 34];
+/// Checkpoints trim in most runs, or the suite is worth little. Run every fixed seed with
+/// `Sabotage::None` and collect those whose `Outcome::trimmed` is false. Corpus v3 yielded
+/// [5, 34]; corpus v4 yields [5]. Claim generation consumes the same RNG as the schedule,
+/// so adding kinds or fields changes both the generated claims and the checkpoint history.
+const NEVER_TRIMS: &[u64] = &[5];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
@@ -1673,6 +1674,9 @@ seed_tests! {
 #[test]
 fn every_fixed_seed_has_a_test() {
     assert_eq!(TESTED_SEEDS, SEEDS);
+    assert!(!NEVER_TRIMS.is_empty(), "keep coverage of a history that never trims");
+    assert!(NEVER_TRIMS.iter().all(|seed| SEEDS.contains(seed)));
+    assert!(NEVER_TRIMS.len() * 2 < SEEDS.len(), "most fixed seeds must trim");
 }
 
 /// The stores of every other test here are on tmpfs (see `scratch_dir`). This one seed runs on

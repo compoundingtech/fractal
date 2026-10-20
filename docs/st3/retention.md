@@ -84,6 +84,19 @@ rule does, and changes the rules digest:
 5. Deploy it to every member. Until every participant runs the same rules, checkpoints wait at
    sealing; replication and ordinary work go on.
 
+## Convergence regression coverage
+
+The fixed seeds in `crates/st3/tests/convergence.rs` exercise both trimmed and untrimmed
+histories. The `NEVER_TRIMS` list is an observation of the versioned corpus, not an exemption
+from convergence: run every `SEEDS` entry with `Sabotage::None` and collect exactly those whose
+`Outcome::trimmed` is false. Each fixed-seed test asserts that observed result as well as
+convergence; the list must retain an untrimmed seed and leave most seeds trimming.
+
+With `claims-v3.json` the untrimmed seeds were `[5, 34]`; with `claims-v4.json` they are `[5]`.
+Claim generation and scheduling share an RNG, so the new task-grant claim kinds and fields
+change subsequent schedule choices. Seed 34 now trims; its convergence and trim assertions
+remain enabled.
+
 ## Measuring a change
 
 `crates/st3/examples/retention_plan.rs` plans a checkpoint on a private copy of a store and prints
