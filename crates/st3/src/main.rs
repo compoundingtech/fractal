@@ -8818,12 +8818,19 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     } else {
         "/v1/usage"
     };
-    let report: Value = client
+    let mut report: Value = client
         .get(&format!("{path}?since_ms={since}&until_ms={until}"))
         .await?;
     if json_output || args.messages_only {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
+    }
+    // Coordination cost beside spend. A daemon without the count read shows spend alone.
+    if let Ok(counts) = client
+        .get::<Value>(&format!("/v1/usage/messages?since_ms={since}&until_ms={until}"))
+        .await
+    {
+        report["coordination"] = counts;
     }
     print!("{}", render_usage_report(&report, args.hours, args.by));
     Ok(())
@@ -9087,6 +9094,28 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             "UNPRICED  {} tokens on models without a price",
             total[6]
         );
+    }
+    if let Some(counts) = report.get("coordination").filter(|counts| counts.is_object()) {
+        let _ = write!(
+            output,
+            "MESSAGES  {} agent to agent ({} silent)",
+            counts["agent_to_agent"].as_u64().unwrap_or(0),
+            counts["silent"].as_u64().unwrap_or(0)
+        );
+        // Older daemons count messages but not merged pull requests.
+        if let Some(merged) = counts["merged_pull_requests"].as_u64() {
+            let _ = write!(output, " · {merged} merged PRs · ");
+            match counts["agent_to_agent_per_merged_pull_request"].as_f64() {
+                Some(ratio) => {
+                    let _ = write!(output, "{ratio:.1} per merged PR");
+                }
+                None if counts["complete"].as_bool() != Some(true) => {
+                    output.push_str("per merged PR unknown until message history is counted")
+                }
+                None => output.push_str("per merged PR unknown with none merged"),
+            }
+        }
+        output.push('\n');
     }
     if let Some(estimate) = report.get("agent_messages") {
         output.push_str("\nAGENT MESSAGES · daily estimate · UTC · API-equivalent\n");
