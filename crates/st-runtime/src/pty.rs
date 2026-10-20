@@ -6,6 +6,7 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -106,6 +107,7 @@ pub struct PtyRuntime {
     spawn_timeout: Duration,
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
+    registry_cache: Arc<pty_client::list::RegistryListCache>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -128,6 +130,7 @@ impl PtyRuntime {
             spawn_timeout: SPAWN_PUBLICATION_TIMEOUT,
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
+            registry_cache: Arc::new(pty_client::list::RegistryListCache::default()),
         }
     }
 
@@ -169,7 +172,8 @@ impl PtyRuntime {
             return Err(error).with_context(|| format!("list PTYs in {}", self.root.display()));
         }
         Ok(
-            pty_client::list::list(&self.root, &pty_client::list::ListOptions::default())
+            self.registry_cache
+                .list(&self.root, &pty_client::list::ListOptions::default())
                 .into_iter()
                 .map(|listed| listed.info)
                 .collect(),
@@ -1178,6 +1182,40 @@ exit 0
     }
 
     #[test]
+    fn sessions_share_cached_metadata_and_observe_registry_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        write_record(&registry, "robin", serde_json::json!({"createdAt":"original"}));
+        let runtime = PtyRuntime::new(registry.clone());
+        let cloned = runtime.clone();
+        assert!(Arc::ptr_eq(&runtime.registry_cache, &cloned.registry_cache));
+
+        let first = runtime.sessions().unwrap();
+        let second = cloned.sessions().unwrap();
+        let observations = |sessions: Vec<SessionInfo>| {
+            sessions
+                .into_iter()
+                .map(observation)
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(first.len(), 1);
+        assert_eq!(observations(first), observations(second));
+
+        // A different length invalidates the metadata stamp without relying on clock resolution.
+        write_record(
+            &registry,
+            "robin",
+            serde_json::json!({"createdAt":"changed-incarnation"}),
+        );
+        let changed = observations(runtime.sessions().unwrap());
+        assert_eq!(changed[0].created_at.as_deref(), Some("changed-incarnation"));
+
+        fs::remove_file(registry.join("robin.json")).unwrap();
+        assert!(cloned.sessions().unwrap().is_empty());
+    }
+
+    #[test]
     fn rollout_spawn_refuses_an_unrelated_live_incarnation_and_reuses_only_its_own_marker() {
         let root = tempfile::tempdir().unwrap();
         let registry = root.path().join("registry");
@@ -1360,6 +1398,7 @@ exit 0
             socket_path: PathBuf::from("bad.sock"),
             pid: Some(-1),
             status: pty_core::registry::SessionStatus::Running,
+            identity: pty_core::registry::DaemonIdentityCheck::Match,
             metadata: None,
         };
         let observed = observation(record).unwrap();

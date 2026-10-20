@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reduce daemon CPU when listing many PTY sessions by reusing unchanged registry metadata",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "The registry metadata cache is process-local; no storage format changes."},
+  "rules": {"status": "none", "detail": "Session liveness and runtime ownership checks remain unchanged."},
+  "compatibility": {"status": "changed", "detail": "Repeated PTY snapshots share cached parsed metadata across runtime clones. Changed and removed registry entries are reflected on the next listing; liveness is still observed on every call."},
+  "downtime": {"status": "none", "detail": "The optimization takes effect on daemon restart without migration."},
+  "manual": {"status": "none", "detail": "No configuration changes."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}
