@@ -521,19 +521,27 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
 }
 
 #[test]
-fn profiles_pin_server_identity_and_legacy_discovery_bytes() {
+fn chatgpt_discovery_bytes_match_main_golden() {
+    // Captured by serializing Adapter::list_tools's complete rmcp ListToolsResult
+    // on origin/main bed66fbea69fae546ce2a5f7d6df942ae335ce47, not regenerated
+    // from this branch's TOOLS/schema(). Keep these bytes immutable.
+    let result = ListToolsResult {
+        tools: tool_definitions(Profile::ChatGpt),
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_vec(&result).unwrap().as_slice(),
+        include_bytes!("testdata/chatgpt-tools-list.json").as_slice(),
+    );
+}
+
+#[test]
+fn profiles_pin_server_identity_and_cross_profile_annotations() {
     assert_eq!(Profile::ChatGpt.server_name(), "st-chatgpt");
     assert_eq!(Profile::ChatGpt.assistant_principal(), "assistant/chatgpt");
     assert_eq!(Profile::Mcp.server_name(), "st");
     assert_eq!(Profile::Mcp.assistant_principal(), "assistant/mcp");
-    let legacy: Vec<Value> = TOOLS.iter().map(|(name, description, read)| {
-        // This is the exact pre-profile tools/list serialization contract.
-        json!({"name":name,"description":description,"inputSchema":schema(name),
-            "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer",
-                "idempotentHint":true,"openWorldHint":*name=="st_message_send"}})
-    }).collect();
     let actual = serde_json::to_value(tool_definitions(Profile::ChatGpt)).unwrap();
-    assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&legacy).unwrap());
     let mcp = serde_json::to_value(tool_definitions(Profile::Mcp)).unwrap();
     for (old, new) in actual.as_array().unwrap().iter().zip(mcp.as_array().unwrap()) {
         assert!(old.get("outputSchema").is_none());
