@@ -22,6 +22,12 @@ class ManifestTests(unittest.TestCase):
         text = (root / 'nix/typescript-client-deps.hash').read_text()
         self.assertRegex(text, r'^sha256-[A-Za-z0-9+/]{43}=\n\Z')
 
+    def test_the_installation_name_carries_the_lockfile_and_the_effect_utils_revision(self):
+        derivation = (root / 'nix/typescript-client.nix').read_text()
+        self.assertIn('typescript-client-installation-${lockHash}-${sourcesHash}', derivation)
+        self.assertRegex(derivation, r'sourcesHash = [^\n]*effect-utils\.narHash')
+        self.assertRegex(derivation, r'lockHash = [^\n]*pnpm-lock\.yaml')
+
     def test_every_workspace_member_manifest_is_a_derivation_input(self):
         workspace = (root / 'pnpm-workspace.yaml').read_text()
         members = re.findall(r'^  - (\S+)$', workspace.split('packages:', 1)[1].split('\n\n', 1)[0], re.MULTILINE)
