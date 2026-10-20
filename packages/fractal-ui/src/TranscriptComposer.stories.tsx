@@ -56,9 +56,10 @@ function ColumnStory({ scheme, readingColumn }: { scheme: Scheme; readingColumn:
 
 /** Scenario slice variants chosen through Storybook controls (`scenarioArgTypes`). */
 type ColumnArgs = React.ComponentProps<typeof ColumnStory> & { conversation?: string }
-const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { scenario: { _tag: 'contract-fixture', reason: "Own-send follow and placeholder probes require controlled local composer state and host callbacks." }, layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
+const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
 type Story = StoryObj<ColumnArgs>
+const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Own-send follow and placeholder probes require controlled local composer state and host callbacks.' } } } satisfies Story
 const scenarioColumn = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'], world: 'fleet-mid-refactor' } }, args: { conversation: 'default' }, argTypes: { conversation: { control: false } } } satisfies Story
 export const ScenarioConversation: Story = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']) }
 export const ScenarioConversationLight: Story = { ...ScenarioConversation, args: { scheme: 'light' } }
@@ -98,7 +99,7 @@ function PlaceholderStory({ scheme }: { scheme: Scheme }) {
 }
 const keyboardText = /enter|shift|return|ctrl|cmd|⌘|⏎|↵|mod\s*\+/i
 /** Empty-field guidance never carries keyboard instructions; a host override replaces it, still describing the field. */
-export const Placeholder: Story = { tags: ['critical'], render: args => <PlaceholderStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const Placeholder: Story = { ...contractFixture, tags: ['critical'], render: args => <PlaceholderStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   for (const [testId, expected] of [['default-placeholder', undefined], ['override-placeholder', overridePlaceholder]] as const) {
     const section = canvasElement.querySelector(`[data-testid="${testId}"]`)!
     const guidance = await waitFor(() => { const found = section.querySelector<HTMLElement>('[data-testid="composer-placeholder"]'); if (found === null) throw new Error(`No guidance in ${testId}`); return found })
@@ -141,7 +142,7 @@ async function settleFrames() {
   for (let frame = 0; frame < 3; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
 }
 /** An agent reply keeps a scrolled-up reader's line and offers the jump; the reader's own send brings it into view. */
-export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
+export const OwnSendFollows: Story = { ...contractFixture, tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
   const canvas = within(canvasElement)
   // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
   await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))

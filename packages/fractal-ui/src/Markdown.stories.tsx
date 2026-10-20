@@ -98,12 +98,13 @@ const ScenarioMarkdown = (args: React.ComponentProps<typeof MarkdownCanvas>) => 
 }
 const meta = {
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
-  parameters: { scenario: { _tag: 'contract-fixture', reason: "Exact local markdown syntax and token streaming stages exercise parser and renderer contracts." }, layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
+  parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof MarkdownCanvas>
 export default meta
 type Story = StoryObj<typeof meta>
+const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local markdown syntax and token streaming stages exercise parser and renderer contracts.' } } } satisfies Story
 
 const settle = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 const requireElement = <T extends Element>(root: Element, selector: string): T => {
@@ -114,6 +115,7 @@ const requireElement = <T extends Element>(root: Element, selector: string): T =
 
 function streamingTailStory(text: string, terminalSelector: string): Story {
   return {
+    ...contractFixture,
     render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={text} streaming /></div></ThemePortal></main>,
     play: async ({ canvasElement }) => {
       await document.fonts.ready
@@ -143,7 +145,7 @@ export const StreamingHeadingLight: Story = { ...StreamingHeading, args: { schem
 export const StreamingTableLight: Story = { ...StreamingTable, args: { scheme: 'light' } }
 export const StreamingTightListLight: Story = { ...StreamingTightList, args: { scheme: 'light' } }
 export const StreamingParagraphLight: Story = { ...StreamingParagraph, args: { scheme: 'light' } }
-export const RichText: Story = { tags: ['critical'],
+export const RichText: Story = { ...contractFixture, tags: ['critical'],
   play: async ({ canvasElement }) => {
     const root = requireElement(canvasElement, '[data-testid="markdown"]')
     const title = requireElement<HTMLAnchorElement>(root, 'h1 a')
@@ -157,9 +159,8 @@ export const RichText: Story = { tags: ['critical'],
     resource.click()
     await settle()
     if (canvasElement.querySelector('[data-testid="opened-resource"]')?.textContent !== 'Opened src/model.ts') throw new Error('Resource chip lost its open callback')
-  },
-}
-export const Languages: Story = { tags: ['critical'],
+  }, }
+export const Languages: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
     const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
@@ -174,18 +175,15 @@ export const Languages: Story = { tags: ['critical'],
       } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
       if (fence.querySelector('code')?.textContent !== `${code}\n`) throw new Error(`${language || 'text'} highlighting changed the source text`)
     }
-  },
-}
+  }, }
 export const Light: Story = { ...RichText, args: { scheme: 'light' } }
-export const AllStates: Story = {
-  args: { scenario: 'all' },
-  parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } },
-  argTypes: scenarioArgTypes(['conversation']),
-  render: args => <ScenarioMarkdown {...args} />,
-}
+export const AllStates: Story = { ...contractFixture, args: { scenario: 'all' },
+parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } },
+argTypes: scenarioArgTypes(['conversation']),
+render: args => <ScenarioMarkdown {...args} />, }
 export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
-export const AllStatesLight: Story = { args: { scenario: 'all', scheme: 'light' } }
-export const StreamingControlsPersistence: Story = { tags: ['critical'],
+export const AllStatesLight: Story = { ...contractFixture, args: { scenario: 'all', scheme: 'light' } }
+export const StreamingControlsPersistence: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     await document.fonts.ready
@@ -225,10 +223,9 @@ export const StreamingControlsPersistence: Story = { tags: ['critical'],
       if (clipboardDescriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
       else Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
     }
-  },
-}
+  }, }
 export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPersistence, args: { scenario: 'streaming', scheme: 'light' } }
-export const StreamingInlineMarkup: Story = { tags: ['critical'],
+export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
     const adversarial = '['.repeat(50_000)
@@ -264,10 +261,9 @@ export const StreamingInlineMarkup: Story = { tags: ['critical'],
       flushSync(() => append.click())
       await settle()
     }
-  },
-}
+  }, }
 
-export const CopyFailure: Story = { tags: ['critical'],
+export const CopyFailure: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     const fence = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
@@ -289,8 +285,7 @@ export const CopyFailure: Story = { tags: ['critical'],
       if (descriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
       else Object.defineProperty(navigator, 'clipboard', descriptor)
     }
-  },
-}
+  }, }
 
 /** C27/E04–E12: the input boundary forwards foreground ink, while default seat Prose stays soft. */
 function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' | 'light'; narrow?: boolean }) {
@@ -301,7 +296,7 @@ function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' |
     <section {...stylex.props(styles.lane, narrow && styles.inputNarrow)}><EmbraceMarkdownPreview tone={foreground ? 'foreground' : 'default'} markdown={'The input anchors this turn.\n\n- Review the retained snapshot.\n\n| Fact | Value |\n| --- | --- |\n| Snapshot | Retained |'} /></section>
   </main>
 }
-export const InputForegroundDark1440: Story = { render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
+export const InputForegroundDark1440: Story = { ...contractFixture, render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Rerender input' }))
   await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))

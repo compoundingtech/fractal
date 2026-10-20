@@ -63,9 +63,10 @@ function PressStory({ scheme }: { scheme: Scheme }) {
   </EmbraceRuntimeProvider></main>
 }
 
-const meta = { title: 'Fractal UI/Transcript press', component: PressStory, parameters: { scenario: { _tag: 'contract-fixture', reason: "Controlled host republish, insertion and pointer timing require identity-retained local transcript turns." }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof PressStory>
+const meta = { title: 'Fractal UI/Transcript press', component: PressStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof PressStory>
 export default meta
 type Story = StoryObj<typeof meta>
+const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Controlled host republish, insertion and pointer timing require identity-retained local transcript turns.' } } } satisfies Story
 
 function SectionTranscript({ section, status, instant }: { section: TranscriptSection; status: SyncStatus; instant: number }) {
   const options = React.useMemo(() => ({ messages: section.turns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items]), isRunning: section.turns.some(turn => turn.work.running), onNew: async () => {} }), [section.turns])
@@ -114,7 +115,7 @@ async function pressAcross(target: HTMLElement, during: () => Promise<void>) {
 }
 
 /** A republished snapshot mid-press neither reveals the jump nor steals the Retry click. */
-export const SameRowsDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const SameRowsDuringPress: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { canvas, jump, retries } = await ready(canvasElement, abortSignal)
   await pressAcross(canvas.getByRole('button', { name: 'Retry' }), async () => {
     canvas.getByRole('button', { name: 'Republish snapshot' }).click()
@@ -129,7 +130,7 @@ export const SameRowsDuringPress: Story = { play: async ({ canvasElement, abortS
 export const SameRowsDuringPressLight: Story = { ...SameRowsDuringPress, args: { scheme: 'light' } }
 
 /** A genuinely new row during the press still lets Retry take the click; the jump appears only after release. */
-export const NewRowDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const NewRowDuringPress: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { canvas, jump, retries } = await ready(canvasElement, abortSignal)
   await pressAcross(canvas.getByRole('button', { name: 'Retry' }), async () => {
     canvas.getByRole('button', { name: 'Append agent reply' }).click()
@@ -143,7 +144,7 @@ export const NewRowDuringPress: Story = { play: async ({ canvasElement, abortSig
 export const NewRowDuringPressLight: Story = { ...NewRowDuringPress, args: { scheme: 'light' } }
 
 /** A scrolled-up reader is not told about rows that were already there. */
-export const SameRowsScrolledUp: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const SameRowsScrolledUp: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Republish snapshot' }))
@@ -163,7 +164,7 @@ async function readerScrollsUp(viewport: HTMLElement) {
 const pointer = (target: Element, type: 'pointerdown' | 'pointerup', pointerId: number, pointerType: 'mouse' | 'touch') => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, pointerId, pointerType, isPrimary: pointerType === 'mouse', button: 0, buttons: type === 'pointerdown' ? 1 : 0, width: 1, height: 1, pressure: type === 'pointerdown' ? 0.5 : 0 }))
 
 /** A press whose release the page never sees (the window blurs) does not keep the jump hidden. */
-export const BlurEndsPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const BlurEndsPress: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { canvas, jump } = await ready(canvasElement, abortSignal)
   pointer(canvas.getByRole('button', { name: 'Retry' }), 'pointerdown', 1, 'mouse')
   window.dispatchEvent(new Event('blur'))
@@ -173,7 +174,7 @@ export const BlurEndsPress: Story = { play: async ({ canvasElement, abortSignal 
 export const BlurEndsPressLight: Story = { ...BlurEndsPress, args: { scheme: 'light' } }
 
 /** With two pointers down, releasing one keeps the dock still; the reveal waits for the last release. */
-export const SecondPointerHoldsDock: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const SecondPointerHoldsDock: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   pointer(retry, 'pointerdown', 1, 'mouse')
@@ -189,7 +190,7 @@ export const SecondPointerHoldsDock: Story = { play: async ({ canvasElement, abo
 export const SecondPointerHoldsDockLight: Story = { ...SecondPointerHoldsDock, args: { scheme: 'light' } }
 
 /** A same-length text revision is new content for a scrolled-up reader. */
-export const SameLengthRevision: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const SameLengthRevision: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Revise answer' }))
@@ -198,7 +199,7 @@ export const SameLengthRevision: Story = { play: async ({ canvasElement, abortSi
 export const SameLengthRevisionLight: Story = { ...SameLengthRevision, args: { scheme: 'light' } }
 
 /** A result arriving for an existing tool call is new content for a scrolled-up reader. */
-export const ToolResultArrives: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const ToolResultArrives: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Attach tool result' }))
@@ -207,7 +208,7 @@ export const ToolResultArrives: Story = { play: async ({ canvasElement, abortSig
 export const ToolResultArrivesLight: Story = { ...ToolResultArrives, args: { scheme: 'light' } }
 
 /** A reply inserted above the last failed send must not move Retry away from the pointer. */
-export const InsertAbovePressedRow: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const InsertAbovePressedRow: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas, jump, retries } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   const row = retry.closest<HTMLElement>('[data-testid="user-message"]')!
@@ -234,7 +235,7 @@ export const InsertAbovePressedRow: Story = { play: async ({ canvasElement, abor
 export const InsertAbovePressedRowLight: Story = { ...InsertAbovePressedRow, args: { scheme: 'light' } }
 
 /** Wheel scrolling during a press gives the reader ownership; compensation stays off. */
-export const ScrollDuringPress: Story = { play: async ({ canvasElement, abortSignal }) => {
+export const ScrollDuringPress: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
   pointer(retry, 'pointerdown', 1, 'mouse')
@@ -305,9 +306,9 @@ const hostInsertPlay: NonNullable<Story['play']> = async ({ canvasElement }) => 
   })
   await waitFor(() => expect(canvas.getByTestId('activated-row')).toHaveTextContent(id))
 }
-export const HostInsertRetainedRows: Story = { render: args => <HostRowsPressStory scheme={args.scheme} snapshot="retained" />, play: hostInsertPlay }
-export const HostInsertFreshObjects: Story = { render: args => <HostRowsPressStory scheme={args.scheme} snapshot="fresh" />, play: hostInsertPlay }
-export const HostInsertShiftedIndex: Story = { render: args => <HostRowsPressStory scheme={args.scheme} snapshot="shifted" />, play: hostInsertPlay }
+export const HostInsertRetainedRows: Story = { ...contractFixture, render: args => <HostRowsPressStory scheme={args.scheme} snapshot="retained" />, play: hostInsertPlay }
+export const HostInsertFreshObjects: Story = { ...contractFixture, render: args => <HostRowsPressStory scheme={args.scheme} snapshot="fresh" />, play: hostInsertPlay }
+export const HostInsertShiftedIndex: Story = { ...contractFixture, render: args => <HostRowsPressStory scheme={args.scheme} snapshot="shifted" />, play: hostInsertPlay }
 export const HostInsertRetainedRowsLight: Story = { ...HostInsertRetainedRows, args: { scheme: 'light' } }
 export const HostInsertFreshObjectsLight: Story = { ...HostInsertFreshObjects, args: { scheme: 'light' } }
 export const HostInsertShiftedIndexLight: Story = { ...HostInsertShiftedIndex, args: { scheme: 'light' } }
@@ -325,9 +326,9 @@ const externalOwnerPlay: NonNullable<Story['play']> = async context => {
   } finally { console.warn = original }
 }
 /** Defense in depth for a misconfigured host: the document, not the lane, scrolls. */
-export const HostInsertDocumentScroll: Story = { render: args => <HostRowsPressStory scheme={args.scheme} snapshot="fresh" scrollOwner="document" />, play: externalOwnerPlay }
+export const HostInsertDocumentScroll: Story = { ...contractFixture, render: args => <HostRowsPressStory scheme={args.scheme} snapshot="fresh" scrollOwner="document" />, play: externalOwnerPlay }
 export const HostInsertDocumentScrollLight: Story = { ...HostInsertDocumentScroll, args: { scheme: 'light' } }
-export const HostInsertAncestorScroll: Story = { render: args => <HostRowsPressStory scheme={args.scheme} snapshot="fresh" scrollOwner="ancestor" />, play: externalOwnerPlay }
+export const HostInsertAncestorScroll: Story = { ...contractFixture, render: args => <HostRowsPressStory scheme={args.scheme} snapshot="fresh" scrollOwner="ancestor" />, play: externalOwnerPlay }
 export const HostInsertAncestorScrollLight: Story = { ...HostInsertAncestorScroll, args: { scheme: 'light' } }
 
 const styles = stylex.create({

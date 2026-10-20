@@ -297,7 +297,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(266)
+  expect(exemptions).toHaveLength(263)
 })
 
 test('scenario transcript preserves the active migrator turn without a terminal status', () => {
@@ -326,6 +326,15 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'edit' && call.changedPath === 'src/session.ts')).toBe(true)
   const failedTurns = scenarioSections(world.with({ conversation: 'failed-tools' }).slices.conversation).sections.flatMap(({ turns }) => turns)
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
+})
+
+test('phone whole-thread projection preserves turns while leaving mounting to Transcript', () => {
+  const slice = loadWorld('huge').slices.conversation
+  const bounded = scenarioSections(slice).sections
+  const whole = scenarioSections(slice, 'whole-thread').sections
+  expect(whole).toHaveLength(slice.state.threads.length)
+  expect(whole.flatMap(section => section.turns.map(turn => turn.id))).toEqual(bounded.flatMap(section => section.turns.map(turn => turn.id)))
+  expect(whole.some(section => section.turns.length > transcriptInitialTailCount + historyBatchSize)).toBe(true)
 })
 
 test('connection geometry header and bounded history belong to the same thread', () => {

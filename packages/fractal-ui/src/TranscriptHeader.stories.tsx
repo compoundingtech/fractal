@@ -22,10 +22,10 @@ const HeaderSurface = ({ scheme = 'dark', narrow = false }: { scheme?: Scheme; n
     <Transcript title="Row projection" turns={[]} showHeader={showHeader} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} />
   </EmbraceRuntimeProvider>
 </section>)}</main>
-const meta = { title: 'Fractal UI/Transcript header ownership', component: HeaderSurface, parameters: { scenario: { _tag: 'primitive', reason: "Compares header ownership, menus and narrow geometry without scenario domain data." }, layout: 'fullscreen' }, args: { scheme: 'dark', narrow: false } } satisfies Meta<typeof HeaderSurface>
+const meta = { title: 'Fractal UI/Transcript header ownership', component: HeaderSurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', narrow: false } } satisfies Meta<typeof HeaderSurface>
 export default meta
 type Story = StoryObj<typeof meta>
-export const Dark1440: Story = { play: async ({ canvasElement }) => {
+export const Dark1440: Story = { parameters: { scenario: { _tag: 'primitive', reason: 'Empty transcripts compare header ownership, menus and narrow geometry without domain content.' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const hosted = within(canvas.getByRole('region', { name: 'Host-owned header' }))
   await expect(hosted.queryByTestId('transcript-header')).toBeNull()
@@ -55,6 +55,7 @@ function HostedStatusSurface({ scheme = 'dark' }: { scheme?: Scheme }) {
 }
 
 export const HostedStatus: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact reading progress 1/2 at a frozen instant proves portal status ownership, park/reactivate cleanup and the 32px host header; catalog sync stages do not preserve that progress geometry contract.' } },
   render: args => <HostedStatusSurface scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)

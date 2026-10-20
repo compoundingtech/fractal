@@ -16,7 +16,7 @@ function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = f
       : <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} terminalDisabledReason={terminalDisabledReason} />}
   </main>
 }
-const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises header controls, disabled reasons and responsive geometry without scenario data." }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
+const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact terminal-disabled reason and fixed short/long titles isolate accessible control names, tooltip focus and constrained-lane/phone overflow; the working label is a fixed geometry probe rather than a catalog agent state.' }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
 export default meta
 type Story = StoryObj<typeof meta>
 /** The host knows why the terminal is unavailable: the toggle stays in place and in the tab order, disabled and described; focus shows the reason in the kit tooltip. */
