@@ -972,7 +972,7 @@ async fn assistant_pages_pack_whole_items_and_resume_at_the_exact_budget_boundar
     let state = state(root.path());
     let snapshot = new_client_snapshot(&state);
     let context = response_body::Context {
-        state: state.clone(), client_request: true, observation_report: false,
+        state: state.clone(), client_request: true, local_only_response: false,
         request_id: "request/00000000-0000-0000-0000-000000000000".into(),
         client_snapshot: Some(snapshot.clone()), server: None, roster: false,
     };
@@ -1047,7 +1047,7 @@ async fn assistant_pages_reject_cursor_limits_and_offsets_outside_the_cached_sna
     let state = state(root.path());
     let snapshot = new_client_snapshot(&state);
     let context = response_body::Context {
-        state: state.clone(), client_request: true, observation_report: false,
+        state: state.clone(), client_request: true, local_only_response: false,
         request_id: "request/test".into(), client_snapshot: Some(snapshot.clone()),
         server: None, roster: false,
     };

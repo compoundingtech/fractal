@@ -34,7 +34,7 @@ async fn rich_source_pages_resume_after_the_last_delivered_item_without_loss() {
         for projection in ["missions-rich", "attention-rich", "agents-rich"] {
             let admitted = new_client_snapshot(&state);
             let context = response_body::Context {
-                state: state.clone(), client_request: true, observation_report: false,
+                state: state.clone(), client_request: true, local_only_response: false,
                 request_id: "request/00000000-0000-0000-0000-000000000000".into(),
                 client_snapshot: Some(admitted.clone()), server: None, roster: false,
             };

@@ -197,6 +197,7 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
+    "write.client-diagnostics",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -335,6 +336,8 @@ pub struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub pairing_grant: Option<String>,
+    /// Local-only push registrations belong to the member that issued this exact pairing.
+    pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
     pub assistant_write: Option<crate::store::assistant_write::AssistantWriteAuthorization>,
     pub transport: &'static str,
@@ -355,6 +358,7 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport,
@@ -394,6 +398,7 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+                pairing_issued_here: false,
             grant_expires_at: None,
                 assistant_write: None,
                 transport: "unix",
@@ -414,6 +419,7 @@ impl ClientSession {
             actor: person.into(),
             authority_actor: person.into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport: "unix",
@@ -431,6 +437,7 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport: "fabric-loopback",
@@ -462,7 +469,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         .map(|scope| {
             json!({
                 "id": scope,
-                "version": 0,
+                "version": if *scope == "write.client-diagnostics" { 1 } else { 0 },
                 "state": if session.allows(scope) { "granted" } else { "ungranted" }
             })
         })
@@ -497,6 +504,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"assistant.grants.v1", "version":1,
         "state":if assistant::trusted_issuer(state, session).is_ok() {"granted"} else {"ungranted"}}));
@@ -633,6 +641,11 @@ pub fn authenticate(
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
     session.messages_paging = messages_paging;
+    if request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/client/diagnostics"
+    {
+        require_scope(&session, "write.client-diagnostics")?;
+    }
     if request.method() == axum::http::Method::GET {
         let scope = if request
             .uri()
@@ -683,6 +696,7 @@ pub fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,
         transport,
@@ -1597,6 +1611,8 @@ pub fn device_resources(
     // Pairing and revocation are fenced by the graph snapshot above. Expiration is
     // live state: its clock must advance even when no claim advances that snapshot.
     let at = client_now_ms();
+    let push = state.store.push_registration_statuses(person, at as u64)
+        .map_err(|_| ApiError::internal("local push registration status is unavailable"))?;
     let mut resources = paired
         .into_iter()
         .map(|(device_id, (completed, revoked))| {
@@ -1614,7 +1630,7 @@ pub fn device_resources(
             } else {
                 "active"
             };
-            json!({
+            let mut resource = json!({
                 "id": device_id,
                 "kind": "device",
                 "revision": selected.id,
@@ -1630,7 +1646,18 @@ pub fn device_resources(
                     "actionable": state_name == "active",
                     "reasons": if state_name == "active" { Vec::<&str>::new() } else { vec![state_name] }
                 }
-            })
+            });
+            if completed.origin == state.node {
+                resource["push"] = if state_name == "active" {
+                    push.get(&device_id).map_or_else(
+                        || json!({"registered":false}),
+                        |status| json!(status),
+                    )
+                } else {
+                    json!({"registered":false})
+                };
+            }
+            resource
         })
         .collect::<Vec<_>>();
     resources.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));

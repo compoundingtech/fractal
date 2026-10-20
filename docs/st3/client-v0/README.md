@@ -48,6 +48,58 @@ The collections socket's `CollectionCommand` and `CollectionFrame` definitions l
 schema as HTTP resources. The operation manifest's `streams` section names its route, protocol,
 command/frame definitions, and subscription bound; see [collections](collections.md).
 
+### Paired client diagnostics
+
+`POST /v1/client/diagnostics` requires `write.client-diagnostics` and a live paired
+device credential. New default limited and full-control pairings include the scope;
+existing grants are unchanged and must be re-paired to acquire it. The Unix route
+also requires a paired bearer; it is not an arbitrary observation/OTLP write API.
+
+Route support and the active pairing's permission are advertised by
+`GET /v1/client/capabilities`: `write.client-diagnostics` version 1 is `granted`
+or `ungranted`. Upload starts only when it is granted; older daemons that omit
+the capability are not probed with POST. A separate unauthenticated health
+feature is unnecessary for this paired-only route.
+
+`ClientDiagnosticsBatch` version 1 carries 1–32 events within 128 KiB, including
+launch/sequence IDs, build/runtime/update metadata, occurrence/capture times,
+severity and one allowlisted payload. Stacks contain at most 32 categorized numeric
+frames, never error messages, symbols, URLs, headers, personal paths or raw native
+dumps. Ingestion reconstructs the allowlist again, discards unknown keys and replaces
+unsafe version strings with `unknown`; malformed/beyond-bound reports are refused.
+
+Pairing determines the device, person and grant. A single durable transaction writes
+the sanitized node-local `client.launch`, `client.js-error`, `client.native-crash` or
+`client.hang` observations and retry receipts. Only then does the envelope return
+`acknowledged_event_ids`; repeated device/event IDs are acknowledged without another
+observation, even across payload kinds. Diagnostics observations have a 7-day local
+retention window; server retry/deduplication receipts remain for 30 days independently
+of observation trimming. Admission allows 256 new events per device per minute;
+retries do not consume that allowance. These observations never replicate desired
+state. Their Local retention is declared in `crates/st3-schema/retention.toml`,
+alongside the other node-local observations; schema registration reads that shared
+policy. This distinction does not change either retention window or runtime behavior.
+
+The receipt table and its indexes are installed idempotently on every store open,
+including an existing storage-version-19 database. This is backward-compatible
+local storage: older binaries ignore the table, existing rows/columns and
+checkpoint/operation rules are unchanged. No migration version or local storage
+compatibility digest bump is required; the published diagnostics vocabulary and
+client contract digests do change. Reopening preserves diagnostic receipts.
+
+Admission refusal returns HTTP 429 with public error code `rate-limited`.
+Phones honour `Retry-After` when supplied, otherwise use bounded backoff. Terminal
+4xx validation refusals discard the rejected batch so it cannot block later
+reports; 401/403 retain reports and pause that client until pairing changes.
+
+The existing OTLP exporter maps diagnostic severity and occurrence time to log
+severity and `timeUnixNano`, while `observedTimeUnixNano` is server acceptance time.
+Build/update IDs are log attributes, not metric labels. MetricKit reports explicitly
+mark their interval-end occurrence approximation and synthetic interval launch ID;
+an unclean previous launch is an inferred breadcrumb, not proof of a crash.
+See [iOS diagnostics](../../../apps/ios/README.md) for capture, bounded offline
+retention, limitations and on-phone verification.
+
 ### Person directive notes
 
 `GET /v1/client/notes` requires `read.projections` and an identified person or
@@ -85,11 +137,19 @@ also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 Launch delivery, change notifications, and UI authoring are outside this read-path slice.
 
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
 [`observations.report`](observations.md). This command has no action receipt, replication
 or snapshot fence. Live-share is typed foreground/live time, separate from latency histograms.
+
+### Push registration
+
+A paired phone can store its APNs device token with [`push.register`](push.md) and remove it with
+`push.unregister`, advertised as the optional `push-registration` capability. The token stays on
+the member that issued the pairing; it is never a claim, never replicated and never logged.
+Revoking or expiring the pairing removes it. st does not send pushes yet.
 
 ### Person ask respondents
 
@@ -205,7 +265,8 @@ Fabric. Never expose the privileged local Unix API through a TCP forwarder.
 The gateway authenticates a paired device and derives the actor and scopes for the connection.
 Request bodies never select an actor. Device credentials are scoped, individually revocable, and
 different from fleet replication secrets. A remote client is always online: v0 has no offline
-mutation queue, push notification service, cached graph authority, or multi-master replication.
+mutation queue, push notification sender, cached graph authority, or multi-master replication.
+A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
 
 ### Tailnet carrier
 
@@ -725,7 +786,8 @@ Clients must evict removed source cards and replace their window from fresh snap
 reconnect. The iOS cache version is 4 and the terminal UI's is 3; older cached cards are discarded. Offline
 cards are marked stale and cannot submit actions. A future notification consumer should compare
 fixed-recipient snapshots at an explicit `as_of` and deduplicate transitions by source, person,
-and episode, notifying only when an episode first appears. There is no push delivery service.
+and episode, notifying only when an episode first appears. There is no push delivery service;
+[push registration](push.md) only stores a paired phone's token.
 
 Every attention resource carries its concrete `person_id`, original `source_id`, semantic
 `attention_kind`, optional mission/run/step context, and currently meaningful typed actions. A
@@ -1271,9 +1333,10 @@ credential bound to that key. The resulting session returns the exact delegated 
 device-session actor, and granted scopes.
 Pairing codes expire after five minutes and reveal no fleet secret. The remote device cannot
 request its own actor or scopes. By default the trusted local begin grants projection reads,
-glasses reads and control, terminal reads, attention control, and launch control. The begin
-request may narrow that default with `scopes`, a non-empty subset of exactly those limited
-scopes (`read.projections`, `read.glasses`, `control.glasses`, `terminal.read`,
+client diagnostics writes, glasses reads and control, terminal reads, attention control,
+and launch control. The begin request may narrow that default with `scopes`, a non-empty
+subset of those limited scopes (`read.projections`, `write.client-diagnostics`,
+`read.glasses`, `control.glasses`, `terminal.read`,
 `control.attention`, `control.launches`); any other scope, or `scopes` combined with
 `full_control`, is rejected with a validation error. `st devices --as person/alex pair
 --read-only "Wall display"` requests `read.projections`, `read.glasses`, and `terminal.read`, so

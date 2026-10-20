@@ -354,8 +354,16 @@ public actor St3Client {
     public func workRelease(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRelease(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workRenew(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRenew(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workRetry(id: String, idempotencyKey: String, fence: Fence, parameters: WorkRetryParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRetry(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    /// Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable, including duplicates. Requires write.client-diagnostics.
+    public func diagnosticsSubmit(_ batch: ClientDiagnosticsBatch) async throws -> Envelope<ClientDiagnosticsAck> {
+        try await post("v1/client/diagnostics", batch)
+    }
     /// Diagnostic local acceptance: no graph receipt or snapshot fence.
     public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+
+    /// Replace this paired device's local-only registration. No graph receipt.
+    public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }
+    public func pushUnregister() async throws -> PushRegistrationResponse { try await request("v1/client/push-registration", query: [], method: "DELETE", body: nil) }
 
     public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: st3ClientAPIVersion, deviceName: deviceName, personID: personID)) }
     public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }
