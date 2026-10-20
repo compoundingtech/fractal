@@ -43,11 +43,31 @@ def main():
     baseline = subprocess.check_output(['git', 'merge-base', 'origin/main', 'HEAD'], cwd=ROOT, text=True).strip()
     reviewed = json.loads(subprocess.check_output(['git', 'show', baseline + ':' + slv.MANIFEST], cwd=ROOT, text=True))
     reviewed_by_id = {entry['id']: entry for entry in reviewed['sites']}
+    # A merge can retain canonical source markers while taking the incoming
+    # manifest with its pre-rename IDs. The first parent is also reviewed source.
+    # Recover only explicitly anchored records; the generator still rejects
+    # fingerprint changes and never grants an unreviewed exception.
+    prior = json.loads(subprocess.check_output(
+        ['git', 'show', 'HEAD^1:' + slv.MANIFEST], cwd=ROOT, text=True))
+    prior_by_id = {entry['id']: entry for entry in prior['sites']}
     cache = {}
     sites, markers = slv.scan(ROOT, cache)
     by_path = {}
     for marker in markers:
         by_path.setdefault(marker[0], []).append(marker)
+    for site in sites:
+        source = cache[site.path][0]
+        adjacent = [marker for marker in by_path.get(site.path, []) if marker[2] <= site.start
+                    and not source[marker[2]:site.start].strip() and marker[3] is not None]
+        if not adjacent:
+            continue
+        identifier = adjacent[-1][3]['id']
+        if identifier in old:
+            continue
+        accepted = reviewed_by_id.get(identifier) or prior_by_id.get(identifier)
+        if accepted is not None:
+            old[identifier] = dict(accepted)
+            manifest['sites'].append(old[identifier])
     changed = 0
     for site in sites:
         if site.id in old or site.kind != 'included-source':
