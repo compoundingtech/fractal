@@ -28,8 +28,8 @@ const sources: Readonly<Record<string, string>> = {
   [`${policy.kitSource}/worlds/types.ts`]: 'export interface Shape { value: number }; export interface OtherShape { value: number }',
   [source('loader.stories.ts')]: "export const load = () => import('../../kit/src/index'); if (globalThis) { void import('../../kit/src/index') }; export const conditional = globalThis ? import('../../kit/src/index') : undefined",
   [source('eager.stories.ts')]: "export const loaded = import('../../kit/src/index')",
-  [source('kit-loader.stories.ts')]: "export { load } from '../../kit/src/storybook/index'",
-  [`${policy.kitSource}/storybook/index.ts`]: "export const load = () => import('./runtime')",
+  [source('kit-loader.stories.ts')]: "export { scenarioLoaders } from '../../kit/src/storybook/index'",
+  [`${policy.kitSource}/storybook/index.ts`]: "export const scenarioLoaders = [async context => { const runtime = await import('./runtime'); return runtime }]",
   [`${policy.kitSource}/storybook/runtime.ts`]: "export { value } from '../index'",
   [source('iife.stories.ts')]: "export const value = (() => import('../../kit/src/index'))()",
   [source('condition.stories.ts')]: "if (await import('../../kit/src/index')) { }",
@@ -80,6 +80,24 @@ test('only the exact resolved kit loader edge is excluded', () => {
   expect(check('kit-loader.stories.ts', 'primitive').violations).toEqual([])
   expect(check('loader.stories.ts', 'primitive').violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)
   expect(check('eager.stories.ts', 'primitive').violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)
+})
+// These dynamic imports intentionally exercise the loader's module-loading boundary.
+test.each([
+  ['static', "import './runtime'; export const scenarioLoaders = []"],
+  ['eager', "const runtime = await import('./runtime'); export const scenarioLoaders = [runtime]"],
+  ['other function', "export const load = async () => { const runtime = await import('./runtime'); return runtime }"],
+  ['nested IIFE', "export const scenarioLoaders = [async () => (() => import('./runtime'))()]"],
+])('the loader path cannot exempt a %s import', (_kind, loaderSource) => {
+  const seededSources = { ...sources, [`${policy.kitSource}/storybook/index.ts`]: loaderSource }
+  const seededGraph = createTypeScriptGraph(Object.keys(seededSources).filter(file => file.endsWith('.ts')), {
+    target: ts.ScriptTarget.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noLib: true,
+    types: [],
+  }, seededSources)
+  const result = checkFixtureGraph(new Map([[source('kit-loader.stories.ts'), new Set<ExemptStoryMode>(['primitive'])]]), seededGraph, policy)
+  expect(result.violations.join('\n')).toContain(`${policy.kitSource}/storybook/runtime.ts`)
+  expect(result.violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)
 })
 test.each(['iife', 'condition', 'switch', 'logical'])('dynamic imports in %s expressions cannot bypass the graph', name => {
   expect(check(`${name}.stories.ts`, 'contract-fixture').violations.join('\n')).toContain(`${policy.kitSource}/index.ts`)

@@ -2,8 +2,13 @@ import * as path from 'node:path'
 import ts from 'typescript'
 
 export type ExemptStoryMode = 'primitive' | 'contract-fixture'
+export interface RuntimeImport {
+  readonly specifier: string
+  readonly kind: 'static' | 'dynamic' | 'require'
+  readonly position: 'scenario-loader-runtime' | 'other'
+}
 export interface RuntimeModule {
-  readonly imports: readonly string[]
+  readonly imports: readonly RuntimeImport[]
   readonly marked: boolean
 }
 export interface RuntimeSourceGraph {
@@ -45,8 +50,8 @@ export const checkFixtureGraph = (
   policy: FixtureGraphPolicy,
 ): FixtureGraphResult => {
   // The public Storybook entry defers its scenario loader until a slices declaration.
-  // Exempt stories never invoke it. This exact resolved edge is the only exception;
-  // all other dynamic imports count, including imports in lazy or conditional code.
+  // Exempt stories never invoke scenarioLoaders. Only its exact dynamic import
+  // initializer is exempt; static/eager imports of the same resolved path still count.
   const allowedLoaderEdges: Readonly<Record<string, readonly string[]>> = {
     [`${policy.kitSource}/storybook/index.ts`]: [`${policy.kitSource}/storybook/runtime.ts`],
   }
@@ -82,11 +87,13 @@ export const checkFixtureGraph = (
         importers.push(chain.join(' -> '))
         contractData.set(file, importers)
       }
-      for (const specifier of module.imports) {
-        const target = graph.resolve(specifier, file)
+      for (const edge of module.imports) {
+        const target = graph.resolve(edge.specifier, file)
+        const allowedLoader = edge.kind === 'dynamic' && edge.position === 'scenario-loader-runtime'
+          && target !== undefined && allowedLoaderEdges[file]?.includes(target)
         if (target === undefined) {
-          violations.push(`${chain.join(' -> ')} -> ${specifier} (unresolved runtime import)`)
-        } else if (!allowedLoaderEdges[file]?.includes(target) && !graph.isExternal(target)) {
+          violations.push(`${chain.join(' -> ')} -> ${edge.specifier} (unresolved runtime import)`)
+        } else if (!allowedLoader && !graph.isExternal(target)) {
           pending.push([...chain, target])
         }
       }
@@ -95,18 +102,51 @@ export const checkFixtureGraph = (
   return { violations, contractData, visited: allVisited.size }
 }
 
+/** Match only `const runtime = await import(...)` directly in the exported loader array's async arrow. */
+const isScenarioLoaderRuntimeImport = (node: ts.CallExpression): boolean => {
+  const awaited = node.parent
+  if (!ts.isAwaitExpression(awaited)) return false
+  const variable = awaited.parent
+  if (!ts.isVariableDeclaration(variable) || variable.initializer !== awaited
+    || !ts.isIdentifier(variable.name) || variable.name.text !== 'runtime') return false
+  const declarations = variable.parent
+  if (!ts.isVariableDeclarationList(declarations) || declarations.declarations.length !== 1
+    || (declarations.flags & ts.NodeFlags.Const) === 0) return false
+  const statement = declarations.parent
+  if (!ts.isVariableStatement(statement)) return false
+  const block = statement.parent
+  if (!ts.isBlock(block)) return false
+  const arrow = block.parent
+  if (!ts.isArrowFunction(arrow) || arrow.body !== block
+    || !arrow.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword)) return false
+  const array = arrow.parent
+  if (!ts.isArrayLiteralExpression(array) || array.elements.length !== 1) return false
+  const loader = array.parent
+  if (!ts.isVariableDeclaration(loader) || loader.initializer !== array
+    || !ts.isIdentifier(loader.name) || loader.name.text !== 'scenarioLoaders') return false
+  const loaderDeclarations = loader.parent
+  if (!ts.isVariableDeclarationList(loaderDeclarations)) return false
+  const exported = loaderDeclarations.parent
+  return ts.isVariableStatement(exported) && ts.isSourceFile(exported.parent)
+    && (exported.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false)
+}
+
 /** Inspect emitted imports: ordinary imports used only as types disappear exactly as in TS. */
-const emittedImports = (javascript: string): readonly string[] => {
+const emittedImports = (javascript: string): readonly RuntimeImport[] => {
   const source = ts.createSourceFile('runtime.js', javascript, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
-  const imports: string[] = []
+  const imports: RuntimeImport[] = []
   const visit = (node: ts.Node): void => {
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
-      imports.push(node.moduleSpecifier.text)
+      imports.push({ specifier: node.moduleSpecifier.text, kind: 'static', position: 'other' })
     }
     if (ts.isCallExpression(node)
       && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
       const argument = node.arguments[0]
-      imports.push(argument !== undefined && ts.isStringLiteral(argument) ? argument.text : '<non-literal runtime import>')
+      imports.push({
+        specifier: argument !== undefined && ts.isStringLiteral(argument) ? argument.text : '<non-literal runtime import>',
+        kind: node.expression.kind === ts.SyntaxKind.ImportKeyword ? 'dynamic' : 'require',
+        position: isScenarioLoaderRuntimeImport(node) ? 'scenario-loader-runtime' : 'other',
+      })
     }
     ts.forEachChild(node, visit)
   }
