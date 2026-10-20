@@ -1194,8 +1194,8 @@ not past it at the start, at its lowest 5-second sample or at the end.
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
 every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
-`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
-`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+`GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
 not, until `ST_LOAD_HOG_STRICT=1`.
 
