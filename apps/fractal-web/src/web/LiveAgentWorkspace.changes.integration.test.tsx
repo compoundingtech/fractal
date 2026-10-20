@@ -124,6 +124,11 @@ const close = () => host.querySelector<HTMLButtonElement>('button[aria-label="Cl
 const openChanges = async () => {
   if (toggle().getAttribute('aria-pressed') !== 'true') await act(async () => toggle().click())
   await act(async () => vi.dynamicImportSettled())
+  // Import settlement does not guarantee that React committed the Suspense content.
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    expect(host.querySelector('[data-testid="diff-code"]')).not.toBeNull()
+  })
 }
 const key = async (value: string) => {
   await act(async () => separator().dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true })))
