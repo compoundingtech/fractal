@@ -38,7 +38,9 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const pendingFrames = [];
 const children = new Set();
 const killChannel = (child) => {
-  if (!child.pid) return; // spawn can fail before assigning a PID
+  // An exit/close callback means libuv already reaped it: that group number
+  // may belong to another process. The fixture guardian owns orphan cleanup.
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
   try { process.kill(-child.pid, 'SIGKILL'); } catch (error) {
     if (error.code !== 'ESRCH') throw error;
   }
@@ -61,7 +63,6 @@ childProcess.spawn = (...args) => {
   const child = spawn(...args);
   children.add(child);
   child.on('close', () => {
-    killChannel(child);
     children.delete(child);
   });
   let partial = '';

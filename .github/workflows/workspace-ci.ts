@@ -759,7 +759,9 @@ export const fractalWebJobs = {
     defaults: { run: { shell: 'bash' } },
     steps: [
       fractalWebRunnerStep,
-      { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+      // A pull request needs its history: the signing guard lists the commits between the base and the head to
+      // check their authors, and without them a web-relevant run is never signed and its lane reads as not run.
+      { uses: 'actions/checkout@v4', with: { 'fetch-depth': "${{ github.event_name == 'pull_request' && '0' || '1' }}", 'persist-credentials': false } },
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
       megarepoApplyStep,
       { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },
