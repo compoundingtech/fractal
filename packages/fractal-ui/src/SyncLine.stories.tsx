@@ -4,6 +4,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
 import { SyncLine } from './assistant-ui/st3-views/SyncLine'
+import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { syncLine, observeSyncStatus } from './assistant-ui/st3-views/sync-line'
 import { syncObservations, syncNow } from './assistant-ui/st3-views/sync-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -169,6 +170,20 @@ export const TransitionSequence: Story = { tags: ['critical'],
   },
 }
 export const TransitionSequenceLight: Story = { tags: ['critical'], args: { scheme: 'light' }, play: TransitionSequence.play }
+export const NarrowFailure: Story = {
+  render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><ThemePortal><NarrowLayoutContext.Provider value={true}><SyncLine status={{ _tag: 'Failed', cause: { _tag: 'Server', code: 'subscription-limit', message: 'Retained conversation diagnostics remain reachable.' } }} label="conversation" now={syncNow} observedAt={syncNow} onRetry={() => {}} /></NarrowLayoutContext.Provider></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    for (const name of ['Retry loading conversation', 'Sync details for conversation']) {
+      const button = canvasElement.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!
+      const rect = button.getBoundingClientRect()
+      if (rect.width < 44 || rect.height < 44) throw new Error(`${name} must retain a 44px touch target`)
+    }
+    canvasElement.querySelector<HTMLButtonElement>('button[aria-label="Sync details for conversation"]')!.click()
+    for (let frame = 0; frame < 120 && !document.querySelector('[role="dialog"]'); frame++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    if (!document.querySelector('[role="dialog"]')?.textContent?.includes('Retained conversation diagnostics remain reachable.')) throw new Error('Touch Details must open real diagnostics')
+  },
+}
+export const NarrowFailureLight: Story = { ...NarrowFailure, args: { scheme: 'light' } }
 const styles = stylex.create({
   root: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, allRoot: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, heading: { display: 'flex', alignItems: 'center', gap: s.lg, minHeight: g.band, flexShrink: 0 },
   stateName: { width: g.tooltipMax, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

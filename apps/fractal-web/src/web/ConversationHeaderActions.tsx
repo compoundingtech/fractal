@@ -9,9 +9,10 @@ import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { SyncFailureDetails } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/SyncLine.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { compactTime } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
-import { useDataSource, useNow } from '../data/react.tsx'
+import { useConversation, useConversationSync, useDataSource, useNow } from '../data/react.tsx'
 import { unavailable, waiting, type Feed } from '../data/source.ts'
 import { resourceState, resourceTitle, type ResourcePage } from '../resources/agent/model.ts'
 import { systemEventsPreference } from './conversationPreferences.ts'
@@ -27,6 +28,10 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
   const [declarationOpen, setDeclarationOpen] = React.useState(false)
+  const [syncDetailsOpen, setSyncDetailsOpen] = React.useState(false)
+  const conversation = useConversation(agentRef)
+  const sync = useConversationSync(agentRef)
+  const retainedFailure = conversation._tag === 'Observed' && conversation.value.items.length > 0 && sync?.status._tag === 'Failed'
   const changeResourcesOpen = (open: boolean) => {
     if (open) markStart('resources_panel', { key: agentRef })
     else cancelMeasure('resources_panel')
@@ -61,16 +66,25 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
       </Tooltip>
     </span>
     <DeclarationDialog subject={agentRef} isOpen={declarationOpen} onOpenChange={setDeclarationOpen} />
+    <Aria.ModalOverlay isOpen={syncDetailsOpen && retainedFailure} onOpenChange={setSyncDetailsOpen} isDismissable {...stylex.props(styles.overlay)}>
+      <Aria.Modal {...stylex.props(styles.modal)}>
+        <Aria.Dialog aria-label="Sync details for conversation" {...stylex.props(styles.dialog)}>
+          <header {...stylex.props(styles.heading)}><strong>Sync details</strong><Aria.Button aria-label="Close sync details" onPress={() => setSyncDetailsOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close</Aria.Button></header>
+          {sync !== undefined && <SyncFailureDetails status={sync.status} />}
+        </Aria.Dialog>
+      </Aria.Modal>
+    </Aria.ModalOverlay>
     <Aria.MenuTrigger>
       <ChromeControl icon="gear" label="Conversation menu" />
       <Aria.Popover {...stylex.props(styles.popover)}>
-        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true) }} {...stylex.props(styles.menu)}>
+        <Aria.Menu aria-label="Conversation settings" onAction={key => { if (key === 'resources') changeResourcesOpen(true); else if (key === 'declaration') setDeclarationOpen(true); else if (key === 'sync-details') setSyncDetailsOpen(true) }} {...stylex.props(styles.menu)}>
           <Aria.MenuSection selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))}>
             <Aria.MenuItem id="system" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Show all system events</Aria.MenuItem>
           </Aria.MenuSection>
           <Aria.MenuSection selectionMode="none">
             <Aria.MenuItem id="resources" isDisabled={disabledReason !== undefined} textValue="Resources" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Resources{disabledReason === undefined ? null : <span slot="description" {...stylex.props(styles.menuReason)}>{disabledReason}</span>}</Aria.MenuItem>
             <Aria.MenuItem id="declaration" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>View KDL</Aria.MenuItem>
+            {retainedFailure ? <Aria.MenuItem id="sync-details" {...stylex.props(styles.menuItem, narrow && styles.touchItem)}>Sync details</Aria.MenuItem> : null}
           </Aria.MenuSection>
         </Aria.Menu>
       </Aria.Popover>

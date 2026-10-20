@@ -46,6 +46,7 @@ try {
       assert.equal(Number(await dock.getAttribute('aria-valuenow')), Number(await dock.getAttribute('aria-valuemax')))
       assert.equal(await page.getByRole('button', { name: 'View KDL', exact: true }).isVisible(), false)
       await page.getByRole('button', { name: 'Conversation menu', exact: true }).click()
+      assert.equal(await page.getByRole('menuitem', { name: 'Sync details', exact: true }).count(), failed ? 1 : 0, 'Diagnostics are offered only for retained failure')
       await page.getByRole('menuitem', { name: 'View KDL', exact: true }).click()
       await page.getByRole('dialog').waitFor()
       await page.keyboard.press('Escape')
@@ -98,6 +99,13 @@ try {
       if (width === 900) {
         assert.equal(await page.getByRole('button', { name: 'Sync details for conversation', exact: true }).isVisible(), false)
         assert.ok((await reason.innerText()).includes('Sync failed'))
+        await page.getByRole('button', { name: 'Conversation menu', exact: true }).click()
+        await page.getByRole('menuitem', { name: 'Sync details', exact: true }).click()
+        const diagnostics = page.getByRole('dialog', { name: 'Sync details for conversation', exact: true })
+        await diagnostics.waitFor()
+        assert.ok((await diagnostics.innerText()).includes('previously loaded thread and captured changes remain available'))
+        await page.getByRole('button', { name: 'Close sync details', exact: true }).click()
+        await diagnostics.waitFor({ state: 'hidden' })
       }
     }
     rows.push({ scheme, failed, viewport: width, dock: Number(await dock.getAttribute('aria-valuenow')), ...facts, rest })
@@ -125,6 +133,23 @@ try {
         await page.setContent(`<html><body style="margin:0;background:${scheme === 'dark' ? '#111' : '#fff'};font:14px system-ui;color:${scheme === 'dark' ? '#fff' : '#111'}"><div style="display:flex"><figure style="margin:0"><figcaption style="height:40px;padding:10px;box-sizing:border-box">Live app · synthetic integration fixtures · ${scheme}</figcaption><img width="1440" src="data:image/png;base64,${image.toString('base64')}"></figure><figure style="margin:0"><figcaption style="height:40px;padding:10px;box-sizing:border-box">Accepted RM1 Slice reference · ${scheme}</figcaption><img width="1440" src="data:image/png;base64,${reference.toString('base64')}"></figure></div></body></html>`)
         await page.screenshot({ path: `${out}/${scheme}-1440-comparison.png` })
       }
+    }
+    if (out && failed && width === 1440 && preferred === 440) {
+      await page.getByRole('button', { name: 'Close changes', exact: true }).click()
+      await page.setViewportSize({ width: 390, height: 844 })
+      await page.getByRole('button', { name: 'Agent details', exact: true }).waitFor()
+      for (const label of ['Retry loading conversation', 'Sync details for conversation']) {
+        const button = page.getByRole('button', { name: label, exact: true })
+        const rect = await button.boundingBox()
+        assert.ok(rect && rect.width >= 44 && rect.height >= 44, `Narrow SyncLine touch target: ${label}`)
+      }
+      await page.getByRole('button', { name: 'Sync details for conversation', exact: true }).click()
+      const diagnostics = page.getByRole('dialog', { name: 'Sync details for conversation', exact: true })
+      await diagnostics.waitFor()
+      assert.ok((await diagnostics.innerText()).includes('previously loaded thread and captured changes remain available'))
+      await page.keyboard.press('Escape')
+      await diagnostics.waitFor({ state: 'hidden' })
+      await page.screenshot({ path: `${out}/app-${scheme}-390-sync-failed.png` })
     }
     assert.deepEqual(errors, [], 'Page exceptions')
     await context.close()
