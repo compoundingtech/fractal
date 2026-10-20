@@ -10,6 +10,7 @@ import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model
 import { geometryNumbers, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 const storyNow = Date.UTC(2026, 9, 17, 9, 30, 0)
 const base: Row = {
@@ -63,13 +64,13 @@ function TreeAndStandalone() {
 const noSessionChild: Row = { ...subagent, ref: 'agent/parent/subagent/no-session', title: 'Child without session', status: 'unobserved', statusLabel: 'Unobserved', subagent: { id: 'no-session', lease_expires_at: '2026-10-17T10:00:00Z' } }
 const actionTreeItems: readonly Item[] = [toItem({ ...parent, children: [...parent.children, noSessionChild] }, 0)]
 
-function TreeWithActions() {
+function TreeWithActions({ phone = false }: { readonly phone?: boolean }) {
   const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([parent.ref]))
   const [opened, setOpened] = React.useState<string>()
   // Stable callbacks: the row is memoized.
   const onOpen = React.useCallback((row: Row) => setOpened(row.ref), [])
   const renderRow = React.useCallback((item: Item) => <MilestoneAgentRow row={item.row} now={storyNow} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
-  return <section aria-label="With actions" data-host="actions" data-opened={opened} {...stylex.props(styles.column, styles.tree)}>
+  return <section aria-label="With actions" data-host="actions" data-opened={opened} {...stylex.props(styles.column, styles.tree, phone && styles.phoneColumn)}>
     <SidebarTree aria-label="Agents with actions" items={actionTreeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow}
       onRowContextMenu={(_item, event) => { if (openAgentRowMenu(event.currentTarget)) event.preventDefault() }} />
   </section>
@@ -292,12 +293,71 @@ export const AllStates: StoryObj<{ scheme: Scheme }> = {
 
 export const AllStatesLight: StoryObj<{ scheme: Scheme }> = { ...AllStates, name: 'All G3 states · live default width · light', args: { scheme: 'light' } }
 
+const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const trigger = await waitFor(() => canvas.getByRole('button', { name: `Actions for ${noSessionChild.title}` }))
+  // No mouse hover/focus setup: the narrow action must already be painted and touch-sized.
+  await expect(trigger).toBeVisible()
+  await expect(getComputedStyle(trigger).opacity).toBe('1')
+  await expect(trigger.getBoundingClientRect().width).toBeGreaterThanOrEqual(44)
+  await expect(trigger.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+  await userEvent.pointer([{ keys: '[TouchA>]', target: trigger }, { keys: '[/TouchA]', target: trigger }])
+  const menu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${noSessionChild.title}` }))
+  await expect(within(menu).getByRole('menuitem', { name: /Open conversation/ })).toHaveAttribute('aria-disabled', 'true')
+  await waitFor(() => {
+    const box = menu.getBoundingClientRect()
+    expect(box.left).toBeGreaterThanOrEqual(0)
+    expect(box.right).toBeLessThanOrEqual(Math.min(window.innerWidth, 390))
+    expect(box.top).toBeGreaterThanOrEqual(0)
+    expect(box.bottom).toBeLessThanOrEqual(window.innerHeight)
+    expect(menu.contains(document.elementFromPoint(box.right - 2, box.top + box.height / 2))).toBe(true)
+    for (const item of within(menu).getAllByRole('menuitem')) expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+  })
+  const details = within(menu).getByRole('menuitem', { name: 'Reported agent details' })
+  await userEvent.pointer([{ keys: '[TouchA>]', target: details }, { keys: '[/TouchA]', target: details }])
+  await waitFor(() => expect(within(document.body).getByRole('dialog', { name: `Reported details for ${noSessionChild.title}` })).toBeVisible())
+  await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
+}
+
+export const PhoneTouchTargets: StoryObj<{ scheme: Scheme }> = {
+  tags: ['critical'], name: 'Phone · native RM1 actions without hover',
+  args: { scheme: 'dark' },
+  render: ({ scheme }) => <main {...stylex.props(styles.root, styles.phoneFrame, scheme === 'light' && lightTheme)}><NarrowLayoutContext.Provider value={true}><ThemePortal><TreeWithActions phone /></ThemePortal></NarrowLayoutContext.Provider></main>,
+  play: phoneTouchPlay,
+}
+export const PhoneTouchTargetsLight: StoryObj<{ scheme: Scheme }> = { ...PhoneTouchTargets, name: 'Phone · native RM1 actions without hover · light', args: { scheme: 'light' } }
+
+export const PhoneFocusNoHover: StoryObj<{ scheme: Scheme }> = {
+  ...PhoneTouchTargets, name: 'Phone · native RM1 focus never opens hover UI',
+  play: async ({ canvasElement }) => {
+    const row = await waitFor(() => within(canvasElement).getByRole('row', { name: parent.title }))
+    await userEvent.hover(row)
+    row.focus()
+    // Observe beyond the shared hook's 150ms opening delay, not just its initial closed render.
+    const started = performance.now()
+    do {
+      await expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull()
+      await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+      await expect(row.querySelector('[data-row-action="open"]')).toBeNull()
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    } while (performance.now() - started < 200)
+    await expect(row).toHaveFocus()
+    await userEvent.unhover(row)
+    row.blur()
+  },
+}
+export const PhoneFocusNoHoverLight: StoryObj<{ scheme: Scheme }> = { ...PhoneFocusNoHover, name: 'Phone · native RM1 focus never opens hover UI · light', args: { scheme: 'light' } }
+
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   matrix: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
   // The live default sidebar: the app's aside opens at `sidebarDefault` and its roster insets rows by `s.md` with 2px gaps.
   column: { display: 'flex', flexDirection: 'column', gap: s.xs2, width: g.sidebarDefault, boxSizing: 'border-box', padding: s.md, backgroundColor: surface.sidebar },
   tree: { height: '320px' },
+  phoneFrame: { width: '390px', maxWidth: '100%', padding: 0 },
+  phoneColumn: { width: '100%' },
   clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).

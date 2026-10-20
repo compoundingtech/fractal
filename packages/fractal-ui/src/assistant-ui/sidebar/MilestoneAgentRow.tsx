@@ -2,6 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Popover } from 'react-aria-components'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { AgentHoverCard, AgentRowActions, Highlight } from './SidebarAgentRow'
@@ -49,11 +50,12 @@ export const openAgentRowMenu = (element: Element): boolean => {
 /**
  * RM1 SR-2 two-line row, 48px. Line 1: status glyph · title · last turn · attention · (chevron), each trailing column a
  * fixed width so every time ends on one edge. Line 2: status word · host · spend and tokens · duration.
- * Activation belongs to the hosting tree item, so the row is never a button. Pointer hover shows the kit hover card with
- * no timers: the card mounts on enter and its CSS entrance delay supplies the hover intent. With callbacks, a hover-only
- * menu trigger overlays the end of line 2, so line geometry and the `!` column never move.
+ * Activation belongs to the hosting tree item, so the row is never a button. Desktop pointer hover shows the kit hover
+ * card with no timers: the CSS entrance delay supplies hover intent. The shared action trigger overlays line 2 on
+ * desktop; narrow rows reserve an always-visible touch-sized action column.
  */
 export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, frozen = false, now, query, depth = 0, focused = false, chevron, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
+  const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const [hovered, setHovered] = React.useState(false)
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
@@ -66,21 +68,21 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const signal = row.needsMe
     ? <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
-  return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
+  return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-narrow={narrow || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
     onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
-    {...stylex.props(styles.row, chevron !== undefined && styles.withChevron, active && styles.active, focused && styles.focused)}>
+    {...stylex.props(styles.row, chevron !== undefined && styles.withChevron, narrow && styles.narrowRow, narrow && chevron !== undefined && styles.narrowWithChevron, active && styles.active, focused && styles.focused)}>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     <span data-row-column="time" {...stylex.props(styles.time, frozen && styles.frozenInk)}>{row.lastTurn._tag === 'Known' && <span data-row-field="last-turn"><SidebarTime at={row.lastTurn.at} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>}</span>
     <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>
     {chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
-    <span data-row-column="line2" {...stylex.props(styles.line2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
+    <span data-row-column="line2" {...stylex.props(styles.line2, narrow && styles.narrowLine2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
     <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
-      menuButtonClassName={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible).className ?? ''} />
-    {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+      menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible]} />
+    {!narrow && hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
       <AgentHoverCard row={row} now={now} />
     </Popover>}
   </div>
@@ -93,6 +95,9 @@ const styles = stylex.create({
   menuButton: { gridColumn: '-2 / -1', gridRow: '2', justifySelf: 'end', zIndex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fgSoft, cursor: 'pointer', opacity: 0, ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
   menuVisible: { opacity: 1 },
   withChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon}` },
+  narrowRow: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.touchTarget}` },
+  narrowWithChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon} ${g.touchTarget}` },
+  narrowLine2: { gridColumn: '2 / -2' },
   active: { backgroundColor: surface.rowActive },
   // Sidebar rows ring keyboard focus in neutral fgMuted, never the accent, so focus does not read as selection.
   focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
