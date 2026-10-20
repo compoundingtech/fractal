@@ -191,6 +191,46 @@ class StTest(unittest.TestCase):
         self.assertIn('FAILED (3)', out)
         self.assertNotIn('covered by', out)
 
+    def test_a_tree_with_a_megarepo_lock_gets_its_members_before_its_checks_run(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        fill = ['sh', '-c', 'mkdir -p repos/effect-utils && touch repos/effect-utils/external.ts']
+        with mock.patch.object(st_test, 'members_command', lambda directory: fill):
+            code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', 'test -e repos/effect-utils/external.ts'])
+        self.assertEqual(code, 0, out + err)
+        statement, = self.statements()
+        self.assertEqual(statement['predicate']['observed']['checks']['demo']['exit_code'], 0)
+        self.assertFalse((self.work / 'repos').exists())  # into the throwaway worktree, not this checkout
+
+    def test_members_that_cannot_be_materialized_run_no_check_and_sign_nothing(self):
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        with mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'echo no network >&2; exit 7']):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.statements(), [])
+        self.assertIn('NOT RUN', out)
+        self.assertIn('materializing the megarepo members failed (7)', out)
+        self.assertIn('no network', err)
+
+    def test_a_tree_without_a_megarepo_lock_materializes_nothing(self):
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'members_command', side_effect=AssertionError('called')):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+
+    def test_the_members_command_is_the_one_ci_runs_before_the_lanes(self):
+        directory = Path(self.tmp.name) / 'pin'
+        directory.mkdir()
+        rev = 'a' * 40
+        (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': rev}}}}))
+        command = st_test.members_command(directory)
+        step = (ROOT / '.github/workflows/workspace-ci.ts').read_text().split('export const megarepoApplyStep', 1)[1].split('} as const', 1)[0]
+        ci = step.replace('$(jq -r \'.nodes["effect-utils"].locked.rev\' flake.lock)', rev)
+        self.assertIn(f'nix run "{command[2]}" {" ".join(command[3:])}', ci)
+        (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'main; rm -rf /'}}}}))
+        with self.assertRaises(ValueError):
+            st_test.members_command(directory)
+
     def test_a_time_limit_is_a_failure_not_a_hang(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sleep', '30'])
@@ -296,14 +336,17 @@ class StTest(unittest.TestCase):
         linked = Path(self.tmp.name) / 'linked'
         git(self.work, 'worktree', 'add', '-q', str(linked), '-b', 'linked', 'feature')
         victim_config = (self.work / '.git/config').read_text()
-        victim_refs = git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags')
+        def own_refs():  # what the run may add is its own record, refs/tags/evidence/<tree>/<record>; nothing else
+            return [line for line in git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags').splitlines()
+                    if not line.startswith('refs/tags/evidence/')]
+        victim_refs = own_refs()
         script = ('d=$(mktemp -d) && git -C "$d" init -q && git -C "$d" config user.name Evil && git -C "$d" config user.email e@e.invalid '
                   '&& git -C "$d" commit -q --allow-empty -m initial && git -C "$d" checkout -q -b accepted-main && git -C "$d" commit -q --allow-empty -m author')
         leaked = {'GIT_DIR': str(self.work / '.git/worktrees/linked'), 'GIT_WORK_TREE': str(linked), 'GIT_INDEX_FILE': str(self.work / '.git/worktrees/linked/index')}
         code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', script], extra_env=leaked)
         self.assertEqual(code, 0, err + out)
         self.assertEqual((self.work / '.git/config').read_text(), victim_config)
-        self.assertEqual(git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags'), victim_refs)
+        self.assertEqual(own_refs(), victim_refs)
         self.assertNotIn('Evil', (self.work / '.git/config').read_text())
         self.assertEqual(git(self.work, 'branch', '--list', 'accepted-main'), '')
 

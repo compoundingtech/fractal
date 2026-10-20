@@ -1317,8 +1317,10 @@ async fn receive_client_read(
                 cursor,
             } => {
                 anyhow::ensure!((1..=200).contains(&limit), "the timeline limit is invalid");
+                // A cursor carries its own page size. The relayed limit is a required field
+                // that a gateway fills with its default, so it only sizes a first page.
                 let answer = relay_trace::future(Phase::OwnerCall,
-                    client.timeline(&session_id, cursor.as_deref(), Some(limit))).await;
+                    client.timeline(&session_id, cursor.as_deref(), cursor.is_none().then_some(limit))).await;
                 if let Some(trace) = relay_trace::current() {
                     match &answer {
                         Ok(envelope) => trace.response(&envelope.request_id),
@@ -1814,6 +1816,40 @@ pub fn smalltalk_routes(splice: RawSplice) -> Router<PeerState> {
             post(receive_client_read).get(client_read_capabilities).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
+}
+
+/// Serve a conversation owner's peer listener for tests, and return the client relay of a
+/// gateway that reaches it. The owner's API answers on `owner_socket`; the caller serves it.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn conversation_gateway_relay(
+    owner_socket: &Path,
+    splice: RawSplice,
+    root: &Path,
+) -> Result<Option<ClientRelay>> {
+    use smallclaims::sync::{FleetContext, peer_router};
+    use std::os::unix::fs::PermissionsExt as _;
+    let peer = PeerState::new(
+        MainBackend::new(owner_socket.to_path_buf()),
+        "conversation-owner".into(),
+        FleetAuth::test("fleet-test", &[7; 32]),
+        FleetContext::legacy(BTreeSet::from(["conversation-gateway".into()])),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(splice))).await });
+    let secret = root.join("fleet-secret");
+    fs::write(&secret, [7_u8; 32])?;
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))?;
+    ClientRelay::from_config(&Config {
+        node: "conversation-gateway".into(),
+        fleet_id: Some("fleet-test".into()),
+        shared_secret_file: Some(secret),
+        peers: vec![PeerConfig {
+            name: "conversation-owner".into(),
+            url: format!("http://{address}"),
+        }],
+        ..Default::default()
+    })
 }
 
 /// Run the replication worker: sync this node's store, through its daemon, with the fleet.
