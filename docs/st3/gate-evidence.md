@@ -520,6 +520,37 @@ standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_
 `ci-evidence-signing configure` writes it), which is how the Nix sandbox, where they live in
 `/nix/store`, supplies them without trusting the caller's PATH.
 
+## A check derivation as evidence: the `nix` record
+
+A required check that runs in the Nix sandbox can be a check derivation (`checks.<system>.<check>` in `flake.nix`). It only
+produces output when its tests pass, and the output path hashes every input (source, `flake.lock`, toolchain, build script),
+so a valid path is both the proof that these inputs passed and a cache: an unchanged tree needs no rebuild. Today
+The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on hetz2; a change to any file in the flake
+source still rebuilds it, because its source is the whole flake).
+
+`scripts/nix-check-facts --check NAME --out FILE` builds the derivation and writes the facts for
+`scripts/evidence-wrap --aggregate FILE`: `runner` `nix`, the command `nix build .#checks.<system>.NAME`, the exit code and
+`output_sha256` (the SHA-256 of the NAR hash string), and the inputs `drv_path`, `out_path`, `nar_hash`, `nar_size`,
+`references` (sorted store paths joined by commas, `-` for none), `cache_hit`, `nix_signatures` (the daemon's `name:base64`
+signatures, `none` when unsigned), `nix_key_id` and `nix_unsigned`. A path that is already valid is not built again; the record
+says `cache_hit=true` and names the same derivation, which is the proof that an unchanged tree skips the rebuild. A failing build
+is recorded too (exit code 1, the derivation, no output path) and never satisfies a check.
+
+`scripts/evidence-sign` accepts `runner: nix` only for that command shape and holds the inputs to their formats (store paths, the
+output named like its derivation, a `sha256-` NAR hash, sorted references, signatures as the daemon prints them). It cannot see
+the store, so it does not judge the Nix signature. The verifier does, in a later slice: it recomputes the fingerprint
+`1;out_path;sha256:<nar_hash in Nix base 32>;nar_size;references` itself, and trusts a Nix signature only when its key name and
+public key are in `.st/evidence-nix-keys` (Nix `trusted-public-keys` lines) read from the accepted base. A record cannot name its
+own key. The record needs both signatures: the SSH wrapper key, and at least one valid Nix signature from a different key.
+
+**Residual trust.** The Nix key proves the content of the path is genuine. Only the wrapper key says "this tree built to this
+path": a cache hit shares one derivation across trees, so the path cannot name a tree. A stolen wrapper key could attach a genuine
+old path to a new tree; the `flake_lock_sha256` bind and `max_age_s` limit that, they do not close it.
+
+**Key custody.** The Nix key is the machine's own (`nix.conf` `secret-key-files`, readable by the Nix daemon only). ci1 and ci2
+have none today (checked 2026-10-20), so no record can be signed by a production Nix key yet; tests and the sample in
+`doc/fleet/factory/nix-evidence/nix-sample-20261020` use a throwaway key.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors
