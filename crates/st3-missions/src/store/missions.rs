@@ -2,7 +2,6 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use st3_delivery::store::missions::*;
-use st3_store::store::missions::{mission_public_id, mission_storage_id};
 use st3_store::store::identities::resolve_reference_conn;
 
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, St3Error> {

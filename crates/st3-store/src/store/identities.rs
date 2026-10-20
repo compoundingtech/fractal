@@ -525,9 +525,7 @@ fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {
             match evidence {
                 None => reason = Some("pending-replication"),
                 Some(claim) => {
-                    if claim.subject != fact.identity || (fact.kind == IdentityKind::Agent && claim.kind != "intent.desired") || (fact.kind == IdentityKind::Mission && claim.kind != "mission.published") {
-                        reason = Some("conflict");
-                    } else if owner_admission(connection,fact.kind,&fact.identity,&fact.declaration,&fact.origin).is_err() {
+                    if claim.subject != fact.identity || (fact.kind == IdentityKind::Agent && claim.kind != "intent.desired") || (fact.kind == IdentityKind::Mission && claim.kind != "mission.published") || owner_admission(connection,fact.kind,&fact.identity,&fact.declaration,&fact.origin).is_err() {
                         reason = Some("conflict");
                     }
                 }

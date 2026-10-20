@@ -205,10 +205,9 @@ fn replicated_declarations_keep_signed_subjects_across_arrival_order_and_replay(
         let mut statement = connection.prepare(
             "SELECT subject,kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step FROM desired ORDER BY subject",
         ).unwrap();
-        let rows = statement.query_map([], |row| {
+        statement.query_map([], |row| {
             (0..9).map(|column| row.get::<_, Option<String>>(column)).collect::<rusqlite::Result<Vec<_>>>()
-        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        rows
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     };
     declare(&owner, ORIGINAL);
     declare(&independent, RENAMED);

@@ -190,11 +190,10 @@ fn partition_collision_replay_preserves_fenced_identity_historical_placement() {
         let mut statement = connection.prepare(
             "SELECT register,value,revision,winner FROM arrangement_registers WHERE subject=?1 AND register LIKE 'placement/%' ORDER BY register",
         ).unwrap();
-        let rows = statement.query_map([arrangement], |row| Ok((
+        statement.query_map([arrangement], |row| Ok((
             row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?,
-        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        rows
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     };
     let before = placements(&left);
     assert_eq!(before.len(), 2);
@@ -293,11 +292,10 @@ fn alias_authored_placement_keeps_signed_identity_when_partition_collision_wins(
         let mut statement = connection.prepare(
             "SELECT register,value,revision,winner FROM arrangement_registers WHERE subject=?1 AND register LIKE 'placement/%' ORDER BY register",
         ).unwrap();
-        let rows = statement.query_map([arrangement], |row| Ok((
+        statement.query_map([arrangement], |row| Ok((
             row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?,
-        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        rows
+        ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     };
     let expected = registers(author);
     assert_eq!(expected.len(), 1);
