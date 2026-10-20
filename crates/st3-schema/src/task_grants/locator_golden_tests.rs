@@ -66,3 +66,36 @@ fn browser_members_are_closed_over_their_operations() {
         }
     }
 }
+
+// Independently computed with the same Bun JCS procedure documented above.
+const READ_ONLY_LOGIN: &str = r#"{"version":1,"title":"Example login","requester":{"principal":"agent/example-requester","run":"example-run","step":"example-step","incarnation":"example-1"},"window":{"notBefore":"2026-10-20T12:00:00Z","notAfter":"2026-10-20T13:00:00Z"},"provider":{"name":"example","browserProfile":"example","origins":["https://example.com"]},"browserSteps":[{"index":0,"op":"fillSecret","locator":{"kind":"label","value":"Password"},"inventoryId":"example-login-password"}],"writes":[],"readers":[{"principal":"agent/example-requester","peerHost":"example","inventoryIds":["example-login-password"],"maxUses":1}]}"#;
+
+#[test]
+fn read_only_login_secret_golden() {
+    let canonical = r#"{"browserSteps":[{"index":0,"inventoryId":"example-login-password","locator":{"kind":"label","value":"Password"},"op":"fillSecret"}],"provider":{"browserProfile":"example","name":"example","origins":["https://example.com"]},"readers":[{"inventoryIds":["example-login-password"],"maxUses":1,"peerHost":"example","principal":"agent/example-requester"}],"requester":{"incarnation":"example-1","principal":"agent/example-requester","run":"example-run","step":"example-step"},"title":"Example login","version":1,"window":{"notAfter":"2026-10-20T13:00:00Z","notBefore":"2026-10-20T12:00:00Z"},"writes":[]}"#;
+    let manifest: TaskManifest = serde_json::from_str(READ_ONLY_LOGIN).unwrap();
+    manifest.validate().unwrap();
+    assert!(manifest.writes.is_empty());
+    assert_eq!(manifest.canonical_json().unwrap(), canonical);
+    assert_eq!(manifest.digest().unwrap(), "55456794982713348ac36ea43c1ecf52eb4931e016c127d234b976f5662b7444");
+}
+
+#[test]
+fn read_only_login_secret_is_requester_only_and_must_be_referenced() {
+    use serde_json::{Value, json};
+    let original: Value = serde_json::from_str(READ_ONLY_LOGIN).unwrap();
+    let mut unrelated = original.clone();
+    let mut reader = unrelated["readers"][0].clone();
+    reader["principal"] = json!("agent/example-unrelated");
+    unrelated["readers"].as_array_mut().unwrap().push(reader);
+    assert!(serde_json::from_value::<TaskManifest>(unrelated).unwrap().validate().is_err());
+    let mut undeclared = original.clone();
+    undeclared["readers"][0]["inventoryIds"].as_array_mut().unwrap().push(json!("example-undeclared"));
+    assert!(serde_json::from_value::<TaskManifest>(undeclared).unwrap().validate().is_err());
+    let mut ungranted = original.clone();
+    ungranted["readers"] = json!([]);
+    assert!(serde_json::from_value::<TaskManifest>(ungranted).unwrap().validate().is_err());
+    let mut not_filled = original;
+    not_filled["browserSteps"] = json!([]);
+    assert!(serde_json::from_value::<TaskManifest>(not_filled).unwrap().validate().is_err());
+}

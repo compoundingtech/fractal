@@ -321,6 +321,7 @@ impl TaskManifest {
             }
         }
         let mut last_index = None;
+        let mut fill_inventory = BTreeSet::new();
         for step in &self.browser_steps {
             if step.index > MAX_SAFE_INTEGER || last_index.is_some_and(|last| step.index <= last) { return Err(invalid("browser step indexes must be increasing safe integers")); }
             last_index = Some(step.index);
@@ -366,6 +367,8 @@ impl TaskManifest {
             }
             if step.op == TaskBrowserOp::FillSecret {
                 let id = step.inventory_id.as_deref().ok_or_else(|| invalid("fillSecret requires inventoryId"))?;
+                text("inventoryId", id)?;
+                fill_inventory.insert(id);
                 if !self.readers.iter().any(|reader| reader.principal == self.requester.principal && reader.inventory_ids.iter().any(|allowed| allowed == id)) {
                     return Err(invalid("fillSecret requires inventoryId granted to requester"));
                 }
@@ -388,7 +391,16 @@ impl TaskManifest {
             text("peerHost", &reader.peer_host)?;
             if reader.peer_host.contains('*') { return Err(invalid("peerHost must be exact")); }
             if reader.max_uses == 0 || reader.max_uses > MAX_SAFE_INTEGER { return Err(invalid("maxUses must be a positive safe integer")); }
-            if reader.inventory_ids.iter().any(|id| !inventory.contains(id.as_str())) { return Err(invalid("reader inventoryIds must be declared in writes")); }
+            for id in &reader.inventory_ids {
+                if !inventory.contains(id.as_str()) {
+                    if !fill_inventory.contains(id.as_str()) {
+                        return Err(invalid("reader inventoryIds must be declared in writes or fillSecret steps"));
+                    }
+                    if reader.principal != self.requester.principal {
+                        return Err(invalid("read-only fillSecret inventoryIds are restricted to the requester"));
+                    }
+                }
+            }
         }
         Ok(())
     }
