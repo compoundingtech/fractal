@@ -401,7 +401,8 @@ fi`,
       defaults: { run: { shell: 'bash' } },
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: skipIfCovered('typescript-client', [
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        // A pull request needs its history: the signing guard lists the commits between the base and the head.
+        { uses: 'actions/checkout@v4', with: { 'fetch-depth': "${{ github.event_name == 'pull_request' && '0' || '1' }}", 'persist-credentials': false } },
         // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
         { uses: 'actions/setup-node@v4', with: { 'node-version': '24.18.0' } },
         {

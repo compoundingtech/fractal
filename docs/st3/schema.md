@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `a1ed0d4405efa92df65e46aaf7c62ee8780aed26ab7d27a4ed5fe53ebb335ca6`
+Storage digest: `ab318454d85787af18a36821c53eefcd4bc33c97da610305e607525dc6fb0b92`
 
 ## Subject families
 
@@ -348,6 +348,24 @@ maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `check
 and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
 this table existed), and the writer floor; the chain's previous hash is the higher of the newest
 batch and the stored head.
+
+## Repaired claim replacements
+
+`repaired_claim_replacements` keeps, for each repaired original claim, its current replacement and
+the repaired record's reference. A trigger copies them whenever a record becomes repaired or is
+repaired again, and deleting the record leaves them; rows are never deleted. A one-time copy at
+open reads only the repaired records that predate the triggers, through their partial index.
+Readers still use the records and `projection_digest_repaired_claims`.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.
 
 ## Local message selectors
 

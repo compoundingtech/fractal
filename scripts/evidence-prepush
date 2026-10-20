@@ -91,14 +91,20 @@ def positive(name, default):
 def stop(group, wait):
     """TERM the process group (st-test cleans its worktree on TERM), then always KILL what is left of it: the leader
     exiting does not mean its children did."""
+    if group.returncode is not None:
+        return  # Already reaped: the numeric group is no longer ours to signal.
     try:
         os.killpg(group.pid, signal.SIGTERM)
-        group.wait(timeout=wait)
-    except subprocess.TimeoutExpired:
-        pass
-    except ProcessLookupError:
-        return
-    try:
+        deadline = time.monotonic() + wait
+        # Observe without reaping: retain the leader PID until the last group
+        # signal, even when TERM makes it exit before its descendants.
+        if hasattr(os, 'WNOWAIT') and hasattr(os, 'waitid'):
+            while time.monotonic() < deadline:
+                if os.waitid(os.P_PID, group.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                    break
+                time.sleep(0.02)
+        else:
+            time.sleep(wait)
         os.killpg(group.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass

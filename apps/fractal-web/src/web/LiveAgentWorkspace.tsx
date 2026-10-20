@@ -5,7 +5,7 @@ import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
-import { retainPane, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
+import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -282,7 +282,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
   const navigate = (ref: string, pane = 'thread') => {
     setStoredAgent(ref)
-    window.history.pushState(null, '', `/w/${ref.split('/').map(encodeURIComponent).join('/')}?open=${encodeURIComponent(pane)}`)
+    window.history.pushState(null, '', workspaceHref(ref, pane, window.location.search))
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
   const select = (ref: string) => {
