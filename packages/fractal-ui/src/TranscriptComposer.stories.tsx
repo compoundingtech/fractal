@@ -56,11 +56,11 @@ function ColumnStory({ scheme, readingColumn }: { scheme: Scheme; readingColumn:
 
 /** Scenario slice variants chosen through Storybook controls (`scenarioArgTypes`). */
 type ColumnArgs = React.ComponentProps<typeof ColumnStory> & { conversation?: string }
-const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
+const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { scenario: { _tag: 'contract-fixture', reason: "Own-send follow and placeholder probes require controlled local composer state and host callbacks." }, layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
 type Story = StoryObj<ColumnArgs>
-const scenarioColumn = { parameters: { scenario: { slices: ['conversation'], world: 'fleet-mid-refactor' } }, args: { conversation: 'default' }, argTypes: { conversation: { control: false } } } satisfies Story
-export const ScenarioConversation: Story = { parameters: { scenario: { slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']) }
+const scenarioColumn = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'], world: 'fleet-mid-refactor' } }, args: { conversation: 'default' }, argTypes: { conversation: { control: false } } } satisfies Story
+export const ScenarioConversation: Story = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']) }
 export const ScenarioConversationLight: Story = { ...ScenarioConversation, args: { scheme: 'light' } }
 
 const bounds = (element: Element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: rect.width } }

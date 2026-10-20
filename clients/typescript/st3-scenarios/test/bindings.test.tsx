@@ -157,9 +157,9 @@ describe('Storybook scenario binding', () => {
     expect(result.reads).toEqual(new Set(['sync']))
     expect(result.checks.find(({ check }) => check === 2)?._tag).toBe('Skipped')
     expect(result.checks.find(({ check }) => check === 3)?._tag).toBe('Skipped')
-    const invalid = { ...Invariant, parameters: { scenario: { slices: ['sync'], invariant: { sync: ' ' } } } }
+    const invalid = { ...Invariant, parameters: { scenario: { _tag: 'slices', slices: ['sync'], invariant: { sync: ' ' } } } }
     expect(() => scenarioStoryCheck(invalid, meta)).toThrow('invariant sync requires a reason')
-    const fixedInvariant = { ...Fixed, parameters: { scenario: { slices: ['roster'], invariant: { roster: 'Intentionally fixed layout' } } } }
+    const fixedInvariant = { ...Fixed, parameters: { scenario: { _tag: 'slices', slices: ['roster'], invariant: { roster: 'Intentionally fixed layout' } } } }
     expect(scenarioStoryCheck(fixedInvariant, meta).failures.some(({ check }) => check === 1)).toBe(true)
   })
 
@@ -229,5 +229,43 @@ describe('Storybook scenario binding', () => {
     expect(result._tag).toBe('Passed')
     expect(result.checks.find(({ check }) => check === 2)?._tag).toBe('Passed')
     expect(result.checks.find(({ check }) => check === 3)?._tag).toBe('Skipped')
+  })
+
+  it('rejects missing and legacy untagged declarations', () => {
+    expect(() => scenarioStoryCheck({ render: () => <p>Fixed</p> }, {})).toThrow('requires parameters.scenario declaration')
+    expect(() => scenarioStoryCheck({ render: () => <p>Fixed</p>, parameters: { scenario: { slices: [] } } }, {})).toThrow('requires a valid _tag')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('reports the reasoned %s exemption without scenario checks', (_tag) => {
+    const exemption = { _tag, reason: 'Isolated visual contract, not scenario data' }
+    const result = scenarioStoryCheck({ render: () => <p>Fixture</p>, parameters: { scenario: exemption } }, {}, { scenario: 'not-a-world' })
+    expect(result._tag).toBe('Passed')
+    expect(result.exemptions).toEqual([exemption])
+    expect(result.reads.size).toBe(0)
+    expect(result.checks.every(({ _tag }) => _tag === 'Skipped')).toBe(true)
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects dishonest %s wiring and empty reasons', (_tag) => {
+    const render = () => <p>Fixture</p>
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: { _tag, reason: ' ' } } }, {})).toThrow('requires a reason')
+    const scenario = { _tag, reason: 'Isolated contract' }
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: { ...scenario, slices: [] } } }, {})).toThrow('cannot declare slices')
+    for (const args of [{ roster: 'default' }, { conversation: undefined }]) {
+      expect(() => scenarioStoryCheck({ render, args, parameters: { scenario } }, {})).toThrow('cannot supply scenario args')
+    }
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario } }, { args: { sync: 'default' } })).toThrow('cannot supply scenario args')
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario } }, {}, { args: { terminal: 'default' } })).toThrow('cannot supply scenario args')
+  })
+
+  it.each(['contract-fixture', 'primitive'] as const)('rejects a hook under %s even inside a nested provider', (_tag) => {
+    const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
+    const render = () => <ScenarioProvider world={world}><Consumer /></ScenarioProvider>
+    expect(() => scenarioStoryCheck({ render, parameters: { scenario: { _tag, reason: 'Invalid hook exemption' } } }, {})).toThrow('useScenarioSlice is forbidden')
+  })
+
+  it('rejects a hook without a declaration through the runtime decorator', () => {
+    const Consumer = () => <p>{useScenarioSlice('roster').state.agents.length}</p>
+    const Composed = composeStory({ render: Consumer }, {}, { decorators: [withScenario] })
+    expect(() => renderToStaticMarkup(<Composed />)).toThrow('no parameters.scenario declaration')
   })
 })

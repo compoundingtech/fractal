@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import * as scenarios from '../src/index.ts'
 import type { WireSlice } from '../src/react/index.ts'
 import { useScenarioSlice } from '../src/react/index.ts'
-import { scenarioStoryCheck, type ScenarioStoryParameter } from '../src/storybook/check.ts'
+import { scenarioStoryCheck, type ScenarioMountedWindow, type ScenarioStoryParameter } from '../src/storybook/check.ts'
 
 const text = (value: unknown): string => {
   if (typeof value !== 'object' || value === null) return ''
@@ -23,7 +23,7 @@ const Tail = ({ omit = false }: { readonly omit?: boolean }) => {
 }
 
 // Transcript.tsx uses initialTailCount={2}; EmbraceScrollViewport's historyBatchSize=4 mounts <=6 turns whole.
-const scenario = { slices: ['conversation'], world: 'long-debug-rabbit-hole', window: { _tag: 'tail', turns: 2, historyBatch: 4 } } satisfies ScenarioStoryParameter
+const scenario = { _tag: 'slices', slices: ['conversation'], world: 'long-debug-rabbit-hole', window: { _tag: 'tail', turns: 2, historyBatch: 4 } } satisfies ScenarioStoryParameter
 const meta = { title: 'Mounted window proof', render: () => <Tail />, parameters: { scenario } } satisfies Meta
 
 type Entry = WireSlice<'conversation'>['state']['threads'][number]['items'][number]
@@ -70,7 +70,7 @@ describe('story-declared mounted conversation window', () => {
   })
 
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid tail count %s', turns => {
-    const result = scenarioStoryCheck({ parameters: { scenario: { window: { _tag: 'tail', turns, historyBatch: 4 } } } }, meta)
+    const result = scenarioStoryCheck({ parameters: { scenario: { ...scenario, window: { _tag: 'tail', turns, historyBatch: 4 } } } }, meta)
     expect(result.failures).toContainEqual(expect.objectContaining({ _tag: 'MountedWindow', message: 'tail window turns must be a positive safe integer' }))
   })
 
@@ -80,7 +80,7 @@ describe('story-declared mounted conversation window', () => {
   })
 
   it('keeps the all-source marker rule without a window or with an explicit all window', () => {
-    for (const window of [undefined, { _tag: 'all' }] satisfies readonly (ScenarioStoryParameter['window'])[]) {
+    for (const window of [undefined, { _tag: 'all' }] satisfies readonly (ScenarioMountedWindow | undefined)[]) {
       const result = scenarioStoryCheck({ parameters: { scenario: { ...scenario, window } } }, meta)
       expect(result.failures).toContainEqual(expect.objectContaining({ _tag: 'DataDependence', message: expect.stringContaining('does not render expected marker') }))
     }

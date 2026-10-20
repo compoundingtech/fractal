@@ -25,7 +25,7 @@ const styles = stylex.create({
 })
 const meta = {
   title: 'Fractal UI/Live polish', component: LiveActivity,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Frozen run clocks and negative-control toggles isolate live activity contrast and elapsed labels." }, layout: 'fullscreen' },
   args: { scheme: 'dark' as Scheme, narrow: false, failingControl: false, contrastFailure: false, state: { _tag: 'Working' as const }, now: clock, startedAt },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failingControl: { control: 'boolean', description: 'Remove the run start fact: the elapsed-label assertion must fail.' }, contrastFailure: { control: 'boolean', description: 'Reduce live-region opacity: the measured contrast assertion must fail.' } },
   render: function Render({ scheme, narrow, failingControl, contrastFailure, state, now }) {

@@ -98,7 +98,7 @@ const ScenarioMarkdown = (args: React.ComponentProps<typeof MarkdownCanvas>) => 
 }
 const meta = {
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Exact local markdown syntax and token streaming stages exercise parser and renderer contracts." }, layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof MarkdownCanvas>
@@ -179,7 +179,7 @@ export const Languages: Story = { tags: ['critical'],
 export const Light: Story = { ...RichText, args: { scheme: 'light' } }
 export const AllStates: Story = {
   args: { scenario: 'all' },
-  parameters: { scenario: { slices: ['conversation'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } },
   argTypes: scenarioArgTypes(['conversation']),
   render: args => <ScenarioMarkdown {...args} />,
 }

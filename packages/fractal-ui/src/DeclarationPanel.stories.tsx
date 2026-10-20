@@ -95,7 +95,7 @@ const structuredFallbackPlay: Play = async ({ canvasElement }) => {
   }
 }
 const scenarioDeclarationStory = {
-  parameters: { scenario: { slices: ['details'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['details'] } },
   argTypes: { ...scenarioArgTypes(['details']), title: { table: { disable: true } }, state: { table: { disable: true } } },
   render: ({ scheme }) => <MissionDeclarationsStory scheme={scheme} />,
 } satisfies StoryObj<PanelArgs>
@@ -103,7 +103,7 @@ const scenarioDeclarationStory = {
 const meta = {
   title: 'Fractal UI/Declaration Panel',
   render: Frame,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Read-only canonical declaration for one agent or mission: KDL tinted with kit tokens, sticky line numbers, copy-all and an optional provenance line. Ready, loading, unavailable and failed states; a `json` language marks the labelled structured fallback used where st serves no KDL. Presentational and host-agnostic: the web app hosts it in a modal today and can host it in a tab later.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Authored KDL, gutter, copy and error-state contracts require exact local declaration text." }, layout: 'fullscreen', docs: { description: { component: 'Read-only canonical declaration for one agent or mission: KDL tinted with kit tokens, sticky line numbers, copy-all and an optional provenance line. Ready, loading, unavailable and failed states; a `json` language marks the labelled structured fallback used where st serves no KDL. Presentational and host-agnostic: the web app hosts it in a modal today and can host it in a tab later.' } } },
   args: { scheme: 'dark', title: 'agent/example/ui-design', state: { _tag: 'Ready', text: agentDeclarationKdl, language: 'kdl', source: 'Canonical KDL · revision rev-41d2a0c7 · environment values redacted by st' } },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<PanelArgs>
@@ -130,7 +130,7 @@ export const MissionKdl: Story = {
 /** Pinned: the gutter, verbatim and copy checks need a world that publishes a mission. */
 export const MissionStructuredFallback: Story = {
   ...scenarioDeclarationStory,
-  parameters: { scenario: { slices: ['details'], world: 'fleet-mid-refactor' } },
+  parameters: { scenario: { _tag: 'slices', slices: ['details'], world: 'fleet-mid-refactor' } },
   play: async (context) => {
     await structuredFallbackPlay(context)
     const panel = panelIn(context.canvasElement)

@@ -48,11 +48,12 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
   the real data layer. stui, iOS and the TUI read JSON or use the same replay.
 - **D9 Catalog:** seven narratives and the edge states listed under [Catalog](#catalog-d9);
   failed sync has one world per cause.
-- **D10 Storybook:** a global Scenario toolbar selects the world. Stories declare
-  `parameters.scenario.slices`. Controls override one slice; fixed stories pin a world. Deep links
-  use `?globals=scenario:<world>&args=<slice>:<variant>`. Explorer pickers (rendering) stay
-  separate from scenario selection (data). Every story renders scenario data; no hand-typed
-  lorem fixtures.
+- **D10 Storybook:** a global Scenario toolbar selects the world. Every story declares exactly
+  one mode in `parameters.scenario`: `{ _tag: 'slices', slices, ... }`,
+  `{ _tag: 'contract-fixture', reason }`, or `{ _tag: 'primitive', reason }`.
+  Slice stories render scenario data; controls override one slice and fixed stories pin a world.
+  Exemptions require a specific reason and must not consume scenario slices or declare scenario
+  args. Explorer pickers (rendering) stay separate from scenario selection (data).
 
 ## Package layout (D1)
 
@@ -994,18 +995,19 @@ export default { globalTypes: scenarioGlobalTypes, loaders: scenarioLoaders, dec
 // Sidebar.stories.tsx
 export default {
   component: Sidebar,
-  parameters: { scenario: { slices: ['roster', 'attention'] } },
+  parameters: { scenario: { _tag: 'slices', slices: ['roster', 'attention'] } },
   argTypes: scenarioArgTypes(['roster', 'attention']),
 }
-export const Huge = { parameters: { scenario: { world: 'huge' } } } // pinned
+export const Huge = { parameters: { scenario: { _tag: 'slices', world: 'huge' } } } // pinned
 ```
 
 - `scenarioGlobalTypes` adds the `scenario` toolbar item (the catalog, default
   `fleet-mid-refactor`) and `scenarioNow` (pinned time; default: load time).
 - The preview-facing `storybook` entry MUST stay light: neither its toolbar nor default
   controls may statically import worlds or recordings. `scenarioLoaders` uses dynamic import
-  only when `parameters.scenario` is declared; stories without that parameter load no catalog.
-  Storybook awaits loaders before the synchronous decorator renders its provider.
+  only for the `slices` mode; exempt stories and missing declarations load no catalog and
+  receive no scenario args. Storybook awaits loaders before the synchronous decorator renders
+  its provider. `useScenarioSlice` fails loudly under an exempt story or missing declaration.
 - Toolbar names and default-world variant controls use a small static manifest, with a test
   comparing it to the catalog. This avoids adding a generation step for a small metadata list.
 - Synchronous Node consumers import `scenarioStoryCheck`, `ScenarioStoryCheckError` and
@@ -1025,13 +1027,34 @@ export const Huge = { parameters: { scenario: { world: 'huge' } } } // pinned
 
 ### Consumption check
 
-An annotation alone proves nothing, so the kit tracks reads. The provider records each slice a
-story reads through `useScenarioSlice`, and each slice whose collections an app-level story's
-replay serves. `scenarioStoryCheck(story)` renders a story through Storybook's portable stories
-and fails unless all hold:
+Every story declares exactly one scenario mode, inherited from its meta or declared on the story.
+`slices` carries the slice declaration, world pin, invariants and optional mounted window.
+`contract-fixture` covers a specific consumer contract or interaction the scenario catalog or
+component props seam cannot yet express. Such a story must convert to `slices` once scenario
+data can express it. `primitive` covers data-independent visual or interaction primitives.
+Both exemptions require a nonempty, specific reason; they are not alternate domain-data sources.
 
-1. **Reads:** every declared slice was read; no undeclared slice was read. This applies to every
-   story.
+The consumption check enforces both directions: a missing or invalid declaration fails; a slice
+story must consume its declared slices, and an exempt story must not declare slices or scenario
+args or call `useScenarioSlice`. Exemptions appear in the check output with their reasons.
+The consumer's all-story test pins their count so each new exemption is visible in review.
+Blocked story files have a separate explicit undeclared-story ratchet with blocking PR numbers;
+the ratchet fails if it grows or retains an entry after the story gains a declaration.
+
+Detection limit: the kit tracks its slice hooks and replay read trackers, not arbitrary JavaScript
+imports, closure values or component props. It cannot generally prove that an exempt story never
+reads hand-authored fixture data. The exemption declaration and its reason remain reviewable
+evidence for those reads, not a claim of static fixture-data analysis.
+The check observes synchronous rendering (and committed effects when a DOM is available), not
+unexecuted conditional branches or asynchronous plays. The decorator's read boundary continues
+to reject forbidden slice hooks during later browser renders.
+
+An annotation alone proves nothing, so the provider records each slice a story reads through
+`useScenarioSlice`, and each slice whose collections an app-level story's replay serves.
+`scenarioStoryCheck(story)` renders a slice story through Storybook's portable stories and fails
+unless all hold:
+
+1. **Reads:** every declared slice was read; no undeclared slice was read.
 2. **Data dependence:** each slice has **contrast pairs**: two variants over the same cast whose
    wire state differs (for example `roster` `default` and `one-agent`). Shared cast members may
    appear on both sides. For each side the pair defines what the render must show:
@@ -1176,7 +1199,7 @@ breaks a scenario fails in the same pull request.
 
 | Consumer | Owner | Contract |
 | --- | --- | --- |
-| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for scenario stories. Every scenario story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
+| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries. Exemptions list their reasons and have a pinned count. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
 | `@st3/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
@@ -1195,8 +1218,11 @@ breaks a scenario fails in the same pull request.
 
 ## Acceptance
 
-- Every fractal-ui story renders a scenario world, passes `scenarioStoryCheck`, and the Scenario
-  toolbar switches it.
+- Every fractal-ui story declares `slices`, `contract-fixture` or `primitive` in
+  `parameters.scenario`, with a reason for either exemption. The check enforces declarations
+  and slice consumption in both directions, reports exemptions with a pinned count, and
+  rejects stale or growing blocked-file ratchet entries. The Scenario toolbar switches slice
+  stories. Contract-fixture stories convert once scenario data can express them.
 - Mounted conversation stories declare the real consumer mount policy and pass marker/contrast
   checks within it; kit tests reject missing mounted markers and vacuous windows and preserve
   the unwindowed rule. Browser plays separately prove history reveal and held-back replies.

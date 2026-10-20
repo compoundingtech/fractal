@@ -54,18 +54,25 @@ import { scenarioGlobalTypes, scenarioLoaders, withScenario } from '@smalltalk/s
 export default { globalTypes: scenarioGlobalTypes, loaders: scenarioLoaders, decorators: [withScenario] }
 
 // a story file
-parameters: { scenario: { slices: ['roster'] } }, argTypes: scenarioArgTypes(['roster'])
+parameters: { scenario: { _tag: 'slices', slices: ['roster'] } }, argTypes: scenarioArgTypes(['roster'])
 
 // a test: checks reads, data dependence, world switch, pinned world and URL state
 import { scenarioStoryCheck } from '@smalltalk/st3-scenarios/storybook/check'
 scenarioStoryCheck(Story, meta, { assert: true })
 ```
 
+Every story declares exactly one `parameters.scenario` mode: `slices`, or an exemption
+`{ _tag: 'primitive', reason }` / `{ _tag: 'contract-fixture', reason }`. Exemptions get no
+scenario args or catalog loaders and cannot read `useScenarioSlice`; missing declarations fail
+the story check. Contract-fixture stories must convert when scenario data can express them.
+The check reports exempt stories with reasons; consumers pin their count. Arbitrary fixture
+imports and closure data cannot be detected by the kit and require review.
+
 The preview entry contains only toolbar/control metadata. Its async loaders import worlds and
-recordings only for stories declaring `parameters.scenario`; install both loaders and decorator.
-The small static manifest is checked against the catalog in the binding tests, avoiding a codegen
-step. Synchronous Node checks and `resolveScenarioWorld` live at `storybook/check`, which may
-eagerly import the catalog. Portable SSR without loaders can use that entry's `withScenario`.
+recordings only for `slices` stories; install both loaders and decorator. The small static
+manifest is checked against the catalog in the binding tests, avoiding a codegen step.
+Synchronous Node checks and `resolveScenarioWorld` live at `storybook/check`, which may eagerly
+import the catalog. Portable SSR without loaders can use that entry's `withScenario`.
 
 Rust, Swift and other readers use the committed files in `fixtures/scenarios/` and shift the
 instants each file lists in `times` (vectors: `fixtures/scenarios/_vectors/rebase.json`).

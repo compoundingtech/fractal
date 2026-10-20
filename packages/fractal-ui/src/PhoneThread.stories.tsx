@@ -44,7 +44,7 @@ function PhoneThreadStory({ scheme, narrow }: { scheme: Scheme; narrow: boolean 
 const meta = {
   title: 'Fractal UI/Phone thread',
   component: PhoneThreadStory,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Fixed local run and composer state isolates phone layout and touch-target contracts." }, layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: true },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, narrow: { control: 'boolean' } },
 } satisfies Meta<typeof PhoneThreadStory>

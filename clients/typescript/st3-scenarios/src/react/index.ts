@@ -45,6 +45,14 @@ interface ScenarioContextValue {
 
 const ScenarioContext = React.createContext<ScenarioContextValue | undefined>(undefined)
 
+const ScenarioReadRestriction = React.createContext<string | undefined>(undefined)
+
+/** Keeps exempt/undeclared stories from reading even through a nested ScenarioProvider. */
+export const ScenarioReadBoundary = ({ reason, children }: {
+  readonly reason: string
+  readonly children?: React.ReactNode
+}): React.ReactElement => React.createElement(ScenarioReadRestriction.Provider, { value: reason }, children)
+
 export const ScenarioProvider = ({ world, clock: suppliedClock, tracker: suppliedTracker, children }: ScenarioProviderProps): React.ReactElement => {
   const clock = React.useMemo(() => suppliedClock ?? manualClock(world.now), [suppliedClock, world.now])
   const tracker = React.useMemo(() => suppliedTracker !== undefined && 'record' in suppliedTracker
@@ -67,6 +75,8 @@ export function useScenarioSlice<TKind extends SliceKind>(kind: TKind): WireSlic
 export function useScenarioSlice<TKind extends SliceKind, TResult>(kind: TKind, project: (slice: WireSlice<TKind>) => TResult): TResult
 export function useScenarioSlice<TKind extends SliceKind, TResult>(kind: TKind, project?: (slice: WireSlice<TKind>) => TResult): WireSlice<TKind> | TResult {
   const context = React.useContext(ScenarioContext)
+  const restriction = React.useContext(ScenarioReadRestriction)
+  if (restriction !== undefined) throw new Error(`useScenarioSlice is forbidden under ${restriction}`)
   if (context === undefined) throw new Error('useScenarioSlice requires ScenarioProvider')
   const { world, atMs, tracker } = context
   tracker.record(kind)

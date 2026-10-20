@@ -7,7 +7,7 @@ const meta = {
   title: 'Fractal UI/Component families',
   component: Families,
   args: { direction: 'folio', scheme: 'light', density: 'comfortable' },
-  parameters: {
+  parameters: { scenario: { _tag: 'primitive', reason: "Compares visual token families and densities, not scenario domain state." },
     a11y: {
       options: {
         rules: {

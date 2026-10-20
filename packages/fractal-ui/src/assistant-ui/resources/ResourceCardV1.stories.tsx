@@ -19,7 +19,7 @@ const resource: ResourceData = {
 const meta = {
   title: 'Fractal UI/Resources/Resource Card',
   component: ResourceCardV1,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Exact local resource metadata exercises hover and full-detail dialog disclosure." }, layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
 } satisfies Meta
 export default meta
 type Story = StoryObj

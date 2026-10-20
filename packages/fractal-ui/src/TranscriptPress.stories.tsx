@@ -63,7 +63,7 @@ function PressStory({ scheme }: { scheme: Scheme }) {
   </EmbraceRuntimeProvider></main>
 }
 
-const meta = { title: 'Fractal UI/Transcript press', component: PressStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof PressStory>
+const meta = { title: 'Fractal UI/Transcript press', component: PressStory, parameters: { scenario: { _tag: 'contract-fixture', reason: "Controlled host republish, insertion and pointer timing require identity-retained local transcript turns." }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof PressStory>
 export default meta
 type Story = StoryObj<typeof meta>
 
@@ -82,7 +82,7 @@ function ScenarioConversationStory({ scheme }: { scheme: Scheme }) {
     {(sections.length === 0 ? [noSection] : sections).map(section => <SectionTranscript key={section.id} section={section} status={status} instant={instant} />)}
   </main>
 }
-export const ScenarioConversation: Story = { parameters: { scenario: { slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']), render: args => <ScenarioConversationStory scheme={args.scheme} /> }
+export const ScenarioConversation: Story = { parameters: { scenario: { _tag: 'slices', slices: ['conversation'] } }, argTypes: scenarioArgTypes(['conversation']), render: args => <ScenarioConversationStory scheme={args.scheme} /> }
 export const ScenarioConversationLight: Story = { ...ScenarioConversation, args: { scheme: 'light' } }
 
 async function settleFrames() {

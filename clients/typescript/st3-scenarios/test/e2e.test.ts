@@ -76,7 +76,7 @@ const Consumer = ({ bound }: { bound?: (value: unknown) => unknown }) =>
   React.createElement('main', {}, ...SLICE_KINDS.map((kind) => React.createElement(SliceConsumer, { key: kind, kind, bound })))
 const meta = {
   title: 'Scenarios/CatalogEndToEnd', component: Consumer,
-  parameters: { scenario: { slices: SLICE_KINDS } },
+  parameters: { scenario: { _tag: 'slices', slices: SLICE_KINDS } },
 } satisfies Meta<Args>
 const story = {} satisfies StoryObj<typeof meta>
 
@@ -398,7 +398,7 @@ describe.each(catalog.map(({ id }) => [id]))('catalog consumer end-to-end: %s', 
       // cannot show; the dedicated huge suite owns variant coherence. Here the toolbar variant
       // choice is exercised through the same binding with bounded output.
       for (const [kind, variant] of [['roster', 'empty'], ['conversation', 'empty']] as const satisfies readonly (readonly [SliceKind, string])[]) {
-        const switched = resolveScenarioWorld({ slices: SLICE_KINDS }, { scenario: world.id, scenarioNow: world.now }, { [kind]: variant })
+        const switched = resolveScenarioWorld({ _tag: 'slices', slices: SLICE_KINDS }, { scenario: world.id, scenarioNow: world.now }, { [kind]: variant })
         expect(switched.variants[kind], label(world, kind, `toolbar variant ${variant}`)).toBe(variant)
         const expected = renderToStaticMarkup(React.createElement(ScenarioProvider, { world: switched, clock },
           React.createElement(Consumer, { bound })))
@@ -411,7 +411,7 @@ describe.each(catalog.map(({ id }) => [id]))('catalog consumer end-to-end: %s', 
     // Scope marker checks to one slice: shared titles/text in other slices are legitimate, not stale data.
     for (const kind of SLICE_KINDS) await step(world, kind, 'scenarioStoryCheck pinned world', () => scenarioStoryCheck({
       render: () => React.createElement(SliceConsumer, { kind }),
-      parameters: { scenario: { slices: [kind], world: world.id } },
+      parameters: { scenario: { _tag: 'slices', slices: [kind], world: world.id } },
     }, meta, { scenario: world.id, scenarioNow: world.now, assert: true }))
   }, 30_000)
 })
@@ -420,6 +420,6 @@ it('checks unpinned consumer data dependence using catalog world contrasts once'
   const world = loadWorld(catalog[0]!.id, { now: ANCHOR_MS })
   for (const kind of SLICE_KINDS) await step(world, kind, 'scenarioStoryCheck full catalog world-switch', () => scenarioStoryCheck({
     render: () => React.createElement(SliceConsumer, { kind }),
-    parameters: { scenario: { slices: [kind] } },
+    parameters: { scenario: { _tag: 'slices', slices: [kind] } },
   }, meta, { scenarioNow: ANCHOR_MS, assert: true }))
 }, 30_000)

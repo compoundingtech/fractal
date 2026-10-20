@@ -94,7 +94,7 @@ const subscriptionLimitPlay: NonNullable<StoryObj<SyncArgs>['play']> = async ({ 
 const meta = {
   title: 'Fractal UI/Sync Line',
   render: StoryRender,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Portable SyncStatus tagged union with epoch-ms timestamps and the syncLine vocabulary. Every status/stage, derived stalled observations, both themes, and fixed-height existing header/status slots. The all-observations matrix stacks theme columns on narrow viewports so each row and its actions remain on their own theme surface. Last-known content remains present. Local and Server subscription-limit failures share plain vocabulary; only reported caps appear, including zero. HTTP Usage reads exclude subscription-limit failures and their actions. Dedicated dark/light stories cover those exclusions and the full transition sequence. No byte-progress or invented stage is shown.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Exact local sync observations and clock transitions exercise status vocabulary and geometry." }, layout: 'fullscreen', docs: { description: { component: 'Portable SyncStatus tagged union with epoch-ms timestamps and the syncLine vocabulary. Every status/stage, derived stalled observations, both themes, and fixed-height existing header/status slots. The all-observations matrix stacks theme columns on narrow viewports so each row and its actions remain on their own theme surface. Last-known content remains present. Local and Server subscription-limit failures share plain vocabulary; only reported caps appear, including zero. HTTP Usage reads exclude subscription-limit failures and their actions. Dedicated dark/light stories cover those exclusions and the full transition sequence. No byte-progress or invented stage is shown.' } } },
   args: { scheme: 'dark', sequence: 0 }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, sequence: { control: { type: 'number', min: 0, max: syncObservations.length - 1 } } },
 } satisfies Meta<SyncArgs>
 export default meta
@@ -110,14 +110,14 @@ export const AllStates: Story = { tags: ['critical'], render: AllStatesStory, pl
     if (lineBounds.width <= 0 || lineBounds.left < rowBounds.left || lineBounds.right > rowBounds.right + 1) throw new Error('Each sync line must fit inside its observation row and theme surface')
   }
 } }
-export const Scenario: Story = { render: ScenarioSyncStory, parameters: { scenario: { slices: ['sync'] } }, argTypes: { ...scenarioArgTypes(['sync']), sequence: { control: false } } }
+export const Scenario: Story = { render: ScenarioSyncStory, parameters: { scenario: { _tag: 'slices', slices: ['sync'] } }, argTypes: { ...scenarioArgTypes(['sync']), sequence: { control: false } } }
 export const UnknownReason: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown') } }
 export const UnknownReasonLastLive: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown · last live') } }
 export const LocalFailure: Story = { ...Scenario, args: { sync: 'subscription-limit-local' } }
 export const LocalFailureWithoutCap: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · no cap') } }
 export const LocalFailureZeroCap: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Local · zero cap') } }
-export const UnknownFailure: Story = { ...Scenario, parameters: { scenario: { slices: ['sync'], world: 'failed-sync-subscription-limit-legacy' } } }
-export const ServerFailure: Story = { ...Scenario, parameters: { scenario: { slices: ['sync'], world: 'failed-sync-subscription-error' } } }
+export const UnknownFailure: Story = { ...Scenario, parameters: { scenario: { _tag: 'slices', slices: ['sync'], world: 'failed-sync-subscription-limit-legacy' } } }
+export const ServerFailure: Story = { ...Scenario, parameters: { scenario: { _tag: 'slices', slices: ['sync'], world: 'failed-sync-subscription-error' } } }
 export const ServerFailureSubscriptionLimit: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
 export const SubscriptionLimitsDark: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
 export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
