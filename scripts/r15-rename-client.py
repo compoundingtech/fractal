@@ -38,7 +38,7 @@ GENERATED = {
 SOURCE_SUFFIXES = {
     '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.swift', '.py',
     '.css', '.scss', '.sass', '.less', '.html', '.htm', '.vue', '.svelte',
-    '.astro', '.mdx',
+    '.astro', '.mdx', '.sh',
 }
 EXCLUDED_ROOTS = {'scripts', 'docs', '.st', 'nix', 'buck2', '.github', 'repos', 'release-notes'}
 
@@ -74,9 +74,20 @@ def rewrite(text: str, path: Path) -> str:
         text = text.replace(old, new)
     for old, new in PATHS.items():
         text = text.replace(old, new)
-    # Relative source imports do not always include the full repository path.
+    # A local folder can share a package's old basename without being that
+    # package. Resolve relative roots before rewriting or repairing earlier output.
     for package in ('client', 'scenarios', 'views'):
-        text = text.replace(f'../st3-{package}', f'../fractal-{package}')
+        def relative_package(match):
+            prefix = match['prefix']
+            canonical = (path.parent / (prefix + 'fractal-' + package)).resolve()
+            legacy = (path.parent / (prefix + 'st3-' + package)).resolve()
+            if canonical == ROOT / 'clients/typescript' / ('fractal-' + package):
+                return prefix + 'fractal-' + package
+            if legacy.is_dir():
+                return prefix + 'st3-' + package
+            return match.group()
+        text = re.sub(r'(?P<prefix>(?:\.\./)+)(?:st3|fractal)-' + package + r'(?=/|["\'])',
+                      relative_package, text)
     # Public source identifiers change; NSError domains are stable error strings.
     text = re.sub(r'\bSt3Client(?=Tests\b|\b)', 'FractalClient', text)
     text = text.replace('domain: "FractalClient"', 'domain: "St3Client"')

@@ -33,7 +33,8 @@ class RenameProof(unittest.TestCase):
             exec(compile(ast.Module(body=[selected], type_ignores=[]), '<client-selection>', 'exec'), namespace)
             for relative in ('apps/web/app.css', 'apps/web/index.html', 'apps/web/vite.config.ts',
                              'apps/web/tailwind.config.json', 'apps/web/tsconfig.json',
-                             'apps/web/tsconfig.jsonc', 'apps/ios/scripts/fixture.py'):
+                             'apps/web/tsconfig.jsonc', 'apps/ios/scripts/fixture.py',
+                             'apps/web/scripts/ci/fixtures-gate.sh'):
                 with self.subTest(path=relative):
                     self.assertTrue(namespace['selected'](tree / relative))
             for relative in ('clients/typescript/fractal-scenarios/recordings/session.normalized.json',
@@ -42,6 +43,32 @@ class RenameProof(unittest.TestCase):
                              'release-notes/source-package.json'):
                 with self.subTest(path=relative):
                     self.assertFalse(namespace['selected'](tree / relative))
+
+    def test_client_relative_package_rewrites_preserve_unmoved_local_folders(self):
+        source = ast.parse((ROOT / 'scripts/r15-rename-client.py').read_text())
+        with tempfile.TemporaryDirectory(dir=ROOT / 'tmp/r15') as directory:
+            tree = Path(directory)
+            namespace = {'ROOT': tree, 'Path': Path, 're': __import__('re')}
+            for node in source.body:
+                if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                        and node.targets[0].id in {'PACKAGES', 'PATHS'}):
+                    namespace[node.targets[0].id] = ast.literal_eval(node.value)
+            rewrite = next(node for node in source.body
+                           if isinstance(node, ast.FunctionDef) and node.name == 'rewrite')
+            exec(compile(ast.Module(body=[rewrite], type_ignores=[]), '<client-rewrite>', 'exec'), namespace)
+            local = tree / 'packages/fractal-ui/src/assistant-ui'
+            (local / 'st3-views').mkdir(parents=True)
+            (local / 'composition').mkdir()
+            source = "import { SyncLine } from '../st3-views/SyncLine'"
+            path = local / 'composition/Transcript.tsx'
+            self.assertEqual(namespace['rewrite'](source, path), source)
+            self.assertEqual(namespace['rewrite'](source.replace('st3-', 'fractal-'), path), source)
+            canonical = tree / 'clients/typescript/fractal-views'
+            canonical.mkdir(parents=True)
+            client = tree / 'clients/typescript/fractal-client'
+            client.mkdir()
+            self.assertEqual(namespace['rewrite'](source, client / 'view.ts'),
+                             source.replace('st3-', 'fractal-'))
 
     def test_rust_rewrite_changes_source_names_not_prompt_or_transcript_strings(self):
         source = ast.parse((ROOT / 'scripts/r15-rename-rust.py').read_text())
