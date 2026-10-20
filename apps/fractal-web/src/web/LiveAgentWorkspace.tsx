@@ -62,6 +62,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   readonly active: boolean
   readonly needsMe: boolean
   readonly openRef?: string
+  readonly touchDisclosure?: React.ReactNode
   readonly select: (ref: string) => void
   readonly actions: SidebarActions
 }) => {
@@ -77,7 +78,7 @@ const LiveSidebarAgentRow = React.memo((props: {
     return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
   }, [agent, stale, props.needsMe, props.childId])
   const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
-  return item === undefined ? null : <MilestoneAgentRow row={item} displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
+  return item === undefined ? null : <MilestoneAgentRow row={item} displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -92,8 +93,8 @@ const LiveSidebarTreeView = React.memo((props: {
   readonly select: (ref: string) => void
   readonly actions: SidebarActions
 }) => {
-  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
-    <LiveSidebarAgentRow agentRef={node.parent ?? node.subject} childId={node.childId} active={node.parent === undefined && props.current === node.subject} needsMe={node.parent === undefined && props.needsYou.has(node.subject)} openRef={node.parent === undefined ? node.subject : undefined} select={props.select} actions={props.actions} />, [props.current, props.needsYou, props.select, props.actions])
+  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>, touchDisclosure?: React.ReactNode) =>
+    <LiveSidebarAgentRow agentRef={node.parent ?? node.subject} childId={node.childId} active={node.parent === undefined && props.current === node.subject} needsMe={node.parent === undefined && props.needsYou.has(node.subject)} openRef={node.parent === undefined ? node.subject : undefined} touchDisclosure={touchDisclosure} select={props.select} actions={props.actions} />, [props.current, props.needsYou, props.select, props.actions])
   const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
     <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
   return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={props.accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>

@@ -45,7 +45,7 @@ export type AgentFoldersProps = {
   /** Native RAC item name; the host supplies displayed title and observed status. */
   readonly accessibleNames?: ReadonlyMap<string, string>
   readonly onSelect?: (id: string) => void
-  readonly renderAgent?: (agent: SidebarAgent) => React.ReactNode
+  readonly renderAgent?: (agent: SidebarAgent, touchDisclosure?: React.ReactNode) => React.ReactNode
   readonly renderFolderSignal?: (folder: SidebarFolder | SidebarGroup) => React.ReactNode
   readonly ariaLabel?: string
   readonly style?: StyleXStyles

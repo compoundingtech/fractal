@@ -31,6 +31,11 @@ class ReadCheckResizeObserver {
 const originalFonts = Object.getOwnPropertyDescriptor(document, 'fonts')
 beforeAll(() => {
   vi.stubGlobal('ResizeObserver', ReadCheckResizeObserver)
+  vi.stubGlobal('matchMedia', (media: string) => ({
+    matches: false, media, onchange: null,
+    addEventListener() {}, removeEventListener() {},
+    addListener() {}, removeListener() {}, dispatchEvent: () => true,
+  }))
   Object.defineProperty(document, 'fonts', { configurable: true, value: Object.assign(new EventTarget(), { ready: Promise.resolve() }) })
 })
 afterAll(() => {

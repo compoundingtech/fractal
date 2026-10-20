@@ -5,7 +5,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { Key } from 'react-aria-components'
 import { MilestoneAgentRow, openAgentRowMenu } from './MilestoneAgentRow'
-import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
+import { SidebarTree, SidebarTreeDisclosure, type SidebarTreeItem, type SidebarTreeRowState } from './SidebarTree'
 import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
 import { geometryNumbers, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
@@ -32,9 +32,13 @@ const parent: Row = {
   ],
 }
 
-interface Item extends SidebarTreeItem<Item> { readonly row: Row; readonly children: readonly Item[] }
-const toItem = (row: Row, depth: number): Item => ({ id: row.ref, depth, textValue: row.title, row, children: row.children.map(next => toItem(next, depth + 1)) })
-const treeItems: readonly Item[] = [toItem(parent, 0), toItem(stateRows[2]!, 0)]
+/** Agents put a touch disclosure in their trailing column (their own press opens the conversation); folders toggle as a whole row. */
+interface AgentItem extends SidebarTreeItem<AgentItem> { readonly kind: 'agent'; readonly row: Row; readonly children: readonly AgentItem[] }
+interface FolderItem extends SidebarTreeItem<Item> { readonly kind: 'folder'; readonly children: readonly AgentItem[] }
+type Item = AgentItem | FolderItem
+const toItem = (row: Row, depth: number): AgentItem => ({ kind: 'agent', id: row.ref, depth, textValue: row.title, row, disclosurePlacement: 'trailing', children: row.children.map(next => toItem(next, depth + 1)) })
+const treeItems: readonly AgentItem[] = [toItem(parent, 0), toItem(stateRows[2]!, 0)]
+const touchDisclosure = (state: SidebarTreeRowState) => state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined
 
 function StateMatrix() {
   return <div {...stylex.props(styles.matrix)}>
@@ -52,7 +56,7 @@ function TreeAndStandalone() {
   const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([parent.ref]))
   return <div {...stylex.props(styles.matrix)}>
     <section aria-label="In SidebarTree" data-host="tree" {...stylex.props(styles.column, styles.tree)}>
-      <SidebarTree aria-label="Agents" items={treeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={item => <MilestoneAgentRow row={item.row} active={item.id === parent.ref} now={storyNow} />} />
+      <SidebarTree aria-label="Agents" items={treeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={(item, state) => <MilestoneAgentRow row={item.row} active={item.id === parent.ref} now={storyNow} touchDisclosure={touchDisclosure(state)} />} />
     </section>
     <section aria-label="Standalone" data-host="standalone" {...stylex.props(styles.column)}>
       <MilestoneAgentRow row={parent} now={storyNow} chevron={null} />
@@ -64,17 +68,25 @@ function TreeAndStandalone() {
 const noSessionChild: Row = { ...subagent, ref: 'agent/parent/subagent/no-session', title: 'Child without session', status: 'unobserved', statusLabel: 'Unobserved', subagent: { id: 'no-session', lease_expires_at: '2026-10-17T10:00:00Z' } }
 /** A display-only subagent: the tree row is disabled and the row drops its menu, hover and active presentation. */
 const displayOnlyChild = parent.children[0]!
-const actionTreeItems: readonly Item[] = [toItem({ ...parent, children: [...parent.children, noSessionChild] }, 0)].map(root => ({ ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true } : child) }))
+const actionAgent = (depth: number): AgentItem => {
+  const root = toItem({ ...parent, children: [...parent.children, noSessionChild] }, depth)
+  return { ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true } : child) }
+}
+const actionAgents: readonly AgentItem[] = [actionAgent(0)]
+/** Phone: the same agents inside a host folder, whose header row is a leading, whole-row disclosure. */
+const phoneFolder: FolderItem = { kind: 'folder', id: 'folder/build-2', depth: 0, textValue: 'build-2', children: [actionAgent(1)] }
 
 function TreeWithActions({ phone = false }: { readonly phone?: boolean }) {
-  const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([parent.ref]))
+  const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([phoneFolder.id, parent.ref]))
   const [opened, setOpened] = React.useState<string>()
   const [selected, setSelected] = React.useState<string>()
   // Stable callbacks: the row is memoized.
   const onOpen = React.useCallback((row: Row) => setOpened(row.ref), [])
-  const renderRow = React.useCallback((item: Item) => <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
+  const renderRow = React.useCallback((item: Item, state: SidebarTreeRowState) => item.kind === 'folder'
+    ? <span data-folder-label {...stylex.props(styles.folderLabel)}>{item.textValue}</span>
+    : <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} touchDisclosure={touchDisclosure(state)} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
   return <section aria-label="With actions" data-host="actions" data-opened={opened} data-selected={selected} {...stylex.props(styles.column, styles.tree, phone && styles.phoneColumn)}>
-    <SidebarTree aria-label="Agents with actions" items={actionTreeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow} onAction={key => setSelected(String(key))}
+    <SidebarTree<Item> aria-label="Agents with actions" items={phone ? [phoneFolder] : actionAgents} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow} onAction={key => setSelected(String(key))}
       onRowContextMenu={(_item, event) => { if (openAgentRowMenu(event.currentTarget)) event.preventDefault() }} />
   </section>
 }
@@ -305,38 +317,80 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
   const canvas = within(canvasElement)
   const host = canvasElement.querySelector<HTMLElement>('[data-host="actions"]')!
   const childTitles = [...parent.children, noSessionChild].map(child => child.title)
-  // The parent's disclosure is a 44px square in the row's own inline-start gutter: inside the row, before its content,
-  // clear of the trailing actions column, and every corner hit-tests to it.
-  const parentRow = await waitFor(() => canvas.getByRole('row', { name: parent.title }))
+  const agentTitles = [parent.title, ...childTitles]
+  const corners = (box: DOMRect) => [[box.left + 1, box.top + 1], [box.right - 1, box.top + 1], [box.left + 1, box.bottom - 1], [box.right - 1, box.bottom - 1]] as const
+  const offset = (title: string) => canvas.getByRole('row', { name: title }).querySelector('[data-milestone-row]')!.getBoundingClientRect().left - canvas.getByRole('row', { name: title }).getBoundingClientRect().left
+  // Labels keep the fine-pointer x: a 16px gutter at every depth, and one depth step between parent and child.
+  const folderRow = await waitFor(() => canvas.getByRole('row', { name: phoneFolder.textValue }))
+  await waitFor(() => expect(canvas.getByRole('row', { name: parent.title })).toBeVisible())
+  const step = offset(childTitles[1]!) - offset(parent.title)
+  await expect(Math.abs(offset(parent.title) - step - 16)).toBeLessThanOrEqual(0.5)
+  await expect(Math.abs(folderRow.querySelector('[data-folder-label]')!.getBoundingClientRect().left - folderRow.getBoundingClientRect().left - 16)).toBeLessThanOrEqual(0.5)
+  // Folder header: the whole row is the disclosure, at least 44px tall, its glyph centred in the 16px gutter.
+  const header = folderRow.querySelector<HTMLElement>('[data-sidebar-header-toggle]')!
+  const headerBox = header.getBoundingClientRect()
+  const folderBox = folderRow.getBoundingClientRect()
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true')
+  await expect(headerBox.height).toBeGreaterThanOrEqual(44)
+  await expect(Math.abs(headerBox.width - folderBox.width)).toBeLessThanOrEqual(0.5)
+  await expect(headerBox.bottom).toBeLessThanOrEqual(canvas.getByRole('row', { name: parent.title }).getBoundingClientRect().top + 0.5)
+  const headerGlyph = header.querySelector('svg')!.getBoundingClientRect()
+  await expect(Math.abs((headerGlyph.left + headerGlyph.right) / 2 - folderBox.left - 8)).toBeLessThanOrEqual(0.5)
+  for (const [x, y] of corners(headerBox)) await expect(header.contains(document.elementFromPoint(x, y))).toBe(true)
+  const label = folderRow.querySelector('[data-folder-label]')!.getBoundingClientRect()
+  await expect(header.contains(document.elementFromPoint((label.left + label.right) / 2, (label.top + label.bottom) / 2))).toBe(true)
+  // Tapping the header collapses the folder; tapping it again brings every agent back.
+  await tap(header)
+  await waitFor(() => {
+    expect(canvas.getByRole('row', { name: phoneFolder.textValue })).toHaveAttribute('aria-expanded', 'false')
+    for (const title of agentTitles) expect(canvas.queryByRole('row', { name: title })).toBeNull()
+  })
+  await tap(canvas.getByRole('row', { name: phoneFolder.textValue }).querySelector('[data-sidebar-header-toggle]')!)
+  await waitFor(() => {
+    expect(canvas.getByRole('row', { name: phoneFolder.textValue })).toHaveAttribute('aria-expanded', 'true')
+    for (const title of agentTitles) expect(canvas.getByRole('row', { name: title })).toBeVisible()
+  })
+  // Agent parent: no gutter chevron; a 44px trailing disclosure inside the row, after the title and just before the
+  // actions button, with every corner hit-testing to it.
+  const parentRow = canvas.getByRole('row', { name: parent.title })
   await expect(parentRow).toHaveAttribute('aria-expanded', 'true')
-  const disclosure = parentRow.querySelector<HTMLElement>('[data-sidebar-disclosure]')!
+  await expect(parentRow.querySelector('[data-sidebar-disclosure="leading"]')).toBeNull()
+  const disclosure = within(parentRow).getByRole('button', { name: 'Hide subagents' })
+  await expect(disclosure).toHaveAttribute('data-sidebar-disclosure', 'trailing')
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'true')
   const hit = disclosure.getBoundingClientRect()
   const row = parentRow.getBoundingClientRect()
-  const content = parentRow.querySelector('[data-milestone-row]')!.getBoundingClientRect()
+  const title = parentRow.querySelector('[data-row-column="title"]')!.getBoundingClientRect()
+  const line2 = parentRow.querySelector('[data-row-column="line2"]')!.getBoundingClientRect()
   const parentActions = within(parentRow).getByRole('button', { name: `Actions for ${parent.title}` }).getBoundingClientRect()
   await expect(hit.width).toBeGreaterThanOrEqual(44)
   await expect(hit.height).toBeGreaterThanOrEqual(44)
   await expect(hit.top).toBeGreaterThanOrEqual(row.top - 0.5)
   await expect(hit.bottom).toBeLessThanOrEqual(row.bottom + 0.5)
-  await expect(hit.right).toBeLessThanOrEqual(content.left + 0.5)
-  await expect(hit.right).toBeLessThanOrEqual(parentActions.left)
-  for (const [x, y] of [[hit.left + 1, hit.top + 1], [hit.right - 1, hit.top + 1], [hit.left + 1, hit.bottom - 1], [hit.right - 1, hit.bottom - 1]] as const) await expect(disclosure.contains(document.elementFromPoint(x, y))).toBe(true)
-  // The painted chevron keeps the desktop position: centred on line one with the status glyph.
-  const chevronGlyph = disclosure.querySelector('svg')!.getBoundingClientRect()
-  const status = parentRow.querySelector('[data-row-column="status"]')!.getBoundingClientRect()
-  await expect(Math.abs((chevronGlyph.top + chevronGlyph.bottom) / 2 - (status.top + status.bottom) / 2)).toBeLessThanOrEqual(1)
-  // Tap collapses: every child row leaves the tree. Tap again expands: each child is back and visible.
+  await expect(hit.left).toBeGreaterThanOrEqual(title.right - 0.5)
+  await expect(hit.left).toBeGreaterThanOrEqual(line2.right - 0.5)
+  await expect(hit.right).toBeLessThanOrEqual(parentActions.left + 0.5)
+  await expect(parentActions.left - hit.right).toBeLessThanOrEqual(8)
+  for (const [x, y] of corners(hit)) await expect(disclosure.contains(document.elementFromPoint(x, y))).toBe(true)
+  // Tap collapses: every child row leaves the tree. Tap again expands: each child is back and visible. Neither tap
+  // selects or opens the parent.
   for (const title of childTitles) await expect(canvas.getByRole('row', { name: title })).toBeVisible()
   await tap(disclosure)
   await waitFor(() => {
     expect(canvas.getByRole('row', { name: parent.title })).toHaveAttribute('aria-expanded', 'false')
     for (const title of childTitles) expect(canvas.queryByRole('row', { name: title })).toBeNull()
   })
-  await tap(canvas.getByRole('row', { name: parent.title }).querySelector('[data-sidebar-disclosure]')!)
+  const collapsed = within(canvas.getByRole('row', { name: parent.title })).getByRole('button', { name: 'Show subagents' })
+  await expect(collapsed).toHaveAttribute('aria-expanded', 'false')
+  await tap(collapsed)
   await waitFor(() => {
     expect(canvas.getByRole('row', { name: parent.title })).toHaveAttribute('aria-expanded', 'true')
     for (const title of childTitles) expect(canvas.getByRole('row', { name: title })).toBeVisible()
   })
+  await expect(host).not.toHaveAttribute('data-selected')
+  await expect(host).not.toHaveAttribute('data-opened')
+  // Leaf agents are unchanged: no disclosure of either kind.
+  await expect(canvas.getByRole('row', { name: noSessionChild.title }).querySelector('[data-sidebar-disclosure]')).toBeNull()
   // A display-only child is no press target: no button, link or menu, no tab or arrow stop, and click, double-click and
   // Enter keep both the selection (a sibling, so a press reaching the parent would also show) and the open conversation.
   const sibling = parent.children[1]!
@@ -391,7 +445,7 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
 
 export const PhoneTouchTargets: StoryObj<{ scheme: Scheme }> = {
   tags: ['critical'], name: 'Phone · native RM1 actions without hover',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px frame, a parent with a display-only child and a child without a conversation verify the 44px disclosure collapsing and expanding by tap, display-only rows ignoring every activation, always-visible 44px touch targets, menu bounds and details access without hover.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px frame with a host folder, a parent with a display-only child and a child without a conversation verify the whole-row folder toggle and the trailing 44px subagent disclosure collapsing and expanding by tap at the fine-pointer label x, display-only rows ignoring every activation, always-visible 44px touch targets, menu bounds and details access without hover.' } },
   args: { scheme: 'dark' },
   render: ({ scheme }) => <main {...stylex.props(styles.root, styles.phoneFrame, scheme === 'light' && lightTheme)}><NarrowLayoutContext.Provider value={true}><ThemePortal><TreeWithActions phone /></ThemePortal></NarrowLayoutContext.Provider></main>,
   play: phoneTouchPlay,
@@ -428,6 +482,8 @@ const styles = stylex.create({
   tree: { height: '320px' },
   phoneFrame: { width: '390px', maxWidth: '100%', padding: 0 },
   phoneColumn: { width: '100%' },
+  // Starts at the tree's content edge, so the label's x is the 16px disclosure gutter.
+  folderLabel: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
