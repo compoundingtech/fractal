@@ -299,8 +299,8 @@ def registered_handler_definitions(source_root, route_handlers):
     production_by_path = {}
     for key, handler in route_handlers.items():
         parts = handler.split("::")
-        path = (source_root / "crates/st3-api/src/api.rs" if len(parts) == 1 else
-                source_root / "crates/st3-api/src/api" / ("/".join(parts[:-1]) + ".rs"))
+        path = (source_root / "crates/st3-api-core/src/api.rs" if len(parts) == 1 else
+                source_root / "crates/st3-api-core/src/api" / ("/".join(parts[:-1]) + ".rs"))
         if path not in production_by_path:
             try:
                 source = path.read_text()
@@ -616,7 +616,7 @@ def run_bounded_cli_inventory(binary, timeout_s=5, limit_bytes=1_000_000):
         selector.close()
         for stream in (process.stdout, process.stderr):
             stream.close()
-        if not complete:
+        if not complete and process.returncode is None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -841,7 +841,7 @@ def report(root, ledger_path, manifest_path=None):
         blockers.append("historical ledger is malformed or unreadable")
     try:
         route_handlers = registered_route_handlers(
-            (root / "crates/st3-api/src/api.rs").read_text(),
+            (root / "crates/st3-api-core/src/api.rs").read_text(),
             (root / "crates/st3-peer/src/peer.rs").read_text(),
         )
         routes = set(route_handlers)

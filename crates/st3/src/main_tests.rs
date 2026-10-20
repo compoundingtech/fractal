@@ -1,6 +1,83 @@
 use super::*;
 
 #[test]
+fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
+    assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
+    let cli = Cli::try_parse_from([
+        "st", "store", "prepare-indexes", "--store", "/private/claims.sqlite3",
+    ]).unwrap();
+    assert!(matches!(cli.command, Command::Store {
+        command: StoreCommand::PrepareIndexes { store },
+    } if store == std::path::Path::new("/private/claims.sqlite3")));
+    assert!(!cli_help::root_help(false).contains("prepare-indexes"));
+    assert!(cli_help::root_help(false).contains("store"));
+    let mut command = Cli::command();
+    let store = command.find_subcommand_mut("store").unwrap();
+    assert!(store.render_help().to_string().contains("prepare-indexes"));
+}
+
+#[test]
+fn cli_environment_aliases_are_normalized_before_parsing() {
+    const CHILD: &str = "ST_TEST_CLI_ENV_CHILD";
+    if let Ok(case) = std::env::var(CHILD) {
+        let expected = match case.as_str() {
+            "old" => Some("agent/old"),
+            "new" => Some("agent/new"),
+            "equal" => Some("agent/same"),
+            _ => None,
+        };
+        assert_eq!(agent_environment_present(), case != "instance");
+        let root_command = cli_command();
+        let command = root_command.find_subcommand("work").unwrap()
+            .find_subcommand("start").unwrap().clone();
+        let parsed = command.clone().try_get_matches_from(["start", "task"])
+            .and_then(|matches| WorkStartArgs::from_arg_matches(&matches));
+        assert_eq!(parsed.ok().map(|args| args.actor).as_deref(), expected);
+        let matches = command.try_get_matches_from([
+            "start", "task", "--as", "person/explicit",
+        ]).unwrap();
+        let explicit = WorkStartArgs::from_arg_matches(&matches).unwrap();
+        assert_eq!(explicit.actor, "person/explicit");
+        if case == "instance" {
+            let arguments = vec![std::ffi::OsString::from("st")];
+            assert_eq!(st3::instance::requested(&arguments).as_deref(), Some("alias-test"));
+            let matches = cli_command().try_get_matches_from([
+                "st", "--instance", "flag-test", "work", "start", "task", "--as", "person/explicit",
+            ]).unwrap();
+            let parsed = Cli::from_arg_matches(&matches).unwrap();
+            assert_eq!(parsed.instance.as_deref(), Some("flag-test"));
+        }
+        return;
+    }
+    for (case, old, new) in [
+        ("old", Some("agent/old"), None),
+        ("new", None, Some("agent/new")),
+        ("equal", Some("agent/same"), Some("agent/same")),
+        ("conflict", Some("agent/old"), Some("agent/new")),
+        ("empty", Some("agent/old"), Some("")),
+        ("instance", None, None),
+    ] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "tests::cli_environment_aliases_are_normalized_before_parsing", "--nocapture"])
+            .env(CHILD, case);
+        for (name, new) in CLI_ENVIRONMENT_NAMES {
+            command.env_remove(name).env_remove(new);
+            if let Some(legacy) = st_drivers::contracts::legacy_env_name(name) {
+                command.env_remove(legacy);
+            }
+        }
+        if let Some(value) = old { command.env("ST_AGENT", value); }
+        if let Some(value) = new { command.env("FRACTAL_AGENT", value); }
+        if case == "instance" { command.env("FRACTAL_INSTANCE", "alias-test"); }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{case}: {stderr}\n{}", String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stderr.contains("conflicting environment variables"), case == "conflict", "{case}: {stderr}");
+        assert!(!stderr.contains("agent/old") && !stderr.contains("agent/new"), "{case}: {stderr}");
+    }
+}
+
+#[test]
 fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
     let rows = vec![
         json!({"id": "person-read", "kind": "objective", "status": "met", "target": "p99 ≤ 100 ms",
@@ -2363,6 +2440,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("driver", /* sqlite-large-value: allow-for-now lv-h6901be108db9 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13e13e1dcef owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
         ("launch", /* sqlite-large-value: allow-for-now lv-h65740c83118e owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
+        ("migrate", /* sqlite-large-value: allow-for-now lv-h3dc022adaedc owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-ha35371b1cf0f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
         ("terminals", /* sqlite-large-value: allow-for-now lv-hc9c07b4d9f7f owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-haa99fd7b7bb0 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
@@ -2421,7 +2499,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         );
     }
 
-    let server_source = /* sqlite-large-value: allow-for-now lv-hcac4fd417c19 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../st3-api/src/api.rs");
+    let server_source = /* sqlite-large-value: allow-for-now lv-hf139810ef8b7 owner=st3::main_tests TODO=trace-statement-and-value-representation */ include_str!("../../st3-api-core/src/api.rs");
     for handler in [
         "watch_resource",
         "unwatch_resource",

@@ -30,6 +30,9 @@
 //! It fails when a person-facing read's p99 passes the budget, and when a read's median grows by
 //! more than twice from one scale to the next, which means it does work that grows with the store.
 
+use st3::MissionsStore;
+use st3::PersonWorkStore;
+use st3::SeatsStoreCore;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -441,6 +444,7 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
     };
     // As the daemon does when it starts.
     st3::api::start_operation_report(&state);
+    st3::api::start_published_lists(&state);
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
@@ -456,6 +460,10 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
             .await
             .unwrap()
     };
+    let seeded_cut = store.index().unwrap();
+    tokio::time::timeout(Duration::from_secs(120),
+        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("benchmark lists publish the seeded fleet cut").unwrap();
     // The fleet takes its steps before the reconciler starts, which could otherwise block a step
     // between its turning ready and its claim.
     let reconciler = settings.reconciler.then(|| {

@@ -3,11 +3,11 @@
 //! published, a collection socket rereads its windows when a newer one is published, never on a
 //! raw commit, so a commit that changes nothing in the view folds no window.
 
-use super::*;
+
 
 /// The collections a refresher may publish. Agents keep their own roster signal.
-pub const PUBLISHED_COLLECTIONS: [&str; 6] =
-    ["missions", "work", "attention", "summary", "glasses", "arrangements"];
+pub const PUBLISHED_COLLECTIONS: [&str; 7] =
+    ["missions", "work", "attention", "summary", "glasses", "arrangements", "runtimes"];
 
 /// One collection's publication state.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -96,39 +96,6 @@ impl PublishedViews {
 
     pub fn published(&self, collection: &str) -> bool {
         position(collection).is_some_and(|position| self.0.borrow()[position].published)
-    }
-}
-
-impl Store {
-    /// Say that `collection`'s refresher has swapped in a newer published view. Call it after
-    /// every publication, including one at the same graph index after a deadline passed.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub fn publish_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.publish(collection);
-    }
-
-    /// Say that `collection`'s refresher stopped serving its view, because it exited or keeps
-    /// failing: its windows go back to following commits until it publishes again.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub fn withdraw_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.withdraw(collection);
-    }
-
-    /// Say that `collection`'s running refresher governs its view while it has nothing to serve:
-    /// see [`PublishedViews::hold`].
-    pub fn hold_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.hold(collection);
-    }
-
-    /// Whether a refresher serves or governs `collection`'s view: its windows then reread only
-    /// when the view changes again.
-    pub fn collection_view_published(&self, collection: &str) -> bool {
-        self.smalltalk.published_views.published(collection)
-    }
-
-    /// Follows every collection's publication revision.
-    pub fn subscribe_collection_views(&self) -> tokio::sync::watch::Receiver<Revisions> {
-        self.smalltalk.published_views.subscribe()
     }
 }
 

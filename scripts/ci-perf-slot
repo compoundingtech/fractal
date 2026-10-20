@@ -207,21 +207,60 @@ def forget(directory, pid):
             (directory / 'holder.json').unlink()
 
 
-def watchdog(directory, gate, group, owner):
-    """Hold the slot for the run's whole life. If the wrapper dies without saying it is done,
-    kill the run's process group, wait for it to be gone, then let the slot go."""
+def watchdog(directory, gate, result, slot_fd, args, owner, since):
+    """Own the command directly and retain its PID until group cleanup is done.
+
+    The old watchdog signalled a numeric group owned/reaped by another process.
+    A dead wrapper could therefore leave it acting on a recycled group number.
+    waitid(WNOWAIT) observes exit without freeing our child's PID/group identity.
+    """
     os.setsid()
+    from st3_test_process import set_child_subreaper, reap_descendants
+    set_child_subreaper()
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, signal.SIG_IGN)
-    if os.read(gate, 1) != b'x':
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError:
+        # Caught handlers reset to SIG_DFL on exec; SIG_IGN would survive
+        # into the command and disable shell TERM traps/graceful cleanup.
+        signal.signal(number, lambda *_: None)
+    child = subprocess.Popen(args.command, start_new_session=True,
+                             env={**os.environ, 'FRACTAL_PERF_SLOT_HELD': str(owner),
+                                  'ST_PERF_SLOT_HELD': str(owner)})
+    outcome = None
+    import select
+    try:
+        while True:
+            exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if exited is not None:
                 break
-            time.sleep(0.05)
+            if select.select([gate], [], [], 0.1)[0]:
+                request = os.read(gate, 1)
+                outcome = 128 + request[0] if request else 137
+                print('perf slot: wrapper ended or signalled, stopping the run', file=sys.stderr, flush=True)
+                break
+            if time.time() >= since + args.timeout:
+                outcome = 124
+                print('perf slot: the run passed its %s timeout; stopping it' % age(args.timeout),
+                      file=sys.stderr, flush=True)
+                break
+        if outcome is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGTERM)
+            deadline = time.monotonic() + GRACE
+            while time.monotonic() < deadline:
+                if os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                    break
+                time.sleep(0.02)
+    finally:
+        # Even a successful leader can leave grandchildren. Do this BEFORE
+        # wait() releases the leader's PID, including on wrapper death.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGKILL)
+        code = child.wait()
+        reap_descendants()
         forget(directory, owner)
+        os.close(slot_fd)
+    code = outcome if outcome is not None else (code if code >= 0 else 128 - code)
+    with contextlib.suppress(BrokenPipeError):
+        os.write(result, str(code).encode())
     os._exit(0)
 
 
@@ -240,50 +279,34 @@ def run(args):
     scratch.replace(directory / 'holder.json')
     print('perf slot taken for %s; stops by %s (%s)' % (purpose, clock(holder['deadline']), age(args.timeout)),
           file=sys.stderr, flush=True)
-
-    stopping = []
-    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(number, lambda received, _frame: stopping.append(received))
-    owner = os.getpid()
-    child = subprocess.Popen(args.command, start_new_session=True,
-                             env={**os.environ, 'ST_PERF_SLOT_HELD': str(os.getpid())})
     gate_read, gate_write = os.pipe()
+    result_read, result_write = os.pipe()
+    # Install handlers BEFORE fork, so early cancellation cannot orphan a run.
+    def stop(received, _frame):
+        with contextlib.suppress(BrokenPipeError):
+            os.write(gate_write, bytes([received]))
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, stop)
+    owner = os.getpid()
     guard = os.fork()
     if guard == 0:
         os.close(gate_write)
-        watchdog(directory, gate_read, child.pid, owner)
+        os.close(result_read)
+        try:
+            watchdog(directory, gate_read, result_write, slot_fd, args, owner, since)
+        except BaseException as error:
+            print('perf slot watchdog: %s' % error, file=sys.stderr, flush=True)
+        os._exit(1)
     os.close(gate_read)
-
-    outcome = None
-    deadline = since + args.timeout
-    while child.poll() is None:
-        if stopping:
-            outcome = 128 + stopping[0]
-            print('perf slot: signal %d, stopping the run' % stopping[0], file=sys.stderr, flush=True)
-        elif time.time() >= deadline:
-            outcome = 124
-            print('perf slot: the run passed its %s timeout; stopping it' % age(args.timeout),
-                  file=sys.stderr, flush=True)
-        if outcome is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(child.pid, signal.SIGTERM)
-            try:
-                child.wait(GRACE)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-            break
-        time.sleep(0.1)
-    if outcome is None:
-        outcome = child.returncode if child.returncode >= 0 else 128 - child.returncode
-    # Say the run is over, wait for the watchdog (which holds the flock) to leave, then free the slot.
-    forget(directory, os.getpid())
-    os.write(gate_write, b'x')
-    os.close(gate_write)
-    os.waitpid(guard, 0)
-    os.close(slot_fd)
-    return outcome
+    os.close(result_write)
+    os.close(slot_fd)  # Only the watchdog holds the slot until every signal is done.
+    try:
+        status = os.read(result_read, 32)
+        os.waitpid(guard, 0)
+        return int(status) if status else 1
+    finally:
+        os.close(result_read)
+        os.close(gate_write)
 
 
 def main():

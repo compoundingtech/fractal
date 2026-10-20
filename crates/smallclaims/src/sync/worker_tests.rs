@@ -106,7 +106,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                 let (parts, body) = request.into_parts();
                 let bytes = to_bytes(body, MAX_EXCHANGE_BYTES).await.unwrap();
                 let decoded = if deflated(&parts.headers) {
-                    inflate(&bytes).unwrap()
+                    inflate(&bytes, "test").unwrap()
                 } else {
                     bytes.to_vec()
                 };
@@ -464,12 +464,22 @@ fn exchange_bodies_deflate_and_refuse_a_body_that_inflates_too_far() {
     let body = serde_json::to_vec(&serde_json::json!({"envelopes": vec!["same"; 1_000]})).unwrap();
     let compressed = deflate(&body).unwrap();
     assert!(compressed.len() * 10 < body.len());
-    assert_eq!(inflate(&compressed).unwrap(), body);
+    assert_eq!(inflate(&compressed, "test").unwrap(), body);
 
     let bomb = deflate(&vec![0_u8; MAX_EXCHANGE_BYTES + 1]).unwrap();
     assert!(bomb.len() < 1024 * 1024);
-    assert!(inflate(&bomb).is_err());
-    assert!(inflate(b"not deflate").is_err());
+    let refused = inflate(&bomb, "the answer to `/v1/peer/exchange` from peer invented-peer")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        refused,
+        format!(
+            "the exchange body inflates past {MAX_EXCHANGE_BYTES} bytes (the answer to \
+             `/v1/peer/exchange` from peer invented-peer, {} compressed bytes)",
+            bomb.len()
+        )
+    );
+    assert!(inflate(b"not deflate", "test").is_err());
 
     let mut headers = HeaderMap::new();
     assert!(!accepts_deflate(&headers));
@@ -569,7 +579,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         assert_eq!(deflated(&headers), ask);
         let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let response_body = if ask {
-            inflate(&response_body).unwrap()
+            inflate(&response_body, "test").unwrap()
         } else {
             response_body.to_vec()
         };
@@ -1106,7 +1116,15 @@ mod retry_tests {
                         if request.method() == axum::http::Method::POST {
                             observed.lock().push(preferred);
                             if preferred && !up.load(Ordering::SeqCst) {
-                                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                                // Fail the HTTP stream, not an application response (503
+                                // must retain the route under the transport-only policy).
+                                return Response::new(Body::from_stream(
+                                    futures_util::stream::once(async {
+                                        Err::<Bytes, _>(std::io::Error::from(
+                                            std::io::ErrorKind::ConnectionReset,
+                                        ))
+                                    }),
+                                ));
                             }
                         }
                         next.run(request).await
@@ -1477,17 +1495,6 @@ mod retry_tests {
         server.abort();
     }
 
-    #[test]
-    fn refused_routes_allow_at_most_three_attempts_per_hour_from_the_first_refusal() {
-        for jitter in [0, 200, 400, u16::MAX] {
-            let delay = fabric_refusal_delay_with_jitter(jitter);
-            assert!(delay >= Duration::from_secs(24 * 60));
-            assert!(delay <= Duration::from_secs(36 * 60));
-            let attempts = 1 + 3600 / delay.as_secs();
-            assert!(attempts <= 3, "{attempts} attempts per hour");
-        }
-    }
-
     #[tokio::test]
     async fn isolated_leaves_refuse_direct_fabric_routes_and_converge_through_the_hub() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1639,7 +1646,7 @@ mod retry_tests {
                     .contains("that member's Fabric grants")
             );
         }
-        // Busy graph, network and online events must leave both refused routes asleep.
+        // Busy graph, network and online events do not change the refusal classification.
         for round in 0..8 {
             for index in 0..3 {
                 write(index, &format!("busy-{round}-{}", names[index]));
@@ -1657,26 +1664,8 @@ mod retry_tests {
             }
             converge(&stores, &contexts).await;
         }
-        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
-        // Advance an hour on the real dialers. Let shell I/O finish in real time between
-        // advances so the command timeout measures a dial, not our simulated hour.
-        tokio::time::pause();
-        for _ in 0..6 {
-            tokio::time::advance(Duration::from_secs(10 * 60)).await;
-            tokio::time::resume();
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            tokio::time::pause();
-        }
-        tokio::time::resume();
-        let attempts = std::fs::read_to_string(&log).unwrap();
-        for name in ["amber", "cobalt"] {
-            let count = attempts.lines().filter(|line| *line == name).count();
-            assert!((2..=3).contains(&count), "{name}: {count} dials in an hour");
-            println!(
-                "isolated refusal proof: {name}: {count} direct attempts in a simulated hour; leaves converged through indigo"
-            );
-        }
-        // A refused Fabric route must not hold up another route to the same member.
+        // A grant refusal must retain the preferred route, not bypass access policy by
+        // selecting an otherwise healthy HTTP fallback.
         routes[2].send_replace(vec![
             Route::Fabric {
                 node: "cobalt".into(),
@@ -1684,31 +1673,15 @@ mod retry_tests {
             },
             Route::Http(format!("http://{}", addresses[2])),
         ]);
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while stores[1]
-                .replication_status(true, Some(fleet_id), &["cobalt".into()])
-                .unwrap()
-                .peers[0]
-                .status
-                != "up"
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("a refused Fabric route must not block the HTTP fallback");
+        tokio::time::sleep(Duration::from_millis(100)).await;
         use crate::replication::ReplicationCarrier;
         let (success, failure) = stores[1].replication_peer_transport("cobalt");
-        assert_eq!(success.unwrap().carrier, ReplicationCarrier::Loopback);
+        assert!(success.is_none(), "grant refusal must not select HTTP fallback");
         let failed_fabric = failure.unwrap();
         assert_eq!(failed_fabric.carrier, ReplicationCarrier::Fabric);
         assert_eq!(failed_fabric.fabric_route.as_deref(), Some("unknown"));
-        // A changed membership route is usable immediately, despite the grant cooldown.
-        let before_route_change = stores[1]
-            .replication_peer_transport("cobalt")
-            .0
-            .unwrap()
-            .at_unix_ms;
+        // An explicit membership route change remains usable immediately.
+        let before_route_change = 0;
         std::fs::write(&grant, addresses[2].to_string()).unwrap();
         routes[2].send_replace(vec![Route::Fabric {
             node: "cobalt-new-route".into(),
@@ -1732,7 +1705,7 @@ mod retry_tests {
             }
         })
         .await
-        .expect("a changed route must interrupt the refusal cooldown");
+        .expect("a changed route must interrupt normal refusal backoff");
         let (success, failure) = stores[1].replication_peer_transport("cobalt");
         let fabric_success = success.unwrap();
         assert_eq!(
@@ -1754,8 +1727,9 @@ mod retry_tests {
     }
 
     /// `fabric dial` never connects, so a member's refusal reaches the worker as a tunnel that
-    /// closes. The worker then asks `fabric probe --json`, and only a refusal class puts the
-    /// route to sleep.
+    /// closes. The worker then asks `fabric probe --json`, and only a refusal class reports the
+    /// peer `refused`. A refused route keeps normal peer backoff (docs/st3/replication.md), so the
+    /// probe is asked once per attempt and never faster than that backoff allows.
     #[tokio::test]
     async fn a_tunnel_that_closes_is_a_refusal_only_when_the_probe_says_so() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1806,6 +1780,7 @@ mod retry_tests {
                 protocol: "st3-peer-v1".into(),
             }]);
             let wake = watch::channel(0).0;
+            let started = std::time::Instant::now();
             let worker = tokio::spawn(dial_peer(
                 Local(store.clone()),
                 "indigo".into(),
@@ -1828,12 +1803,25 @@ mod retry_tests {
             })
             .await
             .unwrap_or_else(|_| panic!("{probe}: the probe was never asked"));
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let peer = store
-                .replication_status(true, Some(fleet_id), &["amber".into()])
-                .unwrap()
-                .peers
-                .remove(0);
+            // Then until it has recorded what the probe said, rather than for a fixed time.
+            let status = || {
+                store
+                    .replication_status(true, Some(fleet_id), &["amber".into()])
+                    .unwrap()
+                    .peers
+                    .remove(0)
+            };
+            let peer = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let peer = status();
+                    if peer.last_failed_exchange.is_some() {
+                        return peer;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{probe}: the failed exchange was never recorded"));
             let failed = peer
                 .last_failed_exchange
                 .as_ref()
@@ -1850,10 +1838,22 @@ mod retry_tests {
                         .unwrap()
                         .contains("that member's Fabric grants")
                 );
-                // Asleep: more time passes and the probe is not asked again.
+                // No hot loop: one probe per attempt, and attempts no closer together than the
+                // backoff's shortest jitter allows. A slow runner only makes fewer attempts.
                 tokio::time::sleep(Duration::from_millis(600)).await;
+                let elapsed = started.elapsed();
                 let asked = std::fs::read_to_string(&probes).unwrap().lines().count();
-                assert_eq!(asked, 1, "{probe}");
+                let mut allowed = 1;
+                let mut earliest = Duration::ZERO;
+                loop {
+                    earliest += PeerBackoff::delay(allowed as u32 - 1, 0);
+                    if earliest > elapsed {
+                        break;
+                    }
+                    allowed += 1;
+                }
+                assert!((1..=allowed).contains(&asked), "{probe}: {asked} probes in {elapsed:?}");
+                assert_eq!(status().status, "refused", "{probe}");
             } else {
                 assert_ne!(peer.status, "refused", "{probe}");
                 assert!(peer.refusal_reason.is_none(), "{probe}");
@@ -3461,6 +3461,220 @@ mod early_recovery {
         link.server.abort();
     }
 
+    /// A link in front of a real peer that, for a span of paused time, drops every open
+    /// connection and closes each new one without an answer, as the messaging-faults link does
+    /// between `link.drop()` and `link.enabled = True`. Otherwise it forwards bytes both ways.
+    struct Outage {
+        url: String,
+        down_until: Arc<Mutex<tokio::time::Instant>>,
+        dropped: Arc<watch::Sender<u64>>,
+        /// Exchanges that reached the link while it was down.
+        refused: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Outage {
+        async fn start(peer: SocketAddr) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let down_until = Arc::new(Mutex::new(tokio::time::Instant::now()));
+            let dropped = Arc::new(watch::channel(0).0);
+            let refused = Arc::new(AtomicUsize::new(0));
+            let (until, drops, counted) = (down_until.clone(), dropped.clone(), refused.clone());
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let down = tokio::time::Instant::now() < *until.lock().unwrap();
+                    let (mut dropped, counted) = (drops.subscribe(), counted.clone());
+                    tokio::spawn(async move {
+                        if down {
+                            if read_request(&mut stream).await == Some(true) {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                            }
+                            return;
+                        }
+                        let Ok(mut upstream) = tokio::net::TcpStream::connect(peer).await else {
+                            return;
+                        };
+                        tokio::select! {
+                            _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream) => {}
+                            _ = dropped.changed() => {}
+                        }
+                    });
+                }
+            });
+            Self {
+                url,
+                down_until,
+                dropped,
+                refused,
+                server,
+            }
+        }
+
+        /// Drop every open connection and refuse new ones for `outage` of paused time.
+        fn drop_for(&self, outage: Duration) {
+            *self.down_until.lock().unwrap() = tokio::time::Instant::now() + outage;
+            self.dropped.send_modify(|generation| *generation += 1);
+        }
+    }
+
+    /// The per-PR contract for the messaging-faults `link_seconds` case: a link outage of a few
+    /// seconds, after a healthy exchange, resumes replication within that case's 10-second read
+    /// deadline, without spinning on the dead link while it is down.
+    #[tokio::test(start_paused = true)]
+    async fn a_seconds_long_link_outage_resumes_exchange_within_the_read_deadline() {
+        const STEP: Duration = Duration::from_millis(100);
+        let awake = keep_awake();
+        let fleet_id = "d706eab5-433c-474b-ae43-fd2a7891d85d";
+        let auth = FleetAuth::test(fleet_id, &[42; 32]);
+        let root = tempfile::tempdir().unwrap();
+        let local = Arc::new(plain_open(&root.path().join("harbor.sqlite3"), "harbor").unwrap());
+        let remote = Arc::new(plain_memory("beacon").unwrap());
+        for store in [&local, &remote] {
+            store.bind_fleet(fleet_id).unwrap();
+        }
+        // When each exchange reached the peer, in paused time.
+        let exchanges = Arc::new(Mutex::new(Vec::new()));
+        let observed = exchanges.clone();
+        let app = peer_router(
+            PeerState {
+                backend: Local(remote.clone()),
+                node: "beacon".into(),
+                auth: auth.clone(),
+                fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
+                outbound_notify: watch::channel(0).0,
+            },
+            Router::new(),
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                if request.method() == axum::http::Method::POST {
+                    observed.lock().unwrap().push(tokio::time::Instant::now());
+                }
+                next.run(request)
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let link = Outage::start(listener.local_addr().unwrap()).await;
+        let peer = tokio::spawn(axum::serve(listener, app).into_future());
+        let (_route_tx, routes) = watch::channel(vec![Route::Http(link.url.clone())]);
+        let (notify, _) = watch::channel(0);
+        let dialer = tokio::spawn(dial_peer(
+            Local(local.clone()),
+            "harbor".into(),
+            "beacon".into(),
+            routes,
+            auth,
+            FleetContext::legacy(BTreeSet::from(["beacon".into()])),
+            notify.subscribe(),
+        ));
+        fn phase(local: &Store) -> Option<String> {
+            local
+                .replication_sync
+                .lock()
+                .unwrap()
+                .get("beacon")
+                .and_then(|progress| progress.worker.clone())
+                .map(|worker| worker.phase)
+        }
+        // Paused time must not outrun loopback sockets or the store's blocking work: let an
+        // exchange in flight finish before each step of the clock.
+        async fn step(local: &Store) {
+            let started = std::time::Instant::now();
+            loop {
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+                if phase(local).as_deref() != Some("exchange")
+                    || started.elapsed() > Duration::from_secs(10)
+                {
+                    break;
+                }
+            }
+            tokio::time::advance(STEP).await;
+        }
+        // A warm link, as the case's cross-node warmup leaves it: the first exchanges have
+        // settled and the worker has been idle for two seconds.
+        let warm = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !(phase(&local).as_deref() == Some("idle")
+            && exchanges
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|at| at.elapsed() >= Duration::from_secs(2)))
+        {
+            assert!(tokio::time::Instant::now() < warm, "no healthy exchange");
+            step(&local).await;
+        }
+        // The link drops, and a message is written while it is down.
+        let outage = Duration::from_secs(3);
+        let started = tokio::time::Instant::now();
+        let ended = started + outage;
+        link.drop_for(outage);
+        fleet_claim(
+            &local,
+            "transport.observed",
+            "host/harbor",
+            serde_json::json!({"status": "up"}),
+        );
+        notify.send_modify(|generation| *generation += 1);
+        let resumed = loop {
+            if let Some(at) = exchanges
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .find(|at| *at > started)
+            {
+                break at;
+            }
+            assert!(
+                tokio::time::Instant::now() < ended + Duration::from_secs(30),
+                "no exchange after the outage"
+            );
+            step(&local).await;
+        };
+        // No exchange reaches the peer through a dropped link, so the first one that does was
+        // sent after the link returned.
+        assert!(resumed >= ended);
+        assert!(
+            resumed - ended < Duration::from_secs(10),
+            "the first exchange after the outage started {:?} after it ended",
+            resumed - ended
+        );
+        // That exchange succeeds and carries the message written during the outage.
+        let delivered = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !(phase(&local).as_deref() == Some("idle")
+            && remote
+                .latest_claim("host/harbor", Some("transport.observed"))
+                .unwrap()
+                .is_some())
+        {
+            assert!(
+                tokio::time::Instant::now() < delivered,
+                "the message did not replicate"
+            );
+            step(&local).await;
+        }
+        // Not a spin: while the link was down the worker tried no more often than the shortest
+        // jitter of its backoff schedule allows.
+        let (mut schedule, mut allowed) = (Duration::ZERO, 0);
+        while schedule < outage {
+            schedule += PeerBackoff::delay(allowed, 0);
+            allowed += 1;
+        }
+        let refused = link.refused.load(Ordering::SeqCst);
+        assert!(
+            (1..=allowed as usize).contains(&refused),
+            "{refused} exchanges in a {outage:?} outage; the backoff allows {allowed}"
+        );
+        dialer.abort();
+        peer.abort();
+        awake.abort();
+        link.server.abort();
+    }
+
     /// The classification the early attempt rests on, for the pinned reqwest 0.12.28 and hyper
     /// 1.11.0: if a version bump changes how a close before the response head surfaces, this
     /// fails rather than the recovery silently reverting to the 30-second cap.
@@ -3537,5 +3751,132 @@ mod early_recovery {
             .unwrap_err();
         assert!(unbuilt.is_builder(), "{unbuilt:?}");
         assert!(!exchange_unanswered(&anyhow::Error::new(unbuilt)));
+    }
+}
+
+#[tokio::test]
+async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn backoff_after(
+        store: &Store,
+        preferred: &AtomicUsize,
+        fallback: &AtomicUsize,
+        attempts: usize,
+    ) -> crate::replication::ReplicationWorkerStatus {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                assert_eq!(fallback.load(Ordering::SeqCst), 0, "fallback was selected");
+                let worker = store
+                    .replication_sync
+                    .lock()
+                    .unwrap()
+                    .get("peer")
+                    .and_then(|progress| progress.worker.clone());
+                if let Some(worker) = worker
+                    && worker.phase == "backoff"
+                    && preferred.load(Ordering::SeqCst) >= attempts
+                {
+                    return worker;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the real dialer must retry the application failure with backoff")
+    }
+
+    let fleet_id = "fdf00ee7-a1f7-4ed7-a5ec-a6558b61cd92";
+    let auth = FleetAuth::test(fleet_id, &[53; 32]);
+    let state = PeerState::new(
+        Local(Arc::new(plain_memory("peer").unwrap())),
+        "peer".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["local".into()])),
+    );
+    for (status, code) in [
+        (StatusCode::INTERNAL_SERVER_ERROR, "replication-request-failed"),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "replication-exchange-metadata-too-large",
+        ),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "replication-exchange-metadata-too-large",
+        ),
+        (StatusCode::UNAUTHORIZED, "auth-failed"),
+        (StatusCode::UNPROCESSABLE_ENTITY, "invalid-exchange"),
+        (StatusCode::OK, "invalid-protocol"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let local = Arc::new(plain_open(&root.path().join("local.sqlite3"), "local").unwrap());
+        local.bind_fleet(fleet_id).unwrap();
+        let preferred_attempts = Arc::new(AtomicUsize::new(0));
+        let fallback_attempts = Arc::new(AtomicUsize::new(0));
+        let observed = preferred_attempts.clone();
+        let state = state.clone();
+        let app = Router::new().route(
+            EXCHANGE_PATH,
+            post(move |body: Bytes| {
+                let state = state.clone();
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    // A signed success carrying the wrong type exercises protocol decoding;
+                    // all other cases are signed application refusals.
+                    let mut response = signed_response(
+                        &state,
+                        &FleetAuth::body_digest(&body),
+                        0,
+                        serde_json::json!({"code": code}),
+                    )
+                    .unwrap();
+                    *response.status_mut() = status;
+                    response
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let preferred = Route::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let observed = fallback_attempts.clone();
+        let fallback_app = Router::new().route(
+            EXCHANGE_PATH,
+            post(move |_: Bytes| {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback = Route::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let fallback_server = tokio::spawn(axum::serve(listener, fallback_app).into_future());
+        let (_routes, routes) = watch::channel(vec![preferred, fallback]);
+        let (notify, _) = watch::channel(0);
+        let dialer = tokio::spawn(dial_peer(
+            Local(local.clone()),
+            "local".into(),
+            "peer".into(),
+            routes,
+            auth.clone(),
+            FleetContext::legacy(BTreeSet::from(["peer".into()])),
+            notify.subscribe(),
+        ));
+        let first = backoff_after(&local, &preferred_attempts, &fallback_attempts, 1).await;
+        let second = backoff_after(&local, &preferred_attempts, &fallback_attempts, 2).await;
+        dialer.abort();
+        server.abort();
+        fallback_server.abort();
+        assert_eq!(first.route_is_preferred, Some(true), "{code}");
+        assert_eq!(second.route_is_preferred, Some(true), "{code}");
+        assert!(first.next_retry_at_unix_ms.is_some(), "{code}");
+        assert!(second.next_retry_at_unix_ms.is_some(), "{code}");
+        assert!(
+            second.last_attempt_at_unix_ms > first.last_attempt_at_unix_ms,
+            "{code}: the normal backoff must lead to another preferred-route attempt"
+        );
+        assert_eq!(fallback_attempts.load(Ordering::SeqCst), 0, "{code}");
     }
 }

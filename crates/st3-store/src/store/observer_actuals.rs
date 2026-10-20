@@ -1,5 +1,5 @@
-//! Observer-only actual reductions. Native row notifications invalidate at writer resolution;
-//! the existing preparation fence remains the authority for using a prepared observation.
+//! Observer-only actual reductions and terminal authority wakes. Native row notifications
+//! invalidate at writer resolution; durable snapshot reads remain the authority.
 use super::*;
 use smallclaims::sqlite::WriterObserver;
 
@@ -11,11 +11,25 @@ const PENDING_LIMIT: usize = 8192;
 #[path = "observer_actuals_tests.rs"]
 mod tests;
 
+impl Store {
+    /// Subscribe before the first authority read so a concurrent commit cannot be missed.
+    /// Uses native writer-resolution notifications, not the API's broad reconciliation wakes.
+    pub fn subscribe_runtime_authority(&self, subject: &str) -> tokio::sync::watch::Receiver<u64> {
+        self.smalltalk.observer_actuals.subscribe_authority(subject)
+    }
+
+    /// Broad API wakes remain a safety source while native dependency coverage is disabled.
+    pub fn runtime_authority_coverage_failed(&self) -> bool {
+        self.smalltalk.observer_actuals.0.lock()
+            .unwrap_or_else(PoisonError::into_inner).coverage_failed
+    }
+}
+
 #[derive(Default)]
 pub struct Actuals(Mutex<State>);
 
 #[derive(Default)]
-struct State {
+pub struct State {
     serial: u64,
     native: Option<(i64, i64)>,
     frontier: i64,
@@ -25,6 +39,7 @@ struct State {
     pending: BTreeSet<(&'static str, i64)>,
     entries: VecDeque<(String, Option<Value>, usize)>,
     bytes: usize,
+    authority_watches: HashMap<String, tokio::sync::watch::Sender<u64>>,
 }
 
 impl State {
@@ -35,10 +50,20 @@ impl State {
 }
 
 impl Actuals {
+    pub fn subscribe_authority(&self, subject: &str) -> tokio::sync::watch::Receiver<u64> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.authority_watches.retain(|_, sender| sender.receiver_count() != 0);
+        state.authority_watches.entry(subject.to_owned())
+            .or_insert_with(|| tokio::sync::watch::channel(0).0).subscribe()
+    }
+
     pub fn invalidate(&self) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.clear();
         state.serial = state.serial.wrapping_add(1);
+        for sender in state.authority_watches.values() {
+            sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
     }
 
     /// Called while holding the autocommit writer, before opening the preparation snapshot.
@@ -148,7 +173,8 @@ fn record_rank_changed(connection: &Connection, rowid: i64, previous_frontier: i
 impl WriterObserver for Actuals {
     fn tables(&self) -> &'static [(&'static str, &'static str)] {
         &[("main", "claims"), ("main", "batches"), ("main", "replica_records"),
-          ("main", "projection_digest_repaired_claims")]
+          ("main", "projection_digest_repaired_claims"), ("main", "desired"),
+          ("main", "operations")]
     }
 
     fn mutated(&self, database: &str, table: &str) {
@@ -164,15 +190,21 @@ impl WriterObserver for Actuals {
             "replica_records" => "replica_records",
             "projection_digest_repaired_claims" => "projection_digest_repaired_claims",
             "batches" => "batches",
+            "desired" => "desired",
+            "operations" => "operations",
             _ => return,
         };
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         // Fence speculative readers immediately, including between commits in one writer loan.
         // Publication can then compare final canonical metadata with the cached prefix safely.
         state.serial = state.serial.wrapping_add(1);
-        // Updates/deletions may have changed the old subject/claim identity; bulk work and
-        // missing rows are deliberately global. Rollback notifications over-invalidate only.
-        if action != rusqlite::hooks::Action::SQLITE_INSERT || state.pending.len() >= PENDING_LIMIT {
+        // Operation IDs are immutable; INSERT/UPDATE can be routed through all claims sharing
+        // the operation. Deletes and other source updates may have lost the old identity.
+        let routable_operation_update = table == "operations"
+            && action == rusqlite::hooks::Action::SQLITE_UPDATE;
+        if table == "desired"
+            || (action != rusqlite::hooks::Action::SQLITE_INSERT && !routable_operation_update)
+            || state.pending.len() >= PENDING_LIMIT {
             state.global = true;
         } else if !state.global {
             state.pending.insert((table, rowid));
@@ -189,6 +221,9 @@ impl WriterObserver for Actuals {
         state.clear();
         state.serial = state.serial.wrapping_add(1);
         state.global = true;
+        for sender in state.authority_watches.values() {
+            sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
     }
 
     fn coverage_verified(&self) {
@@ -197,6 +232,13 @@ impl WriterObserver for Actuals {
         state.clear();
         state.serial = state.serial.wrapping_add(1);
         state.global = true;
+    }
+
+    fn coverage_unavailable(&self) {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for sender in state.authority_watches.values() {
+            sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
     }
 
     fn published(&self, connection: &Connection) {
@@ -208,7 +250,8 @@ impl WriterObserver for Actuals {
             .filter(|entry| entry.0 == "replica_records").map(|entry| entry.1)
             .max().unwrap_or(state.record_frontier).max(state.record_frontier);
         let mut subjects = BTreeSet::new();
-        if !state.global && !state.entries.is_empty() {
+        state.authority_watches.retain(|_, sender| sender.receiver_count() != 0);
+        if !state.global && (!state.entries.is_empty() || !state.authority_watches.is_empty()) {
             for (table, rowid) in pending {
                 if table == "replica_records" && rowid <= state.record_frontier {
                     state.global = true;
@@ -223,14 +266,22 @@ impl WriterObserver for Actuals {
                     }
                     state.frontier = rowid;
                 }
-                if table == "batches" {
+                if matches!(table, "batches" | "operations") {
+                    let sql = if table == "operations" {
+                        // Remove TEXT affinity so the JSON-expression index remains seekable.
+                        "SELECT DISTINCT subject FROM claims INDEXED BY claims_operation_index
+                         WHERE json_extract(body, '$._operation.id')=
+                            (SELECT +id FROM operations WHERE rowid=?1) LIMIT ?2"
+                    } else {
+                        "SELECT subject FROM claims WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) LIMIT ?2"
+                    };
                     let batch_subjects = (|| -> rusqlite::Result<Vec<String>> {
-                        connection.prepare_cached(
-                            "SELECT subject FROM claims WHERE batch_id=(SELECT id FROM batches WHERE rowid=?1) LIMIT ?2"
-                        )?.query_map(params![rowid, PENDING_LIMIT + 1], |row| row.get(0))?.collect()
+                        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h856fd3ad7ada owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql)?
+                            .query_map(params![rowid, PENDING_LIMIT + 1], |row| row.get(0))?.collect()
                     })();
                     match batch_subjects {
-                        Ok(batch_subjects) if batch_subjects.len() <= PENDING_LIMIT => {
+                        Ok(batch_subjects) if batch_subjects.len() <= PENDING_LIMIT
+                            && (table != "operations" || !batch_subjects.is_empty()) => {
                             subjects.extend(batch_subjects);
                             if subjects.len() > PENDING_LIMIT {
                                 state.global = true;
@@ -243,14 +294,20 @@ impl WriterObserver for Actuals {
                 }
                 let sql = match table {
                     "claims" => "SELECT subject FROM claims WHERE rowid=?1",
-                    "replica_records" => "SELECT claims.subject FROM replica_records LEFT JOIN claims ON claims.id=replica_records.claim_id WHERE replica_records.rowid=?1 AND replica_records.claim_id IS NOT NULL",
+                    "replica_records" => "SELECT COALESCE(claims.subject, replica_records.subject_hint) FROM replica_records LEFT JOIN claims ON claims.id=replica_records.claim_id WHERE replica_records.rowid=?1",
                     _ => "SELECT subject FROM claims WHERE id=(SELECT id FROM projection_digest_repaired_claims WHERE rowid=?1)",
                 };
-                match connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h856fd3ad7ada owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql).and_then(|mut statement|
+                match connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h21e59b956a60 owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ sql).and_then(|mut statement|
                     statement.query_row(/* sqlite-large-value: allow-for-now lv-h76495336e10a owner=st3_store::store::observer_actuals TODO=trace-statement-and-value-representation */ [rowid], |row| row.get::<_, String>(0)).optional()) {
                     Ok(Some(subject)) => {
                         if table == "replica_records" {
-                            if !state.entries.iter().any(|(key, _, _)| key == &subject) {
+                            // Unknown/invalid records can fence authority without naming a claim,
+                            // and ordinary sealing can change authority independently of the fold.
+                            if state.authority_watches.contains_key(&subject) {
+                                subjects.insert(subject.clone());
+                            }
+                            if !state.entries.iter().any(|(key, _, _)| key == &subject)
+                                && !state.authority_watches.contains_key(&subject) {
                                 continue;
                             }
                             match record_rank_changed(connection, rowid, state.record_frontier) {
@@ -267,6 +324,13 @@ impl WriterObserver for Actuals {
             }
         }
         state.record_frontier = next_record_frontier;
+        // These are the same claim, repair and canonical-order dependencies read by runtime
+        // authority. Route once at writer resolution, not on each stream's global API wake.
+        for (subject, sender) in &state.authority_watches {
+            if state.global || state.coverage_failed || subjects.contains(subject) {
+                sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+            }
+        }
         if state.global {
             state.clear();
             state.global = false;

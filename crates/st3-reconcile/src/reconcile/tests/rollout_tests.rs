@@ -1,3 +1,5 @@
+use crate::RetirementsStore;
+use crate::RolloutsStore;
 use super::*;
 use crate::rollout::{self, Policy};
 use crate::store::owned_sets::{Options, Source};
@@ -1737,4 +1739,107 @@ fn resume_with_pending_manual_publication_launches_old_and_keeps_pending() {
     assert!(seat.store.rollout(SUBJECT).unwrap().is_none());
     seat.reconcile();
     assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+}
+
+fn crash_loop_parks(store: &Store) -> Vec<Value> {
+    store
+        .claims_for(SUBJECT, Some("runtime.reconcile-decision"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| {
+            claim.body["fields"]["key"]
+                .as_str()
+                .is_some_and(|key| key.contains("crash-loop"))
+        })
+        .map(|claim| claim.body["fields"].clone())
+        .collect()
+}
+
+// Per-PR contract for the boot canary `restart` scenario: `st agents restart --now` relaunches
+// the seat as a new incarnation that continues the native session its harness last bound.
+#[test]
+fn restart_launch_continues_the_recorded_native_session() {
+    let seat = Seat::new();
+    seat.busy(false);
+    let member = seat.desired().member.unwrap();
+    let request = seat.suspension_claim(
+        "runtime.action.requested",
+        json!({"action":"restart","runtime_id":member.runtime_id,"incarnation_id":"original-1",
+            "operation":crate::handoff::RESTART_NOW_OPERATION}),
+        vec![seat.store.selected_desired_token(SUBJECT).unwrap().unwrap()],
+        Some("agent-restart:canary".into()),
+    );
+    seat.reconcile();
+    assert_eq!(*seat.runtime.stops.lock().unwrap(), ["original-1"]);
+    seat.reconcile();
+    let launch = {
+        let starts = seat.runtime.starts.lock().unwrap();
+        assert_eq!(starts.len(), 1);
+        starts[0].clone()
+    };
+    // A restart continues the recorded session; RESUME_ENV is reserved for suspend/resume.
+    assert_eq!(launch.environment[crate::suspension::CONTINUE_ENV], "native-one");
+    assert!(!launch.environment.contains_key(crate::suspension::RESUME_ENV));
+    // The launch's own start operation owns the replacement incarnation, not the predecessor.
+    let operation = &launch.tags[start_jobs::OPERATION_TAG];
+    assert_eq!(
+        seat.runtime
+            .start_operation(&member.runtime_id, member.terminal, "replacement-1")
+            .unwrap()
+            .as_ref(),
+        Some(operation)
+    );
+    let actual = seat.store.latest_actual_value(SUBJECT).unwrap().unwrap();
+    assert_eq!(
+        actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+        Some("replacement-1")
+    );
+    seat.append("harness.observed",json!({"state":"idle","driver":"claude","incarnation_id":"replacement-1","quiescent":true,"blocking":[]}));
+    seat.binding("replacement-1", "native-one");
+    // One pass records the ready replacement as running; the next completes the request.
+    seat.reconcile();
+    seat.reconcile();
+    let completion = seat
+        .store
+        .operation_claim(&format!("agent-restart-completed:{}", request.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(completion.kind, "runtime.action.succeeded");
+    assert_eq!(completion.body["fields"]["incarnation_id"], "replacement-1");
+    assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+    assert!(crash_loop_parks(&seat.store).is_empty());
+}
+
+// Per-PR contract for the boot canary `daemon-restart` scenario: the daemon died with the
+// seat's provider, so the reopened graph's latest observation is still the running predecessor
+// while the PTY service reports nothing. The new daemon boots one replacement on the session.
+#[test]
+fn a_predecessor_still_observed_running_is_replaced_once_after_reopen() {
+    let mut seat = Seat::new();
+    let latest = seat
+        .store
+        .latest_observation(SUBJECT, "runtime.observed")
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.body["fields"]["status"], "running");
+    assert_eq!(latest.body["fields"]["incarnation_id"], "original-1");
+    seat.reopen();
+    seat.runtime = Arc::new(Runtime::default());
+    for _ in 0..3 {
+        seat.reconcile();
+    }
+    let starts = seat.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 1, "exactly one replacement boots");
+    assert!(seat.runtime.stops.lock().unwrap().is_empty());
+    assert_eq!(starts[0].environment[crate::suspension::CONTINUE_ENV], "native-one");
+    let actual = seat.store.latest_actual_value(SUBJECT).unwrap().unwrap();
+    assert_eq!(
+        actual_field(&actual, "status").and_then(Value::as_str),
+        Some("running")
+    );
+    assert_eq!(
+        actual_field(&actual, "incarnation_id").and_then(Value::as_str),
+        Some("replacement-1")
+    );
+    assert!(crash_loop_parks(&seat.store).is_empty());
 }

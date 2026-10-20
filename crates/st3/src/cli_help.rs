@@ -37,6 +37,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "setup",
             "up",
             "service",
+            "migrate",
             "fleet",
             "replication",
             "apply",
@@ -47,6 +48,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "rules",
             "tiles",
             "repair",
+            "store",
             "uninstall",
         ],
     ),
@@ -54,6 +56,7 @@ const GROUPS: &[(&str, &[&str])] = &[
         "Plumbing",
         &[
             "schema",
+            "actor-contract",
             "subject",
             "documents",
             "evidence",
@@ -329,6 +332,11 @@ mod tests {
         );
         assert!(!default.contains("Plumbing:"));
         assert!(all.contains("Plumbing:"));
+        let migration_row = format!("  {:14} ", "migrate");
+        assert!(default.contains(&migration_row));
+        assert!(GROUPS.iter().any(|(title, names)| {
+            *title == "Running st on a machine or fleet" && names.contains(&"migrate")
+        }));
         let sender_guidance = st3::skill::message_sender_guidance();
         assert_eq!(default.matches(sender_guidance).count(), 1);
         assert_eq!(all.matches(sender_guidance).count(), 1);

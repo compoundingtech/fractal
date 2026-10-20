@@ -46,6 +46,57 @@ keeps the newest observation per origin/subject after the D+2 cut; a two-to-thre
 window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
 arithmetic bounds, not measured saturated-daemon costs.
 
+The receive path's latest-observation lookup uses a local transport-only side index once
+its background bootstrap completes. Store opening does no work for this index: after both
+APIs serve, the managed background writer queue atomically installs capture triggers and a
+high-water mark, then commits after 128 source rows or 20 ms of work, whichever comes
+first, checking the elapsed budget between rows and preserving the last processed cursor.
+The budget bounds work, not I/O latency: one cold read, capture setup or commit can still
+exceed 20 ms. A page always processes at least one row to make progress; 100 ms yields
+between pages remain unchanged.
+Each page releases its background loan; pending foreground writers retain priority.
+Sharing the writer also preserves deferred read-then-write snapshots: no independent
+bootstrap connection can commit across an application writer's pending upgrade.
+Inserts, identity/kind/time updates and deletes maintain the index in their claim
+transaction. Until the final page commits, readers use the original canonical query.
+WAL readers remain available during a copy page; other writers wait only for that page,
+not a whole-history `CREATE INDEX`. `st.db.migration.index.ready{index="transport_observation_seek"}`
+reports the switch; `st.db.migration.index.build.duration` records elapsed build seconds and
+`st.db.migration.index.write_hold.duration` records each page's begin-through-commit
+write-hold upper bound, including finalizers and SQLite acquisition wait but excluding
+background queue admission. The index is rebuildable local acceleration, not replicated authority.
+
+For offline production-size evidence, build the aggregate-only
+`smallclaims` example `transport_observation_bench` in release mode with the
+`transport-bench` feature. Run `--store COPY --n 1000 --mode before --bootstrap-yield-ms 0`,
+then the same command with `--mode after`, using the same checkpointed disposable input.
+Both modes measure a private temporary copy; the before mode removes the helper
+objects and uses main's identical SQL literal, per-call canonical expansion and
+uncached `query_row` preparation path, without readiness probes. The after mode
+executes every real bootstrap page. The example-only `--bootstrap-yield-ms` defaults
+to the daemon's 100 ms inter-page yield; use `0` for the accelerated measurement
+without changing transaction boundaries or sampling. Production pacing is unchanged.
+Project production-paced bootstrap time as `bootstrap_elapsed_ms / 1000 +
+bootstrap_pages * 0.1` seconds from a zero-yield run (a conservative extra yield
+for the final page). Removing deliberate sleeps targets an approximately one-hour
+operator run, but storage speed and unknown claim count can still exceed that target.
+The harness rejects open databases, SQLite sidecars and nearby daemon socket/lock
+artifacts; Linux write-lease support is required. Set `TMPDIR` to private local
+storage with capacity for the database plus its working WAL (reflinks are attempted).
+Only aggregate JSON is emitted, including every bootstrap transaction and the
+writer-transaction totals and wall time per synthetic receive-shaped claim insert.
+The JSON also reports `source_claim_rows` from one premeasurement count,
+`bootstrap_elapsed_ms`, `bootstrap_pages`, `bootstrap_yield_ms` and `index_bytes`.
+When `index_bytes_dbstat` is true, size sums `dbstat.pgsize` for both helper tables
+and their indexes. Otherwise it is the checkpointed `page_count * page_size` growth
+across bootstrap, excluding WAL; reused free pages can make this fallback undercount
+the objects' occupied space. Sizing/checkpoint work is outside transaction samples.
+The advance API exposes copied observation rows, not scanned source rows, so
+`bootstrap_rows_copied` must not be interpreted as the scanned claim count.
+The workload persists a synthetic message and its transport observation, not the
+full replication authentication or runtime projection path. No stored message
+bodies or identifiers are emitted; failures are deliberately detail-free.
+
 The daemon caches its sealed membership view at the store's fleet generation, rather than
 folding the full fleet history on every worker poll. The generation and fold share a read
 snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
@@ -374,11 +425,25 @@ See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
 
+Only transport failures advance to the next configured route: connection failures,
+broken request/response streams (including typed TLS fatal alerts and bad records),
+HTTP transport timeouts, and unavailable carriers (including Fabric's typed `fault`
+class or no installed carrier). The worker marks failures at the outbound HTTP
+send/raw-body boundary using typed Hyper/I/O/TLS causes, not by parsing error text;
+broad reqwest request/decode categories are insufficient. An I/O `InvalidData`
+error is transport evidence only when its retained cause identifies the TLS layer.
+An HTTP error response, backend/export/receive failure, metadata budget rejection,
+authentication or grant refusal, invalid protocol/JSON/compression, request-builder
+error, Fabric `usage` error, or ambiguous/untyped error keeps the current route and
+uses normal accumulating backoff. A backend failure with a nested network cause
+does not establish failure of the selected peer route. Overload polling exhaustion
+is an application overload, not a transport timeout.
+
 After a successful exchange on a fallback route, the worker keeps using it for a
 60-second cooldown, then starts the next exchange from the preferred route again.
 Successful fallback exchanges do not extend that cooldown. If the preferred route
-still fails, normal route failover resumes; Fabric grant refusals retain their
-separate, longer cooldown.
+still has a transport failure, normal route failover resumes. Application failures
+do not select fallback or discard a working HTTP connection pool.
 Per-peer worker status reports `route_is_preferred` and `preferred_retry_at_unix_ms`; `st replication status` shows the preferred/fallback selection and pending preferred-route retry deadline.
 
 The peer HTTP listener is not the privileged local Unix API: it exposes only fleet replication,
@@ -756,18 +821,18 @@ A Fabric refusal (error class `refusal`: `peer_not_permitted_for_service` when t
 refuse that direct route, `peer_not_in_allow_list` when it does not trust this machine) means
 that route will not work until the member changes its trust. `fabric dial` never connects, so
 the worker learns of it when the tunnel closes, and then asks `fabric probe --json` for the code.
-Only the `refusal` class puts the route to sleep; a `fault` is retried like any absent member.
+A typed `fault` can select another route; a grant/trust refusal cannot.
 It shows as `refused`, with the Fabric node and service, in `st replication status`,
 `st fleet status` and `st doctor`. It is neither an absent member nor a replication error;
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
 
-The worker retries that route every 24–36 minutes, at most three attempts per hour including
-the first refusal. Local writes, inbound exchanges, Fabric online events and local network
-changes do not shorten this delay. A changed route retries immediately, and a later successful outbound
-exchange clears the refusal. Other routes to the same member remain usable. Members that do
-not grant each other the service can still converge through a common hub; the hub must grant
-and exchange with both leaves. The worker never changes Fabric grants itself.
+The worker keeps a refused route selected and retries with normal peer backoff, as
+for other application errors; it does not bypass the refusal through a fallback
+route. A changed membership route retries immediately, and a later successful
+outbound exchange clears the refusal. Members that do not grant each other the
+service can still converge through a common hub; the hub must grant and exchange
+with both leaves. The worker never changes Fabric grants itself.
 
 For each peer, the status view also reports when the last exchange happened and how far apart the
 two envelope sets were at that exchange:
@@ -998,6 +1063,12 @@ st replication checkpoint status                  # the newest stable checkpoint
 st replication checkpoint plan --cut 2026-09-27    # what it would drop here, proved on a copy
 st replication checkpoint excuse node-c --reason "away for a week" --as person/operator
 ```
+
+`plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
+runs there at a time. While another proof runs, as one does right after the daemon starts, the
+daemon holds the plan for up to a minute, and `st` asks again for up to four minutes more and
+prints that it is waiting. A proof still running after that is refused with
+`checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
 
 An excusal fences nothing. What the excused writer wrote while away still replicates when it
 returns, and its next seal ends the excusal.

@@ -1,16 +1,19 @@
 import { createServer } from 'node:http'
-import { readFile, stat, mkdir, writeFile } from 'node:fs/promises'
+import { readFile, stat, mkdir, writeFile, appendFile } from 'node:fs/promises'
 import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, fullCases } from './kit-play-commit-set.mjs'
+import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
+import { shardStories } from './kit-play-shards.mjs'
 
 // Own an ephemeral localhost server: missing assets remain real, standard 404s.
 const [buildDirectory, outputDirectory] = process.argv.slice(2)
 if (!buildDirectory || !outputDirectory) throw new Error('Usage: node kit-play-gate.mjs <storybook-static> <receipt-directory>')
+const shardIndex = Number(process.env.KIT_PLAY_SHARD_INDEX ?? 0)
+const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
 // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
 // set, a narrowing of those (see kit-play-commit-set.mjs for what it leaves out);
 // KIT_PLAY_A11Y=off skips axe, which the separate full run keeps; KIT_PLAY_MAX_SECONDS
@@ -23,8 +26,13 @@ const option = (name, allowed, fallback) => {
 }
 const set = option('KIT_PLAY_SET', ['all', 'critical', 'commit'], 'all')
 const a11y = option('KIT_PLAY_A11Y', ['on', 'off'], 'on')
+// The strict case policy is the kit's own. Only the gate's fixture builds, whose tiny index has none of
+// its stories, supply theirs as a JSON list of [id, cases] pairs; an empty value is unset.
+const overrides = process.env.KIT_PLAY_CASE_OVERRIDES ? new Map(JSON.parse(process.env.KIT_PLAY_CASE_OVERRIDES)) : FULL_CASE_OVERRIDES
 const maxSeconds = process.env.KIT_PLAY_MAX_SECONDS ? Number(process.env.KIT_PLAY_MAX_SECONDS) : null
 if (maxSeconds !== null && !(Number.isFinite(maxSeconds) && maxSeconds > 0)) throw new Error('KIT_PLAY_MAX_SECONDS must be a positive number of seconds')
+// Only the full set is sharded; the critical and per-commit sets run whole on one runner.
+if (set !== 'all' && (shardCount !== 1 || shardIndex !== 0)) throw new Error(`KIT_PLAY_SET=${set} runs unsharded; only KIT_PLAY_SET=all is sharded`)
 const root = resolve(buildDirectory)
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' }
 const server = createServer(async (request, response) => {
@@ -60,7 +68,7 @@ const busyMilliseconds = () => cpus().reduce((sum, { times }) => sum + times.use
 const busyStarted = busyMilliseconds(), loadStarted = loadavg()
 const rows = []
 const workers = Math.min(6, availableParallelism())
-let ids = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError
+let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError
 await mkdir(outputDirectory, { recursive: true })
 const writeReceipt = async () => {
   const elapsedSeconds = (performance.now() - started) / 1000
@@ -75,9 +83,16 @@ const writeReceipt = async () => {
   const phaseMeanMilliseconds = Object.fromEntries([...phaseTotals].map(([name, { sum, count }]) => [name, sum / count]))
   const overBudget = maxSeconds !== null && elapsedSeconds > maxSeconds
   const receipt = {
-    pass: !fatalError && !overBudget && ids.length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
+    pass: !fatalError && !overBudget && (shardCount > 1 ? fullIds : ids).length > 0 && rows.length === expectedCases && rows.every(row => row.pass),
+    shardIndex, shardCount, fullIds,
+    runId: process.env.GITHUB_RUN_ID, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    headSha: process.env.GITHUB_SHA,
     set, a11y, maxSeconds, overBudget,
     stories: ids.length, expectedCases, cases: rows.length, workers, omitted,
+    caseOverrides: Object.fromEntries([...overrides].filter(([id]) => fullIds.includes(id))),
+    passed: rows.filter(row => row.pass).length, failed: rows.filter(row => !row.pass).length,
+    playMinutes: elapsedSeconds / 60,
+    storybookBuildSeconds: Number(process.env.KIT_STORYBOOK_BUILD_SECONDS ?? 0),
     isolation: 'reused-context-fresh-page-cleared-storage',
     cpu: { count: cpus().length, busyCoreMinutes: (busyMilliseconds() - busyStarted) / 60000, loadavgStart: loadStarted, loadavgEnd: loadavg() },
     elapsedSeconds, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
@@ -88,20 +103,30 @@ const writeReceipt = async () => {
   await writeFile(join(outputDirectory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n')
   const { rows: _rows, ...summary } = receipt
   console.log(`KIT_PLAY_SUMMARY ${JSON.stringify(summary)}`)
+  if (process.env.GITHUB_STEP_SUMMARY && process.env.KIT_PLAY_SHARD_COUNT) {
+    await appendFile(process.env.GITHUB_STEP_SUMMARY, `\n| Shard | Cases (completed/expected) | Passed | Failed | Play minutes | Result |\n| --- | --- | --- | --- | --- | --- |\n| kit ${shardIndex}/${shardCount} | ${receipt.cases}/${receipt.expectedCases} | ${receipt.passed} | ${receipt.failed} | ${receipt.playMinutes.toFixed(2)} | ${receipt.pass ? 'PASS' : 'FAIL'} |\n`)
+    await appendFile(process.env.GITHUB_STEP_SUMMARY, `\nkit ${shardIndex}/${shardCount} Storybook build: ${(receipt.storybookBuildSeconds / 60).toFixed(2)} runner-minutes (included in this shard; duplicate build cost is the sum of nonzero-shard builds).\n`)
+  }
   if (overBudget) console.error(`Kit plays (${set}) took ${elapsedSeconds.toFixed(1)} s, over the ${maxSeconds} s budget: fix the slow cases at their cause; the budget is not raised.`)
   return receipt
 }
 try {
   const response = await fetch(`${base}/index.json`)
   if (!response.ok) throw new Error(`Storybook index: HTTP ${response.status}`)
-  ids = storyIdsFromIndex(await response.json(), set === 'all' ? {} : { tag: 'critical' })
+  // Validate the complete index; fullIds is the selected set's inventory, which the union gate
+  // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
+  const index = await response.json()
+  fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
+  validateCaseOverrides(index.entries, overrides)
+  ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
   let cases
   if (set === 'commit') {
-    const selection = commitSetCases(ids)
+    const selection = commitSetCases(ids, { overrides })
     ;({ ids, cases } = selection)
     omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
   } else {
-    cases = fullCases(ids)
+    cases = fullCases(ids, overrides)
+    omitted = { stories: ids.filter(id => overrides.get(id)?.length === 0), cases: ids.length * 4 - cases.length }
   }
   expectedCases = cases.length
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')

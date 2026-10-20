@@ -45,39 +45,69 @@ fn read_credential(path: &Path) -> io::Result<String> {
 const TOOLS: &[(&str, &str, bool)] = &[
     ("st_alerts_list", "List owner alert identifiers and counts.", true),
     ("st_alert_get", "Read one exact owner alert, including its episode and named answer options.", true),
-    ("st_alert_answer", "Propose one typed person-ask answer. Requires separate owner approval in st; retry identical arguments after approval.", false),
+    ("st_alert_answer", "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     ("st_missions_list", "List mission metadata.", true),
-    ("st_agents_list", "List agent metadata.", true),
-    ("st_conversation_read", "Read one bounded conversation content range. Content may contain sensitive material.", true),
-    ("st_message_send", "Send one exact message to an owner-allowlisted agent, authorized by grant scope and the ChatGPT confirmation card.", false),
+    ("st_agents_list", "List agent metadata. For a known canonical agent ID, set agent_id to avoid paging through the fleet. This does not read priorities or conversation content.", true),
+    ("st_conversations_list", "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for st_conversation_timeline and a read object containing all st_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to st_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
+    ("st_conversation_detail", "Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. Use agent_id from st_conversations_list; pass each non-null timeline item's read object unchanged to st_conversation_read. Content may be sensitive.", true),
+    ("st_conversation_timeline", "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from st_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to st_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
+    ("st_conversation_search", "Search bounded plain conversation text snippets. Content may be sensitive.", true),
+    ("st_conversation_read", "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from st_conversations_list or st_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
+    ("st_message_send", "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
 ];
+
+// Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
+const ACTION_ID_PREFIX: &str = "action/";
+const IDEMPOTENCY_KEY_MIN_LENGTH: usize = 16;
+const IDEMPOTENCY_KEY_MAX_LENGTH: usize = 256;
+const IDEMPOTENCY_KEY_CHAR_RANGE: std::ops::RangeInclusive<u8> = b' '..=b'~';
+
+fn idempotency_key_pattern() -> String {
+    format!("^[{}-{}]{{{IDEMPOTENCY_KEY_MIN_LENGTH},{IDEMPOTENCY_KEY_MAX_LENGTH}}}$",
+        char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.start()), char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.end()))
+}
+
+fn action_id_schema() -> Value {
+    json!({"type":"string","pattern":format!("^{ACTION_ID_PREFIX}"),
+        "description":"Unique per intended action, e.g. action/<short-slug>; reuse the same value on a retry"})
+}
+fn idempotency_key_schema() -> Value {
+    json!({"type":"string","pattern":idempotency_key_pattern(),
+        "description":format!("{IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} printable ASCII chars only (stricter than daemon byte-length bounds); reuse the exact value on retries of the same action")})
+}
 fn fence_schema() -> Value {
     json!({"type":"object","description":"Use the snapshot returned by the preceding read. Copy subject revisions from that snapshot to fence writes against changed resources.",
         "properties":{
-            "snapshot_id":{"type":"string","description":"Opaque snapshot identifier returned by the paired gateway."},
+            "snapshot_id":{"type":"string","description":"The snapshot id from the immediately preceding read result."},
             "subject_revisions":{"type":"object","description":"Resource subject identifiers mapped to their opaque revision strings; omitted means no subject-specific revisions.","additionalProperties":{"type":"string"}}
         },"required":["snapshot_id"],"additionalProperties":false})
 }
 fn schema(name: &str) -> Value {
     let props = match name {
-        "st_alert_answer" => json!({"action_id":{"type":"string"},"idempotency_key":{"type":"string"},"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
-        "st_message_send" => json!({"action_id":{"type":"string"},"idempotency_key":{"type":"string"},"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
+        "st_alert_answer" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
+        "st_message_send" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
         "st_alert_get" => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
-        "st_conversation_read" => json!({"agent_id":{"type":"string"},"session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        "st_conversation_detail" => json!({"agent_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        "st_conversation_timeline" => json!({"agent_id":{"type":"string","description":"Copy value.items[].agent_id from st_conversations_list."},"session_id":{"type":"string","description":"Copy the same conversation item's session_id to pin the discovered session; omitted selects the current session."},"cursor":{"type":"string","description":"Copy value.page.next_cursor from the preceding timeline page; omit for the first page."},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        "st_conversation_search" => json!({"text":{"type":"string"},"agent_id":{"type":"string"},"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        "st_conversation_read" => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        "st_agents_list" => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
         "st_alert_answer" => vec!["action_id","idempotency_key","fence","alert_id","episode","option","summary"],
         "st_message_send" => vec!["action_id","idempotency_key","fence","to","title","content"],
         "st_alert_get" => vec!["alert_id"],
+        "st_conversation_detail" | "st_conversation_timeline" => vec!["agent_id"],
+        "st_conversation_search" => vec!["text"],
         "st_conversation_read" => vec!["agent_id","session_id","reference","revision","start","end"],
         _ => vec![],
     };
     json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
 }
 
-/// Validate the small JSON Schema vocabulary used by the published contracts.
-/// The same contracts drive discovery and validation, including nested fence maps.
+/// Validate the structural JSON Schema vocabulary used by the published contracts.
+/// Action string constraints are checked by validate_arguments with rule-specific errors.
 fn matches_schema(value: &Value, contract: &Value) -> bool {
     match contract["type"].as_str() {
         Some("string") => value.is_string(),
@@ -111,6 +141,25 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     if !matches_schema(args, &schema(name)) {
         return Err(json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}));
     }
+    if name == "st_agents_list"
+        && let Some(id) = args.get("agent_id").and_then(Value::as_str)
+        && (!(7..=256).contains(&id.len()) || !id.starts_with("agent/")
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._:-@+=~".contains(&byte))) {
+        return Err(json!({"code":"invalid-arguments","message":"agent_id must be an exact canonical agent identifier, not an alias."}));
+    }
+    if matches!(name, "st_alert_answer" | "st_message_send") {
+        let action_id = args["action_id"].as_str().expect("validated action ID string");
+        if !action_id.starts_with(ACTION_ID_PREFIX) {
+            return Err(json!({"code":"invalid-arguments",
+                "message":format!("action_id must match ^{ACTION_ID_PREFIX} (start with {ACTION_ID_PREFIX}).")}));
+        }
+        let key = args["idempotency_key"].as_str().expect("validated idempotency key string");
+        if !(IDEMPOTENCY_KEY_MIN_LENGTH..=IDEMPOTENCY_KEY_MAX_LENGTH).contains(&key.len())
+            || !key.bytes().all(|byte| IDEMPOTENCY_KEY_CHAR_RANGE.contains(&byte)) {
+            return Err(json!({"code":"invalid-arguments",
+                "message":format!("idempotency_key must match {}: {IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} printable ASCII chars only.", idempotency_key_pattern())}));
+        }
+    }
     Ok(())
 }
 fn tool_definitions() -> Vec<Tool> {
@@ -119,11 +168,86 @@ fn tool_definitions() -> Vec<Tool> {
         "annotations":{"readOnlyHint":read,"destructiveHint":*name=="st_alert_answer","idempotentHint":true,"openWorldHint":*name=="st_message_send"}
     })).expect("static tool definition")).collect()
 }
+/// Only closed tool names and locally selected codes enter telemetry. A dropped
+/// dispatch future emits cancellation too, without retaining any tool arguments.
+struct CallObservation {
+    tool: &'static str,
+    started: std::time::Instant,
+    outcome: &'static str,
+    code: &'static str,
+    request_id: Option<String>,
+    response_bytes: Option<u64>,
+}
+impl CallObservation {
+    fn new(name: &str) -> Self {
+        Self {
+            tool: TOOLS.iter().find(|(tool, _, _)| *tool == name)
+                .map_or("unknown", |(tool, _, _)| *tool),
+            started: std::time::Instant::now(),
+            outcome: "cancelled",
+            code: "cancelled",
+            request_id: None,
+            response_bytes: None,
+        }
+    }
+    fn response(&mut self, value: &Value) {
+        // Daemon IDs are request/<UUID>. Reject arbitrary text even in this
+        // metadata field: a compromised/malformed gateway must not inject logs.
+        if let Some(id) = value["request_id"].as_str()
+            && let Some(uuid) = id.strip_prefix("request/")
+            && uuid.len() == 36
+            && uuid.bytes().enumerate().all(|(i, byte)| {
+                if matches!(i, 8 | 13 | 18 | 23) { byte == b'-' }
+                else { byte.is_ascii_hexdigit() }
+            })
+        {
+            self.request_id = Some(id.to_owned());
+        }
+    }
+}
+impl Drop for CallObservation {
+    fn drop(&mut self) {
+        tracing::info!(target: "st_chatgpt::call",
+            tool = self.tool, outcome = self.outcome, code = self.code,
+            daemon_request_id = self.request_id.as_deref(),
+            duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            response_bytes = self.response_bytes,
+            "ChatGPT tool call finished");
+    }
+}
 async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value> {
+    let mut observation = CallObservation::new(name);
+    let result = dispatch(adapter, name, args, &mut observation).await;
+    observation.outcome = if result.is_ok() { "success" } else { "error" };
+    observation.code = match &result {
+        Ok(_) => "ok",
+        Err(value) => match value["code"].as_str() {
+            Some("unknown-tool") => "unknown-tool",
+            Some("invalid-arguments") => "invalid-arguments",
+            Some("unavailable") => "unavailable",
+            Some("invalid-daemon-response") => "invalid-daemon-response",
+            Some("incomplete") => "incomplete",
+            _ => "daemon-denied",
+        },
+    };
+    result
+}
+async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut CallObservation) -> Result<Value,Value> {
     validate_arguments(name, args)?;
     let object = args.as_object().expect("validated tool object");
     let write = matches!(name,"st_alert_answer"|"st_message_send");
-    let route = match name {"st_alerts_list"=>"attention-rich","st_alert_get"=>"attention-content","st_missions_list"=>"missions-rich","st_agents_list"=>"agents-rich","st_conversation_read"=>"conversation-content",_=>"propose"};
+    let route = match name {
+        "st_alerts_list" => "attention-rich",
+        "st_alert_get" => "attention-content",
+        "st_missions_list" => "missions-rich",
+        "st_agents_list" => "agents-rich",
+        "st_conversations_list" => "conversations",
+        "st_conversation_detail" => "conversation-detail",
+        "st_conversation_timeline" => "conversation-timeline",
+        "st_conversation_search" => "conversation-search",
+        "st_conversation_read" => "conversation-content",
+        _ => "propose",
+    };
     let url = format!("http://localhost/v1/client/assistant/{route}");
     let request = if write {
         let parameters = if name == "st_alert_answer" {
@@ -136,7 +260,12 @@ async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value
     };
     let response = request.bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired st daemon is unavailable."}))?;
     let status = response.status();
-    let value = response.json::<Value>().await.map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    // reqwest's JSON decoder already buffers the body. Reuse that exact buffer
+    // for byte accounting, without reserializing content or trusting Content-Length.
+    let bytes = response.bytes().await.map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    observation.response_bytes = Some(bytes.len() as u64);
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    observation.response(&value);
     if status.is_success() {Ok(value)} else {Err(json!({"code":if status.as_u16()==413 {"incomplete"} else {"daemon-denied"},"http_status":status.as_u16(),"daemon":value}))}
 }
 impl ServerHandler for Adapter {

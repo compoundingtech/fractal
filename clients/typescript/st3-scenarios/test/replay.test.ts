@@ -7,8 +7,10 @@ import {
 import { CollectionFrame as FrameSchema, Envelope, ErrorEnvelope, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import { applyConversation, isConversational, type Conversation } from '../../st3-views/sessionView.ts'
 
-import { ANCHOR_MS, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
+import { ANCHOR_MS, buildWorld, foldSlice, loadWorld, type Slice, type SyncEvent, type World } from '../src/index.ts'
 import { createReplay, manualClock, type Replay } from '../src/replay/index.ts'
+import { syntheticFirstRunOnboarding } from '../src/worlds/firstRunOnboarding.ts'
+import { genericVariants } from '../src/kit/variants.ts'
 
 const replays: Replay[] = []
 afterEach(() => { for (const replay of replays.splice(0)) replay.close() })
@@ -54,6 +56,62 @@ const setup = (world = base()) => {
 const errors = (frames: CollectionFrame[]) => frames.filter((frame) => frame.kind === 'error')
 const screens = (frames: CollectionFrame[]) => frames.filter((frame) => frame.kind === 'screen')
 const event = <T extends SyncEvent>(value: T): T => value
+
+describe('WebSocket wire aliases', () => {
+  it('preserves protocol-free replay socket opens', () => {
+    const h = setup()
+    const opened = { value: false }
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/collections/stream', [], {})
+    socket.onopen = () => { opened.value = true }
+    h.clock.advance(0)
+    expect(opened.value).toBe(true)
+  })
+
+  it.each(['st3', 'fractal'])('accepts %s collections and conversation protocols', (family) => {
+    for (const surface of ['collections', 'conversation']) {
+      const h = setup()
+      const opened = { value: false }
+      const socket = h.replay.socket(`ws://scenario.invalid/v1/client/${surface}/stream`, [`${family}.client.${surface}.v0`], {})
+      socket.onopen = () => { opened.value = true }
+      h.clock.advance(0)
+      expect(opened.value).toBe(true)
+    }
+  })
+
+  it.each(['st3', 'fractal'])('accepts %s terminal capabilities and equivalent aliases', async (family) => {
+    const h = setup(base().with({ terminal: 'running' }))
+    const attachment = await h.attach()
+    const url = `ws://scenario.invalid/v1/client/terminals/${encodeURIComponent(attachment.terminal_id)}/stream?incarnation=${encodeURIComponent(attachment.runtime_incarnation)}`
+    for (const capabilities of [[`${family}.cap.${attachment.stream_capability}`],
+      [`st3.cap.${attachment.stream_capability}`, `fractal.cap.${attachment.stream_capability}`]]) {
+      const frames: unknown[] = []
+      const socket = h.replay.socket(url, [`${family}.client.terminal.v0`, ...capabilities], {})
+      socket.onmessage = (event) => frames.push(JSON.parse(String(event.data)))
+      h.clock.advance(0)
+      expect(frames).toContainEqual(expect.objectContaining({ api_version: 'st3.client.v0',
+        value: expect.objectContaining({ kind: 'terminal-screen' }) }))
+    }
+  })
+
+  it.each([
+    ['fractal.client.collections.v1'],
+    ['smalltalk.client.collections.v0'],
+    ['st3.client.terminal.v0', 'fractal.client.collections.v0'],
+    ['fractal.client.terminal.v0', 'st3.cap.first', 'fractal.cap.second'],
+    ['fractal.client.terminal.v0', 'fractal.cap.'],
+    ['fractal.client.terminal.v0', 'unknown.cap.secret'],
+  ].map((protocols) => ({ protocols })))('refuses unknown or ambiguous protocols $protocols', ({ protocols }) => {
+    const h = setup()
+    const opened = { value: false }
+    const closed: number[] = []
+    const socket = h.replay.socket('ws://scenario.invalid/v1/client/terminals/test/stream', protocols, {})
+    socket.onopen = () => { opened.value = true }
+    socket.onclose = (event) => closed.push(event.code ?? 0)
+    h.clock.advance(0)
+    expect(opened.value).toBe(false)
+    expect(closed).toEqual([1002])
+  })
+})
 
 describe('collection windows', () => {
   it('dispatches changes and applyWindow equals the roster fold at each clock step', async () => {
@@ -134,6 +192,118 @@ describe('collection windows', () => {
 })
 
 describe('conversation dispatch and consumer fold', () => {
+  it.each(['recorded', 'synthetic'] as const)('follows a known running agent before its first thread (%s), by agent or current session', async (source) => {
+    const h = setup(source === 'recorded' ? loadWorld('first-run-onboarding', { now: ANCHOR_MS }) : buildWorld(syntheticFirstRunOnboarding, genericVariants, ANCHOR_MS))
+    const member = h.world.cast.agents[0]!
+    const stream = await h.connect()
+    h.clock.advance(3_000)
+    for (const [id, target] of Object.entries({ agent: member.id, session: member.session, short: member.session.replace(/^session\//, '') })) {
+      stream.subscribeConversation(id, target)
+    }
+    expect(h.frames).toEqual(['agent', 'session', 'short'].map((id) => ({
+      kind: 'conversation', id, collection: 'conversation', session_id: member.session,
+      replace: true, items: [], has_more: false,
+    })))
+    const page = await h.client.timelineList(member.session)
+    expect(page.value).toMatchObject({ kind: 'timeline-page', session_id: member.session, items: [], page: { has_more: false } })
+    h.clock.advance(1_999)
+    if (source === 'synthetic') expect(h.frames).toHaveLength(3)
+    h.clock.advance(1)
+    expect(errors(h.frames)).toEqual([])
+    const frames = h.frames.filter((frame): frame is Extract<CollectionFrame, { kind: 'conversation' }> => frame.kind === 'conversation' && frame.id === 'agent')
+    expect(frames.length).toBeGreaterThan(1)
+    expect(frames[1]).toMatchObject({ replace: source === 'recorded' })
+    if (source === 'synthetic') expect(frames[1]).not.toHaveProperty('has_more')
+    for (const id of ['session', 'short']) {
+      expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === id)).toHaveLength(frames.length)
+    }
+    let conversation: Conversation<TimelineEntry> | undefined
+    for (const frame of frames) conversation = applyConversation(conversation, {
+      replace: frame.replace, items: frame.items, hasMore: frame.has_more ?? false, sessionId: frame.session_id,
+    })
+    const expected = foldSlice(h.world.slices.conversation, 5_000).state.threads[0]!
+    expect(conversation?.entries).toEqual(expected.items.filter(isConversational).sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence))
+    h.clock.advance(11_000)
+    if (source === 'synthetic') expect(h.frames.filter((frame) => frame.kind === 'conversation' && frame.id === 'agent').length).toBeGreaterThan(frames.length)
+  })
+
+  it('terminates pending session followers on removal before creation', async () => {
+    const world = base()
+    const thread = world.slices.conversation.state.threads[0]!
+    const h = setup(world.with({ conversation: { ...world.slices.conversation, state: { threads: [] }, timeline: [
+      { _tag: 'thread-remove', at_ms: 1_000, store: 0, agent: thread.agent },
+      { _tag: 'thread-create', at_ms: 2_000, store: 0, thread },
+    ] } }))
+    const stream = await h.connect()
+    stream.subscribeConversation('session', thread.session_id)
+    stream.subscribeConversation('short', thread.session_id.replace(/^session\//, ''))
+    h.clock.advance(0)
+    expect(h.frames).toHaveLength(2)
+    h.clock.advance(1_000)
+    expect(errors(h.frames)).toMatchObject([
+      { id: 'session', code: 'not-found', retryable: false },
+      { id: 'short', code: 'not-found', retryable: false },
+    ])
+    h.clock.advance(1_000)
+    expect(h.frames).toHaveLength(4)
+  })
+
+  it('accepts only session selectors on the HTTP timeline route before and after creation', async () => {
+    const h = setup(buildWorld(syntheticFirstRunOnboarding, genericVariants, ANCHOR_MS))
+    const member = h.world.cast.agents[0]!
+    h.clock.advance(3_000)
+    for (const advance of [0, 2_000]) {
+      h.clock.advance(advance)
+      for (const session of [member.session, member.session.replace(/^session\//, '')]) {
+        expect((await h.client.timelineList(session)).value.session_id).toBe(member.session)
+      }
+      const response = await h.replay.fetch(`http://scenario.invalid/v1/client/sessions/${encodeURIComponent(member.id)}/timeline`)
+      expect(response.status).toBe(404)
+    }
+  })
+
+  it('preserves the first authoritative replacement page after an empty pending snapshot', async () => {
+    const world = base()
+    const thread = world.slices.conversation.state.threads[0]!
+    const items = thread.items.slice(0, 3)
+    expect(items).toHaveLength(3)
+    const h = setup(world.with({ conversation: { ...world.slices.conversation, state: { threads: [] }, timeline: [
+      { _tag: 'thread-create', at_ms: 1_000, store: 0, thread: { ...thread, items: [], page_size: 2, has_more: false } },
+      { _tag: 'replace', at_ms: 2_000, store: 0, agent: thread.agent, session_id: thread.session_id, items, has_more: true },
+    ] } }))
+    const stream = await h.connect()
+    stream.subscribeConversation('page', thread.agent)
+    h.clock.advance(0)
+    expect(h.frames[0]).toMatchObject({ kind: 'conversation', replace: true, items: [], has_more: false })
+    h.clock.advance(2_000)
+    const frame = h.frames.at(-1)
+    expect(frame).toMatchObject({ kind: 'conversation', replace: true, items: items.slice(-2), has_more: true })
+    if (frame?.kind !== 'conversation') throw new Error('Missing replacement page')
+    const conversation = applyConversation<TimelineEntry>(undefined, {
+      replace: frame.replace, items: frame.items, hasMore: frame.has_more ?? false, sessionId: frame.session_id,
+    })
+    expect(conversation.hasOlder).toBe(true)
+  })
+
+  it('does not resolve future or unknown agents and sessions from the cast or timeline', async () => {
+    const h = setup(loadWorld('first-run-onboarding', { now: ANCHOR_MS }))
+    const member = h.world.cast.agents[0]!
+    const stream = await h.connect()
+    stream.subscribeConversation('future', member.id)
+    h.clock.advance(0)
+    h.clock.advance(3_000)
+    stream.subscribeConversation('unknown-agent', 'agent/example-unknown')
+    stream.subscribeConversation('unknown-session', 'session/example-unknown')
+    expect(errors(h.frames)).toMatchObject([
+      { id: 'future', code: 'not-found', retryable: false },
+      { id: 'unknown-agent', code: 'not-found', retryable: false },
+      { id: 'unknown-session', code: 'not-found', retryable: false },
+    ])
+    await expect(h.client.timelineList('session/example-unknown')).rejects.toMatchObject({ response: { code: 'not-found' } })
+    h.clock.advance(13_000)
+    expect(h.frames).toHaveLength(3)
+  })
+
   it('dispatches entries as revision deltas without has_more and folds with sessionView', async () => {
     const h = setup()
     const thread = h.world.slices.conversation.state.threads.find((thread) => h.world.slices.conversation.timeline.some((event) => event._tag === 'entries' && event.agent === thread.agent))!

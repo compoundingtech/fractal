@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use crate::SeatsStoreCore as _;
 use std::time::Duration;
 use anyhow::{Context as _, Result};
 use axum::Router;
@@ -2590,6 +2591,7 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
                     history: false,
                     limit: Some(20),
                     cursor: None,
+                    messages_paging: false,
                 },
                 relay: Some(ClientReadRoute {
                     target: "host/lag-owner".into(),

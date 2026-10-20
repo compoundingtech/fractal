@@ -595,10 +595,10 @@ class EndToEnd(unittest.TestCase):
     def test_a_newer_failure_or_a_conflicting_record_never_skips(self):
         base = self.commit_base()
         commit, tree = self.head()
-        self.note(commit, tree, seconds=0)
-        self.note(commit, tree, exit_code=1, seconds=1)
+        self.note(commit, tree, seconds=-600)
+        self.note(commit, tree, exit_code=1, seconds=-300)
         self.assertEqual(self.assertRuns(base)['outcome'], 'rejected')
-        self.note(commit, tree, seconds=2)  # a later pass supersedes the failure
+        self.note(commit, tree, seconds=0)  # a clearly later pass (more than the 2 minute margin) supersedes the failure
         self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
         self.note(commit, tree, exit_code=1, seconds=2)  # same instant: failure wins
         self.assertRuns(base)
@@ -1002,11 +1002,13 @@ class EndToEnd(unittest.TestCase):
         self.wrapper_note(commit, tree, lock, seconds=3 * 3600)
         self.assertEqual(self.assertRuns(base)['reason'], 'future_dated')
         base, commit, tree, lock = self.wrapper_scenario()
-        self.wrapper_note(commit, tree, lock, seconds=0)
+        self.wrapper_note(commit, tree, lock, seconds=-600)
         self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
-        self.wrapper_note(commit, tree, lock, seconds=1, exit_code=1)
+        self.wrapper_note(commit, tree, lock, seconds=-300, exit_code=1)
         self.assertEqual(self.assertRuns(base)['reason'], 'check_failed')
-        self.wrapper_note(commit, tree, lock, seconds=2)  # a later pass supersedes
+        self.wrapper_note(commit, tree, lock, seconds=-250)  # dated within the 2 minute margin of the failure: the failure stands
+        self.assertEqual(self.assertRuns(base)['reason'], 'check_failed')
+        self.wrapper_note(commit, tree, lock, seconds=0)  # clearly later: it supersedes
         self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
 
     def test_forks_and_manual_runs_never_skip_on_a_wrapper_note(self):
@@ -1550,6 +1552,11 @@ class WorkflowStructure(unittest.TestCase):
                 signed += 1
                 env = re.search(r'^          GATE_SKIP: (.*)$', chunk, re.M)
                 self.assertIsNotNone(env, f'{name} signs without being told when its gate skipped')
+                if name == 'fractal-web-execution':
+                    # A lane with no gate: its paths decide whether it runs, nothing ever skips it on a prior note.
+                    self.assertIn(env.group(1).strip(), ('false', '"false"', "'false'"), name)
+                    self.assertNotIn('needs.', env.group(1), name)
+                    continue
                 referenced = set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', env.group(1)))
                 self.assertTrue(referenced, name)
                 # Every gate it reads must be one of its needs, and the check's own gate must be among them.
@@ -1598,7 +1605,7 @@ class WorkflowStructure(unittest.TestCase):
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
         names = [line.strip()[2:] for line in needs.splitlines()]
-        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith('evidence-gate-'))
+        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith(('evidence-gate-', 'fractal-web-')))
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], derived)
         self.assertEqual(GATE_ARGV, derived)

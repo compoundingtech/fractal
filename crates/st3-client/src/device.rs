@@ -426,9 +426,10 @@ impl AssistantDevice {
         // The selected gateway returns the member-sealed issuer. Check its concrete person
         // shape, not a deployment identity; assistant keys never require person grant proofs.
         let issuer = grant.issuer.strip_prefix("person/");
+        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): accept transport aliases; sunset 60 days after first shipping release.
         ensure!(
             self.session.kind == "assistant-paired-session"
-                && self.session.api_version == crate::API_VERSION
+                && matches!(self.session.api_version.as_str(), "st3.client.v0" | "fractal.client.v0")
                 && self.session.principal == AssistantPrincipal::Chatgpt
                 && self.session.credential.len() >= 32
                 && self.session.device_id == grant.device_id
@@ -569,8 +570,8 @@ pub fn profile_path() -> Result<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .context("Set XDG_CONFIG_HOME or HOME for the device profile")?;
     ensure!(base.is_absolute(), "The config directory must be absolute");
-    // Preserve the existing stui location: both entrypoints now use this profile.
-    Ok(base.join("st3/stui-devices.json"))
+    Ok(crate::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+        .join("stui-devices.json"))
 }
 
 pub fn assistant_profile_path() -> Result<PathBuf> {
@@ -745,6 +746,20 @@ pub fn validate_fingerprint(fingerprint: &str) -> Result<()> {
     Ok(())
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+// Sunset: 60 days after the first release shipping this bridge. Pairing still sends st3.
+fn supports_device_key_proofs(capabilities: &serde_json::Value) -> bool {
+    matches!(capabilities["api_version"].as_str(), Some("st3.client.v0" | "fractal.client.v0"))
+        && capabilities["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| capabilities.iter().any(|capability| {
+                capability["id"] == "device-key-proofs"
+                    && capability["version"] == 1
+                    && capability["state"] == "granted"
+            }))
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
+
 pub async fn complete_with_options(
     path: &Path,
     endpoint: &str,
@@ -780,14 +795,7 @@ pub async fn complete_with_options(
     let capabilities: serde_json::Value = client.get("/v1/client/capabilities").await
         .context("Member cannot advertise pairing proof support; upgrade the member before retrying. The pairing code was not submitted")?;
     ensure!(
-        capabilities["api_version"] == crate::API_VERSION
-            && capabilities["capabilities"]
-                .as_array()
-                .is_some_and(|capabilities| capabilities.iter().any(|capability| {
-                    capability["id"] == "device-key-proofs"
-                        && capability["version"] == 1
-                        && capability["state"] == "granted"
-                })),
+        supports_device_key_proofs(&capabilities),
         "Member does not support verifiable device grants; upgrade it before retrying. The pairing code was not submitted"
     );
     let session = client.pairing_complete_person(pairing_id,
@@ -967,6 +975,23 @@ pub fn read_pairing_code() -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn pairing_proof_advertisement_accepts_both_versions_without_weakening_proof_checks() {
+        for version in ["st3.client.v0", "fractal.client.v0", "fractal.client.v1"] {
+            let mut advertisement = serde_json::json!({
+                "api_version": version,
+                "capabilities": [{"id": "device-key-proofs", "version": 1, "state": "granted"}]
+            });
+            assert_eq!(supports_device_key_proofs(&advertisement), version != "fractal.client.v1");
+            advertisement["capabilities"][0]["state"] = "denied".into();
+            assert!(!supports_device_key_proofs(&advertisement));
+            advertisement["capabilities"][0]["state"] = "granted".into();
+            advertisement["capabilities"][0]["version"] = 2.into();
+            assert!(!supports_device_key_proofs(&advertisement));
+        }
+        assert!(!supports_device_key_proofs(&serde_json::json!({})));
+    }
+
 
     #[test]
     fn assistant_session_issuer_is_a_concrete_person_not_a_fixed_deployment_owner() {
@@ -985,6 +1010,14 @@ mod tests {
             "{:x}",
             Sha256::digest(device.signing_key.public_key().unwrap().as_bytes())
         );
+        // The renamed wire version must not bypass any of the grant checks below.
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            device.session.api_version = version.into();
+            device.validate().unwrap();
+        }
+        device.session.api_version = "fractal.client.v1".into();
+        assert!(device.validate().is_err());
+        device.session.api_version = "fractal.client.v0".into();
         for issuer in ["person/operator", "person/other"] {
             device.session.grant.issuer = issuer.into();
             device.validate().unwrap();

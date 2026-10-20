@@ -419,6 +419,30 @@ the principal it claims, it is a full-tier single-note commit about this commit 
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
 
+A step-based job may record extra named inputs next to the fixed ones: `STEP_INPUTS` is a JSON object of short
+lower-case names with nonempty string values (a shard number, a test set). It can add a name but never replace a fixed
+one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
+(`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
+
+The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue. Each
+`fractal-web-execution` shard signs its own result (check `fractal-web`, artifact `evidence-note-fractal-web-shard-N`) and
+records `kit_shard`, `kit_shard_count`, `kit_play_set` and `app_test_set`, so a pull request's per-commit set can never be
+mistaken for the merge queue's full one, and a later policy can require every shard. A run that did not execute the lane
+makes no note and the shadow report reads `n/a`. The lane has no skip policy yet: its notes are evidence only.
+
+### Shadow verification
+
+After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,
+skipped while the base has none). For every lane it published or should have published it fetches only that
+lane's record from the remote at depth 1 into an empty scratch repository and runs the standalone verifier
+there with the base commit's key list. That is what a later gate that fetched the refs would see, not this job's
+own local refs. A lane prints `ok`, or `would-reject` with the verifier's reason (`no_note` for a lane this run did
+not sign, `not_on_remote`, `check_failed`, `untrusted_level`, `stale_tree` and the rest of the verifier's reasons). The job summary carries the table and a
+total (`lanes`, `ok`, `would_reject`, `refs_added`, seconds); each line is also in the log as
+`evidence-shadow v1 ...`. A lane listed in `--optional` (one that runs only when its paths changed, such as
+`fractal-web`) reads `n/a not_run` when this run made no record for it and is counted apart. It gates nothing and never
+changes the job's result.
+
 ### What reaches the signing environment
 
 Only the merge queue and `main` reach the `evidence-signing` environment: every signing job's
@@ -526,7 +550,8 @@ Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is ne
 and is reported as `degraded`, not as a signature fault, because it is what the observer writes
 when its signer is unreachable. The latest
 trusted record for the tree and check decides, so a newer failure supersedes an older
-pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
+pass; `observed_at` is the signer's own clock, so a pass replaces a failure only when it is dated MORE than two minutes after it (the same margin as
+`future_dated`): equal, inverted or within-the-margin dates leave the failure standing, whatever order the notes were created in. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
 signature from a key not on the list, or a principal that differs from the record's
 signer), `untrusted_tier`, `untrusted_level`, `wrong_runner`, `too_old`, `future_dated`, `degraded`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and

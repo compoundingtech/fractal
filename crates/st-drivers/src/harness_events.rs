@@ -28,7 +28,12 @@ pub const WAKE_PIPE: &str = ".st-harness-events-wake";
 pub const DATABASE: &str = "st-harness-events.sqlite";
 const MAX_PENDING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_READ_CONNECTIONS: usize = 64;
+#[cfg(not(test))]
 const MAX_TOTAL_READ_CONNECTIONS: usize = 128;
+// Unit tests get a smaller process-wide cap, so the bound can be proven with tens of seat spools instead of
+// hundreds: every spool's `enable` commits and syncs a file and its directory.
+#[cfg(test)]
+const MAX_TOTAL_READ_CONNECTIONS: usize = 16;
 static LIVE_READ_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 struct ReadConnectionSlot;
@@ -751,24 +756,27 @@ mod tests {
 
     #[test]
     fn cached_connections_are_bounded_across_threads() {
-        const THREADS: usize = 8;
-        const SEATS: usize = 200;
+        // More seats than the test cap (16) on every run; the daily run (ST_TEST_SCALE=full, docs/ci.md) keeps
+        // the original 200 spools on 8 threads.
+        let full = std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full");
+        let (threads, seats): (usize, usize) = if full { (8, 200) } else { (4, 40) };
+        assert!(seats > MAX_TOTAL_READ_CONNECTIONS);
         let _guard = CACHE_TEST_LOCK.lock();
         let root = tempfile::tempdir().unwrap();
-        let paths: Vec<_> = (0..SEATS)
+        let paths: Vec<_> = (0..seats)
             .map(|index| {
                 let path = root.path().join(index.to_string());
                 enable(&path, "runtime").unwrap();
                 path
             })
             .collect();
-        let ready = std::sync::Barrier::new(THREADS + 1);
-        let release = std::sync::Barrier::new(THREADS + 1);
+        let ready = std::sync::Barrier::new(threads + 1);
+        let release = std::sync::Barrier::new(threads + 1);
         let cached_entries = AtomicUsize::new(0);
         #[cfg(target_os = "linux")]
         let baseline_fds = std::fs::read_dir("/proc/self/fd").unwrap().count();
         std::thread::scope(|scope| {
-            for paths in paths.chunks(SEATS / THREADS) {
+            for paths in paths.chunks(seats / threads) {
                 let ready = &ready;
                 let release = &release;
                 let cached_entries = &cached_entries;
@@ -795,7 +803,7 @@ mod tests {
             assert!(entries <= retained);
             #[cfg(target_os = "linux")]
             eprintln!(
-                "{SEATS} spools, {THREADS} threads: {retained} cached connections; \
+                "{seats} spools, {threads} threads: {retained} cached connections; \
                  fd baseline={baseline_fds}, retained={}",
                 std::fs::read_dir("/proc/self/fd").unwrap().count()
             );

@@ -21,6 +21,15 @@ mod install;
 mod lookup;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub use lookup::ConflictingServices;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod stage;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use stage::stage_fractal;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
+    unsupported()
+}
 
 
 /// The names the service manager knows this install by. An instance has its own, so installing,
@@ -1064,26 +1073,38 @@ fn replication_systemd_user_unit_path() -> Result<PathBuf> {
 }
 
 fn wait_for_service_sockets(config: &Config) -> Result<()> {
-    wait_for_socket(&config.socket)?;
-    wait_for_socket(&config.client_gateway_socket)
+    wait_for_socket(&config.socket, &config.socket)?;
+    wait_for_socket(&config.client_gateway_socket, &config.socket)
 }
 
-fn wait_for_socket(socket: &Path) -> Result<()> {
-    wait_for_socket_for(socket, std::time::Duration::from_secs(10))
+fn wait_for_socket(socket: &Path, api_socket: &Path) -> Result<()> {
+    wait_for_socket_for(socket, api_socket, std::time::Duration::from_secs(10))
 }
 
-fn wait_for_socket_for(socket: &Path, timeout: std::time::Duration) -> Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
+/// Wait until `socket` accepts. A daemon that is starting holds its startup record (beside
+/// `api_socket`) while it opens and replays its store, which can take far longer than any fixed
+/// bound on a large store or a busy host: wait for it. Fail once no live startup has been seen
+/// for `unseen`, whether the service never started one or it ended without accepting.
+fn wait_for_socket_for(
+    socket: &Path,
+    api_socket: &Path,
+    unseen: std::time::Duration,
+) -> Result<()> {
+    let mut deadline = std::time::Instant::now() + unseen;
+    loop {
         if service_socket_accepts(socket) {
             return Ok(());
         }
+        if crate::startup::read(api_socket).is_some() {
+            deadline = std::time::Instant::now() + unseen;
+        } else if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "the st service did not accept connections at {}",
+                socket.display()
+            );
+        }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    anyhow::bail!(
-        "the st service did not accept connections at {}",
-        socket.display()
-    )
 }
 
 #[cfg(unix)]
@@ -1187,8 +1208,13 @@ WantedBy=default.target\n",
 }
 
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
+    render_launchd_plist_for_label(spec, service_label())
+}
+
+/// Render a daemon definition for an explicit label without changing runtime service names.
+pub fn render_launchd_plist_for_label(spec: &ServiceSpec, label: &str) -> String {
     render_launchd_program_plist(
-        service_label(),
+        label,
         &spec.program_arguments(),
         "st3.stdout.log",
         "st3.stderr.log",
@@ -1198,8 +1224,13 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
 }
 
 pub fn render_launchd_replication_plist(spec: &ServiceSpec) -> String {
+    render_launchd_replication_plist_for_label(spec, replication_service_label())
+}
+
+/// Render a replication definition for an explicit label.
+pub fn render_launchd_replication_plist_for_label(spec: &ServiceSpec, label: &str) -> String {
     render_launchd_program_plist(
-        replication_service_label(),
+        label,
         &spec.replication_program_arguments(),
         "st3-replication.stdout.log",
         "st3-replication.stderr.log",
@@ -1221,7 +1252,7 @@ fn render_launchd_program_plist(
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
     let mut environment = crate::instance::service_environment();
-    if label == service_label()
+    if process_type == "Interactive"
         && let Some(kib) = spec.read_cache_kib
     {
         environment.push(("SMALLCLAIMS_READ_CACHE_KIB".to_owned(), kib.to_string()));
@@ -1541,13 +1572,40 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("st3.sock");
         fs::write(&socket, b"stale").unwrap();
-        let error = wait_for_socket_for(&socket, std::time::Duration::from_millis(40))
+        let error = wait_for_socket_for(&socket, &socket, std::time::Duration::from_millis(40))
             .expect_err("a stale path is not a ready service");
         assert!(error.to_string().contains("did not accept connections"));
 
         fs::remove_file(&socket).unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        wait_for_socket_for(&socket, std::time::Duration::from_millis(40)).unwrap();
+        wait_for_socket_for(&socket, &socket, std::time::Duration::from_millis(40)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_readiness_waits_for_a_live_startup_and_only_then_gives_up() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        // This process holds the startup record, as a daemon opening its store does.
+        let startup = crate::startup::Startup::begin(&socket).unwrap();
+        assert!(crate::startup::read(&socket).is_some(), "the startup record is live");
+        let unseen = std::time::Duration::from_millis(40);
+        let listening = socket.clone();
+        let listener = std::thread::spawn(move || {
+            // Long past `unseen`: the wait must still be following the live startup.
+            std::thread::sleep(unseen * 5);
+            std::os::unix::net::UnixListener::bind(&listening).unwrap()
+        });
+        wait_for_socket_for(&socket, &socket, unseen).unwrap();
+        let listener = listener.join().unwrap();
+        drop(listener);
+        fs::remove_file(&socket).unwrap();
+        // Once the startup has ended without a listener, the wait gives up after `unseen`.
+        drop(startup);
+        assert!(crate::startup::read(&socket).is_none());
+        let error = wait_for_socket_for(&socket, &socket, unseen)
+            .expect_err("no live startup and no listener is not a ready service");
+        assert!(error.to_string().contains("did not accept connections"));
     }
 
     #[test]

@@ -1,6 +1,11 @@
 //! Product actions over the real client/CLI Unix transport, with disk-backed daemon restarts.
 #![cfg(unix)]
 
+use st3::DeliveryStore;
+use st3::MissionsStore;
+use st3::SeatsStore;
+use st3::EvidenceStore;
+use st3::OwnedSetsStore;
 use st3::GitChangesStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +25,72 @@ const PERSON: &str = "person/avery";
 /// A mailbox owner: a person has no inbox, so mail to read and clean up goes to an agent.
 const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let startup = Store::open(&path, NODE).unwrap();
+    let definitions = |connection: &rusqlite::Connection| {
+        st3::owner_indexes::INDEX_NAMES.iter().map(|name| {
+            connection.query_row(
+                "SELECT sql FROM sqlite_master WHERE name=?1", [name],
+                |row| row.get::<_, String>(0),
+            ).unwrap()
+        }).collect::<Vec<_>>()
+    };
+    let expected = definitions(&startup.connection.write());
+    drop(startup);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    for name in st3::owner_indexes::INDEX_NAMES {
+        connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
+    }
+    let run = || async {
+        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+        command.args(["store", "prepare-indexes", "--endpoint", "unix:/nonexistent/offline.sock",
+            "--daemon-wait", "0", "--store"]).arg(&path);
+        command.output().await
+    };
+    // The CLI is a separate process: both lifetime and SQLite writer locks must fence it.
+    let state_lock = st3::node_identity::lock(root.path()).unwrap();
+    assert!(!run().await.unwrap().status.success());
+    drop(state_lock);
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let refused = run().await.unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("store writer lock is held"));
+    connection.execute_batch("ROLLBACK").unwrap();
+    let prepared = run().await.unwrap();
+    assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
+    let output = String::from_utf8(prepared.stdout).unwrap();
+    for name in st3::owner_indexes::INDEX_NAMES {
+        assert!(output.contains(&format!("before: {name}: missing")));
+        assert!(output.contains(&format!("after: {name}: exists")));
+    }
+    assert_eq!(expected, definitions(&connection));
+    // Closing a raw file descriptor while SQLite owns POSIX locks releases those locks.
+    // Close the SQLite connection before comparing database bytes across subprocess runs.
+    drop(connection);
+    let before = std::fs::read(&path).unwrap();
+    assert!(run().await.unwrap().status.success());
+    assert_eq!(before, std::fs::read(&path).unwrap());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch(
+        "DROP INDEX claims_actual_accepted_index;
+         CREATE INDEX claims_actual_accepted_index ON claims(subject)"
+    ).unwrap();
+    assert_ne!(expected, definitions(&connection));
+    let rejected = run().await.unwrap();
+    assert!(!rejected.status.success(), "stdout={} stderr={} schema={:?}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr), definitions(&connection));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("schema gate failed"));
+    let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+    assert!(!command.args(["store", "prepare-indexes"]).output().await.unwrap().status.success());
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart() {
@@ -693,9 +764,7 @@ impl Daemon {
                 "--json",
                 "--daemon-wait",
                 "0",
-            ])
-            .env_remove("ST_AGENT")
-            .env_remove("ST3_INCARNATION")
+            ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
             .env_remove("ST_MISSION_RUN")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("GH_TOKEN")
@@ -5285,8 +5354,12 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
     let store = daemon.state.store.clone();
     let notify = daemon.state.notify.clone();
     let events = daemon.state.event_notify.clone();
+    // The owner stands in for the seat's runtime. It waits on a deadline, not a count of 10 ms sleeps, because
+    // under CI load those sleeps and the CLI's own start-up both stretch; this test covers declarations
+    // surviving restarts, not how fast a seat becomes ready.
     let owner = tokio::spawn(async move {
-        for _ in 0..300 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline {
             if store.selected_desired_token(SEAT).unwrap().is_some() {
                 for (kind, fields) in [
                     (
@@ -5317,29 +5390,29 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the CLI did not declare its new seat");
+        panic!("the CLI did not declare its new seat within 20 s");
     });
-    cli_value(
-        daemon
-            .cli(
+    let created = daemon
+        .cli(
+            PERSON,
+            &[
+                "agents",
+                "new",
+                "example/cli-seat",
+                "--workspace",
+                daemon.root.path().to_str().unwrap(),
+                "--host",
+                NODE,
+                "--as",
                 PERSON,
-                &[
-                    "agents",
-                    "new",
-                    "example/cli-seat",
-                    "--workspace",
-                    daemon.root.path().to_str().unwrap(),
-                    "--host",
-                    NODE,
-                    "--as",
-                    PERSON,
-                    "--timeout",
-                    "3s",
-                ],
-            )
-            .await,
-    );
+                "--timeout",
+                "15s",
+            ],
+        )
+        .await;
+    // Join the owner first, so a declaration that never appeared fails as that, not as a readiness timeout.
     owner.await.unwrap();
+    cli_value(created);
     for (command, expected) in [("stop", "stop"), ("start", "agent")] {
         daemon.restart().await;
         cli_value(

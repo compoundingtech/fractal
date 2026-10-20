@@ -134,6 +134,29 @@ fn run_with_required_resume(
     .with_context(|| format!("running Claude driver '{runtime_id}'"))
 }
 
+/// Set on every st3-managed interactive Claude: a seat has no person to accept an in-place
+/// update, so the provider must not update itself under a running seat.
+pub(crate) const CONTROLLED_DISABLE_AUTOUPDATER: (&str, &str) = ("DISABLE_AUTOUPDATER", "1");
+
+/// The provider argv an st3-managed Claude launches with. The install access mode's permission
+/// defaults go first unless the declaration authored its own permission flags before any `--`; a
+/// hand-run driver (`mode` is `None`) keeps its complete authored argv.
+pub(crate) fn managed_claude_argv(
+    mode: Option<crate::access::AccessMode>,
+    workspace: &Path,
+    mut claude_argv: Vec<String>,
+) -> Vec<String> {
+    if let Some(mode) = mode {
+        let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
+        let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
+            matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
+                || arg.starts_with("--permission-mode=")
+        });
+        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions, workspace));
+    }
+    claude_argv
+}
+
 /// Run one interactive Claude provider for an st3-owned agent directory.
 ///
 /// The host supplies resolved observation and session paths. This path is deliberately interactive: it
@@ -148,23 +171,16 @@ pub fn run_controlled_paths(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
     );
-    let mut claude_argv = claude_argv;
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
-    if let Some(mode) = crate::access::AccessMode::from_environment()? {
-        let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
-        let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
-            matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
-                || arg.starts_with("--permission-mode=")
-        });
-        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions, &workspace));
-    }
+    let claude_argv =
+        managed_claude_argv(crate::access::AccessMode::from_environment()?, &workspace, claude_argv);
     let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
     let observer = SessionObserver::new(&paths.agent_dir, &identity, "claude", &runtime_id)?;
     let mut env = vec![
-        ("DISABLE_AUTOUPDATER".into(), "1".into()),
+        (CONTROLLED_DISABLE_AUTOUPDATER.0.into(), CONTROLLED_DISABLE_AUTOUPDATER.1.into()),
         (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),
         (SESSION_ENV.to_string(), observer.session().to_string()),
         (SESSION_SEQ_ENV.to_string(), observer.seq().to_string()),

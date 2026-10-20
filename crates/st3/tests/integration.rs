@@ -8,8 +8,10 @@
 mod ci_test_paths;
 
 mod action_coverage;
+mod actor_contract;
 mod adhoc_work;
 mod agents_restart;
+mod assistant_native;
 mod authored_resume;
 mod backup;
 mod binary_payloads;

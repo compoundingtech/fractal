@@ -31,11 +31,21 @@
 //!
 //! Arrangement probes keep one live resource's register heads fixed while its edit history grows
 //! with the generated scale, so both the owner-selected list and detail must be history-independent.
+//! Per-subject conversation-owner probes grow sparse identity history at fixed answer size,
+//! including other-origin actual-state claims without a rival runtime. SQL VM row work and
+//! statement counts must stay bounded; this path has no `KNOWN_GROWTH` exemption.
 //!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+use st3::ConversationReadsStore;
+use st3::CustomStore;
+use st3::AdhocWorkStore;
+use st3::CoordinationStore;
+use st3::MissionsStore;
+use st3::SeatsStore;
+use st3::SeatsStoreCore;
 use st3::{GitChangesStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
@@ -81,8 +91,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
-    // Runtimes read every runtime observation (3.8x for the list, 9.0x for one runtime).
-    ("GET /v1/client/runtimes", 6.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
@@ -222,6 +230,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/conversation-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
+    ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
+    ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
@@ -1698,10 +1710,16 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
     }
 }
 
-/// Every route `api.rs` declares is measured or listed in `NOT_MEASURED`, and nothing is both.
+/// Every route `api.rs` and the route families above it declare is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let mut declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
+    declared.extend(family_routes(include_str!(
+        "../../st3-api-mailbox/src/api/mailbox.rs"
+    )));
+    declared.extend(family_routes(include_str!(
+        "../../st3-api-client-v0/src/api/client_v0.rs"
+    )));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
@@ -1794,12 +1812,149 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
 }
 
+#[test]
+fn conversation_owner_sql_work_is_bounded_independently_of_subject_history() {
+    conversation_owner_history_cost(false);
+}
+
+#[test]
+fn conversation_owner_sql_work_is_bounded_with_other_origin_actual_history() {
+    conversation_owner_history_cost(true);
+}
+
+/// VM steps count indexed row visits too: a constant SQL call count alone cannot detect
+/// repeatedly reading one subject's history inside a single statement.
+fn conversation_owner_history_cost(other_origin: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("tester.sqlite3"), "tester").unwrap();
+    let reviewer = Store::open(&root.path().join("reviewer.sqlite3"), "reviewer").unwrap();
+    let append = |store: &Store, kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: "agent/ada".into(),
+            kind: kind.into(),
+            actor: Some("agent/ada".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
+    };
+    let historical_resource = |store: &Store, fields: Value| {
+        // Current admission correctly rejects resource observations on agent subjects.
+        // Reserve canonical batch/claim metadata with an admitted scaffold; install its
+        // historical mixed-kind body only after replication, outside all measurements.
+        let scaffold = append(store, "runtime.observed", json!({"status": "running"}));
+        (scaffold.id, json!({"fields": fields}).to_string())
+    };
+    let mut historical_resources = Vec::new();
+    append(&store, "runtime.observed", json!({
+        "status": "running", "incarnation_id": "ada", "runtime_id": "tester",
+    }));
+    let mut measurements = Vec::new();
+    let mut earlier = None;
+    for history in 1..=1000 {
+        // Keep identity fields on the first observation only. Seeking an inherited field
+        // must not scan every intervening heartbeat, even when the current fields omit it.
+        append(&store, "runtime.observed", json!({"status": "running"}));
+        append(&store, "harness.observed", json!({
+            "incarnation_id": "ada", "state": "idle",
+        }));
+        // Ordinary resource observations participate in the actual-state field fold;
+        // their presence alone must not force a historical owner reduction.
+        historical_resources.push(historical_resource(&store, json!({
+            "kind": "custom.tester", "facts": {"opened_by": "person/alex"},
+        })));
+        if other_origin {
+            append(&reviewer, "runtime.reconcile-decision", json!({
+                "decision": "hold", "reason": "historical observation",
+            }));
+            // Opener attribution receipts are not runtime identity, even if their
+            // recorded fields look like a different managed session.
+            historical_resources.push(historical_resource(&reviewer, json!({
+                "kind": "vcs.issue", "attribution_only": true,
+                "facts": {"opened_by": "person/alex", "number": history},
+                "incarnation_id": "reviewer", "runtime_id": "reviewer",
+            })));
+        }
+        if !matches!(history, 100 | 1000) {
+            continue;
+        }
+        if other_origin {
+            sync(&reviewer, "reviewer", &store);
+        }
+        install_historical_owner_resources(root.path(), &mut historical_resources);
+        let frontier = store.index().unwrap();
+        // The full status fold is the semantic oracle, outside the measured owner lookup.
+        let status = store.status_at(Some("agent/ada"), None, Some(frontier)).unwrap();
+        let actual = status.subjects[0].actual.as_ref().unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..4 {
+            let scope = work::SqliteWorkScope::start();
+            let owner = store.conversation_owner_at("agent/ada", frontier).unwrap().unwrap();
+            let spent = scope.finish();
+            assert_eq!(owner.subject, "agent/ada");
+            assert_eq!(owner.incarnation.as_deref(), actual["incarnation_id"].as_str());
+            assert_eq!(owner.runtime.as_deref(), actual["runtime_id"].as_str());
+            assert_eq!(owner.origin.as_deref(), Some("tester"));
+            samples.push(spent);
+        }
+        measurements.push(samples.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap());
+        if let Some((old_frontier, old_owner)) = &earlier {
+            assert_eq!(
+                store.conversation_owner_at("agent/ada", *old_frontier).unwrap(),
+                *old_owner,
+                "later subject history must not change a pinned owner",
+            );
+        } else {
+            earlier = Some((frontier, store.conversation_owner_at("agent/ada", frontier).unwrap()));
+        }
+    }
+    let (small, large) = (measurements[0], measurements[1]);
+    println!("conversation owner 100 -> 1000 subject observations (other_origin={other_origin}): {small:?} -> {large:?}");
+    assert!(small.statements > 0, "owner SQL work must be traced");
+    assert!(large.statements <= small.statements + 2,
+        "owner SQL calls grew with subject history: {small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps + SLACK,
+        "owner indexed row work grew with subject history: {small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+        "owner scanned subject history: {small:?} -> {large:?}");
+}
+
+fn install_historical_owner_resources(root: &Path, resources: &mut Vec<(String, String)>) {
+    // This fixture models historical records, not newly admitted resource claims. Preserve
+    // their canonical ordering metadata and origin; no modified envelope is sent to a peer.
+    // These folds read claims directly, so no projection rebuild or production rule changes.
+    let mut setup = rusqlite::Connection::open(root.join("tester.sqlite3")).unwrap();
+    let transaction = setup.transaction().unwrap();
+    for (id, body) in resources.drain(..) {
+        let changed = transaction.execute(
+            "UPDATE claims SET kind='resource.observed', body=?2 WHERE id=?1",
+            rusqlite::params![id, body],
+        ).unwrap();
+        assert_eq!(changed, 1, "the historical fixture scaffold must exist");
+    }
+    transaction.commit().unwrap();
+}
+
 /// `METHOD /path` for every `.route(...)` in the router's source.
 fn declared_routes(source: &str) -> BTreeSet<String> {
-    let mut routes = BTreeSet::new();
-    let router = &source[source
+    routes_in(&source[source
         .find("fn router_for_transport")
-        .expect("api.rs builds its router in router_for_transport")..];
+        .expect("api.rs builds its router in router_for_transport")..])
+}
+
+/// The routes of a route family a crate above st3-api adds to the router (its `routes` fn).
+fn family_routes(source: &str) -> BTreeSet<String> {
+    let start = source
+        .find("pub fn routes(")
+        .expect("a route family is built in its `routes` fn");
+    let end = start + source[start..].find("\n}\n").expect("the `routes` fn closes");
+    routes_in(&source[start..end])
+}
+
+/// `METHOD /path` for every `.route(...)` in `router`.
+fn routes_in(router: &str) -> BTreeSet<String> {
+    let mut routes = BTreeSet::new();
     let mut rest = router;
     while let Some(start) = rest.find(".route(") {
         rest = &rest[start + ".route(".len()..];
@@ -1860,7 +2015,7 @@ fn declared_routes(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_cost_route_inventory_resolves_the_client_read_forward_constant() {
-    let declared = declared_routes(include_str!("../../st3-api/src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-api-core/src/api.rs"));
     assert!(declared.contains("POST /v1/internal/client-read/forward"));
 }
 
@@ -1889,13 +2044,29 @@ async fn invented_client_read_owner(
         .expect("the forward probe must use its invented fleet credentials");
     assert_eq!(sender.name, NODE);
     let request: ClientReadRequest = serde_json::from_slice(&body).unwrap();
+    // Other census probes can try this configured peer as a fallback relay.
+    // It owns only cost-owner; answer those attempts like a real unreachable relay.
+    if let Some(route) = &request.relay
+        && route.target != "host/cost-owner"
+    {
+        return signed_cost_owner_response(
+            &auth,
+            &body,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            PeerResponse::new("cost-owner", 1, json!({
+                "code": "remote-unavailable",
+                "message": "invented cost owner has no onward route",
+                "details": {"reason": "no-route", "owner_host_id": route.target},
+            })),
+        );
+    }
     assert_eq!(request.authority_actor, "person/bench-operator");
     assert!(
         request.relay.is_none(),
         "direct owner delivery has no relay fence"
     );
     assert!(
-        matches!(request.request, ClientReadOperation::Messages { actor, history: false, limit: Some(20), cursor: None } if actor == "agent/bench/cost/reader")
+        matches!(request.request, ClientReadOperation::Messages { actor, history: false, limit: Some(20), cursor: None, messages_paging: false } if actor == "agent/bench/cost/reader")
     );
     let envelope = PeerResponse::new(
         "cost-owner",
@@ -1915,21 +2086,65 @@ async fn invented_client_read_owner(
             "page": {"limit": 20, "has_more": false}
         }),
     );
+    signed_cost_owner_response(&auth, &body, axum::http::StatusCode::OK, envelope)
+}
+
+fn signed_cost_owner_response(
+    auth: &FleetAuth,
+    body: &[u8],
+    status: axum::http::StatusCode,
+    envelope: PeerResponse<Value>,
+) -> Response {
     let bytes = serde_json::to_vec(&envelope).unwrap();
     let signed = auth
         .response_headers_for(
             "/v1/peer/client-read",
             "cost-owner",
             &bytes,
-            &FleetAuth::body_digest(&body),
+            &FleetAuth::body_digest(body),
         )
         .unwrap();
-    let mut response = bytes.into_response();
+    let mut response = (status, bytes).into_response();
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
     response.headers_mut().extend(signed);
     response
+}
+
+#[tokio::test]
+async fn invented_cost_owner_refuses_foreign_relays_but_serves_its_direct_probe() {
+    let root = tempfile::tempdir().unwrap();
+    let secret = root.path().join("secret");
+    std::fs::write(&secret, [13_u8; 32]).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let auth = FleetAuth::load(FLEET, &secret).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/peer/client-read", axum_post(invented_client_read_owner))
+        .with_state(auth);
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let relay = ClientRelay::from_config(&Config {
+        node: NODE.into(),
+        fleet_id: Some(FLEET.into()),
+        shared_secret_file: Some(secret),
+        peers: vec![PeerConfig { name: "cost-owner".into(), url: format!("http://{address}") }],
+        ..Default::default()
+    }).unwrap().unwrap();
+    let request = |target: &str| serde_json::from_value::<ClientReadRequest>(json!({
+        "authority_actor": "person/bench-operator",
+        "request": {"operation": "messages", "actor": "agent/bench/cost/reader", "history": false, "limit": 20, "cursor": null},
+        "relay": {"target": target, "path": ["cost-source"], "hops_left": 3},
+    })).unwrap();
+    let error = relay.forward(&request("host/unreachable-owner")).await.unwrap_err();
+    let rejected = error.downcast_ref::<st3::peer::ClientReadRejected>().unwrap();
+    assert_eq!(rejected.code, "remote-unavailable");
+    assert_eq!(rejected.reason(), Some("no-route"));
+    let answer = relay.forward(&request("host/cost-owner")).await.unwrap();
+    assert_eq!(answer["items"][0]["id"], "message/cost-forward");
+    server.abort();
 }
 
 /// Work counted while `request` runs and until the daemon's own work for it settles.
@@ -2105,6 +2320,11 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         native_session_home: Some(root.join("home")),
         planner_default: st3::model::PlannerSpec::default(),
     };
+    let seeded_cut = store.index().unwrap();
+    st3::api::start_published_lists(&state);
+    tokio::time::timeout(Duration::from_secs(120),
+        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("cost census lists publish the seeded store cut").unwrap();
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
@@ -2857,6 +3077,9 @@ async fn trim_cost(store: &Arc<Store>) -> Cost {
             .unwrap()
             .as_millis()
             + 1_000;
+        // Pacing only sleeps between chunks; the counts are the whole process's, so a rest would
+        // count whatever else runs meanwhile, and a larger store has more chunks to rest after.
+        store.set_trim_pause(Duration::ZERO);
         let plan = st3::store::plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
         let rows = (plan.claims.len() + plan.envelopes.len()) as u64;
         let before = work::total();
