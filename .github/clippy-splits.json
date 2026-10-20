@@ -5,6 +5,7 @@
   "fractal-api-core": "st3-api-core",
   "fractal-api-mailbox": "st3-api-mailbox",
   "fractal-attention": "st3-attention",
+  "fractal-build-stamp": "st-build-stamp",
   "fractal-chatgpt": "st-chatgpt",
   "fractal-client": "st3-client",
   "fractal-client-codegen": "st3-client-codegen",

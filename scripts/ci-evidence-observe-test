@@ -139,7 +139,7 @@ else:
     done, out = execute(answer([(full, 'full'), (degraded, 'degraded')], pack(full, degraded)), scratch=scratch)
     assert done.returncode == 0, done.stdout
     assert git(scratch, 'for-each-ref', '--format=%(refname) %(objectname)') == '\n'.join(sorted(
-        [f'refs/notes/evidence/{full} {full}', f'refs/notes/evidence/{degraded} {degraded}']))
+        [f'refs/notes/evidence/{tree}/{full} {full}', f'refs/notes/evidence/{tree}/{degraded} {degraded}']))
     verified = [json.loads(line) for line in calls.read_text().splitlines()]
     assert len(verified) == 1 and verified[0][verified[0].index('--check') + 1] == 'linux-gate' and tree in verified[0], verified
     assert [e['verified'] for e in out['records']] == [True, False]
@@ -171,28 +171,28 @@ else:
     git(source, 'push', '-q', str(remote), 'HEAD~1:refs/heads/main')  # the source's parent exists upstream
     done, out = execute(answer([(full, 'full')], pack(full)), remote=remote, scratch=tmp / 'pushed')
     assert done.returncode == 0 and out['published'] == 1, done.stdout
-    assert git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{full}'
+    assert git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{tree}/{full}'
     print('passed: verified refs are pushed; the source\'s missing parent is fetched first, never pushed shallow')
 
     # A scratch repository that already holds refs whose parents are absent (an earlier run without
     # --remote) must still be able to fetch them and publish.
     stale = tmp / 'stale'
     done, out = execute(answer([(full, 'full')], pack(full)), scratch=stale)
-    assert done.returncode == 0 and git(stale, 'for-each-ref', '--format=%(refname)') == f'refs/notes/evidence/{full}'
+    assert done.returncode == 0 and git(stale, 'for-each-ref', '--format=%(refname)') == f'refs/notes/evidence/{tree}/{full}'
     other_remote = tmp / 'other-remote.git'
     git(tmp, 'init', '-q', '--bare', str(other_remote))
     git(other_remote, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
     git(source, 'push', '-q', str(other_remote), 'HEAD~1:refs/heads/main')
     done, out = execute(answer([(full, 'full')], pack(full)), remote=other_remote, scratch=stale)
     assert done.returncode == 0 and out['published'] == 1, done.stdout
-    assert git(other_remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{full}'
+    assert git(other_remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{tree}/{full}'
     print('passed: a scratch repository with older refs still fetches missing history and publishes')
 
     # Replaying the same run is idempotent; a ref that names something else is never replaced.
     done, out = execute(answer([(full, 'full')], pack(full)), remote=remote, scratch=tmp / 'pushed')
     assert done.returncode == 0, done.stdout
     other = record('full', check='another')
-    git(tmp / 'pushed', 'update-ref', f'refs/notes/evidence/{other}', full)
+    git(tmp / 'pushed', 'update-ref', f'refs/notes/evidence/{tree}/{other}', full)
     done, out = execute(answer([(other, 'full')], pack(other)), scratch=tmp / 'pushed')
     assert done.returncode == 1 and 'never replaced' in out['failures'][0], out
     print('passed: replays are idempotent and an existing evidence ref is never replaced')
@@ -236,7 +236,7 @@ else:
     done, lines = timer()
     assert done.returncode == 1, done.stderr
     assert {(l['run'], l['state']) for l in lines} == {(7, 'done'), (8, 'failed')}, lines
-    assert git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{full}'
+    assert git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{tree}/{full}'
     done, lines = timer()
     assert [(l['run'], l['state']) for l in lines] == [(8, 'failed')], 'a done run is never observed again, a cancelled one never'
     done, lines = timer()

@@ -21,6 +21,7 @@ CRATES = {
     )},
     **{'st-' + name: 'fractal-' + name for name in (
         'storage-version', 'wire', 'runtime', 'resource-protocol', 'drivers', 'chatgpt',
+        'build-stamp',
     )},
     'st2-resource-providers': 'fractal-resource-providers',
     'st2-resource-wasip2': 'fractal-resource-wasip2',

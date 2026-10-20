@@ -10,6 +10,80 @@ or replica. Devices read and act through a member's client gateway and are not s
 
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
+
+## Local adapter membership and leave authority
+
+Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
+socket. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
+`members`, and legacy removals. A member's `member_key` identifies its incarnation;
+names are not identity. `state = "current"` is application membership authority.
+An ended member is not authorized for ordinary replication or owner RPC, even if
+a transport temporarily remains available for leave completion. Published
+endpoints describe routes, not grants or live reachability. This endpoint remains
+a read-only membership projection and does not start or renew leave grace.
+
+Adapters that retain a departing member's transport must instead make their
+decision from one `GET /v1/internal/fleet/leave-state` response:
+
+```json
+{
+  "fleet_id": "fleet-id",
+  "own_member_key": "member-key",
+  "membership": { "anchor": null, "members": [], "legacy_removed": [] },
+  "members": [
+    {
+      "member_key": "departed-member-key",
+      "state": "awaiting-confirmation",
+      "grace_deadline_unix_ms": 1234567890000
+    }
+  ],
+  "persistence_error": null
+}
+```
+
+`membership` has exactly the membership endpoint's `FleetView` schema, captured
+with the leave authority under the worker's membership-generation barrier. Do not
+combine two endpoint responses to decide retention: their generations can differ.
+`members` contains only ended members whose reason is `left`, keyed by exact
+incarnation. States are `awaiting-confirmation`, `confirmed`, or `unconfirmed`.
+Deadlines are absolute Unix milliseconds (JSON integers, Rust `u128`) or null.
+Only an ended-left member with `awaiting-confirmation`, a deadline strictly after
+the adapter's current time, and null `persistence_error` qualifies for receiver-side
+transport retention. Equality to the deadline is expired. Confirmation ends this
+retention; expiry never manufactures confirmation. The leaving node's final local
+carrier remains owned by its leave operation until the authenticated receipt ACK
+or an explicit offline leave, not by receiver grace.
+
+The replication worker durably journals a conservative first-receive timestamp
+*before* admitting a direct signed leave. Once sealed membership proves that
+departure, receiver grace is 120 seconds from that timestamp, surviving restart.
+Ordinary signatures can trigger the conservative filter; a membership fold that
+still shows the sender current clears the provisional record, so a false positive
+cannot consume a later departure's grace. Replaying an already-ended leave never
+renews its deadline. A failed journal/deadline persistence denies retention and is
+reported in `persistence_error`.
+
+The leaving worker durably chooses one current listening confirmer before
+exporting its leave. A signed `member-left` refusal naming the exact leaving key
+is retained as a proof and acknowledged over the authenticated
+`POST /v1/replication/leave-receipt` protocol. The receiver verifies both the
+leaving member's signature and its own signed refusal before persisting completion;
+the sender accepts only the selected confirmer's signed ACK. Lost responses remain
+retryable from the durable proof. Matching replication digests suffice for the
+pre-leave drain, but never for post-leave cleanup: the CLI waits for the completed
+receipt handshake before removing settings or its final carrier.
+
+The daemon proxies leave-state reads to the live worker's private, mode-0600
+`fleet/leave-state.sock`; it does not infer authority from the receipt journal.
+This also exposes in-memory persistence failures. A per-socket reservation fences
+concurrent worker startup. A configured fleet with no reachable worker, or a worker
+from another fleet/key incarnation, fails the read rather than returning an empty
+success. A local-only daemon returns null identities and an empty membership and
+leave list. Polling never imports claims, writes the journal, refreshes membership,
+selects a confirmer, starts grace, or changes transport policy. External adapters
+own transport-policy reconciliation; neither daemon nor worker reconciles Fabric
+runtime peers.
+
 ## Sync invariants
 
 Every shared projection folds claims in the canonical total order: numeric acceptance time,
@@ -1124,6 +1198,21 @@ worker's locally initiated success can still have carrier `unknown`.
 Restart clears both records;
 absence means evidence is unavailable, even when durable last-seen status exists.
 Worker phase changes, connectivity events and separate probes do not rewrite them.
+
+The replication-status JSON failed record also carries optional `failure` metadata:
+`code`, `phase`, `elapsed_ms`, optional `http_status`, and a bounded sanitized `cause`.
+The phases are `dial`, `local-export`, `request-headers`, `response-body`, `verify`,
+`local-receive`, and `follow-up-export`; they describe the failing operation, not the
+carrier. Authenticated peer backend failures preserve allowlisted machine codes such
+as `replication-exchange-metadata-too-large` and the backend phase. The elapsed time
+is the local outbound attempt's duration, including any dial and polling time, not
+a remote clock measurement. Local daemon failures retain their typed API codes.
+
+Causes retain safe error categories and typed I/O kinds, not free-form error/source
+displays, URLs, credentials, claim content, request bodies, or unsigned peer prose.
+Success records omit `failure`. Older worker requests and older observations without
+details remain readable and do not invent a cause. Carrier-only client sync notices
+remain unchanged; use replication-status JSON for the diagnostic details.
 
 The worker captures a Fabric route before converting it to its loopback tunnel
 URL. Fabric currently supplies no direct/relay evidence for that exact dial or

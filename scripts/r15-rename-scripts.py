@@ -60,6 +60,10 @@ def rewrite(relative, source):
                                       "self.git('mv', 'crates/st-storage-version/", 1)
             source = source[:start] + fixture + source[end:]
         return source
+    # This extracted library has no executable or persisted runtime identity.
+    # Its source fixtures, Cargo selectors and Rust imports move together.
+    source = re.sub(r'\bst-build-stamp\b', 'fractal-build-stamp', source)
+    source = re.sub(r'\bst_build_stamp\b', 'fractal_build_stamp', source)
     # Source paths, not executable names, state paths or serialized fixtures.
     if name not in HISTORICAL:
         source = re.sub(r'crates/(st3(?:-[a-z0-9-]+)?|stui|st-(?:drivers|runtime|chatgpt|storage-version|ui-model|terminal-direct)|st2-(?:resource-providers|resource-wasip2|[a-z0-9-]+-component))(?=[/"\' *])',

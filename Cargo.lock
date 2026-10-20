@@ -1386,6 +1386,7 @@ dependencies = [
  "data-encoding",
  "flate2",
  "fractal",
+ "fractal-build-stamp",
  "fractal-chatgpt",
  "fractal-client",
  "fractal-conversation-ui",
@@ -1591,6 +1592,10 @@ dependencies = [
  "tokio",
  "uuid",
 ]
+
+[[package]]
+name = "fractal-build-stamp"
+version = "0.1.0"
 
 [[package]]
 name = "fractal-chatgpt"
@@ -2011,6 +2016,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "fractal-build-stamp",
  "fractal-drivers",
  "fractal-resource-protocol",
  "fractal-resource-providers",
@@ -4489,7 +4495,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
 dependencies = [
  "libc",
  "pty-core",
@@ -4500,7 +4506,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
 dependencies = [
  "indexmap",
  "libc",
@@ -4515,7 +4521,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=4f703c7d7f9cbff5d713b1234d1db98223881bca#4f703c7d7f9cbff5d713b1234d1db98223881bca"
+source = "git+https://github.com/compoundingtech/pty?rev=063ff7f9d6ef099f76c31752b2eb52c5bba94c17#063ff7f9d6ef099f76c31752b2eb52c5bba94c17"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",

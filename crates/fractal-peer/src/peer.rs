@@ -1611,6 +1611,23 @@ impl MainBackend {
     pub fn socket(&self) -> &Path {
         &self.socket
     }
+
+    fn exchange_error(
+        error: anyhow::Error,
+        phase: smallclaims::replication::ReplicationFailurePhase,
+        started: std::time::Instant,
+    ) -> anyhow::Error {
+        let mut failure = smallclaims::replication::ReplicationExchangeFailure::from_error(
+            &error, phase, started.elapsed(), None,
+        );
+        // This response came from our own daemon, not unsigned remote peer prose.
+        if let Some((status, code, _, _)) = crate::client::api_error_parts(&error) {
+            failure.code = code.to_owned();
+            failure.http_status = Some(status);
+        }
+        let display = error.to_string();
+        error.context(failure).context(display)
+    }
 }
 
 impl Backend for MainBackend {
@@ -1630,6 +1647,7 @@ impl Backend for MainBackend {
         summary_only: bool,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
+        let started = std::time::Instant::now();
         self.client
             .post(
                 "/v1/internal/replication/export",
@@ -1641,7 +1659,9 @@ impl Backend for MainBackend {
                     signature_requests: signature_requests.to_vec(),
                 },
             )
-            .await
+            .await.map_err(|error| Self::exchange_error(
+                error, smallclaims::replication::ReplicationFailurePhase::LocalExport, started,
+            ))
     }
 
     async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
@@ -1669,6 +1689,7 @@ impl Backend for MainBackend {
         round_trip: Option<Duration>,
         carrier: smallclaims::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
+        let started = std::time::Instant::now();
         self.client
             .post(
                 "/v1/internal/replication/receive",
@@ -1680,7 +1701,9 @@ impl Backend for MainBackend {
                     carrier,
                 },
             )
-            .await
+            .await.map_err(|error| Self::exchange_error(
+                error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
+            ))
     }
 
     async fn checkpoint_manifest(
@@ -1753,6 +1776,7 @@ impl Backend for MainBackend {
         status: &str,
         error: &str,
         carrier: Option<smallclaims::replication::ReplicationCarrier>,
+        failure: Option<&smallclaims::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
         let _: serde_json::Value = self
             .client
@@ -1763,6 +1787,7 @@ impl Backend for MainBackend {
                     status: status.to_owned(),
                     error: error.to_owned(),
                     carrier,
+                    failure: failure.cloned(),
                 },
             )
             .await?;
@@ -1835,6 +1860,44 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn daemon_export_failures_preserve_machine_code_without_private_messages() {
+        use smallclaims::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+        use std::future::IntoFuture as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/internal/replication/export",
+            post(|| async {
+                (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({
+                    "code": "replication-exchange-metadata-too-large",
+                    "message": "private request content must not be retained",
+                    "details": {}
+                })))
+            }),
+        );
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let backend = MainBackend {
+            client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
+            socket: PathBuf::new(),
+        };
+        let result = backend.export("sample", &ReplicationInventory::default(), false, &[]).await;
+        server.abort();
+        let _ = server.await;
+        let error = result.unwrap_err();
+        let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+        assert_eq!(failure.code, "replication-exchange-metadata-too-large");
+        assert_eq!(failure.phase, ReplicationFailurePhase::LocalExport);
+        assert_eq!(failure.http_status, Some(500));
+        assert!(!failure.cause.contains("private"));
+        let contextual = ReplicationExchangeFailure::from_error(
+            &error, ReplicationFailurePhase::FollowUpExport, Duration::from_millis(123), None,
+        );
+        assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
+        assert_eq!(contextual.elapsed_ms, 123);
+        assert_eq!(contextual.http_status, Some(500));
+    }
 
     #[test]
     fn messages_paging_relay_preserves_explicit_negotiation_and_legacy_wire_shape() {

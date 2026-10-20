@@ -227,6 +227,38 @@ full replay trigger. Backups and restart windows must accommodate the release's 
 
 Check that local delivery becomes `current`, and read an `outdated` or `stale` reason before deciding a seat needs a restart.
 
+### Retained subject-reference rejections
+
+An older build can retain a signed envelope as `invalid-replicated-claim` because a
+field names a subject family that its schema does not recognize. Installing a newer
+binary alone does not revisit that historical verdict. Normal daemon startup runs
+replication admission before projecting its backlog. It revalidates retained
+`invalid-subject-reference` failures once per local schema digest, including one
+pass for stores without the retry completion marker.
+
+Use the pinned installation and normal service activation above, then check
+`st replication status` and read the existing message and its receipt. Admission
+checks the original envelope's signature and current fleet membership, its hashes
+and every claim field again. Only claims passing normal validation can be admitted;
+unknown or malformed references remain rejected, and unverified signatures remain held.
+The original record reference, claim ID, envelope hash, raw bytes and writer
+provenance are preserved. No resend, replacement record, SQLite edit, marker
+deletion or manual replay is required or supported for this recovery.
+
+The indexed retry is restricted to that historical error class and uses the normal
+bounded admission transactions. Completion is durable, so ordinary receive loops
+and restarts at the same schema do not repeatedly revalidate invalid references.
+An interrupted pass can safely finish at the next startup. A later local schema
+change schedules a new pass; the schema digest is only a retry trigger, never
+authority to admit a claim.
+An eligible historical receipt held by fleet/signature validation returns to the
+ordinary pending admission lifecycle before schema retry completes. A later verified
+signature can therefore unblock it after a restart without another schema change.
+This transition does not change the invalid record's bytes or admit it provisionally.
+Selection retains the existing whole-backlog payload materialization; bounded writer
+transactions do not imply bounded-memory backlog selection.
+
+
 After all members are upgraded and caught up, compare replication digests as [two machines](two-machines.md#check-what-arrived) describes. Mixed builds can exchange signed history while an older member has claims waiting for an upgrade; that does not prove equal projections. Check a real conversation and its message receipt too. The example uses the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat); substitute your own existing seat when upgrading:
 
 ```sh

@@ -34,7 +34,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "crates/fractal-drivers/build.rs",
+        "crates/fractal-build-stamp/**",
         "crates/fractal-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",

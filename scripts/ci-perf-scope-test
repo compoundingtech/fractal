@@ -30,7 +30,7 @@ for name in ('crates/fractal-api-core/src/api/client_v0.rs', 'crates/fractal-dae
              'crates/fractal-schema/src/registry.rs', 'crates/fractal-client/src/lib.rs',
              'crates/fractal-runtime/src/lib.rs', 'crates/fractal-drivers/src/lib.rs',
              'crates/fractal-conversation-ui/src/lib.rs', 'crates/new-daemon-dependency/src/lib.rs', 'vendor/component/src/lib.rs',
-             'crates/fractal-drivers/build.rs', 'crates/fractal/build.rs', 'scripts/ci-test-paths.rs', 'nix/package.nix'):
+             'crates/fractal-build-stamp/build.rs', 'crates/fractal/build.rs', 'scripts/ci-test-paths.rs', 'nix/package.nix'):
     assert module.decision('pull_request', event, [name])[0], name
 for name in ('docs/other.md', 'apps/ios/App.tsx'):
     assert not module.decision('pull_request', event, [name])[0], name

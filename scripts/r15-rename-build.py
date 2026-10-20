@@ -6,6 +6,8 @@ Generated Buck/workflow outputs remain owned by Genie; regenerate after updating
 pnpm-lock.yaml with: nix develop .#genie -c genie
 Nix output attributes, derivation names, executables, environment and installed
 component paths deliberately retain their existing consumer contracts.
+The import-safe rewrite(path, text) entry point replays an owning file in isolation
+when other source files still have merge conflicts.
 """
 from pathlib import Path
 import json
@@ -50,20 +52,13 @@ def clippy_ancestry(text: str) -> str:
         old = entry["name"]
         if package(old) != old:
             ancestry[package(old)] = old
+    # Main extracted this library after the immutable pre-rename lock above.
+    # Its old warning baseline remains historical Git data, not a Cargo alias.
+    ancestry["fractal-build-stamp"] = "st-build-stamp"
     return json.dumps(ancestry, indent=2, sort_keys=True) + "\n"
 
 
-files = {ROOT / name for name in (
-    "flake.nix", ".gitignore", ".gitattributes", "BUCK.genie.ts", ".buckconfig.genie.ts",
-    ".config/nextest.toml",
-)}
-for directory, suffixes in (("nix", {".nix", ".json"}), ("buck2", {".ts"}),
-                            (".github", {".ts", ".json"})):
-    files.update(path for path in (ROOT / directory).rglob("*") if path.suffix in suffixes)
-files.update(ROOT.glob("clients/typescript/*/BUCK.genie.ts"))
-
-for path in sorted(files):
-    before = path.read_text()
+def rewrite(path: Path, before: str) -> str:
     after = source_paths(before)
     # Cargo package selectors only: --bin and externally exposed Nix names stay put.
     after = re.sub(r'("(?:-p|--exclude)"\s+)"(' + OLD + r')"',
@@ -72,6 +67,23 @@ for path in sorted(files):
     if path.name == "flake.nix":
         after = re.sub(r'"(st2-[a-z-]+-component)"(?= = "st2_)',
                        lambda match: '"' + package(match[1]) + '"', after)
+        # Cargo's renamed wasm basename differs from the installed provider ABI.
+        after = after.replace(
+            '${pkgs.lib.concatMapStringsSep "\\n" (wasmName: \'\'\n',
+            '${pkgs.lib.concatMapStringsSep "\\n" (package:\n'
+            '              let\n'
+            '                wasmName = builtins.replaceStrings [ "-" ] [ "_" ] package;\n'
+            '                installedName = providerComponentPackages.${package};\n'
+            "              in ''\n",
+        )
+        after = after.replace(
+            '$out/share/st2/providers/${wasmName}.component.wasm',
+            '$out/share/st2/providers/${installedName}.component.wasm',
+        )
+        after = after.replace(
+            "(pkgs.lib.attrValues providerComponentPackages)}",
+            "(pkgs.lib.attrNames providerComponentPackages)}",
+        )
     after = re.sub(r'package\((=?)(' + OLD + r')\)',
                    lambda match: "package(" + match[1] + package(match[2]) + ")", after)
     after = re.sub(r'("package":\s*")(' + OLD + r')(")',
@@ -82,6 +94,26 @@ for path in sorted(files):
         after = clippy_ancestry(before)
     if path.name == ".gitattributes":
         after = after.replace("@smalltalk/st3-scenarios", "@fractal/scenarios")
-    if after != before:
-        path.write_text(after)
-        print(path.relative_to(ROOT))
+    return after
+
+
+def main() -> None:
+    files = {ROOT / name for name in (
+        "flake.nix", ".gitignore", ".gitattributes", "BUCK.genie.ts", ".buckconfig.genie.ts",
+        ".config/nextest.toml",
+    )}
+    for directory, suffixes in (("nix", {".nix", ".json"}), ("buck2", {".ts"}),
+                                (".github", {".ts", ".json"})):
+        files.update(path for path in (ROOT / directory).rglob("*") if path.suffix in suffixes)
+    files.update(ROOT.glob("clients/typescript/*/BUCK.genie.ts"))
+
+    for path in sorted(files):
+        before = path.read_text()
+        after = rewrite(path, before)
+        if after != before:
+            path.write_text(after)
+            print(path.relative_to(ROOT))
+
+
+if __name__ == "__main__":
+    main()

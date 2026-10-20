@@ -638,6 +638,13 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 
     status.peers[1].authority_digest = Some("mine".into());
     assert_eq!(leave_confirmation(&status, None).unwrap(), Some("c".into()));
+    // Matching digest is sufficient only before writing leave, never before the receipt ACK.
+    assert_eq!(leave_receipt_confirmation(None).unwrap(), None);
+    assert_eq!(
+        leave_receipt_confirmation(Some(&left)).unwrap(),
+        Some("a".into())
+    );
+    assert!(leave_receipt_confirmation(Some(&removed)).is_err());
 }
 
 #[test]

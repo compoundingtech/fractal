@@ -11,6 +11,7 @@ members = [
   "crates/agent-spec",
   "crates/demo-resolver-wasm",
   "crates/smallclaims",
+  "crates/fractal-build-stamp",
   "crates/fractal-drivers",
   "crates/fractal-runtime",
   "crates/fractal-storage-version",
@@ -56,6 +57,7 @@ default-members = [
   ".",
   "crates/agent-spec",
   "crates/smallclaims",
+  "crates/fractal-build-stamp",
   "crates/fractal-drivers",
   "crates/fractal-runtime",
   "crates/fractal-resource-protocol",
@@ -181,7 +183,6 @@ overflow-checks = true
 name = "fractal-legacy-runner"
 version.workspace = true
 edition = "2024"
-build = "crates/fractal-drivers/build.rs"
 description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."
 license = "MIT"
 # Every file in tests/ is a module of one test binary; see tests/integration.rs.
@@ -220,6 +221,8 @@ path = "tests/resource_profile_supervisor_e2e.rs"
 # Sync by design: the runner is I/O-light (shell-outs to `pty` plus a
 # folder watch + a sleep), so no tokio. Deps grow per milestone; M0 needs only parse + CLI.
 agent-spec = { path = "crates/agent-spec" }
+# The build identity: only the binary packages depend on it (see crates/fractal-build-stamp).
+fractal-build-stamp = { path = "crates/fractal-build-stamp" }
 fractal-drivers = { path = "crates/fractal-drivers" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/4f703c7d7f9cbff5d713b1234d1db98223881bca";
+    pty.url = "github:compoundingtech/pty/063ff7f9d6ef099f76c31752b2eb52c5bba94c17";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
@@ -115,7 +115,7 @@
         # pure input, so baking it lets a hermetic build know its own identity
         # without an impure `.git` read. Same env var + JSON shape as the rest of
         # the fleet (TS `@overeng/utils/node/cli-version`; the otel-scrape Rust
-        # reader) — `crates/fractal-drivers/src/version.rs` reads it via `option_env!("CLI_BUILD_STAMP")`.
+        # reader) — `crates/fractal-build-stamp` reads it via `option_env!("CLI_BUILD_STAMP")` for the binaries.
         # `self.shortRev`/`lastModified` are absent only for a dirty tree, where
         # `dirtyShortRev` and the working-tree mtime stand in and `dirty` is true.
         sourceRev = self.shortRev or self.dirtyShortRev or "unknown";
@@ -312,7 +312,7 @@
           # over the LocalStamp `build.rs` bakes from git (which is empty here
           # anyway — a flake source carries no `.git`). Reaches rustc as a plain
           # env var, captured at compile time by `option_env!` (see
-          # crates/fractal-drivers/src/version.rs). A derivation env var change rebuilds the crate.
+          # crates/st-build-stamp). A derivation env var change rebuilds the crate.
           CLI_BUILD_STAMP = buildStamp;
           ST2_EXECUTOR_BUILD_IDENTITY = buildStamp;
           AGENT_SPEC_REVISION = agentSpecRevision;
@@ -457,7 +457,7 @@
               fi
             done
           '';
-          # Stamp st3, its shared driver library, and the terminal UI library from this declared flake source.
+          # Stamp st3 from this declared flake source; it hands the stamp to its libraries at startup.
           CLI_BUILD_STAMP = buildStamp;
           inherit cargoDeps;
           cargoBuildFlags = [
@@ -1732,6 +1732,7 @@
         devShells.web = import ./nix/web-shell.nix { inherit effect-utils system; };
         # The isolation-vm CI job's NixOS VMs; see each file for how it runs.
         legacyPackages = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          script-signal-vm = import ./nix/script-signal-vm.nix { inherit pkgs; };
           transport-isolation-vm = import ./nix/transport-isolation-vm.nix {
             inherit pkgs;
             pty = ptyPackage;

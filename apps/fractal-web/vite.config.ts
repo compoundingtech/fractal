@@ -6,6 +6,7 @@ import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
 import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
 import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
+import { fractalDevReplay } from './scripts/vite-replay.mjs'
 
 // One identity per build: the bundle embeds it and the host serves it as /build-identity.json.
 const git = (...args: string[]) => execFileSync('git', args, { encoding: 'utf8' }).trim()
@@ -22,6 +23,7 @@ export default defineConfig({
   root: 'src/web',
   plugins: [
     fractalContentSecurityPolicy(),
+    fractalDevReplay(),
     {
       // The root is src/web, so Vite watches other app and kit modules file by file; such a watch
       // can be lost when a write replaces the file (git, formatters, atomic saves). Directory watches
