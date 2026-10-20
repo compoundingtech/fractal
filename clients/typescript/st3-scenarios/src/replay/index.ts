@@ -54,6 +54,18 @@ const collectionKind = (collection: string): SliceKind | undefined => {
   }
 }
 const equal = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
+/** JSON objects are unordered; recorded command arrays and all field values remain significant. */
+const equalCommand = (left: unknown, right: unknown): boolean => {
+  if (left === right) return true
+  if (Array.isArray(left)) {
+    return Array.isArray(right) && left.length === right.length &&
+      left.every((value: unknown, index: number) => equalCommand(value, right[index]))
+  }
+  if (!record(left) || !record(right) || Array.isArray(right)) return false
+  const keys = Object.keys(left)
+  return keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && equalCommand(left[key], right[key]))
+}
 const matches = (sub: Subscription, selector: Selector): boolean =>
   sub.collection === selector.collection &&
   (!('conversation' in selector) || sub.conversation === selector.conversation) &&
@@ -509,7 +521,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
           conversation: stringField(command, 'conversation'), terminal: stringField(command, 'terminal'),
           incarnation: stringField(command, 'incarnation'), capability: stringField(command, 'capability') }
         sub.recorded = world.recording?.subscriptions?.some((entry) =>
-          entry.at_ms === offset() && entry.socket_id === connection.recorded_socket_id && equal(entry.command, command)) ?? false
+          entry.at_ms === offset() && entry.socket_id === connection.recorded_socket_id && equalCommand(entry.command, command)) ?? false
         connection.subscriptions.set(sub.id, sub)
         first(connection, sub)
       },

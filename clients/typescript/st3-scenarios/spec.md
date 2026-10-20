@@ -760,7 +760,9 @@ replay.actions  // actions the client submitted, in order, for test assertions
 - **Recorded subscriptions:** explicit recording proofs retain the captured subscribe commands,
   socket identities and clock offsets. Reissuing a captured command at its captured offset on
   its captured socket follows the recorded wire boundaries, without a second initial snapshot
-  or timeline dispatch. Other subscriptions read the folded state immediately and follow slice
+  or timeline dispatch. Command matching compares every field recursively, ignoring object key
+  order but preserving array order and window/cursor values. Other subscriptions read the
+  folded state immediately and follow slice
   events, just like synthetic worlds. A known running agent without a thread receives an empty
   `replace: true` conversation snapshot; later entries append, while authoritative replacement
   events retain their replacement semantics. Opening an existing thread returns its current page,
