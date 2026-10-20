@@ -5357,10 +5357,12 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
     // The owner stands in for the seat's runtime. It waits on a deadline, not a count of 10 ms sleeps, because
     // under CI load those sleeps and the CLI's own start-up both stretch; this test covers declarations
     // surviving restarts, not how fast a seat becomes ready.
+    let started = tokio::time::Instant::now();
     let owner = tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = started + Duration::from_secs(20);
         while tokio::time::Instant::now() < deadline {
             if store.selected_desired_token(SEAT).unwrap().is_some() {
+                let saw = started.elapsed();
                 for (kind, fields) in [
                     (
                         "runtime.observed",
@@ -5386,7 +5388,7 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
                 // The CLI waits on the daemon's event channel after its first state read.
                 events.send_modify(|version| *version += 1);
                 notify.notify_waiters();
-                return;
+                return (saw, started.elapsed());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -5410,8 +5412,38 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
             ],
         )
         .await;
+    let returned = started.elapsed();
     // Join the owner first, so a declaration that never appeared fails as that, not as a readiness timeout.
-    owner.await.unwrap();
+    let (saw, ready) = owner.await.unwrap();
+    if !created.status.success() {
+        // This has stalled only on CI (once in 34 merge groups after #3447); say which side stalled.
+        let shown = tokio::time::timeout(
+            Duration::from_secs(5),
+            daemon.cli(PERSON, &["agents", "show", SEAT]),
+        )
+        .await
+        .map_or_else(
+            |_| "no answer within 5 s".to_owned(),
+            |shown| match serde_json::from_slice::<Value>(&shown.stdout) {
+                Ok(shown) => ["state", "harness_state", "reachability", "observation", "fault"]
+                    .map(|field| format!("{field}={}", shown["value"][field]))
+                    .join(" "),
+                Err(_) => String::from_utf8_lossy(&shown.stderr).into_owned(),
+            },
+        );
+        let events = daemon
+            .store()
+            .events_after(0, Some(SEAT))
+            .unwrap()
+            .into_iter()
+            .map(|event| format!("{} {}", event.store_index, event.kind))
+            .collect::<Vec<_>>();
+        panic!(
+            "{}\nthe owner saw the declaration at {saw:?} and wrote readiness at {ready:?}; the CLI returned at {returned:?}\nstore index {}, {SEAT} events: {events:?}\nagents show: {shown}",
+            String::from_utf8_lossy(&created.stderr),
+            daemon.store().index().unwrap(),
+        );
+    }
     cli_value(created);
     for (command, expected) in [("stop", "stop"), ("start", "agent")] {
         daemon.restart().await;
