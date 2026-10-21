@@ -1512,7 +1512,12 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     if crate::test_support::supervise_test() {
         return;
     }
+    use std::os::unix::fs::PermissionsExt as _;
     let root = tempfile::tempdir().unwrap();
+    let pty = root.path().join("pty");
+    let called = root.path().join("producer-called");
+    std::fs::write(&pty, format!("#!/bin/sh\nprintf called > {called:?}\nexit 99\n")).unwrap();
+    std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
     let registry = root.path().join("registry");
     std::fs::create_dir(&registry).unwrap();
     let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
@@ -1522,7 +1527,11 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     ), "prelaunch");
     let desired = store.desired_subjects_named(&["agent/example-prelaunch/worker".into()])
         .unwrap().remove(0);
-    let member = desired.member.as_ref().unwrap().clone();
+    let mut member = desired.member.as_ref().unwrap().clone();
+    member.environment.insert("PATH".into(), format!("{}:${{PATH}}", root.path().display()));
+    let environment = member_environment(&member.environment, &launch_executable().unwrap(), None).unwrap();
+    assert_eq!(fractal_runtime::resolve_executable("pty", &environment).unwrap(), pty,
+        "the native path must resolve the fixture instead of the login environment");
     let row = registry.join(format!("{}.json", member.runtime_id));
     let record = serde_json::json!({
         "createdAt": "older", "tags": {"st3.start-operation": "older-operation"}
@@ -1530,8 +1539,7 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     std::fs::write(&row, &record).unwrap();
     std::fs::write(registry.join(format!("{}.pid", member.runtime_id)),
         std::process::id().to_string()).unwrap();
-    let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry),
-        &root.path().join("must-not-launch")));
+    let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
     let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
     let result = reconciler.dispatch_start(start_jobs::PreparedStart {
         subject: desired.clone(), launch_member: member.clone(), member,
@@ -1547,6 +1555,22 @@ fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
     let failed = store.observations_for(&desired.subject, "runtime.action.failed")
         .unwrap().pop().unwrap();
     assert_eq!(failed.body["fields"]["operation_status"], "producer-closed");
+    let operation = failed.body["fields"]["operation"].as_str().unwrap();
+    let result: String = store.readers.get().query_row(
+        "SELECT result FROM local_runtime_starts WHERE id=?1", [operation], |row| row.get(0),
+    ).unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["closure_kind"], "native-rejection");
+    let proof = &result["closure_proof"];
+    assert_eq!(proof["witness"]["kind"], "native-rejection");
+    assert_eq!(proof["verification"], "producer-closed");
+    assert_eq!(proof["operation_id"], operation);
+    assert_eq!(proof["subject"], desired.subject);
+    assert_eq!(proof["runtime_id"], desired.member.as_ref().unwrap().runtime_id);
+    assert_eq!(proof["start_request_receipt"]["body"]["fields"]["operation"], operation);
+    assert_eq!(result["closure_proof_id"],
+        format!("start-proof/{}", smallclaims::hash::canonical_hash(proof).unwrap()));
+    assert!(!called.exists(), "the foreign-row refusal must precede the launcher");
     assert_eq!(std::fs::read_to_string(row).unwrap(), record,
         "rejection must not retire or change the foreign incarnation");
 }
