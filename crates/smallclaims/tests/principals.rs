@@ -19,7 +19,7 @@ const FLEET: &str = "6f1e8a52-3c4d-4b7e-9a10-2d5c8e7f9b31";
 #[test]
 fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering() {
     thread_local! {
-        static BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static BODY_READS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     for tampered in [false, true] {
         let store = Store::open_memory("studio", Arc::new(Plain)).unwrap();
@@ -45,16 +45,19 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
                 "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
                 [&claim.id],
             ).unwrap();
-            BODY_READS.with(|count| count.set(0));
+            BODY_READS.with(|reads| reads.borrow_mut().clear());
             connection.trace(Some(|sql| {
                 if sql.starts_with("SELECT id, subject, kind, actor, body FROM claims WHERE id=") {
-                    BODY_READS.with(|count| count.set(count.get() + 1));
+                    BODY_READS.with(|reads| reads.borrow_mut().push(sql.to_owned()));
                 }
             }));
         }
         store.judge_claims(false).unwrap();
         store.connection.write().trace(None);
-        assert_eq!(BODY_READS.with(|count| count.get()), 1, "tampered={tampered}");
+        BODY_READS.with(|reads| {
+            let reads = reads.borrow();
+            assert_eq!(reads.len(), 1, "tampered={tampered}: {reads:?}");
+        });
         let result = verdict(&store, &claim);
         if tampered {
             assert!(matches!(result, Verdict::Invalid(_)), "{result:?}");

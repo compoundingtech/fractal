@@ -1610,7 +1610,7 @@ impl Store {
                 };
                 if write_verdict_tx(&transaction, claim_id, &signature, &verdict)? {
                     // A changed delegation or revocation changes what relied on it.
-                    queue_affected_by_tx(&transaction, claim_id)?;
+                    queue_affected_by_row_tx(&transaction, &row)?;
                 }
                 judged += 1;
             }
