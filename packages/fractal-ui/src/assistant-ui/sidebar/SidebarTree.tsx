@@ -26,9 +26,10 @@ export interface SidebarTreeItem<T> {
   readonly isDisabled?: boolean
   /**
    * Where a touch layout (narrow host or coarse primary pointer) puts this row's disclosure. `leading` (default): the
-   * whole row toggles, at least `g.touchTarget` tall, with the glyph in its usual gutter. `trailing`: for rows whose own
-   * press opens something, the gutter chevron hides and `renderRow` receives `trailingDisclosure`, so the host places a
-   * `SidebarTreeDisclosure` in its own trailing column. Fine pointers always use the compact gutter chevron.
+   * whole row toggles, at least `g.touchTarget` tall, with the glyph in its usual gutter; controls inside the row use
+   * `SidebarTreeRowAction` to stay pressable above it. `trailing`: for rows whose own press opens something, the gutter
+   * chevron hides and `renderRow` receives `trailingDisclosure`, so the host places a `SidebarTreeDisclosure` in its own
+   * trailing column. Fine pointers always use the compact gutter chevron.
    */
   readonly disclosurePlacement?: 'leading' | 'trailing'
 }
@@ -166,6 +167,15 @@ export function SidebarTreeDisclosure({ expanded }: { readonly expanded: boolean
   return <Button slot="chevron" id={id} aria-labelledby={id} aria-label={expanded ? 'Hide subagents' : 'Show subagents'} aria-expanded={expanded} data-sidebar-disclosure="trailing" {...stylex.props(styles.trailing)}>
     <span aria-hidden {...stylex.props(styles.trailingGlyph, direction === 'rtl' && styles.mirrored, expanded && (direction === 'rtl' ? styles.turnedRtl : styles.turned))}><Icon name="chevron-right" size={12} /></span>
   </Button>
+}
+
+/**
+ * A control inside a row's content, such as an inline retry. It stacks above a touch header row's whole-row disclosure,
+ * so a tap presses the control instead of toggling the row, and is at least `g.touchTarget` square on touch layouts.
+ */
+export function SidebarTreeRowAction({ onPress, children }: { readonly onPress: () => void; readonly children: React.ReactNode }) {
+  const touch = useTouchLayout()
+  return <Button onPress={onPress} data-sidebar-row-action {...stylex.props(styles.rowAction, touch && styles.rowActionTouch)}>{children}</Button>
 }
 
 interface RowContentProps<T extends SidebarTreeItem<T>> {
@@ -452,13 +462,15 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     const key = state.selectionManager.focusedKey
     const node = key === null ? undefined : state.collection.getItem(key)
     if (node == null) return
-    const child = [...state.collection.getChildren?.(node.key) ?? []].find(node => node.type === 'item')
+    const children = [...state.collection.getChildren?.(node.key) ?? []].filter(node => node.type === 'item')
+    // Display-only children are never focus targets; a parent of only display-only rows keeps focus once expanded.
+    const enabled = children.find(child => !state.selectionManager.isDisabled(child.key) && model.all.get(child.key)?.isDisabled !== true)
     let destination: Key | undefined
     if (event.key === expand) {
-      if (child === undefined) return
-      if (state.expandedKeys.has(node.key)) destination = child.key
-      else state.toggleKey(node.key)
-    } else if (child !== undefined && state.expandedKeys.has(node.key)) state.toggleKey(node.key)
+      if (children.length === 0) return
+      if (!state.expandedKeys.has(node.key)) state.toggleKey(node.key)
+      else if (enabled !== undefined) destination = enabled.key
+    } else if (children.length > 0 && state.expandedKeys.has(node.key)) state.toggleKey(node.key)
     else {
       const parent = node.parentKey == null ? undefined : state.collection.getItem(node.parentKey)
       if (parent?.type !== 'item') return
@@ -495,7 +507,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   }
   const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} isDisabled={item.isDisabled} data-sidebar-tree-key={String(item.id)} data-sidebar-disabled={item.isDisabled || undefined} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible, isDisabled }) => stylex.props(styles.item, isDisabled ? styles.disabled : isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
-    <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]}>{renderItem}</Collection>
+    <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined, touch]}>{renderItem}</Collection>
   </TreeItem>
   return <div {...stylex.props(styles.root, props.style)} data-sidebar-drag-active={dragging || undefined} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
     const target = (event.target as HTMLElement).closest('[data-sidebar-tree-key]')
@@ -508,7 +520,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       schedule()
     }
   }}>
-    <Virtualizer layout={layout} layoutOptions={rowLayoutOptions}><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} dragAndDropHooks={props.dragAndDropHooks} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
+    <Virtualizer layout={layout} layoutOptions={rowLayoutOptions}><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined, touch]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} dragAndDropHooks={props.dragAndDropHooks} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
     <div aria-hidden="true" data-sidebar-pinned-stack data-top-key={snapshot.top} {...stylex.props(styles.stack)} style={{ height: snapshot.height }}>
       {snapshot.pins.map(pin => <div key={pin.item.id} {...stylex.props(styles.pinSlot)} style={{ height: pin.height }}><div draggable={false} data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin, dragging && styles.dragPassthrough)} style={{ height: pin.height, transform: `translateY(calc(${pin.offset} * ${g.hairline}))` }} onClick={event => {
         const target = event.target as HTMLElement
@@ -545,6 +557,9 @@ const styles = stylex.create({
   // Covers the touch header row above its content; the padding puts the glyph in the gutter at the row's depth indent.
   headerToggle: { position: 'absolute', inset: 0, zIndex: 1, display: 'flex', alignItems: 'center', boxSizing: 'border-box', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
   headerGlyph: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.controlSm, flexShrink: 0 },
+  // Same layer as the header disclosure; later in the row's paint order, so the control paints and hit-tests above it.
+  rowAction: { position: 'relative', zIndex: 1 },
+  rowActionTouch: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.touchTarget, minHeight: g.touchTarget, boxSizing: 'border-box' },
   // The host's trailing column: a touch-target square whose chevron turns a quarter as the row expands.
   trailing: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.touchTarget, height: g.touchTarget, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: 0, backgroundColor: { default: 'transparent', ':is([data-pressed])': surface.rowHover }, color: ink.fgMuted, ':focus-visible': { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineColor: ink.fgMuted } },
   trailingGlyph: { display: 'flex', transitionProperty: 'transform', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: 'ease-out' },

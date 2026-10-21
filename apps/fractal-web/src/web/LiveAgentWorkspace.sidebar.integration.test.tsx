@@ -23,7 +23,7 @@ import type { ConnectionState } from '@fractal/sdk/effect'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const gateway = 'gateway.example.invalid'
-const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
+const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
@@ -90,7 +90,7 @@ it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-
     started_at: '2026-10-04T12:00:00Z', lease_expires_at: '2026-10-04T12:01:00Z',
   }
   const observation = openAgent(decodeUnknownSync(Agent)({
-    kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1',
+    kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary',
     driver, runtime_ids: ['runtime/example-parent'], reachability: 'reachable', state: 'running',
     harness_state: 'working', blocked_on: null, fault: null, revision: '1',
     updated_at: '2026-10-04T12:00:00Z',

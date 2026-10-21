@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
-import { SidebarTree, SidebarTreeDisclosure, openAgentRowMenu, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@fractal/ui/assistant-ui/shell'
+import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, openAgentRowMenu, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@fractal/ui/assistant-ui/shell'
 import {
   Button as AriaButton,
   useDragAndDrop,
@@ -649,7 +649,8 @@ const BoundFolderRow = ({ node, touchDisclosure }: { readonly node: SidebarNode;
       </div>
     )}
     {status?._tag === 'Pending' ? <span role="status">Saving folder layout…</span> : null}
-    {status?._tag === 'Refused' ? <span role="status">{status.reason}{status.onRetry === undefined ? null : <AriaButton onPress={status.onRetry}>Try again</AriaButton>}</span> : null}
+    {/* A folder is a touch header row: the whole row toggles, so its retry is a kit row action stacked above that. */}
+    {status?._tag === 'Refused' ? <span role="status">{status.reason}{status.onRetry === undefined ? null : <SidebarTreeRowAction onPress={status.onRetry}>Try again</SidebarTreeRowAction>}</span> : null}
   </div>
 }
 

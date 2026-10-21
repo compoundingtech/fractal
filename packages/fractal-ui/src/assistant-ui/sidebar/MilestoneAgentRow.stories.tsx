@@ -5,7 +5,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { Key } from 'react-aria-components'
 import { MilestoneAgentRow, openAgentRowMenu } from './MilestoneAgentRow'
-import { SidebarTree, SidebarTreeDisclosure, type SidebarTreeItem, type SidebarTreeRowState } from './SidebarTree'
+import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, type SidebarTreeItem, type SidebarTreeRowState } from './SidebarTree'
 import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
 import { geometryNumbers, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
@@ -14,21 +14,21 @@ import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 const storyNow = Date.UTC(2026, 9, 17, 9, 30, 0)
 const base: Row = {
-  ref: 'agent/base', id: 'base', title: 'Base', status: 'idle', statusLabel: 'Idle', host: 'build-1', freshness: 'live',
+  ref: 'agent/example-base', id: 'base', title: 'Base', status: 'idle', statusLabel: 'Idle', host: 'build-1', freshness: 'live',
   usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, children: [],
 }
 const stateOrder = Object.keys(statuses) as AgentStatus[]
 /** One row per canonical status; every row carries a last turn 3 minutes before the story clock. */
-const stateRows: readonly Row[] = stateOrder.map(status => ({ ...base, ref: `agent/${status}`, id: status, title: `${statuses[status].label} agent`, status, statusLabel: statuses[status].label, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 180_000 } }))
+const stateRows: readonly Row[] = stateOrder.map(status => ({ ...base, ref: `agent/example-${status}`, id: status, title: `${statuses[status].label} agent`, status, statusLabel: statuses[status].label, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 180_000 } }))
 
-const subagent: Row = { ...base, id: 'parent', parentRef: 'agent/parent', host: 'build-2' }
+const subagent: Row = { ...base, id: 'parent', parentRef: 'agent/example-parent', host: 'build-2' }
 const parent: Row = {
-  ...base, ref: 'agent/parent', id: 'parent', title: 'Align the metric track across every row', status: 'working', statusLabel: 'Working', needsMe: true, host: 'build-2',
+  ...base, ref: 'agent/example-parent', id: 'parent', title: 'Align the metric track across every row', status: 'working', statusLabel: 'Working', needsMe: true, host: 'build-2',
   usage: { _tag: 'Known', scope: 'lifetime-incl-subagents', usd: 3.42, tokens: 1_180_000 }, duration: { _tag: 'Known', scope: 'lifetime', ms: 2_460_000 },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 },
   children: [
-    { ...subagent, ref: 'agent/parent/subagent/review', title: 'Review metric track diff', status: 'ended', statusLabel: statuses.ended.label, usage: { _tag: 'Known', scope: 'reported-agent', tokens: 48_200 }, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 140_000 } },
-    { ...subagent, ref: 'agent/parent/subagent/checks', title: 'Run row fitting checks', status: 'working', statusLabel: 'Working', unread: 2, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 12_000 } },
+    { ...subagent, ref: 'agent/example-review', title: 'Review metric track diff', status: 'ended', statusLabel: statuses.ended.label, usage: { _tag: 'Known', scope: 'reported-agent', tokens: 48_200 }, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 140_000 } },
+    { ...subagent, ref: 'agent/example-checks', title: 'Run row fitting checks', status: 'working', statusLabel: 'Working', unread: 2, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 12_000 } },
   ],
 }
 
@@ -47,7 +47,7 @@ function StateMatrix() {
       {/* Frozen rows measure against the observation; their last turn (3m ago) still reads 1m, never a clamped 0s. */}
       {stateRows.map(row => <MilestoneAgentRow key={row.ref} row={row} frozen={frozen} now={frozen ? storyNow - 120_000 : storyNow} />)}
       {/* Activity newer than the observation cannot be in the snapshot: the frozen row omits it. */}
-      {frozen && <MilestoneAgentRow row={{ ...stateRows[0]!, ref: 'agent/after-observation', title: 'Activity after the observation', lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } }} frozen now={storyNow - 120_000} />}
+      {frozen && <MilestoneAgentRow row={{ ...stateRows[0]!, ref: 'agent/example-after-observation', title: 'Activity after the observation', lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } }} frozen now={storyNow - 120_000} />}
     </section>)}
   </div>
 }
@@ -65,30 +65,65 @@ function TreeAndStandalone() {
   </div>
 }
 
-const noSessionChild: Row = { ...subagent, ref: 'agent/parent/subagent/no-session', title: 'Child without session', status: 'unobserved', statusLabel: 'Unobserved', subagent: { id: 'no-session', lease_expires_at: '2026-10-17T10:00:00Z' } }
+const noSessionChild: Row = { ...subagent, ref: 'agent/example-no-session', title: 'Child without session', status: 'unobserved', statusLabel: 'Unobserved', subagent: { id: 'no-session', lease_expires_at: '2026-10-17T10:00:00Z' } }
 /** A display-only subagent: the tree row is disabled and the row drops its menu, hover and active presentation. */
 const displayOnlyChild = parent.children[0]!
 const actionAgent = (depth: number): AgentItem => {
   const root = toItem({ ...parent, children: [...parent.children, noSessionChild] }, depth)
   return { ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true } : child) }
 }
-const actionAgents: readonly AgentItem[] = [actionAgent(0)]
+/** A parent whose only subagent is display-only: arrow keys expand it but never move focus into the child. */
+const displayOnlyParentRow: Row = { ...parent, ref: 'agent/example-display-parent', title: 'Summarise reported subagents', needsMe: false,
+  children: [{ ...displayOnlyChild, ref: 'agent/example-display-review', parentRef: 'agent/example-display-parent', title: 'Reported review summary' }] }
+const displayOnlyParent = (depth: number): AgentItem => {
+  const root = toItem(displayOnlyParentRow, depth)
+  return { ...root, children: root.children.map(child => ({ ...child, isDisabled: true })) }
+}
+/** Desktop: a refused folder carries an inline retry, and nests a parent agent inside RAC's nested Collection. */
+const retryFolder: FolderItem = { kind: 'folder', id: 'folder/example-retry', depth: 0, textValue: 'Reviews', children: [displayOnlyParent(1)] }
+const actionItems: readonly Item[] = [actionAgent(0), retryFolder]
 /** Phone: the same agents inside a host folder, whose header row is a leading, whole-row disclosure. */
-const phoneFolder: FolderItem = { kind: 'folder', id: 'folder/build-2', depth: 0, textValue: 'build-2', children: [actionAgent(1)] }
+const phoneFolder: FolderItem = { kind: 'folder', id: 'folder/example-host', depth: 0, textValue: 'build-2', children: [actionAgent(1)] }
 
 function TreeWithActions({ phone = false }: { readonly phone?: boolean }) {
-  const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([phoneFolder.id, parent.ref]))
+  const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([phoneFolder.id, retryFolder.id, parent.ref]))
   const [opened, setOpened] = React.useState<string>()
   const [selected, setSelected] = React.useState<string>()
+  const [retries, setRetries] = React.useState(0)
   // Stable callbacks: the row is memoized.
   const onOpen = React.useCallback((row: Row) => setOpened(row.ref), [])
-  const renderRow = React.useCallback((item: Item, state: SidebarTreeRowState) => item.kind === 'folder'
-    ? <span data-folder-label {...stylex.props(styles.folderLabel)}>{item.textValue}</span>
-    : <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} touchDisclosure={touchDisclosure(state)} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />, [onOpen])
-  return <section aria-label="With actions" data-host="actions" data-opened={opened} data-selected={selected} {...stylex.props(styles.column, styles.tree, phone && styles.phoneColumn)}>
-    <SidebarTree<Item> aria-label="Agents with actions" items={phone ? [phoneFolder] : actionAgents} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow} onAction={key => setSelected(String(key))}
+  const onRetry = React.useCallback(() => setRetries(count => count + 1), [])
+  const renderRow = React.useCallback((item: Item, state: SidebarTreeRowState) => {
+    if (item.kind === 'agent') return <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} touchDisclosure={touchDisclosure(state)} onOpen={item.id === noSessionChild.ref ? undefined : onOpen} />
+    const label = <span data-folder-label {...stylex.props(styles.folderLabel)}>{item.textValue}</span>
+    return item.id !== retryFolder.id ? label
+      : <div {...stylex.props(styles.folderRow)}>{label}<span role="status" {...stylex.props(styles.folderStatus)}>Layout refused <SidebarTreeRowAction onPress={onRetry}>Try again</SidebarTreeRowAction></span></div>
+  }, [onOpen, onRetry])
+  return <section aria-label="With actions" data-host="actions" data-opened={opened} data-selected={selected} data-retries={retries} {...stylex.props(styles.column, styles.tree, phone && styles.phoneColumn)}>
+    <SidebarTree<Item> aria-label="Agents with actions" items={phone ? [phoneFolder] : actionItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow} onAction={key => setSelected(String(key))}
       onRowContextMenu={(_item, event) => { if (openAgentRowMenu(event.currentTarget)) event.preventDefault() }} />
   </section>
+}
+
+/**
+ * The kit's coarse-pointer query, served by one controllable list so a story drives fine → coarse → fine through the
+ * same `change` subscription a device's pointer change would. Every other query reaches the browser.
+ */
+const touchPointerQuery = '(pointer: coarse) and (not (any-pointer: fine))'
+class PointerMedia extends EventTarget {
+  readonly media = touchPointerQuery
+  onchange: MediaQueryList['onchange'] = null
+  matches = false
+  addListener(listener: EventListener | null) { if (listener !== null) this.addEventListener('change', listener) }
+  removeListener(listener: EventListener | null) { if (listener !== null) this.removeEventListener('change', listener) }
+  emulate(coarse: boolean) { this.matches = coarse; this.dispatchEvent(new MediaQueryListEvent('change', { matches: coarse, media: this.media })) }
+}
+const pointerMedia = new PointerMedia()
+const servePointerMedia = () => {
+  const native = window.matchMedia
+  pointerMedia.matches = false
+  window.matchMedia = (query: string): MediaQueryList => query === touchPointerQuery ? pointerMedia : native.call(window, query)
+  return () => { window.matchMedia = native }
 }
 
 /** One live row per canonical state in the live default sidebar; the scheme themes the story root, as the app themes its shell. */
@@ -211,7 +246,8 @@ export const TwoLineAndNesting: Story = {
 
 export const RowActions: Story = {
   tags: ['critical'], name: 'Row actions · shared menu and reported details',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed rows with and without conversations exercise pointer and keyboard menus, details dialogs and clipping boundaries.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed rows with and without conversations, a parent of only display-only subagents and a refused folder exercise pointer and keyboard menus, details dialogs, clipping boundaries, display-only arrow navigation, a fine → coarse → fine pointer change and an inline folder retry.' } },
+  beforeEach: servePointerMedia,
   args: { row: base },
   render: () => <main {...stylex.props(styles.root)}><ThemePortal><div {...stylex.props(styles.clipped)}><TreeWithActions /></div></ThemePortal></main>,
   play: async ({ canvasElement }) => {
@@ -267,6 +303,71 @@ export const RowActions: Story = {
       await userEvent.keyboard('{Escape}')
       await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
     }
+    const row = (title: string) => within(host).getByRole('row', { name: title })
+    // Mixed children: the parent collapses, re-expands keeping focus, then enters its first enabled child past the
+    // display-only first one.
+    row(parent.title).focus()
+    await userEvent.keyboard('{ArrowLeft}')
+    await waitFor(() => expect(row(parent.title)).toHaveAttribute('aria-expanded', 'false'))
+    await userEvent.keyboard('{ArrowRight}')
+    await waitFor(() => expect(row(parent.title)).toHaveAttribute('aria-expanded', 'true'))
+    await expect(row(parent.title)).toHaveFocus()
+    await userEvent.keyboard('{ArrowRight}')
+    await waitFor(() => expect(row(parent.children[1]!.title)).toHaveFocus())
+    // Only display-only children: the parent expands and keeps focus on every further expand key, and navigation
+    // continues from it.
+    const onlyDisplay = displayOnlyParentRow.title
+    row(onlyDisplay).focus()
+    for (const _ of [0, 1, 2]) {
+      await userEvent.keyboard('{ArrowRight}')
+      await waitFor(() => expect(row(onlyDisplay)).toHaveAttribute('aria-expanded', 'true'))
+      await expect(row(onlyDisplay)).toHaveFocus()
+      await expect(row(displayOnlyParentRow.children[0]!.title)).not.toHaveFocus()
+    }
+    await userEvent.keyboard('{ArrowUp}')
+    await waitFor(() => expect(row(retryFolder.textValue)).toHaveFocus())
+    // Pointer changes reach rows in the root Tree (the top parent and folder) and in the folder's nested Collection.
+    const box = (element: Element) => element.getBoundingClientRect()
+    const hit = (element: Element) => { const { left, right, top, bottom } = box(element); return document.elementFromPoint((left + right) / 2, (top + bottom) / 2)! }
+    const content = (title: string) => row(title).querySelector(title === retryFolder.textValue ? '[data-folder-label]' : '[data-milestone-row]')!
+    const parents = [parent.title, onlyDisplay, retryFolder.textValue]
+    const fine = async () => {
+      for (const title of parents) {
+        await waitFor(() => expect(row(title).querySelector('[data-sidebar-header-toggle], [data-sidebar-disclosure="trailing"]')).toBeNull())
+        const chevron = row(title).querySelector('[data-sidebar-disclosure="leading"]')!
+        // The desktop 16px × 24px gutter chevron, with the row's content starting right after the gutter.
+        await expect({ width: box(chevron).width, height: box(chevron).height }).toEqual({ width: 16, height: 24 })
+        await expect(Math.abs(box(content(title)).left - box(chevron).right)).toBeLessThanOrEqual(0.5)
+      }
+    }
+    await fine()
+    pointerMedia.emulate(true)
+    for (const title of [parent.title, onlyDisplay]) {
+      const disclosure = await waitFor(() => { const element = row(title).querySelector('[data-sidebar-disclosure="trailing"]'); expect(element).not.toBeNull(); return element! })
+      await expect(row(title).querySelector('[data-sidebar-disclosure="leading"]')).toBeNull()
+      await expect(box(disclosure).width).toBeGreaterThanOrEqual(44)
+      await expect(box(disclosure).height).toBeGreaterThanOrEqual(44)
+    }
+    const header = await waitFor(() => { const element = row(retryFolder.textValue).querySelector('[data-sidebar-header-toggle]'); expect(element).not.toBeNull(); return element! })
+    await expect(box(header).height).toBeGreaterThanOrEqual(44)
+    // The inline retry stays a 44px target above the whole-row header: a tap retries and never toggles the folder.
+    const retry = within(row(retryFolder.textValue)).getByRole('button', { name: 'Try again' })
+    await expect(box(retry).width).toBeGreaterThanOrEqual(44)
+    await expect(box(retry).height).toBeGreaterThanOrEqual(44)
+    await expect(retry.contains(hit(retry))).toBe(true)
+    await tap(hit(retry))
+    await waitFor(() => expect(host).toHaveAttribute('data-retries', '1'))
+    await expect(row(retryFolder.textValue)).toHaveAttribute('aria-expanded', 'true')
+    // The header's own text is still the disclosure.
+    const label = row(retryFolder.textValue).querySelector('[data-folder-label]')!
+    await expect(header.contains(hit(label))).toBe(true)
+    await tap(hit(label))
+    await waitFor(() => expect(row(retryFolder.textValue)).toHaveAttribute('aria-expanded', 'false'))
+    await expect(host).toHaveAttribute('data-retries', '1')
+    await tap(hit(row(retryFolder.textValue).querySelector('[data-folder-label]')!))
+    await waitFor(() => expect(row(onlyDisplay)).toBeVisible())
+    pointerMedia.emulate(false)
+    await fine()
   },
 }
 
@@ -484,6 +585,8 @@ const styles = stylex.create({
   phoneColumn: { width: '100%' },
   // Starts at the tree's content edge, so the label's x is the 16px disclosure gutter.
   folderLabel: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
+  folderRow: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
+  folderStatus: { display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, color: ink.fgMuted, fontSize: t.denseSize },
   clipped: { width: g.sidebarDefault, overflow: 'hidden', transform: 'translateX(0)' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
