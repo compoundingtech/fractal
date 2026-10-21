@@ -251,11 +251,11 @@ describe('sidebar retained mission feed plumbing', () => {
   it('updates mission and waiting context independently of an unchanged agent roster', () => {
     const registry = AtomRegistry.make()
     const native = decodeUnknownSync(Agent, 'strict')({
-      kind: 'agent', id: 'agent/build-1/worker', name: 'Worker', host_id: 'host/build-1',
+      kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
       runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1',
       updated_at: '2026-10-20T12:00:00Z',
       current_work: [{
-        id: 'work/build-1/review', mission_id: mission.id, mission_run_id: 'mission-run/build-1/run',
+        id: 'work/example/review', mission_id: mission.id, mission_run_id: 'mission-run/example/run',
         path: 'review', title: 'Review changes', state: 'claimed', since: '2026-10-20T12:00:00Z',
       }],
     } satisfies AgentEncoded)
@@ -282,7 +282,7 @@ describe('sidebar retained mission feed plumbing', () => {
       registry.set(missions, observed({ value: [{ ...mission, title: 'Actual published title' }] }))
       render()
       expect(context).toMatchObject({ slug: mission.id.split('/').at(-1) })
-      const run = { ...mission.run_details![0]!, id: 'mission-run/build-1/run' as const, generation_id: undefined,
+      const run = { ...mission.run_details![0]!, id: 'mission-run/example/run' as const, generation_id: undefined,
         progress: { done: 1, total: 4 } }
       const hydrated = { ...mission, run_generations: {}, run_details: [run] }
       registry.set(missions, observed({ value: [hydrated] }))

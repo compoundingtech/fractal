@@ -11,7 +11,7 @@ import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
+import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import * as dataHooks from '../data/react.tsx'
@@ -19,6 +19,7 @@ import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
 import type { ConnectionState } from '@fractal/sdk/effect'
+import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -77,6 +78,79 @@ const mount = async (width: number) => {
 const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
+
+it.each(['missions', 'attention'] as const)('retains %s freshness, failures and observed time in mission rows and tree names', async family => {
+  const mission = fixtureMissions[0]!
+  const runId = 'mission-run/example/review'
+  const hydrated: Mission = { ...mission, run_generations: {}, run_details: [{
+    ...mission.run_details![0]!, id: runId, generation_id: undefined, progress: { done: 2, total: 5 },
+  }] }
+  const seat = openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
+    runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
+    blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z',
+    current_work: [{ id: 'work/example/review', mission_id: mission.id, mission_run_id: runId,
+      path: 'review', title: 'Review changes', state: 'claimed', since: '2026-10-20T12:00:00Z' }],
+  }))
+  const question: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
+    actions: ['work.done'], conversation_id: seat.id, detail: 'Ship the reviewed change?', update: undefined }
+  const missionValues = [hydrated]
+  const attentionValues = [question]
+  const missions = Atom.make<Feed<readonly Mission[]>>(observed({ value: missionValues })).pipe(Atom.keepAlive)
+  const attention = Atom.make<Feed<readonly Attention[]>>(observed({ value: attentionValues })).pipe(Atom.keepAlive)
+  const missionsSync = Atom.make<FeedSync<readonly Mission[]>>({
+    last: Option.some({ value: missionValues, observedAt: 2000 }),
+    sync: { status: { _tag: 'Live', since: 2000 }, observedAt: 2000 },
+  }).pipe(Atom.keepAlive)
+  const attentionSync = Atom.make<FeedSync<readonly Attention[]>>({
+    last: Option.some({ value: attentionValues, observedAt: 3000 }),
+    sync: { status: { _tag: 'Live', since: 3000 }, observedAt: 3000 },
+  }).pipe(Atom.keepAlive)
+  source = { ...source, missions, attention, sync: { ...source.sync!, missions: missionsSync, attention: attentionSync } }
+  registry.set(agents, observed({ value: [seat] }))
+  await mount(1440)
+  const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
+  const expected = `Worker, Working, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
+  expect(row().getAttribute('aria-label')).toBe(expected)
+  expect(row().querySelector('[data-mission-progress="2/5"]')).not.toBeNull()
+  expect(row().querySelector('[data-row-field="host"]')).toBeNull()
+  await act(async () => {
+    if (family === 'missions') {
+      registry.set(missions, observed({ value: missionValues, freshness: 'stale' }))
+      registry.set(missionsSync, { ...registry.get(missionsSync),
+        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: 4000 } })
+    } else {
+      registry.set(attention, observed({ value: attentionValues, freshness: 'stale' }))
+      registry.set(attentionSync, { ...registry.get(attentionSync),
+        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: 4000 } })
+    }
+  })
+  expect(row().getAttribute('aria-label')).toBe(`${expected}, mission info may be out of date`)
+  expect(row().querySelector('[data-mission-info="stale"]')).not.toBeNull()
+  expect(row().querySelector('[data-mission-updated-at="2000"]')).not.toBeNull()
+  await act(async () => {
+    const sync = { status: { _tag: 'Failed', cause: { _tag: 'Unknown' } }, observedAt: 4500 } as const
+    if (family === 'missions') registry.set(missionsSync, { ...registry.get(missionsSync), sync })
+    else registry.set(attentionSync, { ...registry.get(attentionSync), sync })
+  })
+  expect(row().getAttribute('aria-label')).toBe(`${expected}, mission info may be out of date`)
+  expect(row().querySelector('[data-mission-info="failed"]')).not.toBeNull()
+  expect(row().querySelector('[data-mission-updated-at="2000"]')).not.toBeNull()
+  await act(async () => {
+    const missing = { _tag: 'Unavailable', reason: 'failed', detail: 'Follow failed before a value was available' } as const
+    if (family === 'missions') {
+      registry.set(missions, missing)
+      registry.set(missionsSync, { ...registry.get(missionsSync), last: Option.none() })
+    } else {
+      registry.set(attention, missing)
+      registry.set(attentionSync, { ...registry.get(attentionSync), last: Option.none() })
+    }
+  })
+  expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+  expect(row().querySelector('[data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
+  expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
+})
 
 it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {
   if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })

@@ -53,8 +53,19 @@ function usageText(usage: Extract<Row['usage'], { _tag: 'Known' }>): string {
   return `${usage.usd === undefined ? '' : `$${usage.usd} / `}${usage.tokens} tokens; ${usageScopeLabel(usage.scope).toLowerCase()}`
 }
 export const sidebarRowTitle = (row: Row): string => row.title
-/** Name for a focusable tree row whose host cannot attach a description (RAC TreeItem drops aria-describedby): the visible title first (label-in-name), then the status. */
-export const sidebarRowAccessibleName = (row: Row): string => `${row.title}, ${row.statusLabel}`
+/** Concise label-in-name for the tree host, which cannot attach a row description. */
+export const sidebarRowAccessibleName = (row: Row): string => {
+  const parts = [row.title, row.statusLabel]
+  if (row.missionContext?._tag === 'Mission') {
+    const { slug, progress, step } = row.missionContext
+    parts.push(`Mission ${slug}`)
+    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    if (step._tag === 'Step') parts.push(`Step ${step.name}`)
+    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    if (row.missionInfo !== undefined && row.missionInfo._tag !== 'Live') parts.push('mission info may be out of date')
+  }
+  return parts.join(', ')
+}
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */
 export function sidebarRowDescription(row: Row): string {
   const parts: string[] = [row.title]

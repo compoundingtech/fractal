@@ -1,12 +1,47 @@
 import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@fractal/ui/assistant-ui'
-import { statuses } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
-import type { Agent } from '../data/source.ts'
+import { statuses, type SidebarMissionInfo } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import type { Agent, DataSource, Feed } from '../data/source.ts'
+import type { FeedSync } from '../data/feedSync.ts'
+import * as Atom from 'effect/reactivity/Atom'
 import type { AgentSubagent } from '../data/source.ts'
 import type { Attention, Mission } from '@fractal/client/schema'
 import * as Option from 'effect/Option'
 import { isWaitingForAnswer } from '../data/attention.ts'
 
 const missionSlug = (id: string): string => id.split('/').at(-1) ?? id
+
+/** Preserve independent feed verdicts; only retained Observed events supply update times. */
+export const sidebarMissionFeeds = ({ missions, attention, missionsSync, attentionSync }: {
+  readonly missions: Feed<readonly Mission[]>
+  readonly attention: Feed<readonly Attention[]>
+  readonly missionsSync?: FeedSync<readonly Mission[]>
+  readonly attentionSync?: FeedSync<readonly Attention[]>
+}) => {
+  const feeds = [missions, attention]
+  const syncs = [missionsSync, attentionSync]
+  const failed = feeds.some(feed => feed._tag === 'Unavailable' || (feed._tag === 'Observed' && feed.error !== undefined)) ||
+    syncs.some(sync => sync?.sync.status._tag === 'Failed')
+  const stale = feeds.some(feed => feed._tag !== 'Observed' || feed.freshness === 'stale') ||
+    syncs.some(sync => sync !== undefined && sync.sync.status._tag !== 'Live')
+  const times = syncs.flatMap(sync => sync?.last._tag === 'Some' ? [sync.last.value.observedAt] : [])
+  const updatedAt = times.length === 0 ? undefined : Math.min(...times)
+  const missionInfo: SidebarMissionInfo = failed ? { _tag: 'Failed', updatedAt } :
+    stale ? { _tag: 'Stale', updatedAt } : { _tag: 'Live' }
+  return {
+    missions: missions._tag === 'Observed' ? missions.value : undefined,
+    attention: attention._tag === 'Observed' ? attention.value : undefined,
+    missionInfo,
+    missionUnavailable: feeds.some(feed => feed._tag === 'Unavailable') ||
+      syncs.some((sync, index) => sync?.sync.status._tag === 'Failed' && feeds[index]?._tag !== 'Observed'),
+  }
+}
+
+/** Mounted only by sidebar rows and their accessible-name projection, never the workspace. */
+export const sidebarMissionFeedsAtom = (source: DataSource) => Atom.make(get => sidebarMissionFeeds({
+  missions: get(source.missions), attention: get(source.attention),
+  missionsSync: source.sync === undefined ? undefined : get(source.sync.missions),
+  attentionSync: source.sync === undefined ? undefined : get(source.sync.attention),
+}))
 
 /** Join retained feeds only: no per-seat read, queue-size estimate, or synthetic decision handle. */
 export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: {
@@ -61,9 +96,10 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
 })
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
-export const sidebarRow = ({ agent, stale, needsMe, missions, attention }: {
+export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false }: {
   readonly agent: Agent; readonly stale: boolean; readonly needsMe?: boolean
   readonly missions?: readonly Mission[]; readonly attention?: readonly Attention[]
+  readonly missionInfo?: SidebarMissionInfo; readonly missionUnavailable?: boolean
 }): SidebarAgentRowData => {
   const status: SidebarAgentStatus = agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
@@ -82,7 +118,8 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention }: {
     statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
     freshness: stale ? 'stale' : 'live', description: agent.description, harness: agent.harness,
     terminal: agent.terminal || undefined, mission: agent.mission, lastActivityAt, statusSince,
-    missionContext: sidebarMissionContext({ agent, missions, attention }),
+    missionContext: missionUnavailable ? { _tag: 'None' } : sidebarMissionContext({ agent, missions, attention }),
+    missionInfo,
     needsMe,
     childrenKnown: agent.subagents !== undefined,
     children: agent.subagents?.map(child => sidebarSubagentRow({ parent: agent, child, stale })) ?? [],

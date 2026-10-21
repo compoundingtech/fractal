@@ -1,3 +1,6 @@
+import * as React from 'react'
+import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
+import { sidebarRowAccessibleName } from './SidebarAgentRow'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useScenarioSlice, type WireSlice } from '@fractal/scenarios/react'
@@ -47,11 +50,20 @@ const scenarioRows = ({ loading, state }: WireSlice<'roster'>): readonly Row[] =
   })
 }
 
+interface ScenarioTreeItem extends SidebarTreeItem<ScenarioTreeItem> {
+  readonly row: Row
+}
+
 function ScenarioRosterStory({ scheme }: { readonly scheme: Scheme }) {
   const roster = useScenarioSlice('roster', scenarioRows)
+  const [expandedKeys, setExpandedKeys] = React.useState<Set<string | number>>(() => new Set())
+  const items = React.useMemo((): readonly ScenarioTreeItem[] => roster.map(row => ({
+    id: row.id, depth: 0, textValue: row.title, accessibleName: sidebarRowAccessibleName(row), row,
+  })), [roster])
   return <main data-testid="scenario-mission-roster" {...stylex.props(styles.root, scheme === 'light' && lightTheme)}>
     <ThemePortal><section aria-label="Scenario roster" {...stylex.props(styles.column)}>
-      {roster.map(item => <MilestoneAgentRow key={item.ref} row={item} />)}
+      <SidebarTree items={items} aria-label="Scenario agents" expandedKeys={expandedKeys} onExpandedChange={setExpandedKeys}
+        renderRow={item => <MilestoneAgentRow row={item.row} />} />
     </section></ThemePortal>
   </main>
 }
@@ -70,16 +82,25 @@ export const ScenarioRoster: StoryObj<Args> = {
   name: 'Scenario roster · current mission work',
   play: async ({ canvasElement }) => {
     const roster = await within(canvasElement).findByRole('region', { name: 'Scenario roster' })
-    await waitFor(() => expect(roster.querySelectorAll('[data-milestone-row]').length).toBeGreaterThan(0))
-    await expect(roster.querySelectorAll('[data-mission-pill]').length).toBeGreaterThan(0)
-    for (const pill of roster.querySelectorAll('[data-mission-pill]')) {
-      await expect(pill.closest('[data-row-column="line2"]')?.querySelector('[data-row-field="step"]')).not.toBeNull()
+    const tree = await within(roster).findByRole('treegrid', { name: 'Scenario agents' })
+    await waitFor(() => expect(within(tree).getAllByRole('row').length).toBeGreaterThan(0))
+    const missionRows = within(tree).getAllByRole('row').filter(row => row.querySelector('[data-mission-pill]') !== null)
+    await expect(missionRows.length).toBeGreaterThan(0)
+    for (const row of missionRows) {
+      const pill = row.querySelector('[data-mission-pill]')!
+      const title = row.querySelector('[data-row-column="title"]')!.textContent!.trim()
+      const step = row.querySelector('[data-row-field="step"]')!.textContent!.trim()
+      const slug = pill.getAttribute('data-mission-pill')!
+      const status = row.querySelector('[data-milestone-row]')!.getAttribute('data-status') as AgentStatus
+      await expect(row.getAttribute('aria-label')?.startsWith(`${title}, `)).toBe(true)
+      await expect(row).toHaveAccessibleName(`${title}, ${statuses[status].label}, Mission ${slug}, Step ${step}`)
       await expect(pill.querySelector('[data-mission-progress]')).toBeNull()
+      await expect(row.getAttribute('aria-label')).not.toMatch(/\d+ of \d+ steps/)
     }
   },
 }
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  column: { display: 'flex', flexDirection: 'column', gap: s.xs2, width: g.sidebarDefault, boxSizing: 'border-box', padding: s.md, backgroundColor: surface.sidebar },
+  column: { height: '640px', minHeight: 0, width: g.sidebarDefault, boxSizing: 'border-box', padding: s.md, backgroundColor: surface.sidebar },
 })
