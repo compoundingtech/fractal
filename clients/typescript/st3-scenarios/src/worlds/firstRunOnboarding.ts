@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { child } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { terminalRecord } from '../kit/factories/terminalRecord.ts'
@@ -61,3 +62,5 @@ export const syntheticFirstRunOnboarding: WorldDefinition = {
 }
 
 export const firstRunOnboarding: WorldDefinition = adoptNarrativeRecording(syntheticFirstRunOnboarding)
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

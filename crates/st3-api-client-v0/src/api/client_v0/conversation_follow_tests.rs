@@ -434,6 +434,7 @@ fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
                 &fixture.session_id,
                 resolved.managed.as_ref(),
                 Some(&source),
+                CLIENT_MAX_PAGE_ITEMS,
             )
             .unwrap();
             assert!(native);
@@ -518,7 +519,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
         "control: the stored projection has an incomplete-history notice"
     );
     let (start, page) =
-        conversation_open_local(&fixture.state, &session, &fixture.session_id).unwrap();
+        conversation_open_local(&fixture.state, &session, &fixture.session_id, 200).unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
     assert!(!has_stored_availability_notice(&page));
     assert!(page["items"].as_array().unwrap().iter().all(|item| {
@@ -557,6 +558,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
         &fixture.session_id,
         resolved.managed.as_ref(),
         Some(&source),
+        CLIENT_MAX_PAGE_ITEMS,
     )
     .unwrap();
     assert!(native);

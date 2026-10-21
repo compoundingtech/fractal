@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { child } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { diff } from '../kit/factories/diff.ts'
@@ -69,3 +70,5 @@ export const syntheticMergeConflictStandoff: WorldDefinition = {
 }
 
 export const mergeConflictStandoff: WorldDefinition = adoptNarrativeRecording(syntheticMergeConflictStandoff)
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

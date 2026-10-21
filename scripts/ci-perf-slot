@@ -47,7 +47,7 @@ Measuring a change (docs/ci.md, "Performance gate")
   budget, and the daemon's CPU in cores. The budgets that apply are the absolute p99 budget of
   every request and the 2-core CPU ceiling (slo/targets.toml); locally there is no baseline, so
   those are the whole gate. CI adds the relative gate, twice the worst of main's last five
-  reports, when your PR runs Performance. A run that misses a budget fails; do not retry it into
+  reports, when you dispatch Performance on your branch. A run that misses a budget fails; do not retry it into
   passing, find the cause.
 
 Evidence for the PR

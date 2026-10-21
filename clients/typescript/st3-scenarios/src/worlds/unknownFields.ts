@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { child, scenarioId } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { terminalRecord } from '../kit/factories/terminalRecord.ts'
@@ -118,3 +119,5 @@ export const unknownFields: WorldDefinition = {
     }
   },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

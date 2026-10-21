@@ -42,10 +42,25 @@ impl CoordinationStore for Store {
              FROM coordination_sends INDEXED BY coordination_sends_time WHERE sent_ms>=?1 AND sent_ms<?2",
             params![i64::try_from(since).unwrap_or(i64::MAX), i64::try_from(until).unwrap_or(i64::MAX)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         )?;
+        let merged = merged_pull_requests(&connection, since, until)?;
+        // Messages per landed change: unknown while the counts are incomplete or nothing merged.
+        let per_merged = (complete && merged > 0).then(|| agents as f64 / merged as f64);
         Ok(
-            json!({"since_ms":since,"until_ms":until,"agent_to_agent":agents,"silent":silent,"to_person":people,"complete":complete,"cursor":cursor,"ceiling":ceiling,"progress_ms":progress}),
+            json!({"since_ms":since,"until_ms":until,"agent_to_agent":agents,"silent":silent,"to_person":people,"merged_pull_requests":merged,"agent_to_agent_per_merged_pull_request":per_merged,"complete":complete,"cursor":cursor,"ceiling":ceiling,"progress_ms":progress}),
         )
     }
+}
+
+/// Pull requests this daemon has observed merging in the period, from the latest observation of
+/// each, so a pull request counts once. One that merged unobserved is not counted.
+fn merged_pull_requests(connection: &rusqlite::Connection, since: u64, until: u64) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT COUNT(*) FROM (SELECT CAST(round((julianday(json_extract(facts,'$.merged_at'))-2440587.5)*86400000) AS INTEGER) AS merged_ms
+             FROM resource_observations INDEXED BY resource_observations_kind WHERE kind='vcs.pull-request')
+         WHERE merged_ms>=?1 AND merged_ms<?2",
+        params![i64::try_from(since).unwrap_or(i64::MAX), i64::try_from(until).unwrap_or(i64::MAX)],
+        |row| row.get(0),
+    )?)
 }
 
 
@@ -113,6 +128,65 @@ mod tests {
                 .any(|row| row.contains("COVERING INDEX coordination_sends_time")),
             "{plan:?}"
         );
+    }
+
+    #[test]
+    fn counts_agent_messages_per_pull_request_merged_in_the_period() {
+        let store = Store::open_memory("node").unwrap();
+        let claim = |subject: &str, kind: &str, fields: Value| ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let pull = |number: u32, merged_at: Value| {
+            claim(
+                &format!("resource/github/acme/app/pull-request/{number}"),
+                "resource.observed",
+                json!({"kind": "vcs.pull-request", "facts": {"number": number, "merged_at": merged_at}}),
+            )
+        };
+        let since = 1_791_244_800_000; // 2026-10-06T00:00:00Z
+        let until = since + 86_400_000;
+        store.append_claim(&pull(1, json!(null))).unwrap();
+        // Merged in the period, observed twice: one pull request.
+        store.append_claim(&pull(1, json!("2026-10-06T00:00:00Z"))).unwrap();
+        store.append_claim(&pull(2, json!("2026-10-06T00:00:00Z"))).unwrap();
+        store.append_claim(&pull(3, json!("2026-10-06T23:59:59.999Z"))).unwrap();
+        store.append_claim(&pull(4, json!("2026-10-07T00:00:00Z"))).unwrap();
+        store.append_claim(&pull(5, json!("2026-10-05T23:59:59Z"))).unwrap();
+        store.append_claim(&pull(6, json!(null))).unwrap();
+        let counts = store.coordination_counts(since, until).unwrap();
+        assert_eq!(counts["merged_pull_requests"], 3);
+        assert_eq!(counts["agent_to_agent_per_merged_pull_request"], 0.0);
+        let nothing_merged = store.coordination_counts(since - 86_400_000, since - 1_000).unwrap();
+        assert_eq!(nothing_merged["merged_pull_requests"], 0);
+        assert_eq!(nothing_merged["agent_to_agent_per_merged_pull_request"], Value::Null);
+
+        let now = chrono::Utc::now();
+        for n in 0..6 {
+            store
+                .append_claim(&ClaimInput {
+                    actor: Some("agent/example/writer".into()),
+                    ..claim(
+                        &format!("message/per-pull-{n}"),
+                        "message.sent",
+                        json!({"status": "sent", "from": "agent/example/writer", "to": "agent/example/reader", "content": "merged"}),
+                    )
+                })
+                .unwrap();
+        }
+        store.append_claim(&pull(8, json!(now.to_rfc3339()))).unwrap();
+        store.append_claim(&pull(9, json!(now.to_rfc3339()))).unwrap();
+        let now = now.timestamp_millis() as u64;
+        let counts = store.coordination_counts(now - 60_000, now + 60_000).unwrap();
+        assert_eq!(counts["complete"], true);
+        assert_eq!(counts["agent_to_agent"], 6);
+        assert_eq!(counts["merged_pull_requests"], 2);
+        assert_eq!(counts["agent_to_agent_per_merged_pull_request"], 3.0);
     }
 
     #[test]

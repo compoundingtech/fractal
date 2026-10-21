@@ -4557,10 +4557,12 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         if Instant::now() >= deadline {
             panic!(
                 "timed out waiting until jade records its removal after the sponsor restarted\n\
-                 jade's view of amber: {}\njade fleet status: {}\namber fleet status: {}",
+                 jade's view of amber: {}\njade fleet status: {}\namber fleet status: {}\n{}\n{}",
                 peer_status(&jade, "fixture-amber"),
                 String::from_utf8_lossy(&jade.st(&["--json", "fleet", "status"]).stdout),
                 String::from_utf8_lossy(&amber.st(&["--json", "fleet", "status"]).stdout),
+                jade.logs(),
+                amber.logs(),
             );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
