@@ -38,7 +38,7 @@ jobs:
         id: scope
         env:
           GH_TOKEN: ${{ github.token }}
-          STORYBOOK_PATHS: '["packages/fractal-ui/**","apps/fractal-web/**","clients/typescript/st3-client/**","clients/typescript/st3-views/**","clients/typescript/st3-scenarios/**","docs/st3/client-v0/schemas/**","fixtures/**","**/package.json*","**/pnpm-workspace.yaml*","**/pnpm-lock.yaml","**/tsconfig*.json*",".npmrc","pnpm-install-contract.json*","pnpm-source-inputs.json*","megarepo.kdl","megarepo.lock","flake.nix","flake.lock","nix/**","genie/**","scripts/**","infra/storybook/**",".github/workflows/storybook-deploy.yml*",".github/workflows/workspace-ci.ts",".github/workflows/cache-audit.ts"]'
+          STORYBOOK_PATHS: '["packages/fractal-ui/**","apps/fractal-web/**","clients/typescript/fractal-client/**","clients/typescript/fractal-views/**","clients/typescript/fractal-scenarios/**","docs/st3/client-v0/schemas/**","fixtures/**","**/package.json*","**/pnpm-workspace.yaml*","**/pnpm-lock.yaml","**/tsconfig*.json*",".npmrc","pnpm-install-contract.json*","pnpm-source-inputs.json*","megarepo.kdl","megarepo.lock","flake.nix","flake.lock","nix/**","genie/**","scripts/**","infra/storybook/**",".github/workflows/storybook-deploy.yml*",".github/workflows/workspace-ci.ts",".github/workflows/cache-audit.ts"]'
         run: |
           python3 - <<'STORYBOOK_CHANGES_PY'
           #!/usr/bin/env python3
@@ -163,7 +163,7 @@ jobs:
           nix develop .#web --command bash -euo pipefail -c '
           pnpm install --frozen-lockfile
           node apps/fractal-web/scripts/changelog-registry.mjs
-          pnpm --filter @smalltalk/fractal-ui build-storybook
+          pnpm --filter @fractal/ui build-storybook
           '
       - name: Deploy Storybook and publish its URLs
         if: steps.credentials.outputs.enabled == 'true'

@@ -1,5 +1,5 @@
 {
-  "name": "@smalltalk/storybook-deploy",
+  "name": "@fractal/storybook-deploy",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.7.0",

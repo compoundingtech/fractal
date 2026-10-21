@@ -8,9 +8,9 @@ import { auditCaches } from './cache-audit.ts'
 const paths = [
   'packages/fractal-ui/**',
   'apps/fractal-web/**',
-  'clients/typescript/st3-client/**',
-  'clients/typescript/st3-views/**',
-  'clients/typescript/st3-scenarios/**',
+  'clients/typescript/fractal-client/**',
+  'clients/typescript/fractal-views/**',
+  'clients/typescript/fractal-scenarios/**',
   'docs/st3/client-v0/schemas/**',
   'fixtures/**',
   '**/package.json*',
@@ -124,7 +124,7 @@ export default githubWorkflow(auditCaches({
           run: `nix develop .#web --command bash -euo pipefail -c '
 pnpm install --frozen-lockfile
 node apps/fractal-web/scripts/changelog-registry.mjs
-pnpm --filter @smalltalk/fractal-ui build-storybook
+pnpm --filter @fractal/ui build-storybook
 '`,
         },
         {

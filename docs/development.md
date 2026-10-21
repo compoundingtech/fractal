@@ -203,7 +203,7 @@ captured changes, composer, arrangements, roster and terminal attachment.
 ### Storybook deployment
 
 The UI component reference targets [storybook.compounding.tech](https://storybook.compounding.tech).
-Its Alchemy v2 stack lives in `infra/storybook` (`@smalltalk/storybook-deploy`).
+Its Alchemy v2 stack lives in `infra/storybook` (`@fractal/storybook-deploy`).
 The separate [deployment workflow](ci.md#storybook-deployment) is not a required
 check: main deploys stage `main`, non-draft same-repository pull requests deploy
 isolated `pr-N` stages, and closing or merging a pull request destroys its stage,
@@ -270,7 +270,7 @@ nix develop .#web
 pnpm install --frozen-lockfile
 pnpm --dir infra/storybook install --frozen-lockfile
 node apps/fractal-web/scripts/changelog-registry.mjs
-pnpm --filter @smalltalk/fractal-ui build-storybook
+pnpm --filter @fractal/ui build-storybook
 pnpm --dir infra/storybook run deploy --stage main
 ```
 
