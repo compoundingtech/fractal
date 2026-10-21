@@ -3,8 +3,8 @@ import { ActionSheetIOS, Alert, Modal, PanResponder, Pressable, RefreshControl, 
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
-import { openAlerts } from '@smalltalk/st3-views';
-import type { ArrangementOperation } from '../../../clients/typescript/st3-client';
+import { openAlerts } from '@fractal/views';
+import type { ArrangementOperation } from '../../../clients/typescript/fractal-client';
 import { Banners, StatusLine, useListsOnFocus, useMissionsOnFocus } from '../chrome';
 import { agentGlyph, agentRows } from '../agentsView';
 import { missionTitle, missionWord, wordStyle } from '../missionsView';

@@ -1,4 +1,4 @@
-import { ResourceObservation } from '@smalltalk/st3-client/schema'
+import { ResourceObservation } from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 

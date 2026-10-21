@@ -6,7 +6,7 @@ import { performance as timing } from 'node:perf_hooks'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Atom from 'effect/reactivity/Atom'
 import { setTimeout as delay } from 'node:timers/promises'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import { expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -70,7 +70,7 @@ it.each(['switch completion', 'switch abandonment', 'direct-open abandonment'] a
       expect(window.location.pathname).toBe('/w/agent/second')
     }
     if (abandoned) {
-      const usage = [...host.querySelectorAll<HTMLButtonElement>('aside button')].find(button => button.textContent === 'Usage')!
+      const usage = [...host.querySelectorAll<HTMLButtonElement>('aside button')].find(button => button.getAttribute('aria-label') === 'Usage')!
       await act(async () => usage.click())
       expect(timing.getEntriesByName('fractal:switch_to_tail:start')).toHaveLength(0)
       expect(timing.getEntriesByName('fractal:open_transcript:start')).toHaveLength(0)
