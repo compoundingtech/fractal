@@ -1573,6 +1573,11 @@ pub async fn observe_at(
         ).await?;
         facts.insert(super::github_workflows::PERFORMANCE_FAILURES_FIELD.into(),
             serde_json::to_value(failures)?);
+        // The same observer, token and cadence read Workspace CI's recent runs for `st slo`. They
+        // are kept in memory only, never in the facts, and a failed read never fails this one.
+        super::github_workflows::observe_workspace_ci(
+            &client, &base, &repository, token, cache_for, now_ms() as u64,
+        ).await;
     }
     Ok(ProviderObservation {
         facts: Value::Object(facts),
@@ -2453,6 +2458,12 @@ mod tests {
     const WORKFLOW_RUNS: &str = "/repos/acme/garden/actions/workflows/perf.yml/runs?branch=main&event=push&status=failure&per_page=100";
     const DAILY_RUNS: &str = "/repos/acme/garden/actions/workflows/daily-long.yml/runs?branch=main&status=failure&per_page=100";
 
+    /// The requests other than the Workspace CI run reads, which these fixtures answer 404: a
+    /// failed read of them leaves the observation as it was.
+    fn without_workspace_ci(requests: Vec<String>) -> Vec<String> {
+        requests.into_iter().filter(|request| !request.contains("/fleet.yml/")).collect()
+    }
+
     fn daily_run(id: u64, attempt: u64, event: &str) -> Value {
         json!({"id": id, "run_attempt": attempt, "head_sha": "d".repeat(40),
             "name": "Daily long lanes", "path": ".github/workflows/daily-long.yml", "event": event,
@@ -2500,16 +2511,57 @@ mod tests {
         assert_eq!(failures[1]["run_attempt"], 2);
         assert_eq!(failures[1]["workflow_path"], ".github/workflows/perf.yml");
         assert_eq!(failures[0]["url"], "https://github.com/acme/garden/actions/runs/7");
-        assert_eq!(github.take_requests(), vec!["GET /repos/acme/garden HTTP/1.1".to_owned(),
+        assert_eq!(without_workspace_ci(github.take_requests()), vec!["GET /repos/acme/garden HTTP/1.1".to_owned(),
             format!("GET {WORKFLOW_RUNS} HTTP/1.1"), format!("GET {DAILY_RUNS} HTTP/1.1")]);
         assert!(failures.iter().all(|failure| failure.get("failed_jobs").is_none()));
         let second = observe_at(request(&[field], first.cursor.as_deref(), Some(first.facts.clone())),
             &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
         assert_eq!(second.facts, first.facts);
-        let revalidated = github.requests.lock().clone();
+        let revalidated = without_workspace_ci(github.requests.lock().clone());
         assert_eq!(revalidated.len(), 3);
         assert!(revalidated.iter().all(|head| head.to_ascii_lowercase().contains("if-none-match:")));
         assert!(github.graphql_requests.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_ci_runs_are_read_with_performance_failures_and_kept_out_of_the_facts() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));
+        github.route(WORKFLOW_RUNS, json!({"workflow_runs": [workflow_run(7, 1)]}));
+        github.route(DAILY_RUNS, json!({"workflow_runs": []}));
+        let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
+        // Without Workspace CI routes the reads fail, and the observation is what it was.
+        let without = observe_at(request(&[field], None, None), &base,
+            Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        let since = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            chrono::Utc::now().timestamp_millis() - 86_400_000).unwrap().format("%Y-%m-%d");
+        let pulls = format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?event=pull_request&status=success&created=%3E%3D{since}&per_page=100");
+        let groups = format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?event=merge_group&status=completed&created=%3E%3D{since}&per_page=100");
+        let run = |id: u64, event: &str, branch: &str, conclusion: &str| json!({"id": 9_000_000 + id,
+            "name": "Workspace CI", "path": ".github/workflows/fleet.yml", "event": event,
+            "head_branch": branch, "status": "completed", "conclusion": conclusion,
+            "created_at": "2026-10-20T10:00:00Z", "run_started_at": "2026-10-20T10:00:30Z",
+            "updated_at": "2026-10-20T10:09:00Z", "repository": {"full_name": "acme/garden"}});
+        github.route(&pulls, json!({"total_count": 2, "workflow_runs": [
+            run(1, "pull_request", "feature", "success"),
+            run(2, "pull_request", "gh-readonly-queue/main/pr-4-abc", "success")]}));
+        github.route(&groups, json!({"total_count": 2, "workflow_runs": [
+            run(3, "merge_group", "gh-readonly-queue/main/pr-4-abc", "success"),
+            run(4, "merge_group", "gh-readonly-queue/main/pr-5-def", "failure")]}));
+        github.take_requests();
+        let with = observe_at(request(&[field], without.cursor.as_deref(), Some(without.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(with.facts, without.facts, "the runs never enter the observed facts");
+        let requests = github.take_requests();
+        for path in [&pulls, &groups] {
+            assert!(requests.contains(&format!("GET {path} HTTP/1.1")), "{path}");
+        }
+        let ci = super::super::github_workflows::workspace_ci().expect("the runs were kept");
+        assert_eq!(ci.runs.iter().map(|run| run.run_id - 9_000_000).collect::<Vec<_>>(), [1, 3, 4]);
+        assert!(github.graphql_requests.lock().is_empty());
+        // Without the field, nothing reads them.
+        observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("fixture-auth"))).await.ok();
+        assert!(!github.take_requests().iter().any(|request| request.contains("/fleet.yml/")));
     }
 
     #[tokio::test]
@@ -2581,7 +2633,7 @@ mod tests {
         assert_eq!(failures[2]["failed_jobs"], json!(["daily-perf-load-hog", "daily-perf-load-hog-macos"]));
         assert_eq!(failures[2]["event"], "workflow_dispatch");
         // Only daily-long schedule/dispatch runs have their attempt's jobs read.
-        let requests = github.take_requests();
+        let requests = without_workspace_ci(github.take_requests());
         assert_eq!(requests.len(), 6);
         for path in [&load, &tests_only, &hogs] {
             assert!(requests.contains(&format!("GET {path} HTTP/1.1")));
