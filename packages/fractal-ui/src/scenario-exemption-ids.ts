@@ -254,6 +254,8 @@ export const scenarioExemptionIds: readonly string[] = [
   './assistant-ui/sidebar/SidebarTreeFilter.stories.tsx#FilterBehavior:contract-fixture',
   './assistant-ui/sidebar/SidebarTreeFilter.stories.tsx#FilterHighlightsWithoutRowRenders:contract-fixture',
   './assistant-ui/sidebar/SidebarTreeFilter.stories.tsx#FilterKeystrokeToPaint:contract-fixture',
+  './explore/SubagentSwitching.stories.tsx#Exploration:contract-fixture',
+  './explore/SubagentSwitching.stories.tsx#SubagentSwitchingProbe:contract-fixture',
   './time/HumanTime.stories.tsx#AllStates:primitive',
   './time/HumanTime.stories.tsx#Dark1440:primitive',
   './time/HumanTime.stories.tsx#DefaultHoverDelay:primitive',
