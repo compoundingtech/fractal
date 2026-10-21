@@ -1,6 +1,6 @@
 import { nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
-import { buildEnv, fullHistoryCheckoutSteps, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { buildEnv, fractalWebRunnerStep, fullHistoryCheckoutSteps, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
 
 // The load jobs, defined once. The daily long lanes run them on main (daily-perf-load, daily-perf-load-hog,
 // daily-perf-load-hog-macos), and the Performance workflow (perf.yml) runs them by manual dispatch on any
@@ -10,8 +10,11 @@ import { buildEnv, fullHistoryCheckoutSteps, macosRunner, performanceRunner, rea
 const snapshotAttempt = "!cancelled() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (steps.load.outcome == 'success' || steps.load.outcome == 'failure')"
 const snapshotPublished = "!cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.publish == 'true'"
 
-// The checkout, snapshots, Nix and scratch space every Linux load job starts from.
+// The checkout, snapshots, Nix and scratch space every Linux load job starts from. The first step logs the
+// runner's CPU model: Namespace's 8x16 label serves two host classes, one about 2x slower, and the job
+// header cannot tell them apart.
 const loadSetupSteps = [
+  fractalWebRunnerStep,
   ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   {
     name: 'Name compatible snapshot recipes',
