@@ -7,14 +7,17 @@ import importlib.util
 import json
 import os
 import random
+import signal
 from pathlib import Path
 import subprocess
 import sys
+import time
 import unittest
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 GC = ROOT / 'scripts/evidence-gc'
+TIMER = ROOT / 'scripts/evidence-gc-timer'
 gc_loader = importlib.machinery.SourceFileLoader('evidence_gc_test_module', str(GC))
 evidence_gc = importlib.util.module_from_spec(importlib.util.spec_from_loader(gc_loader.name, gc_loader))
 gc_loader.exec_module(evidence_gc)
@@ -381,6 +384,303 @@ class Gc(unittest.TestCase):
         self.assertEqual(code, 2, error)
         self.assertIn('needs the branch tips', error)
         self.assertEqual(self.refs('refs/evidence-gc/tips'), set())
+
+    def protected_remote(self, state='active'):
+        """A bare remote whose pre-receive hook refuses deleting or moving an evidence tag while STATE says active: a tag ruleset."""
+        bare = self.f.root / 'protected.git'
+        subprocess.run(['git', 'init', '-q', '--bare', str(bare)], check=True)
+        flag = self.f.root / 'ruleset-state'
+        flag.write_text(state)
+        hook = bare / 'hooks/pre-receive'
+        hook.write_text(f"""#!/bin/sh
+state=$(cat '{flag}')
+while read old new ref; do
+  case "$ref" in refs/tags/evidence/*)
+    if [ "$old" != 0000000000000000000000000000000000000000 ] && [ "$state" = active ]; then echo "protected: $ref"; exit 1; fi;;
+  esac
+done
+""")
+        hook.chmod(0o755)
+        self.f.git('remote', 'add', 'origin', str(bare))
+        calls = self.f.root / 'lock-calls'
+        python = sys.executable
+        log = f'open({str(calls)!r}, "a").write'
+        lock = {'version': 1,
+                'unlock': [python, '-c', f'{log}("unlock\\n"); open({str(flag)!r}, "w").write("disabled")'],
+                'relock': [python, '-c', f'{log}("relock\\n"); open({str(flag)!r}, "w").write("active")'],
+                'check': [python, '-c', f'import sys; {log}("check\\n"); sys.exit(open({str(flag)!r}).read() != "active")']}
+        config = self.f.root / 'lock.json'
+        config.write_text(json.dumps(lock))
+        return bare, flag, calls, config, lock
+
+    def remote_refs(self, bare, prefix='refs'):
+        return set(subprocess.run(['git', '-C', str(bare), 'for-each-ref', '--format=%(refname)', prefix], capture_output=True, text=True).stdout.split())
+
+    def lock_world(self):
+        old, recent, pr = self.world()
+        head = self.both(pr[0], pr[1], 28)
+        doomed = [self.both(old[0], f'{n}' * 40, 10) for n in range(1, 4)]
+        bystander = self.both(recent[0], recent[1], 1)
+        return pr, head, doomed, bystander
+
+    def push_all(self):
+        self.f.git('push', '-q', 'origin', 'main:main', *[f'{ref}:{ref}' for ref in self.refs('refs/notes/evidence') | self.refs('refs/tags/evidence')])
+
+    def run_locked(self, config, *extra):
+        done = subprocess.run([sys.executable, str(GC), '--repo', str(self.f.repo), '--main', 'main', '--as-of', str(NOW), '--retention', self.retention(),
+                               '--remote', 'origin', '--apply', '--lock-config', str(config), *extra], capture_output=True, text=True)
+        return done.returncode, (json.loads(done.stdout) if done.stdout.strip() else None), done.stderr
+
+    def test_without_the_lock_window_a_protected_remote_refuses_the_tag_deletions(self):
+        pr, head, doomed, _ = self.lock_world()
+        bare, flag, calls, config, _ = self.protected_remote()
+        self.push_all()
+        code, result, _ = self.run_gc('--head', pr[0], '--remote', 'origin', '--apply')
+        self.assertEqual(code, 1, result)
+        self.assertTrue(any('protected' in failure for failure in result['failed']), result)
+        self.assertEqual(len([r for r in self.remote_refs(bare, 'refs/tags/evidence') if r.rsplit('/', 1)[1] in doomed]), 3)
+        self.assertFalse([r for r in self.remote_refs(bare, 'refs/notes/evidence') if r.rsplit('/', 1)[1] in doomed], 'the notes went first')
+
+    def test_the_window_opens_only_around_the_tag_deletions_and_is_closed_and_checked_at_the_end(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, _ = self.protected_remote()
+        self.push_all()
+        code, result, error = self.run_locked(config, '--head', pr[0])
+        self.assertEqual(code, 0, (result, error))
+        self.assertEqual(flag.read_text(), 'active')
+        self.assertEqual(calls.read_text().split(), ['check', 'unlock', 'relock', 'check'])
+        lock = result['lock']
+        self.assertEqual((lock['tags_planned'], lock['tags_deleted'], lock['unexplained'], lock['final']), (3, 3, [], 'on'), lock)
+        self.assertLessEqual(lock['unlocked_at'], lock['relocked_at'])
+        self.assertIsInstance(lock['window_s'], float)
+        line = [l for l in error.splitlines() if l.startswith('evidence-gc-lock v1 ')]
+        self.assertEqual(len(line), 1, error)
+        self.assertIn('tags_deleted=3 unexplained=0 final=on', line[0])
+        left = {r.rsplit('/', 1)[1] for r in self.remote_refs(bare, 'refs/tags/evidence') | self.remote_refs(bare, 'refs/notes/evidence')}
+        self.assertEqual(left, {head, bystander})
+        self.assertEqual(left, {r.rsplit('/', 1)[1] for r in self.refs('refs/tags/evidence') | self.refs('refs/notes/evidence')})
+        calls.unlink()
+        code, result, _ = self.run_locked(config, '--head', pr[0])  # nothing left to delete: the protection is never touched
+        self.assertEqual((code, calls.exists(), 'lock' in result), (0, False, False), result)
+
+    def test_a_tag_that_disappears_during_the_window_without_being_planned_is_an_alarm(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, lock = self.protected_remote()
+        self.push_all()
+        victim = f'refs/tags/evidence/{pr[1]}/{head}'  # a writer who deletes a live record while the protection is off
+        lock['unlock'] = [sys.executable, '-c', f'import subprocess; open({str(flag)!r}, "w").write("disabled"); '
+                          f'subprocess.run(["git", "-C", {str(bare)!r}, "update-ref", "-d", {victim!r}], check=True)']
+        config.write_text(json.dumps(lock))
+        code, result, error = self.run_locked(config, '--head', pr[0])
+        self.assertEqual(code, 4, (result, error))
+        self.assertEqual(result['lock']['unexplained'], [victim])
+        self.assertIn('did not name', result['alarm'])
+        self.assertIn('unexplained=1 final=on', error)
+        self.assertEqual(flag.read_text(), 'active')
+
+    def test_a_protection_found_off_is_turned_on_and_no_tag_is_deleted(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, _ = self.protected_remote()
+        self.push_all()
+        flag.write_text('disabled')  # a previous run was killed inside its window
+        code, result, error = self.run_locked(config, '--head', pr[0])
+        self.assertEqual(code, 4, (result, error))
+        self.assertEqual(flag.read_text(), 'active')
+        self.assertEqual(calls.read_text().split(), ['check', 'relock', 'check'])
+        self.assertIn('found off', result['alarm'])
+        self.assertEqual(len([r for r in self.remote_refs(bare, 'refs/tags/evidence') if r.rsplit('/', 1)[1] in doomed]), 3)
+        self.assertEqual(len([r for r in self.refs('refs/tags/evidence') if r.rsplit('/', 1)[1] in doomed]), 3, 'the local tags follow the remote')
+        self.assertFalse([r for r in self.remote_refs(bare, 'refs/notes/evidence') if r.rsplit('/', 1)[1] in doomed])
+        self.assertIn('found_unlocked=true', error)
+
+    def test_a_relock_that_keeps_failing_is_retried_and_reported_as_off(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, lock = self.protected_remote()
+        self.push_all()
+        lock['relock'] = [sys.executable, '-c', f'import sys; open({str(calls)!r}, "a").write("relock\\n"); sys.exit("no admin token")']
+        config.write_text(json.dumps(lock))
+        code, result, error = self.run_locked(config, '--head', pr[0])
+        self.assertEqual(code, 4, (result, error))
+        self.assertEqual(calls.read_text().split().count('relock'), 3)
+        self.assertEqual(result['lock']['final'], 'OFF')
+        self.assertIn('no admin token', result['lock']['relock_failures'][0])
+        self.assertIn('not on', result['alarm'])
+        self.assertIn('final=OFF', error)
+        code, result, error = self.run_locked(self.f.root / 'lock.json', '--relock-only')  # still failing: the unit's ExecStopPost says so
+        self.assertEqual((code, result['lock']['final']), (4, 'OFF'))
+
+    def test_a_signal_inside_the_window_still_closes_it(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, lock = self.protected_remote()
+        self.push_all()
+        # The unlock turns the protection off and then waits; the test sends SIGTERM to the GC it started while it waits.
+        lock['unlock'] = [sys.executable, '-c', f'import time; open({str(flag)!r}, "w").write("disabled"); time.sleep(60)']
+        config.write_text(json.dumps(lock))
+        proc = subprocess.Popen([sys.executable, str(GC), '--repo', str(self.f.repo), '--main', 'main', '--as-of', str(NOW), '--retention', self.retention(),
+                                 '--remote', 'origin', '--apply', '--lock-config', str(config), '--head', pr[0]],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        deadline = time.monotonic() + 30
+        while flag.read_text() != 'disabled' and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(flag.read_text(), 'disabled')
+        proc.send_signal(signal.SIGTERM)
+        out, error = proc.communicate(timeout=60)
+        self.assertEqual(flag.read_text(), 'active', error)
+        self.assertEqual(proc.returncode, 1, error)
+        result = json.loads(out)
+        self.assertEqual((result['lock']['interrupted'], result['lock']['final']), ('SIGTERM', 'on'), result)
+
+    def test_an_unlock_that_fails_deletes_no_tag_and_still_relocks(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, lock = self.protected_remote()
+        self.push_all()
+        lock['unlock'] = [sys.executable, '-c', 'import sys; sys.exit("forbidden")']
+        config.write_text(json.dumps(lock))
+        code, result, error = self.run_locked(config, '--head', pr[0])
+        self.assertEqual(code, 1, (result, error))
+        self.assertIn('forbidden', result['lock']['unlock_failed'])
+        self.assertEqual((result['lock']['final'], result['lock']['tags_deleted']), ('on', 0))
+        self.assertEqual(len([r for r in self.remote_refs(bare, 'refs/tags/evidence') if r.rsplit('/', 1)[1] in doomed]), 3)
+        self.assertEqual(len([r for r in self.refs('refs/tags/evidence') if r.rsplit('/', 1)[1] in doomed]), 3, 'nothing local was deleted')
+
+    def test_relock_only_and_a_bad_lock_config(self):
+        bare, flag, calls, config, _ = self.protected_remote(state='disabled')
+        code, result, error = self.run_locked(config, '--relock-only')
+        self.assertEqual((code, result['lock']['final'], flag.read_text()), (0, 'on', 'active'), error)
+        for bad in ({'version': 1}, {'version': 1, 'unlock': [], 'relock': ['x'], 'check': ['x']}, {'version': 1, 'unlock': 'gh', 'relock': ['x'], 'check': ['x']}):
+            config.write_text(json.dumps(bad))
+            self.assertEqual(self.run_locked(config)[0], 2, bad)
+        missing = {'version': 1, 'unlock': ['/nonexistent/unlock'], 'relock': ['/nonexistent/relock'], 'check': ['/nonexistent/check']}
+        config.write_text(json.dumps(missing))
+        code, result, _ = self.run_locked(config, '--relock-only')
+        self.assertEqual((code, result['lock']['final']), (4, 'OFF'), 'a command that cannot start is a failure, not a crash')
+
+    def recorder(self, bare, exit_code=0):
+        """A --before-delete command: it writes its arguments and the remote's evidence tags at the moment it runs, then exits."""
+        seen = self.f.root / f'before-{exit_code}.json'
+        script = self.f.root / f'before-{exit_code}.py'
+        script.write_text(f"""import json, subprocess, sys
+tags = subprocess.run(['git', '-C', {str(bare)!r}, 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence'], capture_output=True, text=True).stdout.split()
+plan = json.load(open(sys.argv[-1]))
+json.dump({{'argv': sys.argv[1:], 'tags': tags, 'plan_delete': plan['delete']}}, open({str(seen)!r}, 'w'))
+sys.exit({exit_code})
+""")
+        return [sys.executable, str(script)], seen
+
+    def test_before_delete_runs_on_the_written_plan_while_every_doomed_tag_still_exists(self):
+        pr, head, doomed, bystander = self.lock_world()
+        bare, flag, calls, config, _ = self.protected_remote()
+        self.push_all()
+        argv, seen = self.recorder(bare)
+        plan = self.f.root / 'plan.json'
+        code, result, error = self.run_locked(config, '--head', pr[0], '--plan-out', str(plan), '--before-delete', json.dumps([*argv, '--flag']))
+        self.assertEqual((code, result['before_delete']), (0, {'exit_code': 0}), error)
+        before = json.loads(seen.read_text())
+        self.assertEqual(before['argv'], ['--flag', str(plan)], 'the plan path is the last argument')
+        doomed_tags = {ref for ref in before['plan_delete'] if ref.startswith('refs/tags/evidence/')}
+        self.assertEqual({ref.rsplit('/', 1)[1] for ref in doomed_tags}, set(doomed))
+        self.assertTrue(doomed_tags <= set(before['tags']), 'nothing was deleted before the command ran')
+        self.assertTrue(doomed_tags.isdisjoint(self.remote_refs(bare, 'refs/tags/evidence')), 'and all of it after')
+
+    def test_a_failing_before_delete_command_deletes_and_migrates_nothing_and_never_opens_the_window(self):
+        pr, head, doomed, bystander = self.lock_world()
+        self.record(pr[0], pr[1], 27, layout='legacy')  # a migration is a change too
+        bare, flag, calls, config, _ = self.protected_remote()
+        self.push_all()
+        remote_before, local_before = self.remote_refs(bare), self.refs('refs')
+        argv, seen = self.recorder(bare, exit_code=3)
+        code, result, error = self.run_locked(config, '--head', pr[0], '--plan-out', str(self.f.root / 'plan.json'), '--before-delete', json.dumps(argv))
+        self.assertEqual((code, result['before_delete'], 'applied' in result), (1, {'exit_code': 3}, False), error)
+        self.assertIn('--before-delete', result['refused'])
+        self.assertEqual((self.remote_refs(bare), self.refs('refs')), (remote_before, local_before))
+        self.assertFalse(calls.exists(), 'the protection was never touched')
+        self.assertTrue(seen.exists())
+        code, result, error = self.run_locked(config, '--head', pr[0], '--plan-out', str(self.f.root / 'plan.json'),
+                                              '--before-delete', json.dumps([str(self.f.root / 'no-such-command')]))
+        self.assertEqual((code, result['before_delete']['exit_code']), (1, None), error)
+        self.assertEqual(self.remote_refs(bare), remote_before)
+
+    def test_before_delete_needs_a_plan_file_and_a_json_argv(self):
+        self.world()
+        for extra in (['--before-delete', '["true"]'], ['--before-delete', 'true', '--plan-out', 'p.json'], ['--before-delete', '[]', '--plan-out', 'p.json']):
+            code, _, error = self.run_gc('--apply', '--head', self.f.git('rev-parse', 'main'), *extra)
+            self.assertEqual(code, 2, (extra, error))
+
+    def timer_world(self):
+        pr, head, doomed, bystander = self.lock_world()
+        for tool in ('evidence-gc', 'evidence-verify'):  # main carries the tools the timer runs; the branch under test does not matter
+            (self.f.repo / 'scripts').mkdir(exist_ok=True)
+            (self.f.repo / 'scripts' / tool).write_bytes((ROOT / 'scripts' / tool).read_bytes())
+        (self.f.repo / '.st/evidence-retention.json').write_text(json.dumps(RETENTION))
+        self.f.git('add', '-A')
+        with At(0.5):
+            self.f.git('commit', '-q', '-m', 'tools')
+        bare, flag, calls, config, _ = self.protected_remote()
+        self.push_all()
+        self.f.git('push', '-q', 'origin', f'{pr[0]}:refs/heads/agent/feature')
+        bin_dir = self.f.root / 'bin'
+        bin_dir.mkdir()
+        stored = self.f.root / 'stored'
+        (bin_dir / 'st').write_text(f'#!/bin/sh\ncp "$3" {str(stored)!r}-$(ls {str(self.f.root)!r} | grep -c stored)\necho "$5" >> {str(stored)!r}.names\n')
+        (bin_dir / 'st').chmod(0o755)
+        state = self.f.root / 'state'
+        env = dict({k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, PATH=f'{bin_dir}:{os.environ["PATH"]}',
+                   EVIDENCE_GC_STATE=str(state), EVIDENCE_GC_REMOTE=str(bare), EVIDENCE_GC_LOCK=str(config),
+                   GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+        return env, bare, flag, head, doomed, stored, state
+
+    def test_the_timer_runs_main_s_gc_with_the_lock_and_stores_each_summary_as_a_document(self):
+        env, bare, flag, head, doomed, stored, state = self.timer_world()
+        env['EVIDENCE_GC_LOG_TIMER'] = str(self.f.root / 'no-log-here')  # this host runs no evidence log
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('evidence-gc-lock v1 ', done.stderr)
+        self.assertEqual(flag.read_text(), 'active')
+        left = {r.rsplit('/', 1)[1] for r in self.remote_refs(bare, 'refs/tags/evidence')}
+        self.assertTrue(left.isdisjoint(doomed) and head in left, left)
+        summaries = sorted(stored.parent.glob('stored-*'))
+        self.assertEqual(len(summaries), 1)
+        summary = json.loads(summaries[0].read_text())
+        self.assertEqual((summary['mode'], summary['lock']['final'], summary['lock']['tags_deleted']), ('apply', 'on', 3))
+        self.assertEqual(stored.with_suffix('.names').read_text().split(), ['doc/fleet/factory/evidence-gc/runs'])
+        self.assertEqual(len(list((state / 'runs').glob('*.plan.json'))), 1)
+        flag.write_text('disabled')
+        done = subprocess.run(['bash', str(TIMER), '--relock-only'], capture_output=True, text=True, env=env)
+        self.assertEqual((done.returncode, flag.read_text()), (0, 'active'), done.stderr)
+        done = subprocess.run(['bash', str(TIMER), '--relock-only'], capture_output=True, text=True, env=dict(env, EVIDENCE_GC_LOCK=str(self.f.root / 'none.json')))
+        self.assertEqual(done.returncode, 0, 'without a lock config there is nothing to relock')
+
+    def test_on_a_host_with_the_evidence_log_the_timer_writes_gc_s_lines_and_publishes_before_deleting(self):
+        env, bare, flag, head, doomed, stored, state = self.timer_world()
+        argv, seen = self.recorder(bare)
+        log_timer = self.f.root / 'evidence-log-timer'  # stands in for the installed wrapper: bash runs it with its arguments
+        log_timer.write_text(f'exec {" ".join(argv)} "$@"\n')
+        log_config = self.f.root / 'evidence-log-config'
+        log_config.mkdir()
+        (log_config / 'signer.json').write_text('["true"]')
+        env.update(EVIDENCE_GC_LOG_TIMER=str(log_timer), EVIDENCE_LOG_CONFIG=str(log_config))
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        before = json.loads(seen.read_text())
+        self.assertEqual(before['argv'][:3], ['gc', '--publish', '--plan'])
+        self.assertTrue(before['argv'][3].endswith('.plan.json'))
+        self.assertTrue(set(doomed) <= {ref.rsplit('/', 1)[1] for ref in before['tags']}, 'the log heard first')
+        self.assertTrue(set(doomed).isdisjoint(ref.rsplit('/', 1)[1] for ref in self.remote_refs(bare, 'refs/tags/evidence')))
+
+    def test_on_a_host_with_the_evidence_log_a_failed_log_step_stops_the_deletions(self):
+        env, bare, flag, head, doomed, stored, state = self.timer_world()
+        log_timer = self.f.root / 'evidence-log-timer'
+        log_timer.write_text('echo "evidence-log: the log signer failed" >&2; exit 1\n')
+        log_config = self.f.root / 'evidence-log-config'
+        log_config.mkdir()
+        (log_config / 'signer.json').write_text('["true"]')
+        env.update(EVIDENCE_GC_LOG_TIMER=str(log_timer), EVIDENCE_LOG_CONFIG=str(log_config))
+        done = subprocess.run(['bash', str(TIMER)], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn('the log signer failed', done.stderr)
+        self.assertTrue(set(doomed) <= {ref.rsplit('/', 1)[1] for ref in self.remote_refs(bare, 'refs/tags/evidence')})
+        self.assertEqual(flag.read_text(), 'active')
 
     def test_bad_retention_and_bad_arguments_are_refused(self):
         self.world()

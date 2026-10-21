@@ -227,6 +227,9 @@ pub(super) async fn run_agents(
             ).await?;
             print_value(&response, json_output)
         }
+        AgentsCommand::RenameId(args) => {
+            run_identity_rename(endpoint, args, true, json_output).await
+        }
         AgentsCommand::Queue(args) => {
             run_agent_queue(endpoint, configured_person, args, json_output).await
         }
@@ -516,6 +519,14 @@ pub(super) async fn run_agents(
                     }),
                 )
                 .await?;
+            if request.body["fields"]["action"] == "restart-when-idle" {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Restart pending for {subject}: waiting for the turn to end and the harness to be idle and quiescent");
+                    Ok(())
+                };
+            }
             let previous = request.body["fields"]["incarnation_id"]
                 .as_str()
                 .unwrap_or("");
@@ -1165,6 +1176,7 @@ async fn run_agent_inspection(
         | AgentsCommand::Suspend(_)
         | AgentsCommand::Resume(_)
         | AgentsCommand::Rename(_)
+        | AgentsCommand::RenameId(_)
         | AgentsCommand::Queue(_)
         | AgentsCommand::Hold(_) => {
             unreachable!("agent mutation and queue commands return before inspection")

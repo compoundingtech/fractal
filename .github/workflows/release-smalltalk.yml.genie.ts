@@ -92,7 +92,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           }
         },
         {
-          "name": "Test install entry points and isolated app transactions",
+          "name": "Test release names, install entry points and isolated app transactions",
           "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {

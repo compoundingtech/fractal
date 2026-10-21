@@ -4493,6 +4493,8 @@ fn nodes_that_received_the_same_claims_in_different_orders_agree() {
 fn the_same_envelopes_projecting_different_graphs_diverge() {
     let left = Store::open_memory("left").unwrap();
     let right = Store::open_memory("right").unwrap();
+    left.capture_divergences(true);
+    right.capture_divergences(true);
     let intent = simple("true");
     let preview = left
         .mission(

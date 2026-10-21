@@ -2018,6 +2018,14 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "agent.renamed", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("agents"), true, &[],
+        ),
+        (
+            "mission.renamed", &["mission"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("missions"), true, &[],
+        ),
+        (
             "agent.presence",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -3276,6 +3284,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("anchor", reference_to(&["mission-run"])),
             ("reason", string()),
         ],
+        "agent.renamed" | "mission.renamed" => &[
+            ("from", required_reference_to(&["agent", "mission"])),
+            ("to", required_reference_to(&["agent", "mission"])),
+            ("reason", required_string()),
+            ("owner_host", required_string()),
+            ("declaration", required_string()),
+            ("previous_revision", string()),
+            ("preserved_incarnation", string()),
+            ("request", FieldSpec { required: true, ..object() }),
+        ],
         "agent.retired" => &[
             ("reason", required_string()),
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
@@ -4506,8 +4524,8 @@ mod tests {
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
             "assistant/chatgpt[/session/assistant-grant/ID]".into();
-        assert_eq!(previous.digest(), "23c83a98d8138ca27215b962f7dde3180db11402bfa1580155b04170b8fcaabf");
-        assert_eq!(current.digest(), "3ad363642c10bafab1e60160926e743409e6f139a24d7819e4b65fce43ffe62c");
+        assert_eq!(previous.digest(), "264f8c8f4252e828035e93e3964e65047678d8c0c3d2233026a71c767600c3a6");
+        assert_eq!(current.digest(), "921b65fe6121e068a183eb384c79ca5a8b6699be3b52b6f53c1ed99d195e13d2");
         println!("assistant principal registry digest: {} -> {}", previous.digest(), current.digest());
     }
 

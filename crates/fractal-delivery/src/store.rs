@@ -1,5 +1,6 @@
 //! The part of `store` that moved up from st3-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
+pub use fractal_store::store::identities;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::shared_missions::*;

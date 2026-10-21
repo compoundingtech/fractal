@@ -718,6 +718,11 @@ fn record_github_response(status: reqwest::StatusCode, headers: &reqwest::header
         .record(&spender, status, headers, now);
 }
 
+/// Drop `url`'s cached answer: for a URL read once, whose answer would never be revalidated.
+async fn github_forget(url: &str) {
+    github_cache().lock().await.remove(url);
+}
+
 /// A URL is fetched at most once per cache interval on this host. A stale entry is revalidated
 /// with its ETag; a 304 keeps the complete prior body, including pagination links.
 async fn github_json(

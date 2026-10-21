@@ -366,7 +366,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Test install entry points and isolated app transactions
+      - name: Test release names, install entry points and isolated app transactions
         run: |
           scripts/install-test
           scripts/install-release-test

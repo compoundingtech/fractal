@@ -113,7 +113,10 @@ fn person_asked(connection: &Connection, person: &str, agent: &str, about: &str)
             .prepare_cached("SELECT body FROM claims WHERE subject=?1 AND kind='message.sent'")?;
         for body in query.query_map([about], |row| row.get::<_, String>(0))? {
             let body: Value = serde_json::from_str(&body?)?;
-            if body["fields"]["from"] == person && body["fields"]["to"] == agent {
+            let recipient = body["fields"]["to"].as_str().map(|recipient|
+                fractal_store::store::identities::resolve_reference_conn(connection, recipient)
+            ).transpose()?;
+            if body["fields"]["from"] == person && recipient.as_deref() == Some(agent) {
                 return Ok(true);
             }
         }
@@ -273,6 +276,13 @@ impl PersonWorkStore for Store {
             return self.ask_person_in_new_run(input);
         }
         self.connection.batched(|tx| {
+            let mut stable_input;
+            let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
+            let input = if actor == input.actor { input } else {
+                stable_input = input.clone();
+                stable_input.actor = actor;
+                &stable_input
+            };
             let structured = canonical_request(input)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the asking step does not exist"))?;
@@ -360,6 +370,13 @@ impl PersonWorkStore for Store {
             None => None,
         };
         self.connection.batched(|tx| {
+            let mut stable_input;
+            let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
+            let input = if actor == input.actor { input } else {
+                stable_input = input.clone();
+                stable_input.actor = actor;
+                &stable_input
+            };
             let assistant_grant_id = authorization.map(|authorization|
                 super::assistant_write::authorize_grant(tx, &self.origin, authorization)).transpose()?;
             let subject = normalize_step_run(&input.subject);
@@ -549,6 +566,13 @@ impl PersonWorkStore for Store {
         let structured = canonical_request(input)?;
         let about = structured["about"].as_str().unwrap_or_default().to_owned();
         self.connection.batched(|tx| {
+            let mut stable_input;
+            let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
+            let input = if actor == input.actor { input } else {
+                stable_input = input.clone();
+                stable_input.actor = actor;
+                &stable_input
+            };
             if !declaration_live(tx, &input.actor).map_err(internal)? {
                 return Err(St3Error::new("missing-ask-owner", "the agent posting an update must have a live declaration"));
             }
@@ -648,6 +672,13 @@ impl PersonWorkStore for Store {
         }
         let structured = canonical_request(input)?;
         self.connection.batched(|tx| {
+            let mut stable_input;
+            let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
+            let input = if actor == input.actor { input } else {
+                stable_input = input.clone();
+                stable_input.actor = actor;
+                &stable_input
+            };
             if !declaration_live(tx, &input.actor).map_err(internal)? {
                 return Err(St3Error::new("missing-ask-owner", "the requester must have a live declaration"));
             }
