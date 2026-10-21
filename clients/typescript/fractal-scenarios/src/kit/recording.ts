@@ -34,6 +34,12 @@ export interface RecordedHttp {
 export interface RecordedTransport {
   readonly frames: readonly RecordedFrame[]
   readonly http: readonly RecordedHttp[]
+  /** Only the captured subscribe command at its captured clock uses wire-boundary playback. */
+  readonly subscriptions?: readonly {
+    readonly at_ms: number
+    readonly socket_id?: string
+    readonly command: Readonly<Record<string, unknown>>
+  }[]
   /** Socket creation order from recorded commands, including disconnected historical sockets. */
   readonly socket_ids?: readonly string[]
 }

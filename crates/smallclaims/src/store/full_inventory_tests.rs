@@ -89,3 +89,41 @@ fn a_request_with_the_same_digest_is_not_counted() {
         .unwrap();
     assert_eq!(answers(), before);
 }
+
+#[test]
+fn an_equal_digest_answer_stays_compact_after_a_concurrent_write() {
+    let store = source();
+    let summary = store.export_replication_summary(FLEET).unwrap();
+    let equal = store
+        .export_replication_exchange(FLEET, &summary.inventory)
+        .unwrap();
+    assert_eq!(equal.inventory.digest, summary.inventory.digest);
+    assert!(equal.inventory.envelopes.is_empty());
+    assert!(equal.envelopes.is_empty());
+    assert_eq!(equal.inventory.buckets, summary.inventory.buckets);
+
+    // The answer can be used by the next export after a local or replicated write.
+    // Its digest no longer matches, but it must not become an implicit full listing.
+    store
+        .append_claim(&ClaimInput {
+            subject: "note/concurrent".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let before = answers();
+    let next = store
+        .export_replication_exchange(FLEET, &equal.inventory)
+        .unwrap();
+    assert_ne!(next.inventory.digest, equal.inventory.digest);
+    assert!(!next.inventory.buckets.is_empty());
+    assert_eq!(answers(), before, "no full inventory was constructed");
+    assert!(
+        next.inventory.envelopes.len() <= REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
+        "the answer retains the compact identity page bound"
+    );
+}

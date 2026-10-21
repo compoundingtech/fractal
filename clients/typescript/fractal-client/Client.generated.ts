@@ -3,9 +3,11 @@
 // Clients that omit that token retain the legacy message-list shape and paging contract.
 import { API_VERSION } from './Models.generated.ts';
 import type {
-    ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
+    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes,
     Arrangement, ArrangementId, ArrangementPage,
+    HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
@@ -158,11 +160,17 @@ function defaultTerminalSocket(url: string, protocols: string[], headers: Record
 export class ClientError extends Error {
     public readonly response: ErrorEnvelope;
     public readonly status: number;
+    public readonly retryAfterMs?: number;
 
-    constructor(response: ErrorEnvelope, status: number) {
+    constructor(response: ErrorEnvelope, status: number, retryAfter?: string | null) {
         super(response.message);
         this.response = response;
         this.status = status;
+        if (retryAfter) {
+            const seconds = /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : undefined;
+            const delay = seconds === undefined ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
+            if (Number.isFinite(delay)) this.retryAfterMs = Math.max(0, delay);
+        }
         this.name = 'ClientError';
     }
 }
@@ -312,9 +320,10 @@ export class FractalClient {
             throw new Error('Unexpected st client API response');
         }
         if (!response.ok || 'error_version' in payload) {
-            throw new ClientError(payload as ErrorEnvelope, response.status);
+            throw new ClientError(payload as ErrorEnvelope, response.status, response.headers.get('Retry-After'));
         }
-        if ((path !== '/v1/client/observations' && !('snapshot' in payload)) || !('value' in payload)) {
+        const localCommand = path === '/v1/client/observations' || path === '/v1/client/push-registration';
+        if ((!localCommand && !('snapshot' in payload)) || !('value' in payload)) {
             throw new Error('Incomplete st client API response');
         }
         return payload as EnvelopeOf<T>;
@@ -392,9 +401,23 @@ export class FractalClient {
         return this.request<ActionResult>('POST', '/v1/client/actions', request, undefined, undefined, options);
     }
 
+    /** Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable, including duplicates. Requires write.client-diagnostics. */
+    diagnosticsSubmit(batch: ClientDiagnosticsBatch): Promise<EnvelopeOf<ClientDiagnosticsAck>> {
+        return this.request<ClientDiagnosticsAck>('POST', '/v1/client/diagnostics', batch);
+    }
+
     /** Local diagnostic acceptance, without a snapshot fence or durable action receipt. */
     async observationsReport(report: ObservationReport, requestOptions: RequestOptions = {}): Promise<ObservationResponse> {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
+    }
+
+    /** Replace this paired device's local-only registration, without a graph receipt. */
+    async pushRegister(registration: PushRegistration, requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
+        return this.request('POST', '/v1/client/push-registration', registration, undefined, undefined, requestOptions);
+    }
+
+    async pushUnregister(requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
+        return this.request('DELETE', '/v1/client/push-registration', undefined, undefined, undefined, requestOptions);
     }
 
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {
@@ -601,6 +624,8 @@ export class FractalClient {
     async setsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/sets' + query(options), undefined, requestOptions); }
     async setsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sets/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async documentGet(name: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentContent>> { return this.get('/v1/client/documents/content' + query({ name }), undefined, requestOptions); }
+    async documentsList(options: { prefix?: string; history?: boolean; cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentsPage>> { return this.get('/v1/client/documents' + query(options), undefined, requestOptions); }
+    async documentReferencesGet(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentReferences>> { return this.get('/v1/client/document-references' + query({ subject }), undefined, requestOptions); }
     async publicationDefinition(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PublicationDefinition>> { return this.get('/v1/client/publication-definition' + query({ subject }), undefined, requestOptions); }
     async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectDefinition>> { return this.get('/v1/client/subject-definition' + query({ subject, show_env_values: showEnvValues }), undefined, requestOptions); }
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
@@ -632,6 +657,7 @@ export class FractalClient {
     async agentDeclarationGet(id: string, revision?: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentDeclaration>> { return this.get(`/v1/client/agent-declarations/${encodeURIComponent(routedId(id))}` + query({ revision, show_env_values: showEnvValues }), undefined, requestOptions); }
     async statusHistoryGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<StatusHistory>> { return this.get(`/v1/client/status-history/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async agentQueueGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentQueue>> { return this.get(`/v1/client/agent-queues/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async harnessInventoryGet(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessInventory>> { return this.get(`/v1/client/harness-inventory/${encodeURIComponent(routedId(id))}` + query({ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }), undefined, requestOptions); }
     async runtimesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/runtimes' + query(options), undefined, requestOptions); }
     async runtimesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/runtimes/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async observersList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/observers' + query(options), undefined, requestOptions); }

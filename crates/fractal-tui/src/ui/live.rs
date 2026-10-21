@@ -515,8 +515,9 @@ pub fn run(context: Context) -> Result<()> {
     // Each conversation st has sent, kept after it closes so reopening it shows its last entries.
     let mut timelines: BTreeMap<String, fractal_conversation_ui::Timeline> = BTreeMap::new();
     let mut failed: BTreeMap<String, String> = BTreeMap::new();
-    // How many earlier pages each conversation read on its own to fill its first screen.
-    let mut filled: BTreeMap<String, usize> = BTreeMap::new();
+    // Each target remembers which timeline generation last needed automatic history filling.
+    let mut filled: BTreeMap<String, FillState> = BTreeMap::new();
+    let mut fill_names = BTreeMap::new();
     // The agent or session whose conversation the feed holds.
     let mut conversing: Vec<String> = Vec::new();
     let mut opens: BTreeMap<String, Instant> = BTreeMap::new();
@@ -871,28 +872,21 @@ pub fn run(context: Context) -> Result<()> {
                         super::slo::METRICS.add("open_not_bound", 1);
                     }
                     failed.remove(&target);
-                    if replace
-                        && !timelines
-                            .get(&target)
-                            .is_some_and(|timeline| timeline.older.paged)
-                    {
-                        filled.remove(&target);
-                    }
                     ui.conversation_updated(&target);
                     if let Some(header) = &header {
                         ui.conversation_headers
                             .insert(target.clone(), header.clone());
                     }
-                    timelines
-                        .entry(target)
-                        .or_default()
-                        .apply(fractal_conversation_ui::Frame {
+                    filled.entry(target.clone()).or_default().apply(
+                        timelines.entry(target).or_default(),
+                        fractal_conversation_ui::Frame {
                             replace,
                             has_more,
                             items,
                             session_id: Some(session_id),
                             header,
-                        });
+                        },
+                    );
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
                         let Some(id) = pending.message_id.as_ref() else {
@@ -1189,16 +1183,20 @@ pub fn run(context: Context) -> Result<()> {
                 } => {
                     // A slow st is not asked to fill the first screen any further.
                     if slow_page(took) {
-                        filled.insert(target.clone(), FILL_PAGES);
+                        filled.entry(target.clone()).or_default().pages = FILL_PAGES;
                     }
                     if let Some(timeline) = timelines.get_mut(&target) {
+                        let fill = filled.entry(target).or_default();
                         match page {
-                            Ok(page) => timeline.older_page(
-                                &session_id,
-                                page.items,
-                                page.has_more,
-                                page.cursor,
-                            ),
+                            Ok(page) => {
+                                timeline.older_page(
+                                    &session_id,
+                                    page.items,
+                                    page.has_more,
+                                    page.cursor,
+                                );
+                                fill.invalidate();
+                            }
                             Err(reason) => timeline.older_failed(reason),
                         }
                     }
@@ -1725,7 +1723,17 @@ pub fn run(context: Context) -> Result<()> {
         // A first load that shows little (a page that is mostly tool calls) reads on by itself,
         // a few pages at most, until about a screenful of rows is there.
         let mut wanted = ui.take_older_wanted();
-        let mut names = None;
+        // Names are the only display-row adapter input outside the timeline. Recompute them
+        // only when the model changed; unrelated redraws do not invalidate assessments.
+        if changed {
+            let names = adapt::names(&model, &person);
+            if names != fill_names {
+                fill_names = names;
+                for fill in filled.values_mut() {
+                    fill.invalidate();
+                }
+            }
+        }
         // One page is asked for at a time across every conversation, so opening several at
         // once is not a burst of reads on a daemon that may already be busy.
         let reading = timelines.values().any(|timeline| timeline.older.loading);
@@ -1733,14 +1741,16 @@ pub fn run(context: Context) -> Result<()> {
             if reading || !wanted.is_empty() {
                 break;
             }
-            let pages = filled.get(target).copied().unwrap_or(0);
-            if !extras.live || !wants_fill(timeline, pages) {
+            if !extras.live {
                 continue;
             }
-            let names = names.get_or_insert_with(|| adapt::names(&model, &person));
-            let entries = adapt::conversation(&timeline.items, names);
-            if fractal_conversation_ui::display_rows(&entries) < FILL_ROWS {
-                *filled.entry(target.clone()).or_default() += 1;
+            let Some(fill) = filled.get_mut(target) else {
+                continue;
+            };
+            if fill.assess(timeline, |timeline| {
+                let entries = adapt::conversation(&timeline.items, &fill_names);
+                fractal_conversation_ui::display_rows(&entries)
+            }) {
                 wanted.insert(target.clone());
             }
         }
@@ -1907,6 +1917,10 @@ pub fn run(context: Context) -> Result<()> {
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
+            extras.pending_calls = timelines
+                .iter()
+                .map(|(agent, timeline)| (agent.clone(), adapt::pending_calls(&timeline.items)))
+                .collect();
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
                     entries.push(super::view::Entry {
@@ -2350,6 +2364,53 @@ fn wants_fill(timeline: &fractal_conversation_ui::Timeline, pages_read: usize) -
         && timeline.older.failed.is_none()
         && timeline.more_before()
         && pages_read < FILL_PAGES
+}
+
+/// Automatic filling is driven by timeline mutations, not live-loop ticks. In particular,
+/// revisions can change display rows without changing the entry count or the last entry ID.
+#[derive(Default)]
+struct FillState {
+    generation: u64,
+    assessed: Option<u64>,
+    pages: usize,
+}
+
+impl FillState {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.assessed = None;
+    }
+
+    fn apply(
+        &mut self,
+        timeline: &mut fractal_conversation_ui::Timeline,
+        frame: fractal_conversation_ui::Frame,
+    ) {
+        let other_session = frame.session_id.is_some()
+            && timeline.session_id.is_some()
+            && frame.session_id != timeline.session_id;
+        if other_session || (frame.replace && !timeline.older.paged) {
+            self.pages = 0;
+        }
+        timeline.apply(frame);
+        self.invalidate();
+    }
+
+    fn assess(
+        &mut self,
+        timeline: &fractal_conversation_ui::Timeline,
+        display_rows: impl FnOnce(&fractal_conversation_ui::Timeline) -> usize,
+    ) -> bool {
+        if !wants_fill(timeline, self.pages) || self.assessed == Some(self.generation) {
+            return false;
+        }
+        self.assessed = Some(self.generation);
+        if display_rows(timeline) >= FILL_ROWS {
+            return false;
+        }
+        self.pages += 1;
+        true
+    }
 }
 
 /// st keeps a page cursor for five minutes; one older than this starts again from the newest.
@@ -3431,6 +3492,133 @@ mod tests {
         timeline.older.failed = None;
         timeline.has_more = false;
         assert!(!super::wants_fill(&timeline, 0));
+    }
+
+    fn fill_frame(rows: usize) -> fractal_conversation_ui::Frame {
+        fractal_conversation_ui::Frame {
+            replace: true,
+            has_more: Some(true),
+            session_id: Some("session/fill".into()),
+            items: (0..rows).map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("content/{i}"), "sequence": i, "revision": 1,
+                    "timestamp": "2026-10-01T10:00:00Z", "role": "assistant",
+                    "type": "content", "final": true,
+                    "body": {"media_type": "text/plain", "text": "A visible row."}
+                })).unwrap()
+            }).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fill_probe_adapts_a_full_conversation_only_once_while_idle() {
+        let mut timeline = fractal_conversation_ui::Timeline::default();
+        let mut fill = super::FillState::default();
+        fill.apply(&mut timeline, fill_frame(super::FILL_ROWS));
+        let mut adaptations = 0;
+        for _ in 0..100 {
+            assert!(!fill.assess(&timeline, |timeline| {
+                adaptations += 1;
+                let entries = super::adapt::conversation(&timeline.items, &BTreeMap::new());
+                fractal_conversation_ui::display_rows(&entries)
+            }));
+        }
+        assert_eq!(adaptations, 1);
+        assert_eq!(fill.pages, 0);
+    }
+
+    #[test]
+    fn fill_probe_pages_until_the_row_target_or_page_limit() {
+        for rows_per_page in [1, 50] {
+            let mut timeline = fractal_conversation_ui::Timeline::default();
+            let mut fill = super::FillState::default();
+            fill.apply(&mut timeline, fill_frame(0));
+            let mut requests = 0;
+            for _ in 0..100 {
+                if fill.assess(&timeline, |timeline| timeline.items.len()) {
+                    requests += 1;
+                    timeline.older.loading = true;
+                    assert!(!fill.assess(&timeline, |_| panic!("page in flight")));
+                    let mut page = fill_frame(rows_per_page).items;
+                    for entry in &mut page {
+                        entry.id = format!("{requests}/{}", entry.id);
+                    }
+                    timeline.older_page("session/fill", page, true, None);
+                    fill.invalidate();
+                }
+            }
+            let expected = super::FILL_ROWS.div_ceil(rows_per_page).min(super::FILL_PAGES);
+            assert_eq!(requests, expected);
+            assert_eq!(fill.pages, expected);
+        }
+    }
+
+    #[test]
+    fn fill_probe_reassesses_an_in_place_revision_once() {
+        let mut timeline = fractal_conversation_ui::Timeline::default();
+        let mut fill = super::FillState::default();
+        fill.apply(&mut timeline, fill_frame(1));
+        let mut adaptations = 0;
+        assert!(!fill.assess(&timeline, |_| {
+            adaptations += 1;
+            super::FILL_ROWS
+        }));
+        let last_id = timeline.items.last().unwrap().id.clone();
+        let mut revision = fill_frame(1);
+        revision.replace = false;
+        revision.items[0].revision += 1;
+        fill.apply(&mut timeline, revision);
+        assert_eq!(timeline.items.len(), 1);
+        assert_eq!(timeline.items.last().unwrap().id, last_id);
+        assert_eq!(timeline.items[0].revision, 2);
+        for _ in 0..100 {
+            assert!(!fill.assess(&timeline, |_| {
+                adaptations += 1;
+                super::FILL_ROWS
+            }));
+        }
+        assert_eq!(adaptations, 2);
+    }
+
+    #[test]
+    fn fill_probe_resets_for_a_replacement_session_even_after_paging() {
+        let mut timeline = fractal_conversation_ui::Timeline::default();
+        let mut fill = super::FillState::default();
+        fill.apply(&mut timeline, fill_frame(1));
+        assert!(!fill.assess(&timeline, |_| super::FILL_ROWS));
+        timeline.older.paged = true;
+        fill.pages = super::FILL_PAGES;
+        let mut replacement = fill_frame(1);
+        replacement.session_id = Some("session/replaced".into());
+        fill.apply(&mut timeline, replacement);
+        assert_eq!(fill.pages, 0);
+        assert!(fill.assess(&timeline, |_| 1));
+        assert!(!fill.assess(&timeline, |_| panic!("unchanged replacement")));
+        assert_eq!(fill.pages, 1);
+    }
+
+    #[test]
+    fn fill_probe_resets_for_a_replacement_window_before_paging() {
+        let mut timeline = fractal_conversation_ui::Timeline::default();
+        let mut fill = super::FillState::default();
+        fill.apply(&mut timeline, fill_frame(1));
+        assert!(!fill.assess(&timeline, |_| super::FILL_ROWS));
+        fill.pages = super::FILL_PAGES;
+        fill.apply(&mut timeline, fill_frame(1));
+        assert_eq!(fill.pages, 0);
+        assert!(fill.assess(&timeline, |_| 1));
+    }
+
+    #[test]
+    fn fill_probe_reassesses_when_display_names_change() {
+        let mut timeline = fractal_conversation_ui::Timeline::default();
+        let mut fill = super::FillState::default();
+        fill.apply(&mut timeline, fill_frame(1));
+        assert!(!fill.assess(&timeline, |_| super::FILL_ROWS));
+        fill.invalidate();
+        assert!(fill.assess(&timeline, |_| 1));
+        assert!(!fill.assess(&timeline, |_| panic!("unchanged names")));
     }
 
     #[test]

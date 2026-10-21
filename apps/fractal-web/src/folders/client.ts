@@ -202,9 +202,17 @@ export const sidebarFolders = ({ gateway, socket }: {
   return current
 })
 /** Same-origin paired client API, scoped to the discovered person. */
-export const folders = sidebarFolders({
+const pageHotData = import.meta.hot?.data
+export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
     const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
     return { ...st3InventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
   },
 })
+
+/** Page startup may provide an alternate transport before the first registry consumer mounts. */
+export const installPageFolders = (source: Atom.Atom<FolderState>): void => {
+  folders = source
+  // The folder module can reload without re-evaluating the retained page runtime.
+  if (pageHotData !== undefined) pageHotData.pageFolders = source
+}

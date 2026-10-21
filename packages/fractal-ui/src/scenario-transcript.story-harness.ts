@@ -1,7 +1,11 @@
+import { scenarioDomainFixture } from '@fractal/scenarios/domain-fixture'
 import type { WireSlice } from '@fractal/scenarios/react'
 import type { TranscriptHistory, TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { Sender, TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
+
 type WireEntry = WireSlice<'conversation'>['state']['threads'][number]['items'][number]
 type ToolResultEntry = Extract<WireEntry, { type: 'tool_result' }>
 type Prompt = TextItem & { readonly role: 'user' }
@@ -54,14 +58,15 @@ function threadTurns(entries: readonly WireEntry[], hasMore: boolean): Transcrip
   close()
   return turns
 }
-/** The whole conversation as bounded sections per thread; the newest wire instant stands in for the host clock. */
-export const scenarioSections = ({ loading, state }: WireSlice<'conversation'>): { readonly loading: boolean; readonly instant: number; readonly sections: readonly TranscriptSection[] } => ({
+/** The conversation as sections per thread; whole-thread hosts let Transcript apply its own initial mounted window. */
+export const scenarioSections = ({ loading, state }: WireSlice<'conversation'>, grouping: 'bounded' | 'whole-thread' = 'bounded'): { readonly loading: boolean; readonly instant: number; readonly sections: readonly TranscriptSection[] } => ({
   loading,
   instant: loading ? 0 : state.threads.reduce((latest, thread) => thread.items.reduce((at, entry) => Math.max(at, Date.parse(entry.timestamp)), latest), 0),
   sections: loading ? [] : state.threads.flatMap(thread => {
     const incomplete = thread.has_more || (thread.history?.committed_from_sequence ?? 1) > 1
     const turns = threadTurns(thread.items, incomplete)
-    const count = Math.max(1, Math.ceil(turns.length / sectionTurns))
-    return Array.from({ length: count }, (_, index): TranscriptSection => ({ id: `${thread.agent}/${index}`, title: count === 1 ? thread.agent : `${thread.agent} · part ${index + 1} of ${count}`, turns: turns.slice(index * sectionTurns, (index + 1) * sectionTurns), history: index === 0 && incomplete ? { _tag: 'HasOlder' } : { _tag: 'Complete' } }))
+    const sectionSize = grouping === 'whole-thread' ? Math.max(1, turns.length) : sectionTurns
+    const count = Math.max(1, Math.ceil(turns.length / sectionSize))
+    return Array.from({ length: count }, (_, index): TranscriptSection => ({ id: `${thread.agent}/${index}`, title: count === 1 ? thread.agent : `${thread.agent} · part ${index + 1} of ${count}`, turns: turns.slice(index * sectionSize, (index + 1) * sectionSize), history: index === 0 && incomplete ? { _tag: 'HasOlder' } : { _tag: 'Complete' } }))
   }),
 })

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 JQ_BIN=${FRACTAL_SOAK_JQ_BIN-${ST3_SOAK_JQ_BIN:-$(command -v jq)}}

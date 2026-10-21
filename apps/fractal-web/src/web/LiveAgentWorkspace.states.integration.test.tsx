@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
-import type { ConnectionState } from '@fractal/sdk/effect'
+import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Option from 'effect/Option'
@@ -21,7 +21,8 @@ import './ConversationPane.tsx'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const observedAt = 100_000
-const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:01.000Z' })
+const rawAgent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:01.000Z' })
+const agent = openAgent(rawAgent)
 const page: ConversationPage = {
   items: [
     { _tag: 'Text', id: 'prompt/example', role: 'user', text: 'Keep the observed conversation visible.', attachments: [], streaming: false, at: '1970-01-01T00:00:01.000Z' },
@@ -42,9 +43,9 @@ let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
 let source: DataSource
-let agents: Atom.Writable<Feed<readonly Agent[]>>
+let agents: Atom.Writable<Feed<readonly DecodedAgent[]>>
 let conversation: Atom.Writable<Feed<ConversationPage>>
-let agentsSync: Atom.Writable<FeedSync<readonly Agent[]>>
+let agentsSync: Atom.Writable<FeedSync<readonly DecodedAgent[]>>
 let conversationSync: Atom.Writable<FeedSync<ConversationPage>>
 let gatewaySync: Atom.Writable<FeedSyncObservation>
 let connection: Atom.Writable<ConnectionState>
@@ -61,14 +62,14 @@ beforeEach(() => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/example')
   registry = AtomRegistry.make()
-  agents = Atom.make<Feed<readonly Agent[]>>(observed({ value: [agent] })).pipe(Atom.keepAlive)
+  agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [agent] })).pipe(Atom.keepAlive)
   conversation = Atom.make<Feed<ConversationPage>>(observed({ value: page })).pipe(Atom.keepAlive)
-  agentsSync = Atom.make(liveSync<readonly Agent[]>([agent])).pipe(Atom.keepAlive)
+  agentsSync = Atom.make(liveSync<readonly DecodedAgent[]>([agent])).pipe(Atom.keepAlive)
   conversationSync = Atom.make(liveSync(page)).pipe(Atom.keepAlive)
   gatewaySync = Atom.make<FeedSyncObservation>({ status: { _tag: 'Live', since: observedAt }, observedAt }).pipe(Atom.keepAlive)
   connection = Atom.make<ConnectionState>({ _tag: 'Live' }).pipe(Atom.keepAlive)
   now = Atom.make(118_000).pipe(Atom.keepAlive)
-  const fixture = fixtureSource({ world: { now: 118_000, gateway: 'gateway.example.invalid', agents: [agent], missions: [], attention: [], events: [], conversations: { [agent.id]: page }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  const fixture = fixtureSource({ world: { now: 118_000, gateway: 'gateway.example.invalid', agents: [rawAgent], missions: [], attention: [], events: [], conversations: { [agent.id]: page }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   source = { ...fixture, agents, conversation: () => conversation, connection, now, sync: {
     gateway: gatewaySync,
     agents: agentsSync,
@@ -108,7 +109,7 @@ describe('RM1 workspace source states', () => {
     expect(sidebar().textContent).not.toContain('No agents match')
     await act(async () => {
       registry.set(agents, observed({ value: [] }))
-      registry.set(agentsSync, liveSync<readonly Agent[]>([]))
+      registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([]))
     })
     expect(sidebar().querySelector('[data-system-state="loading"]')).toBeNull()
     expect(roster().querySelector('[data-wf-roster-skeleton]')).toBeNull()
@@ -171,7 +172,7 @@ describe('RM1 workspace source states', () => {
     expect(sidebar().querySelector('[data-system-state="loading"]')).not.toBeNull()
     await act(async () => {
       registry.set(agents, observed({ value: [agent] }))
-      registry.set(agentsSync, liveSync<readonly Agent[]>([agent]))
+      registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([agent]))
     })
     expect(roster().textContent).toContain(agent.name)
     expect(sidebar().querySelector('[data-system-state="error"]')).toBeNull()
@@ -217,7 +218,7 @@ describe('RM1 workspace source states', () => {
 
   it('uses retained observation time and the shared clock for stale roster and conversation ages', async () => {
     registry.set(agents, observed({ value: [agent], freshness: 'stale' }))
-    registry.set(agentsSync, staleSync<readonly Agent[]>([agent]))
+    registry.set(agentsSync, staleSync<readonly DecodedAgent[]>([agent]))
     registry.set(conversation, observed({ value: page, freshness: 'stale' }))
     registry.set(conversationSync, staleSync(page))
     await mount()
@@ -237,7 +238,7 @@ describe('RM1 workspace source states', () => {
     expect(registry.get(conversation)).toBe(retainedConversation)
     await act(async () => {
       registry.set(agents, observed({ value: [agent] }))
-      registry.set(agentsSync, liveSync<readonly Agent[]>([agent]))
+      registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([agent]))
       registry.set(conversation, observed({ value: page }))
       registry.set(conversationSync, liveSync(page))
     })
@@ -296,9 +297,9 @@ describe('RM1 workspace source states', () => {
   })
 
   it('never presents an idle retained observation as last seen working', async () => {
-    const idle: Agent = { ...agent, harness_state: Option.some('idle') }
+    const idle: DecodedAgent = { ...agent, harness_state: Option.some('idle') }
     registry.set(agents, observed({ value: [idle], freshness: 'stale' }))
-    registry.set(agentsSync, staleSync<readonly Agent[]>([idle]))
+    registry.set(agentsSync, staleSync<readonly DecodedAgent[]>([idle]))
     const idlePage: ConversationPage = { ...page, items: [...page.items.slice(0, -1), { _tag: 'Status', id: 'status/idle', status: 'completed', at: '1970-01-01T00:00:04.000Z' }] }
     registry.set(conversation, observed({ value: idlePage, freshness: 'stale' }))
     registry.set(conversationSync, staleSync(idlePage))
@@ -318,7 +319,7 @@ describe('RM1 workspace source states', () => {
       _tag: 'Observed', value: [agent], freshness: 'stale',
       error: { reason: 'failed', detail: 'private refresh diagnostic' },
     })
-    registry.set(agentsSync, staleSync<readonly Agent[]>([agent]))
+    registry.set(agentsSync, staleSync<readonly DecodedAgent[]>([agent]))
     await mount()
     expect(roster().textContent).toContain(agent.name)
     expect(sidebar().querySelector('[data-roster-error]')?.textContent).toContain('Couldn’t refresh agents')
@@ -329,7 +330,7 @@ describe('RM1 workspace source states', () => {
     expect(retryAgents).toHaveBeenCalledOnce()
     await act(async () => {
       registry.set(agents, observed({ value: [agent] }))
-      registry.set(agentsSync, liveSync<readonly Agent[]>([agent]))
+      registry.set(agentsSync, liveSync<readonly DecodedAgent[]>([agent]))
     })
     expect(roster().textContent).toContain(agent.name)
     expect(sidebar().querySelector('[data-roster-error]')).toBeNull()

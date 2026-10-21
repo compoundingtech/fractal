@@ -66,7 +66,7 @@ IMPORT_TOKEN = re.compile(r"\b(use|extern\s+crate)\s+(" + "|".join(map(re.escape
 # Directory substitutions are limited to source-tree references, never XDG/state paths.
 DIRECTORIES = {old: new for old, new in PACKAGES.items()
                if (ROOT / "crates" / new).is_dir()}
-SOURCE_PATH = re.compile(r"(?P<base>crates/|\.\./)(?P<name>" + "|".join(map(re.escape, sorted(DIRECTORIES, key=len, reverse=True))) + r")(?=/|[\"'\s`\\]|$)")
+SOURCE_PATH = re.compile(r"(?P<base>crates/|\.\./)(?P<name>" + "|".join(map(re.escape, sorted(DIRECTORIES, key=len, reverse=True))) + r")(?=/|[\"'\s`\\)]|$)")
 
 # Match comments before strings so quotation marks in prose do not hide code.
 # Raw Rust strings may contain ordinary quotes and arbitrary hash delimiters.

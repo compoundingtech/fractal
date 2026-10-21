@@ -1,13 +1,14 @@
 import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { describe, expect, it } from 'vitest'
 
 import { askingAgentRefs } from './asking.ts'
 
-const agent = (id: string, fields: Record<string, unknown> = {}) => decodeUnknownSync(Agent)({
+const agent = (id: string, fields: Record<string, unknown> = {}) => openAgent(decodeUnknownSync(Agent)({
   kind: 'agent', id, name: id, host_id: 'host/host-a', runtime_ids: [], reachability: 'reachable',
   state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
   ...fields,
-})
+}))
 const card = (fields: Record<string, unknown>) => decodeUnknownSync(Attention)({
   id: 'attention/card', kind: 'attention', revision: '1', updated_at: '2026-10-04T12:00:00Z', requested_at: '2026-10-04T12:00:00Z',
   person_id: 'person/operator', source_id: 'agent/elsewhere', attention_kind: 'agent-request', title: 'Request', detail: 'Request detail', priority: 'normal',
@@ -16,7 +17,7 @@ const card = (fields: Record<string, unknown>) => decodeUnknownSync(Attention)({
 const onMission = (mission: string) => ({
   current_work: [{ id: 'work/one', mission_id: mission, mission_run_id: 'mission-run/one', path: 'step', since: '2026-10-04T12:00:00.000Z', state: 'claimed', title: 'Step', goal: 'Goal' }],
 })
-const asking = (rows: readonly Agent[], attention: readonly Attention[] = []) => [...askingAgentRefs({ rows, attention })]
+const asking = (rows: readonly DecodedAgent[], attention: readonly Attention[] = []) => [...askingAgentRefs({ rows, attention })]
 
 describe('Waiting for answer reads only st', () => {
   it.each([

@@ -820,11 +820,17 @@ fn a_trim_never_makes_a_write_wait_long() {
         .unwrap()
         .execute_batch("PRAGMA synchronous=OFF")
         .unwrap();
-    write_diagnostics(&store, "daemon/alder", 1_500);
+    // A trim that held the writer for all its row cost would let about one write through, so a
+    // hundred dropped claims prove interleaving. Pull requests trim 100 diagnostics over
+    // 5,000 history rows; the daily run (ST_TEST_SCALE=full, docs/ci.md) the production-sized
+    // 1,500 over 150,000, which takes a minute.
+    let full = std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full");
+    let (diagnostics, history) = if full { (1_500, 150_000) } else { (100, 5_000) };
+    write_diagnostics(&store, "daemon/alder", diagnostics);
     let cut = now_ms() + 1_000;
     let plan = plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
-    assert!(plan.claims.len() >= 1_000, "{}", plan.claims.len());
-    production_history(&store, 150_000);
+    assert!(plan.claims.len() >= diagnostics * 2 / 3, "{}", plan.claims.len());
+    production_history(&store, history);
     // Every deleted row is slow, as on a store missing an index: 2,000 of them at once would
     // hold the writer for four seconds.
     store.set_trim_row_cost(cost);
@@ -863,8 +869,8 @@ fn a_trim_never_makes_a_write_wait_long() {
         matches!(&actions[..], [CheckpointAction::Trimmed { claims, .. }] if *claims == plan.claims.len()),
         "{actions:?}"
     );
-    // A trim that held the writer throughout (at least two seconds of row cost) would leave
-    // these writes waiting until it finished.
+    // A trim that held the writer throughout (every dropped row's cost at once: two seconds at
+    // full size) would leave these writes waiting until it finished.
     assert!(writes >= 20, "only {writes} writes ran during the trim");
     println!("{writes} writes during the trim; the longest waited {longest:?}");
 }

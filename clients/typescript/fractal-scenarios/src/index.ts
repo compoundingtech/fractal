@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from './domain-fixture.ts'
 import { nowMs } from './kit/time.ts'
 import { genericVariants } from './kit/variants.ts'
 import { buildWorld, type World, type WorldDefinition } from './kit/world.ts'
@@ -77,3 +78,5 @@ export const loadWorld = (id: WorldId | (string & {}), options: LoadWorldOptions
   buildWorld(definition(id), genericVariants, nowMs(options.now ?? new Date()))
 export { foldSlice, syncStatusAt, absolute } from './kit/fold.ts'
 export { manualClock, realClock, type Clock, type ManualClock } from './clock.ts'
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
