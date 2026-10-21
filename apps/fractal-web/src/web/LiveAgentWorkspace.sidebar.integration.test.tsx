@@ -23,7 +23,7 @@ import type { ConnectionState } from '@fractal/sdk/effect'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const gateway = 'gateway.example.invalid'
-const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
+const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
@@ -78,6 +78,67 @@ const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
 
+it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
+  // Both producers publish the parent's hook session_id on each child, not a child conversation.
+  // Claude: subagents.rs:378-402,914-917; OMP: subagents.rs:643-673.
+  const parentSession = 'example-parent-session'
+  const reviewLabel = driver === 'claude' ? 'Review changes' : 'example-reviewer'
+  const child = {
+    id: 'example-reviewer', driver, description: driver === 'claude' ? 'Review changes' : null,
+    subagent_type: driver === 'claude' ? 'Explore' : 'task', session_id: parentSession,
+    started_at: '2026-10-04T12:00:00Z', lease_expires_at: '2026-10-04T12:01:00Z',
+  }
+  const observation = openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary',
+    driver, runtime_ids: ['runtime/example-parent'], reachability: 'reachable', state: 'running',
+    harness_state: 'working', blocked_on: null, fault: null, revision: '1',
+    updated_at: '2026-10-04T12:00:00Z',
+    subagents: [child, { ...child, id: 'example-checks', description: driver === 'claude' ? 'Review checks' : null }],
+  }))
+  registry.set(agents, observed({ value: [observation] }))
+  await mount(1440)
+  expect(roster().textContent).not.toContain(reviewLabel)
+  const parent = roster().querySelector('[data-wf-agent-ref="agent/example"]')!.closest('[role="row"]')!
+  await act(async () => {
+    parent.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true }))
+  })
+  const input = sidebar().querySelector('input')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, driver === 'claude' ? 'Review' : 'example-')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  expect(roster().textContent).toContain('Example Agent')
+  expect(roster().textContent).toContain(reviewLabel)
+  const childRow = [...roster().querySelectorAll('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes(reviewLabel))!
+  expect(childRow.getAttribute('aria-level')).toBe(String(Number(parent.getAttribute('aria-level')) + 1))
+  expect(childRow.querySelector(`[aria-label="Move ${reviewLabel}"]`)).toBeNull()
+  expect(childRow.getAttribute('draggable')).not.toBe('true')
+  expect(childRow.querySelector('button, a, [role="button"], [role="link"], [data-agent-menu], [data-row-action]')).toBeNull()
+  expect(childRow.querySelector('[data-status="working"]')).toBeNull()
+  expect(childRow.querySelector('time')).toBeNull()
+  expect(childRow.textContent).not.toContain('$0')
+  const previousLocation = window.location.href
+  const parentSelection = parent.getAttribute('aria-selected')
+  const parentClass = parent.className
+  const childRows = [...roster().querySelectorAll<HTMLElement>('[role="row"][aria-disabled="true"]')]
+  expect(childRows).toHaveLength(2)
+  for (const row of childRows) {
+    expect(row.getAttribute('tabindex')).not.toBe('0')
+    expect(row.getAttribute('role')).toBe('row')
+    expect(row.querySelector('[data-display-only="true"]')).not.toBeNull()
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+      row.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }))
+    })
+    expect(window.location.href).toBe(previousLocation)
+    expect(parent.getAttribute('aria-selected')).toBe(parentSelection)
+    expect(parent.className).toBe(parentClass)
+    expect(row.getAttribute('aria-selected')).not.toBe('true')
+  }
+})
 it('keeps workspace providers and unchanged roster rows out of the one-second clock render', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
@@ -142,17 +203,17 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
   const freshness = () => row().querySelector('[data-observation-freshness]')!.getAttribute('data-observation-freshness')
   const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
   expect(freshness()).toBe('live')
-  expect(row().getAttribute('aria-label')).toContain('Example Agent, idle')
-  expect(status()).toContain('idle;')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
+  expect(status()).toContain('Idle;')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   expect(registry.get(agents)).toBe(retained)
   expect(freshness()).toBe('stale')
-  expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · idle')
-  expect(status()).toContain('Last verified · idle;')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · Idle')
+  expect(status()).toContain('Last verified · Idle;')
   expect(status()).toContain('stale observation')
   await act(async () => registry.set(connection, { _tag: 'Live' }))
   expect(freshness()).toBe('live')
-  expect(row().getAttribute('aria-label')).toContain('Example Agent, idle')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
   expect(status()).toContain('live observation')
 })
 
@@ -174,6 +235,25 @@ it('refreshes sidebar activity labels at their exact second and minute boundarie
   expect(time()).toBe('1m')
   await act(async () => registry.set(now, 121_000))
   expect(time()).toBe('2m')
+})
+
+it('renders the RM1 two-line facts and freezes age without replacing the working cue', async () => {
+  const now = Atom.make(5000)
+  const connection = Atom.make<ConnectionState>({ _tag: 'Live' })
+  source = { ...source, now, connection }
+  const snapshot = [{ ...agent, harness_state: Option.some('working'), last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }]
+  registry.set(agents, observed({ value: snapshot }))
+  // Main's shared snapshot clock uses the actual roster observation, not the disconnect instant.
+  source = { ...source, sync: { ...source.sync!, agents: Atom.make({ ...initialFeedSync<readonly Agent[]>(5000), last: Option.some({ value: snapshot, observedAt: 5000 }) }) } }
+  await mount(1440)
+  const row = roster().querySelector('[data-testid="taste-agent-row"]')!
+  expect(row.querySelector('[data-row-column="title"]')?.textContent).toContain(agent.name)
+  expect(row.querySelector('[data-row-column="line2"]')?.textContent).toContain('example-primary')
+  expect(row.querySelector('[data-row-column="time"] time')?.textContent).toBe('4s')
+  await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
+  await act(async () => registry.set(now, 60_000))
+  expect(row.querySelector('[data-row-column="time"] time')?.textContent).toBe('4s')
+  expect(row.getAttribute('data-status')).toBe('working')
 })
 
 it('reveals a slightly future activity timestamp when only the leaf clock catches up', async () => {
@@ -331,9 +411,9 @@ describe('shipped live sidebar search', () => {
     registry.set(agents, observed({ value: [agent] }))
     await mount(1440)
     const rowName = () => roster().querySelector('[role="row"][data-sidebar-tree-key="agent/example"]')?.getAttribute('aria-label')
-    expect(rowName()).toBe('Example Agent, idle')
+    expect(rowName()).toBe('Example Agent, Idle')
     await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale' }))
-    expect(rowName()).toBe('Example Agent, Last verified · idle')
+    expect(rowName()).toBe('Example Agent, Last verified · Idle')
   })
 })
 

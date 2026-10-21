@@ -127,6 +127,15 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     ask: fromOption(row.ask),
     ...(suspendedAt === undefined ? {} : { statusSince: DateTime.toEpochMillis(suspendedAt) }),
     ...(mission === undefined ? {} : { mission }),
+    ...(row.subagents === undefined ? {} : { subagents: row.subagents.map(child => ({
+      id: child.id, driver: child.driver,
+      description: Option.getOrUndefined(child.description),
+      session_id: Option.getOrUndefined(child.session_id),
+      started_at: Option.match(child.started_at, { onNone: () => undefined, onSome: DateTime.formatIso }),
+      subagent_type: Option.getOrUndefined(child.subagent_type),
+      work_id: Option.getOrUndefined(child.work_id),
+      lease_expires_at: DateTime.formatIso(child.lease_expires_at),
+    })) }),
     connected: isConnected(row),
   }
 }
@@ -246,6 +255,15 @@ const sameItems = <T>(left: readonly T[], right: readonly T[]): boolean =>
 const sameKnown = <T>(left: Known<T>, right: Known<T>, equivalent: (left: T, right: T) => boolean = Object.is): boolean =>
   left._tag === 'Unknown' ? right._tag === 'Unknown' : right._tag === 'Known' && equivalent(left.value, right.value)
 const sameCheckout = Schema.toEquivalence(St3.AgentCheckout)
+// oxlint-disable-next-line overeng/named-args -- Retained child projection comparator.
+const sameSubagents = (a: Agent['subagents'], b: Agent['subagents']): boolean =>
+  a === b || (a !== undefined && b !== undefined && a.length === b.length && a.every((child, index) => {
+    const other = b[index]!
+    return child.id === other.id && child.driver === other.driver && child.description === other.description &&
+      child.session_id === other.session_id && child.started_at === other.started_at &&
+      child.subagent_type === other.subagent_type && child.work_id === other.work_id &&
+      child.lease_expires_at === other.lease_expires_at
+  }))
 
 // oxlint-disable-next-line overeng/named-args -- Retained Agent projection comparator; fixed positional Equivalence shape.
 const sameAgent = (a: Agent, b: Agent): boolean =>
@@ -270,6 +288,7 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   sameKnown(a.ask, b.ask) &&
   a.statusSince === b.statusSince &&
   a.mission === b.mission &&
+  sameSubagents(a.subagents, b.subagents) &&
   a.connected === b.connected
 
 /**

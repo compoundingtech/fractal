@@ -112,6 +112,12 @@ case "$stage" in
   mail-redelivery-canaries) python3 scripts/ci-mail-redelivery-canaries 2>&1 | tee "$logs/$stage.log" || status=$? ;;
   *) echo "unknown stage: $stage" >&2; exit 2 ;;
 esac
+# The tests nextest passed only on a retry: `flaky=N` for the step output, and the file Workspace CI
+# uploads as `nextest-flaky-<lane>-<N>` for `st slo`'s flakes. Counting never changes the result.
+if [[ "$stage" == tests ]]; then
+  python3 scripts/ci-nextest-flaky "$logs/$stage.log" "${RUNNER_TEMP:-$logs}/nextest-flaky.txt" \
+    || echo "::warning::could not count nextest's flaky tests"
+fi
 # `tee` hides the stage's exit status behind a pipeline; pipefail restores it above.
 result=passed
 [ "$status" -eq 0 ] || result=failed
