@@ -203,9 +203,9 @@ export const AgentTodos = ({
         {binding !== 'current' ? <p {...stylex.props(styles.note)}>
           {binding === 'pending' ? 'Checking to-dos…' : 'These to-dos may be out of date.'}
         </p> : null}
-        <p {...stylex.props(styles.note)}>
+        <div {...stylex.props(styles.note)}>
           <HumanTime at={DateTime.toEpochMillis(snapshot.observed_at)} prefix="Updated " tooltip={!narrow} />
-        </p>
+        </div>
       </div>
     </>
   )
