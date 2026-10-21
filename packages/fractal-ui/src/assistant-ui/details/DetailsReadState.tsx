@@ -27,7 +27,7 @@ function ReadAction({ children, onPress, describedBy, pending, action, buttonRef
     if (pending) button.setAttribute('aria-busy', 'true')
     else button.removeAttribute('aria-busy')
   }, [pending, buttonRef])
-  return <Button ref={buttonRef} isPending={pending} onPress={onPress} aria-describedby={describedBy} data-details-read-action={action} data-details-read-pending={pending || undefined} {...stylex.props(styles.action, narrow && styles.actionTouch, pending && styles.actionPending)}>{children}</Button>
+  return <Button ref={buttonRef} aria-disabled={pending || undefined} onPress={() => { if (!pending) onPress() }} aria-describedby={describedBy} data-details-read-action={action} data-details-read-pending={pending || undefined} {...stylex.props(styles.action, narrow && styles.actionTouch, pending && styles.actionPending)}>{children}</Button>
 }
 
 /** The failure sentence; a read that kept earlier figures dates them, so no separate `Updated …` line is needed. */

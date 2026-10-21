@@ -91,6 +91,7 @@ async function action(canvas: HTMLElement, name: 'loading' | 'failed' | 'busy') 
   click(canvas, `[data-recovery-action="${name}"]`)
   await waitFor(() => expect(paneFor(canvas)).toHaveAttribute('data-details-sync-state', name === 'failed' ? 'Failed' : name === 'loading' ? 'Connecting' : 'Live'))
   await frames()
+  await waitFor(() => assertPhase(paneFor(canvas), name === 'busy' ? 'live' : name === 'failed' ? 'failed' : 'loading'))
 }
 const shown = (node: Element | null): node is HTMLElement => Boolean(node && node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== 'hidden' && getComputedStyle(node).display !== 'none')
 function clipFor(head: HTMLElement) {

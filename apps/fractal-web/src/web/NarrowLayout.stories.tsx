@@ -179,7 +179,7 @@ const assertPhoneTabRow = async (canvasElement: HTMLElement) => {
 }
 
 /** The thread fills the window; the header keeps the chevron, host / agent breadcrumb, status, the conversation actions and one Agent details button; Terminal ends the tab row. */
-export const Drawers: Story = { play: async ({ canvasElement }) => {
+export const Drawers: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin responsive drawer routing, header controls and unavailable-terminal copy.' } }, play: async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) return assertWide(canvasElement)
   // The sidebar is not in the layout until opened.
@@ -213,7 +213,7 @@ export const Drawers: Story = { play: async ({ canvasElement }) => {
   await waitFor(() => expect(terminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 } }
-export const DrawersLight: Story = { ...Drawers, args: { scheme: 'light' } }
+export const DrawersLight: Story = { ...Drawers, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Light deterministic workspace feeds pin responsive drawer routing, header controls and unavailable-terminal copy.' } }, args: { scheme: 'light' } }
 
 const openDetailsSheet = async (canvasElement: HTMLElement) => {
   const { canvas, header } = await workspace(canvasElement)
@@ -226,7 +226,7 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   return { canvas, sheet, opener, ...inspector }
 }
 /** The right sheet holds the agent inspector: Details first, Changes one tab away; the conversation actions stay in the header. */
-export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
+export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin Details-first inspector routing and the Changes tab inside the phone sheet.' } }, play: async ({ canvasElement }) => {
   const { narrow } = await workspace(canvasElement)
   if (!narrow) return openWideDetails(canvasElement)
   const { canvas, sheet, inspector, views, tab, opener } = await openDetailsSheet(canvasElement)
@@ -262,7 +262,7 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
 } }
 /** Keyboard path through both sheets: each opens with focus inside, Escape or the backdrop closes it, and focus returns to its opener. */
-export const DrawersFlow: Story = { play: restoringStoryUrl(async ({ canvasElement }) => {
+export const DrawersFlow: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin keyboard opening, dismissal and focus return for both responsive drawers.' } }, play: restoringStoryUrl(async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) return assertWide(canvasElement)
   // Agents, from the left.
@@ -320,7 +320,7 @@ export const DrawersFlow: Story = { play: restoringStoryUrl(async ({ canvasEleme
  * play then selects a seat with a long name: the breadcrumb truncates within its share and the tab row, with the
  * terminal tab added, still ends before Terminal.
  */
-export const TerminalToggle: Story = { parameters: { scenario: { mode: 'contract-fixture', reason: 'The real responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { terminalRuntime: true }, play: restoringStoryUrl(async ({ canvasElement }) => {
+export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The real responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { terminalRuntime: true }, play: restoringStoryUrl(async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) await assertWide(canvasElement)
   if (narrow) await assertPhoneHeader(canvasElement)
@@ -366,4 +366,4 @@ export const TerminalToggle: Story = { parameters: { scenario: { mode: 'contract
   await waitFor(() => expect(longTerminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 }) }
-export const TerminalToggleLight: Story = { ...TerminalToggle, parameters: { scenario: { mode: 'contract-fixture', reason: 'The light responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { ...TerminalToggle.args, scheme: 'light' } }
+export const TerminalToggleLight: Story = { ...TerminalToggle, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The light responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { ...TerminalToggle.args, scheme: 'light' } }
