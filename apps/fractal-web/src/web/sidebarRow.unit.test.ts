@@ -172,7 +172,7 @@ describe('retained mission row context', () => {
     const prefix = `${seat.name}, Idle, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps`
     expect(sidebarRowAccessibleName(actual)).toBe(`${prefix}, Step Review changes`)
     const card: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
-      actions: ['work.done'], conversation_id: seat.ref, detail: 'Ship this change?', update: undefined }
+      actions: ['work.done'], conversation_id: 'agent/example-readonly', detail: 'Ship this change?', update: undefined }
     const waiting = sidebarRow({ agent: seat, stale: false, missions: [hydrated], attention: [card],
       missionInfo: { _tag: 'Stale', updatedAt: 1000 } })
     expect(sidebarRowAccessibleName(waiting)).toBe(`${prefix}, Waiting for you: Ship this change?, mission info may be out of date`)
