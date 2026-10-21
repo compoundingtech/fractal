@@ -1,7 +1,7 @@
 # st observability
 
 This reference describes the current daemon, CLI, replication worker and hook
-telemetry in the `crates/st3` implementation. The shared client-class vocabulary
+telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
 and bounded attributes are used by production code.
 
 ## Requirements
@@ -50,7 +50,7 @@ hook signals ── daemon observations exporter ──────────�
 
 ## Pipeline and identity
 
-`crates/st3-telemetry/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
+`crates/fractal-telemetry/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
 The tracer provider uses `Sampler::AlwaysOn` and a plain SDK `BatchSpanProcessor` to export
 every span, including spans with an unsampled remote parent. There is no in-process sampler
 or span buffer beyond the SDK batch queue. The manifest pins OpenTelemetry API, SDK
@@ -85,13 +85,13 @@ unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 | Driver hook | `st-hook` via daemon observations exporter; no direct SDK export | No collector flush in the hook |
 | `driver claude-statusline` | None; `telemetry::local_only()` | No pipeline |
 
-`crates/st3-telemetry/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
+`crates/fractal-telemetry/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
 never contact a collector. The observations exporter emits hook spans and hook invocation
 metrics as `st-hook`; observation logs and usage metrics retain `st-daemon`. Statusline calls remain local-only and do not initialize an SDK pipeline.
 
 The shared resource contains `service.name`, `service.version` from
-`st_drivers::version::machine_version()`, a random per-process `service.instance.id`,
-`host.name`, and `st3.node`. The observations exporter in `crates/st3-telemetry/src/otlp.rs` uses this
+`fractal_drivers::version::machine_version()`, a random per-process `service.instance.id`,
+`host.name`, and `st3.node`. The observations exporter in `crates/fractal-telemetry/src/otlp.rs` uses this
 resource builder, including the version: hook spans and invocation metrics are `st-hook`,
 observation logs and usage metrics are `st-daemon`. The bare `st` service name is retired.
 The platform edge supplies fleet-owned attributes.
@@ -814,7 +814,7 @@ metrics, or logs. Span names and labels use bounded operation vocabulary. Existi
 `profile::Op` and `profile::task` labels supply that vocabulary where available.
 
 W3C `traceparent` and `tracestate` are the wire context, not hash-derived identities.
-`crates/st3-client/src/propagation.rs` supplies one injector for both the CLI's internal
+`crates/fractal-client/src/propagation.rs` supplies one injector for both the CLI's internal
 daemon client and the generated typed Rust client. Every HTTP request, Unix HTTP request,
 and WebSocket handshake injects the current tracing span's OpenTelemetry context through
 the global text-map propagator. This makes the daemon's SERVER span a child of the CLI's
@@ -833,7 +833,7 @@ bridge dependencies, not an exporter or SDK initializer. `st3` enables the featu
 `stui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
-`crates/st3-client-codegen/templates/lib.rs.in`; the
+`crates/fractal-client-codegen/templates/lib.rs.in`; the
 shared propagation module is handwritten. Invalid-context injection performs only a
 current-span/context check, with no allocation, header formatting, or propagator lookup.
 Valid-context injection clones/updates tracestate and uses the propagator to format the

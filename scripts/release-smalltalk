@@ -20,7 +20,7 @@ esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
 if $dry_run; then
-  printf 'cargo build --release --locked --target %s -p st3\n' "$target"
+  printf 'cargo build --release --locked --target %s -p fractal\n' "$target"
   printf 'stage bin/%s\n' "${runtime_binaries[@]}"
   printf 'link bin/fractal -> st3\n'
   # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
@@ -64,7 +64,7 @@ if [[ $target == *linux* ]]; then
   export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$repo/scripts/linux-release-cc"
   export CC_x86_64_unknown_linux_gnu="$repo/scripts/linux-release-cc"
 fi
-cargo build --release --locked --target "$target" -p st3
+cargo build --release --locked --target "$target" -p fractal
 build_dir=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 for binary in "${binaries[@]}"; do
   install -m 0755 "$build_dir/$target/release/$binary" "$work/$package/bin/$binary"
@@ -164,7 +164,7 @@ PY_VERSION
 env -u FRACTAL_AGENT -u ST_AGENT HOME="$work/install-home" XDG_CONFIG_HOME="$work/install-home/.config" \
   XDG_CACHE_HOME="$work/install-home/.cache" XDG_STATE_HOME="$work/install-home/.local/state" \
   FRACTAL_PERSON=person/release-smoke ST3_PERSON=person/release-smoke FRACTAL_ENDPOINT="$work/absent.sock" ST3_ENDPOINT="$work/absent.sock" \
-  python3 crates/stui/tests/pty_smoke.py "$work/installed/st" --ui --no-panic
+  python3 crates/fractal-tui/tests/pty_smoke.py "$work/installed/st" --ui --no-panic
 python3 - "$archive" <<'PY'
 import hashlib, pathlib, sys
 p = pathlib.Path(sys.argv[1])

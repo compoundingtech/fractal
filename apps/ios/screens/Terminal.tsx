@@ -3,7 +3,7 @@ import { Alert, InputAccessoryView, KeyboardAvoidingView, PanResponder, Platform
 import { quality } from '../qualityNative';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
-import type { TerminalScreen as Screen } from '../../../clients/typescript/st3-client';
+import type { TerminalScreen as Screen } from '../../../clients/typescript/fractal-client';
 import { Banners } from '../chrome';
 import type { RootScreen } from '../navigation';
 import { errorText, useStore } from '../store';

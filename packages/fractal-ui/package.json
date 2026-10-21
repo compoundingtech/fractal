@@ -1,5 +1,5 @@
 {
-  "name": "@smalltalk/fractal-ui",
+  "name": "@fractal/ui",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -48,7 +48,7 @@
     "remark-gfm": "4.0.1"
   },
   "devDependencies": {
-    "@smalltalk/st3-scenarios": "workspace:*",
+    "@fractal/scenarios": "workspace:*",
     "@storybook/addon-a11y": "10.6.1",
     "@storybook/addon-docs": "10.6.1",
     "@storybook/react-vite": "10.6.1",
