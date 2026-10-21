@@ -6058,6 +6058,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
@@ -18172,6 +18173,28 @@ async fn import_retired_identities(store: Arc<Store>) {
             Ok(Ok(())) => return,
             error => {
                 eprintln!("st3: retired identity import failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Claim inserts and deletes queue by trigger; this folds the queue, and once the claims stored
+/// before the digests existed, into the claim range digests: a page per background writer loan,
+/// resting outside the loan. It runs at startup and again after each store event. A failed fold
+/// retries; the queue and the import cursor are durable, so nothing is lost.
+async fn fold_claim_ranges(store: Arc<Store>, mut events: watch::Receiver<u64>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.claim_ranges", || worker.fold_claim_ranges_paced(std::thread::sleep))).await;
+        match result {
+            Ok(Ok(())) => {
+                if events.changed().await.is_err() {
+                    return;
+                }
+            }
+            error => {
+                eprintln!("st3: claim range fold failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
