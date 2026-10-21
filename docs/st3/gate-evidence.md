@@ -93,7 +93,7 @@ verifier still reads it, with a pattern that matches only names exactly one obje
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
 refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
 Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
-`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/st3-kernel/src/evidence`) still writes
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
 the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
 removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
 
@@ -203,7 +203,7 @@ or malformed statement supplies no evidence. Repository Git signing programs,
 allowed-signers paths, revocation files, and replacement objects cannot widen
 this caller-supplied trust. Key removal from the trust list revokes its evidence.
 
-`st3::evidence::sign_observation` is an API for trusted observers running under
+`fractal_daemon::evidence::sign_observation` is an API for trusted observers running under
 a separate signing account. It validates the statement, measures its own
 executable digest, constructs the note, and calls Git's SSH signer. The observer
 must construct facts from its own execution; it must never expose this API as a
@@ -669,8 +669,8 @@ implementation; the script's tests use real Git repositories and real SSH
 signatures.
 
 ```sh
-scripts/evidence-verify --repo . --revision HEAD --check typescript-client \
-  --keys-from BASE_COMMIT [--command '["nix","build",".#checks.x86_64-linux.suite"]']
+scripts/evidence-verify --repo . --revision HEAD --check genie-freshness \
+  --keys-from BASE_COMMIT [--command '["nix","build",".#checks.x86_64-linux.genie-freshness"]']
 ```
 
 Exit 0 is satisfied, exit 1 is not satisfied, exit 2 is a usage error. Both print one JSON
@@ -856,11 +856,11 @@ members of the aggregate read: the whole of `.github` (workflows, the clippy and
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
 on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the st3 crate), `evals` (the example and graph tests read `evals/st3`),
-`claude-channel` and `plugins` (the plugin files `include_bytes!`d into st-drivers) and `docs/st2` (`tests/invariants.rs` includes
+`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
 `docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
 artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
-(`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/st3-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
+(`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/fractal-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
 the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
 whole until a per-file list is reviewed against a trace of what each stage opens.
 

@@ -78,7 +78,7 @@ certify only their exact measured builds, not every patch in a release family.
 
 The probe does not certify pricing, context arithmetic, every provider/model combination,
 or every interactive mode. Its retained test captures are in
-[`crates/st-drivers/tests/fixtures/harness-admission`](../../crates/st-drivers/tests/fixtures/harness-admission/).
+[`crates/fractal-drivers/tests/fixtures/harness-admission`](../../crates/fractal-drivers/tests/fixtures/harness-admission/).
 A refusal stops a new OMP provider before it claims the live session. Admission runs on
 restart and residency resume; it does not stop an already-running provider retroactively,
 and adopting an existing provider does not repeat the probe. See
@@ -240,12 +240,12 @@ to the observed kinds: genuinely unknown entry types retain their existing behav
 bookkeeping records (`model_change`, `custom`, `credential_pin`, `title`) keep the views and
 visibility the conversation design gives them.
 
-`crates/st3/fixtures/omp-admin-events.jsonl` preserves one native shape per administrative kind
+`crates/fractal/fixtures/omp-admin-events.jsonl` preserves one native shape per administrative kind
 from a session resumed on 2026-10-04. Native IDs and timestamps remain exact, but every payload
 string and numeric usage value is redacted. No bootstrap prompt, injected rule, task, model
 label, or tool name from that capture is published.
 
-`crates/st3/fixtures/omp-native-events.jsonl` contains a redacted 2026-10-01 OMP capture:
+`crates/fractal/fixtures/omp-native-events.jsonl` contains a redacted 2026-10-01 OMP capture:
 the native tool call/result IDs and error flag, plus an incoming IRC event.
 Tool arguments, result text, sender name and incoming text are redacted; no credentials,
 machine paths, or host metadata are retained. Task-job and structured-resource boundary
@@ -344,7 +344,7 @@ Its existing state-frame `reason` names the reopened toolCall id
 what the seat is waiting on. Shared native continuation does not depend on the bridge.
 
 The contraction criterion is behavioral, not a version equality assertion. The standalone
-`crates/st3-daemon/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
+`crates/fractal-daemon/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
 a disposable native session directory, renders native resume in a PTY under an empty HOME with no
 auth or extensions, and never sends F5 or a prompt. It requires `OMP_BIN` pointing at the raw pinned
 OMP executable (not a fleet launcher); `--omp` overrides that variable. Optional `--fixture`,
