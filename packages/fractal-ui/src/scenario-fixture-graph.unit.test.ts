@@ -39,6 +39,16 @@ const sources: Readonly<Record<string, string>> = {
   [source('unresolved.stories.ts')]: "import './not-present'",
   [source('recording.stories.ts')]: "import data from '../../kit/recordings/data.json'; export const story = data",
   '/fixture-graph/kit/recordings/data.json': '{}',
+  [source('html.stories.ts')]: "import text from './page.html?raw'; export const story = text",
+  [source('page.html')]: '<html>Example</html>',
+  [source('font.stories.ts')]: "import url from './font.ttf?url'; export const story = url",
+  [source('font.ttf')]: 'example-font',
+  [source('missing-asset.stories.ts')]: "import text from './missing.html?raw'; export const story = text",
+  [source('raw-domain.stories.ts')]: "import text from '../../kit/src/index.ts?raw'; export const story = text",
+  [source('raw-fixture.stories.ts')]: "import text from './local-fixture.ts?raw'; export const story = text",
+  [source('raw-marked.stories.ts')]: "import text from './marked-data.ts?raw'; export const story = text",
+  [source('unknown-query.stories.ts')]: "import text from './page.html?unknown'; export const story = text",
+  [source('raw-code.stories.ts')]: "import text from './catalog-bridge.ts?raw'; export const story = text",
 }
 const graph = createTypeScriptGraph(Object.keys(sources).filter(file => file.endsWith('.ts')), {
   target: ts.ScriptTarget.ESNext,
@@ -110,6 +120,19 @@ test('unresolved runtime edges fail closed instead of disappearing from the grap
 })
 test('raw recording JSON cannot bypass domain ownership checks', () => {
   expect(check('recording.stories.ts', 'contract-fixture').violations.join('\n')).toContain('/fixture-graph/kit/recordings/data.json')
+})
+
+test.each(['html', 'font', 'raw-code'])('Vite asset imports are leaves: %s', name => {
+  expect(check(`${name}.stories.ts`, 'contract-fixture').violations).toEqual([])
+})
+test.each(['inline', 'no-inline'])('documented Vite %s assets are leaves', query => {
+  expect(graph.resolve(`./font.ttf?${query}`, source('font.stories.ts'))).toBe(`${source('font.ttf')}?${query}`)
+})
+test.each(['missing-asset', 'unknown-query'])('asset imports fail closed: %s', name => {
+  expect(check(`${name}.stories.ts`, 'contract-fixture').violations.join('\n')).toContain('unresolved runtime import')
+})
+test.each(['raw-domain', 'raw-fixture', 'raw-marked'])('raw source cannot hide forbidden fixture data: %s', name => {
+  expect(check(`${name}.stories.ts`, 'primitive').violations.join('\n')).toContain('forbidden domain/fixture module')
 })
 
 test.each([

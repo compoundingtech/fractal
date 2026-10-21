@@ -27,6 +27,7 @@ export interface FixtureGraphPolicy {
 const normalized = (file: string): string => file.replaceAll('\\', '/')
 const within = (file: string, directory: string): boolean => file.startsWith(`${directory}/`)
 const fixtureNamed = (file: string): boolean => /fixture/i.test(path.basename(file))
+const assetBasePath = (file: string): string => file.split('?')[0]!
 
 /** Only domain roots carry markers. Local contract-data modules remain usable by contracts. */
 export const requiresDomainMarker = (file: string, policy: FixtureGraphPolicy): boolean => {
@@ -69,7 +70,8 @@ export const checkFixtureGraph = (
       if (visited.has(file)) continue
       visited.add(file)
       allVisited.add(file)
-      const domainRoot = requiresDomainMarker(file, policy)
+      const basePath = assetBasePath(file)
+      const domainRoot = requiresDomainMarker(basePath, policy)
       let module: RuntimeModule
       try {
         module = domainRoot ? { imports: [], marked: false } : graph.read(file)
@@ -77,7 +79,7 @@ export const checkFixtureGraph = (
         violations.push(`${chain.join(' -> ')} (unreadable runtime module: ${String(cause)})`)
         continue
       }
-      const forbidden = domainRoot || module.marked || (primitive && fixtureNamed(file))
+      const forbidden = domainRoot || module.marked || (primitive && fixtureNamed(basePath))
       if (forbidden) {
         violations.push(`${primitive ? 'primitive' : 'contract-fixture'}: ${chain.join(' -> ')} (forbidden domain/fixture module)`)
         continue
@@ -180,6 +182,14 @@ export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.
         : ts.createSourceFile(file, text, languageVersion, true)
     }
   }
+  // Vite's documented string/URL asset queries; worker and unknown queries
+  // remain code edges or unresolved, never silently become asset leaves.
+  const resolveAsset = (specifier: string, importer: string): string | undefined => {
+    const query = specifier.slice(specifier.indexOf('?'))
+    if (!specifier.startsWith('.') || !/^\?(?:raw|url|inline|no-inline)$/.test(query)) return undefined
+    const base = normalized(path.resolve(path.dirname(importer), assetBasePath(specifier)))
+    return host.fileExists(base) ? base : undefined
+  }
   const resolutionCache = ts.createModuleResolutionCache(host.getCurrentDirectory(), file => file, compilerOptions)
   const repository = normalized(path.resolve(import.meta.dirname, '../../..'))
   host.resolveModuleNameLiterals = (literals, importer, redirectedReference, options, source) => literals.map(literal => {
@@ -197,11 +207,12 @@ export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.
   const program = ts.createProgram([...rootNames], compilerOptions, host)
   const checker = program.getTypeChecker()
   const cache = new Map<string, RuntimeModule>()
-  const hasMarker = (file: string): boolean => {
-    const source = program.getSourceFile(file)
+  const hasMarker = (file: string, owner: ts.Program = program): boolean => {
+    const source = owner.getSourceFile(file)
     if (source === undefined) throw new Error(`Missing graph source: ${file}`)
-    const symbol = checker.getSymbolAtLocation(source)
-    return symbol !== undefined && checker.getExportsOfModule(symbol).some(exported => exported.name === 'scenarioDomainFixtureMarker')
+    const ownerChecker = owner.getTypeChecker()
+    const symbol = ownerChecker.getSymbolAtLocation(source)
+    return symbol !== undefined && ownerChecker.getExportsOfModule(symbol).some(exported => exported.name === 'scenarioDomainFixtureMarker')
   }
   return {
     hasMarker,
@@ -217,6 +228,14 @@ export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.
         && (type.symbol.declarations?.some(declaration => normalized(declaration.getSourceFile().fileName).endsWith('/domain-fixture.ts')) ?? false)
     },
     read: file => {
+      if (file.includes('?')) {
+        const base = assetBasePath(file)
+        if (!/\.[cm]?[jt]sx?$/.test(base)) return { imports: [], marked: false }
+        // Raw module text is not executable, but its exported marker still
+        // makes it fixture data, even when TS never resolved the query import.
+        const owner = program.getSourceFile(base) === undefined ? ts.createProgram([base], compilerOptions, host) : program
+        return { imports: [], marked: hasMarker(base, owner) }
+      }
       const previous = cache.get(file)
       if (previous !== undefined) return previous
       if (!/\.[cm]?[jt]sx?$/.test(file)) return { imports: [], marked: false }
@@ -231,6 +250,10 @@ export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.
     },
     resolve: (specifier, importer) => {
       if (specifier.startsWith('node:')) return `external:${specifier}`
+      if (specifier.includes('?')) {
+        const asset = resolveAsset(specifier, importer)
+        return asset === undefined ? undefined : `${asset}${specifier.slice(specifier.indexOf('?'))}`
+      }
       // Non-code assets are runtime leaves, not source graph escape hatches.
       if (/\.(?:css|svg|png|jpe?g|woff2?|json|jsonl)(?:\?.*)?$/.test(specifier) && specifier.startsWith('.')) {
         const asset = normalized(path.resolve(path.dirname(importer), specifier.split('?')[0]!))

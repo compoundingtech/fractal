@@ -16,6 +16,8 @@ import * as nodePath from 'node:path'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
 import './scenario-fixture-graph.unit.test.ts'
+import { storyGlobs } from '../.storybook/stories.ts'
+import storybookConfig from '../.storybook/main.ts'
 
 import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
 import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
@@ -274,13 +276,47 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './stories/milestone/RedesignMilestone.stories.tsx#Decisions': 3355,
 }
 
+// Separate shrink-only debt owned by the app, never part of the blocked-PR ratchet.
+const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
+  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#Drawers': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersLight': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersOpen': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersFlow': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
+  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
+}
+
 interface StoryModule {
   readonly default: Meta
   readonly [exportName: string]: unknown
 }
-const storyModules = import.meta.glob<StoryModule>('./**/*.stories.tsx', { eager: true })
+// A lazy repository-wide loader pool is not the inventory: only configured CSFs
+// are imported. New Storybook locations need no parallel glob-list update.
+const storyLoaders = import.meta.glob<StoryModule>('../../../**/*.stories.tsx')
+const uiSource = nodePath.resolve(process.cwd(), 'src')
+const loadersByFile = Object.fromEntries(Object.entries(storyLoaders).map(([file, loader]) => [nodePath.resolve(uiSource, file), loader]))
+const storybookDirectory = nodePath.resolve(uiSource, '../.storybook')
+const configuredFiles = ts.sys.readDirectory(storybookDirectory, ['.tsx'], undefined, storyGlobs)
+const storyModules: Record<string, StoryModule> = {}
+for (const file of configuredFiles) {
+  const path = `./${nodePath.relative(uiSource, file)}`
+  const loader = loadersByFile[file]
+  if (loader === undefined) throw new Error(`No CSF loader for configured Storybook file: ${file}`)
+  storyModules[path] = await loader()
+}
+
+test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', () => {
+  expect(storybookConfig.stories).toEqual(storyGlobs)
+  expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
+  expect(configuredFiles.length).toBeGreaterThan(0)
+})
 const isStory = (value: unknown): value is StoryObj => typeof value === 'object' && value !== null
 const undeclared: string[] = []
+const undeclaredApp: string[] = []
 const exemptions: string[] = []
 const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
 const sliceFiles = new Set<string>()
@@ -299,9 +335,12 @@ for (const [path, module] of Object.entries(storyModules)) {
     const declaration: unknown = story.parameters?.scenario ?? storyMeta.parameters?.scenario
     const tag = typeof declaration === 'object' && declaration !== null && '_tag' in declaration ? declaration._tag : undefined
     if (tag !== 'slices' && tag !== 'contract-fixture' && tag !== 'primitive') {
-      undeclared.push(id)
-      test(`${id} has pinned, PR-owned undeclared mode debt`, () => {
-        expect(deferredStoryModes[id], 'Declare a scenario mode instead of adding unowned debt').toBeDefined()
+      const appStory = path.startsWith('./../../../apps/')
+      if (appStory) undeclaredApp.push(id)
+      else undeclared.push(id)
+      test(`${id} has pinned, owned undeclared mode debt`, () => {
+        expect(appStory ? deferredAppStoryModes[id] : deferredStoryModes[id], 'Declare a scenario mode instead of adding unowned debt').toBeDefined()
+        if (appStory) expect(declaration, 'Deferred app stories must have no scenario declaration').toBeUndefined()
       })
       continue
     }
@@ -340,6 +379,10 @@ test('exempt CSF runtime import graphs cannot reach domain fixture roots', () =>
   const allKitSources = ts.sys.readDirectory(kitRoot, ['.ts', '.tsx'], ['**/node_modules/**', '**/*.test.ts', '**/*.test.tsx'])
   const markerRoots = [...allKitSources, policy.projectionHarness].filter(file => requiresDomainMarker(file, policy))
   const entries = new Map([...exemptFiles].map(([file, modes]) => [nodePath.resolve(uiSource, file), modes]))
+  // Undeclared app debt still receives the runtime graph check, not an exemption.
+  for (const file of Object.keys(storyModules)) {
+    if (file.startsWith('./../../../apps/')) entries.set(nodePath.resolve(uiSource, file), exemptFiles.get(file) ?? new Set())
+  }
   const configPath = nodePath.resolve(uiSource, '../tsconfig.json')
   const config = ts.readConfigFile(configPath, ts.sys.readFile)
   if (config.error !== undefined) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'))
@@ -359,6 +402,12 @@ test('exempt CSF runtime import graphs cannot reach domain fixture roots', () =>
 test('undeclared story modes match the exact blocked-PR ratchet (no growth or stale entries)', () => {
   expect(undeclared.sort()).toEqual(Object.keys(deferredStoryModes).sort())
   for (const id of undeclared) process.stdout.write(`${id}: undeclared — blocked by PR #${deferredStoryModes[id]}\n`)
+})
+
+test('app mode debt matches its separate shrink-only owner ratchet', () => {
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(10)
+  expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
+  for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
