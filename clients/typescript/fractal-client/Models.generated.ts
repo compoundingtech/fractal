@@ -1370,7 +1370,45 @@ export type DirectiveNotes = {
 
 export type DocumentContent = {
   bytes: Array<number>;
+  changed_at_unix_ms?: number;
+  latest?: boolean;
+  name?: string;
+  owner?: string;
   reference: string;
+  size?: number;
+  version?: string;
+};
+
+export type DocumentItem = {
+  changed_at_unix_ms: number;
+  latest: boolean;
+  name: string;
+  owner?: string;
+  reference: string;
+  size: number;
+  version: string;
+};
+
+export type DocumentReference = {
+  name: string;
+  reference: string;
+  source: "content" | "body" | "step";
+  step?: string | null;
+  version?: string | null;
+};
+
+export type DocumentReferences = {
+  complete: boolean;
+  references: Array<DocumentReference>;
+  subject: string;
+};
+
+export type DocumentsPage = {
+  has_more: boolean;
+  history: boolean;
+  items: Array<DocumentItem>;
+  limit: number;
+  next_cursor?: string | null;
 };
 
 export type Ed25519PublicKey = string;
@@ -1379,7 +1417,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | DocumentContent | DocumentsPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1439,6 +1477,8 @@ export type ErrorCode = (
   | "long-message-signature-unsupported"
   | "response-budget-exceeded"
   | "content-not-text"
+  | "invalid-document-reference"
+  | "document-not-synced"
   | "internal"
  | string);
 

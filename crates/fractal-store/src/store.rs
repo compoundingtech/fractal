@@ -18,6 +18,7 @@ pub mod attention;
 pub mod delivery;
 pub mod evidence;
 pub mod missions;
+mod mission_projection_upgrade;
 pub mod seats;
 pub mod trace_principal;
 #[cfg(test)]
@@ -15317,8 +15318,12 @@ fn reconcile_carried_step_tx(
     // observation for this successor step.
     let later_step_claim = transaction
         .query_row(
-            "SELECT 1 FROM claims WHERE subject=?1 AND kind<>'step-run.carried' LIMIT 1",
-            [&claim.subject],
+            /* sqlite-large-value: allow-for-now lv-hfdfe47383131 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT 1 FROM claims JOIN claims carried ON carried.id=?2
+                 WHERE claims.subject=?1 AND claims.kind IN
+                 ('step-run.state','step-run.retried','work.claimed','work.renewed',
+                  'work.progress','work.submitted','work.failed','work.released','work.extended')
+                 AND {} LIMIT 1", canonical::after_sql("claims", "carried")),
+            params![claim.subject, claim.id],
             |_| Ok(()),
         )
         .optional()
@@ -15345,14 +15350,17 @@ fn reconcile_carried_step_tx(
             .get(name)
             .filter(|_| matches!(status, "claimed" | "working" | "verifying" | "blocked"))
     };
+    let reason = mission_projection_upgrade::carried_reason(transaction, &claim.id)?;
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h49652782434a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
-                    blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE NULL END,
+            /* sqlite-large-value: allow-for-now lv-h3bfc21a711de owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
+                    blocked_reason=?9,
                     not_before_unix_ms=CASE WHEN status=?2 THEN not_before_unix_ms ELSE NULL END,
-                    lease_owner=?6, lease_incarnation=?7, lease_expires_at_unix_ms=?8,
-                    updated_at_unix_ms=?5
-                 WHERE subject=?1 AND status<>?2",
+                    lease_owner=CASE WHEN status<>?2 THEN ?6 ELSE lease_owner END,
+                    lease_incarnation=CASE WHEN status<>?2 THEN ?7 ELSE lease_incarnation END,
+                    lease_expires_at_unix_ms=CASE WHEN status<>?2 THEN ?8 ELSE lease_expires_at_unix_ms END,
+                    updated_at_unix_ms=CASE WHEN status<>?2 THEN ?5 ELSE updated_at_unix_ms END
+                 WHERE subject=?1 AND (status<>?2 OR blocked_reason IS NOT ?9)",
             params![
                 claim.subject,
                 status,
@@ -15364,6 +15372,7 @@ fn reconcile_carried_step_tx(
                 lease("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
                     .map(|expiry| expiry.to_string()),
+                reason,
             ],
         )
         .map_err(internal)?;
@@ -15578,6 +15587,9 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    if claim.kind == "step-run.carried" {
+        return reconcile_carried_step_tx(transaction, claim);
+    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }
