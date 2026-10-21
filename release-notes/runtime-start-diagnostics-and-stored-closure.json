@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "Adds an authenticated read-only client diagnostic endpoint. Existing endpoints are unchanged."},
   "downtime": {"status": "none", "detail": "None."},
   "manual": {"status": "none", "detail": "No manual cleanup is required when a valid exact stored nonlaunch witness exists."},
-  "recovery": {"status": "none", "detail": "Recovered closure is validated against the original operation and retained request provenance inside the writer fence. A generic launch error, elapsed time or unrelated PTY tag never supplies a witness."}
+  "recovery": {"status": "none", "detail": "Recovered closure is validated against the original operation and retained request provenance inside the writer fence before taking the lazy pass-shared PTY snapshot. A generic launch error, elapsed time or unrelated PTY tag never supplies a witness."}
 }

@@ -2648,10 +2648,16 @@ async fn self_restart_now_and_other_actors_interrupt_immediately() {
             // restart: the seat is asked for its handoff and stopped at the prepare deadline.
             assert!(fixture.runtime.stops.lock().unwrap().is_empty(), "{case}");
             assert_eq!(prepare_messages(&fixture, &subject).len(), 1, "{case}");
-            let due = fixture.reconciler.next_deadline().expect("the prepare deadline");
-            let wait = due.saturating_sub(smallclaims::store::now_ms()) + 1;
-            tokio::time::sleep(Duration::from_millis(wait as u64)).await;
-            fixture.reconciler.reconcile_once().unwrap();
+            // Other deadlines can come due first: follow the reconciler's own deadlines until the
+            // prepare deadline passes and the seat stops.
+            let give_up = std::time::Instant::now() + Duration::from_secs(10);
+            while fixture.runtime.stops.lock().unwrap().is_empty() {
+                assert!(std::time::Instant::now() < give_up, "{case}: never stopped after preparing");
+                let due = fixture.reconciler.next_deadline().expect("the prepare deadline");
+                let wait = due.saturating_sub(smallclaims::store::now_ms()) + 1;
+                tokio::time::sleep(Duration::from_millis(wait as u64)).await;
+                fixture.reconciler.reconcile_once().unwrap();
+            }
         }
         assert_eq!(
             fixture.runtime.stops.lock().unwrap().as_slice(),
