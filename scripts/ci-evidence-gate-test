@@ -309,7 +309,7 @@ class EndToEnd(unittest.TestCase):
                'committers_also': []}
 
     def pull_request(self, main_moves=True, signing=True, head_files=None, main_files=None, head_email=None, policy=None,
-                     base_files=None, authors_text=None):
+                     base_files=None, authors_text=None, main_commits=1):
         """Base B (with the gate, verifier, policy, keys, author list and signing script), a branch head H on it, and the
         merge M of H into a main that moved (B2), as GitHub's merge ref is. The repository's HEAD is M, as the checkout."""
         repo = self.f.repo
@@ -339,6 +339,8 @@ class EndToEnd(unittest.TestCase):
             (repo / name).write_text(content)
         self.f.git('add', '-A')
         self.f.git('commit', '-q', '--allow-empty', '-m', 'main moves')
+        for number in range(main_commits - 1):
+            self.f.git('commit', '-q', '--allow-empty', '-m', f'main moves again {number}')
         tip = self.f.git('rev-parse', 'HEAD')
         merged_tree = self.f.git('merge-tree', '--write-tree', '--no-messages', tip, head).splitlines()[0]
         merge = self.f.git('commit-tree', merged_tree, '-p', tip, '-p', head, '-m', 'merge ref')
@@ -382,6 +384,23 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(fields['notes_fetch'], 'ok')
         self.assertRegex(fields['policy_sha256'], r'^[0-9a-f]{16}$')
         self.assertRegex(fields['keys_sha256'], r'^[0-9a-f]{16}$')
+
+    def test_a_head_tree_is_used_only_up_to_the_staleness_bound(self):
+        bound = gate.HEAD_TREE_MAX_BEHIND
+        for commits, expected in ((bound, 'head'), (bound + 1, 'merge')):
+            with self.subTest(commits=commits):
+                self.f = fixtures.Fixture()
+                self.addCleanup(self.f.tmp.cleanup)
+                self.ci = self.f.key('ci', 'fleet/ci')
+                s = self.pull_request(main_commits=commits)
+                self.note(s['head'], s['head_tree'], seconds=1)
+                fields, _ = self.run_gate(s['base'], **self.pr_env(s))
+                self.assertEqual((fields['tree_of'], fields['behind']), (expected, str(commits)))
+                if expected == 'head':
+                    self.assertEqual(fields['decision'], 'skip')
+                else:
+                    self.assertTrue(fields['head_tree'].startswith('fallback:the_branch_is_'), fields['head_tree'])
+                    self.assertEqual((fields['decision'], fields['outcome']), ('run', 'no_note'))
 
     def test_a_note_for_the_merge_tree_alone_does_not_cover_a_pull_request_head(self):
         s = self.pull_request()
@@ -1181,7 +1200,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
-            'head_tree', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'head', 'base', 'event', 'pr', 'repo', 'run',
+            'head_tree', 'behind', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'head', 'base', 'event', 'pr', 'repo', 'run',
             'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))
