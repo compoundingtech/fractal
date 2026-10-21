@@ -368,8 +368,35 @@ pub struct RuntimeObservation {
     pub incarnation_id: Option<String>,
 }
 
+/// Read-only pass evidence; provenance is keyed by the exact observed incarnation.
+#[derive(Default)]
+pub struct PtyRegistrySnapshot {
+    pub observations: Vec<RuntimeObservation>,
+    pub start_operations: HashMap<String, (String, String)>,
+}
+
+type PassPtySnapshot = std::sync::OnceLock<Result<PtyRegistrySnapshot>>;
+
 pub trait RuntimeControl: Send + Sync + 'static {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
+    /// Existing controls can supply provenance separately; native controls read both
+    /// from one registry snapshot so the evidence describes the same incarnation.
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        let observations = self.snapshot_ptys()?;
+        let mut start_operations = HashMap::new();
+        for observation in &observations {
+            if let Some(incarnation) = &observation.incarnation_id
+                && let Some(operation) =
+                    self.start_operation(&observation.runtime_id, true, incarnation)?
+            {
+                start_operations.insert(
+                    observation.runtime_id.clone(),
+                    (incarnation.clone(), operation),
+                );
+            }
+        }
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
     /// Inspect the resulting runtime. Callers must still verify its operation provenance.
     fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
@@ -542,12 +569,13 @@ fn local_process_is_alive(_pid: u32) -> bool {
     true
 }
 
-impl RuntimeControl for NativeRuntime {
-    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+impl NativeRuntime {
+    fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
         fractal_runtime::protect_servers(&observations);
-        observations
+        let mut start_operations = HashMap::new();
+        let observations = observations
             .into_iter()
             .map(|item| {
                 let incarnation_id = match (&item.pid, &item.created_at) {
@@ -555,15 +583,35 @@ impl RuntimeControl for NativeRuntime {
                     _ => None,
                 };
                 let status = observed_pty_status(&item);
-                Ok(RuntimeObservation {
+                if include_provenance
+                    && let Some(incarnation) = &incarnation_id
+                    && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
+                {
+                    start_operations.insert(
+                        item.name.clone(),
+                        (incarnation.clone(), operation.clone()),
+                    );
+                }
+                RuntimeObservation {
                     runtime_id: item.name,
                     terminal: true,
                     status,
                     exit_code: item.exit_code,
                     incarnation_id,
-                })
+                }
             })
-            .collect()
+            .collect();
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
+}
+
+impl RuntimeControl for NativeRuntime {
+    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+        Ok(self.snapshot_pty_registry(false)?.observations)
+    }
+
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        self.snapshot_pty_registry(true)
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -2482,7 +2530,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
-        self.reconcile_start_jobs()?;
+        // Start completion can mutate the runtime-observation fence. Capture before
+        // it can read the shared snapshot, so pre-completion evidence cannot later
+        // be presented to planning as a post-completion observation.
+        let _observation_capture = self.store.capture_runtime_observations()?;
+        let pty_snapshot = PassPtySnapshot::new();
+        self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -2496,7 +2549,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental
                 .touch(&format!("runtime-observation-drops:{subject}"));
         }
-        let _observation_capture = self.store.capture_runtime_observations()?;
         let observe_span = crate::reconcile_telemetry::phase("pass/changes");
         self.incremental.observe(&self.store)?;
         self.incremental.observe_value(
@@ -2596,7 +2648,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = root_tasks;
         let mut pty_span = crate::reconcile_telemetry::phase("pass/pty-snapshot");
-        let ptys = self.runtime.snapshot_ptys();
+        // Read-only launch completion evidence and planning share one pass snapshot.
+        // A mutation can make it stale: guarded launches and exact native controls
+        // still take their own fresh fences before acting on an incarnation.
+        let ptys = pty_snapshot
+            .into_inner()
+            .unwrap_or_else(|| self.runtime.snapshot_ptys_with_provenance())
+            .map(|snapshot| snapshot.observations);
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
         drop(pty_span);
         let ptys = match ptys {

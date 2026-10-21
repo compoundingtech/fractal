@@ -24,6 +24,27 @@ use super::*;
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         self.inner.snapshot_ptys()
     }
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        // Hide verification evidence consistently from worker observation and
+        // pass-scoped completion. Raw snapshots remain available to stop tests.
+        if self.verification_hidden.load(Ordering::Acquire) {
+            return Ok(PtyRegistrySnapshot::default());
+        }
+        let observations = self.snapshot_ptys()?;
+        let mut start_operations = HashMap::new();
+        for observation in &observations {
+            if let Some(incarnation) = &observation.incarnation_id
+                && let Some(operation) =
+                    self.start_operation(&observation.runtime_id, true, incarnation)?
+            {
+                start_operations.insert(
+                    observation.runtime_id.clone(),
+                    (incarnation.clone(), operation),
+                );
+            }
+        }
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
     fn observe_exec(&self, id: &str) -> Result<Option<RuntimeObservation>> {
         self.inner.observe_exec(id)
     }

@@ -89,7 +89,6 @@ Options (environment): `KIT_PLAY_SET=commit` is the per-commit set, a narrowing 
 
 ## Stories
 
-- **Fractal UI / Visual language**: one working context rendered in the chosen direction. It contains a thread list, a conversation with a tool call and a diff, a terminal pane, a command palette and component specimens. `Explore` exposes direction, scheme and density as canvas controls and Storybook args. The `FolioLight` … `OrbitDark` and `Compact` stories are fixed comparison entries.
 - **Fractal UI / Component families**: every family on one canvas (`AllFamilies`, `FamiliesDark`), under the same three switches.
 - **Fractal UI / Markdown**: CommonMark + GFM coverage with streamed fences and inline markup; language fences assert highlighted syntax and stable wrap/copy state.
 - **Fractal UI / Thinking Entry**: the muted reasoning disclosure, settled and streaming.

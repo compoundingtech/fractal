@@ -6133,7 +6133,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
-            move || fractal_daemon::api::slo_rows(&store),
+            move || {
+                let rows = fractal_daemon::api::slo_rows(&store)?;
+                fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                Ok(rows)
+            },
         )));
     }
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(

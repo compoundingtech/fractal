@@ -334,7 +334,7 @@ test('exempt CSF runtime import graphs cannot reach domain fixture roots', () =>
   const contractDataModules = [
     ...ts.sys.readDirectory(uiSource, ['.ts', '.tsx'], ['**/*.test.ts', '**/*.test.tsx', '**/*.stories.tsx'])
       .filter(file => /fixture/i.test(nodePath.basename(file)) && nodePath.basename(file) !== 'scenario-fixture-graph.ts'),
-    ...['Families.tsx', 'Workshop.tsx', 'markdown.story-canvas.tsx'].map(file => nodePath.resolve(uiSource, file)),
+    ...['Families.tsx', 'markdown.story-canvas.tsx'].map(file => nodePath.resolve(uiSource, file)),
   ]
   const policy = {
     uiSource: uiSource.replace(/\/$/, ''),
@@ -367,7 +367,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(271)
+  expect(exemptions).toHaveLength(263)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
