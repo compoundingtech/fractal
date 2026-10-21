@@ -44,7 +44,7 @@ binaries=(st3 st3-migrate)
 if [[ -z $from ]]; then
   repo=$(cd "$(dirname "$0")/.." && pwd)
   cargo build --release --locked --manifest-path "$repo/Cargo.toml" \
-    -p st3 -p st3-migrate
+    -p fractal -p fractal-migrate
   from=${CARGO_TARGET_DIR:-$repo/target}/release
   # The terminal client's speech helper, on a Mac whose Swift has the macOS 26 SDK; SmallTalk.app takes it in.
   if [[ $(uname -s) == Darwin ]] && ! "$repo/apps/macos/listen/build.sh" "$from" >/dev/null; then

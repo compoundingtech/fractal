@@ -12,7 +12,7 @@ import type {
   CollectionSocket,
   Snapshot,
   TimelineEntry,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import * as Option from 'effect/Option'
 import * as os from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

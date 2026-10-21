@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { ClientError } from '../../clients/typescript/st3-client/index.ts';
-import { emptyDocumentList, documentListPlaceholder } from '@smalltalk/st3-views';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
+import { emptyDocumentList, documentListPlaceholder } from '@fractal/views';
 import { changedAt, documentsServed, followDocument, nextDocumentPage, openDocument, referencedDocuments, versionLine, whyUnreadable } from './documents.ts';
 import { inline, markdown } from './markdown.ts';
 

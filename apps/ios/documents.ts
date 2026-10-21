@@ -1,15 +1,15 @@
-import { ClientError, type Capabilities, type DocumentReference, type St3Client } from '../../clients/typescript/st3-client';
+import { ClientError, type Capabilities, type DocumentReference, type FractalClient } from '../../clients/typescript/fractal-client';
 import {
   documentUnavailable, documentView, failDocumentList, openOnTrail, pushDocumentPage, unavailableDocument,
   type DocumentList, type DocumentUnavailable, type DocumentView,
-} from '@smalltalk/st3-views';
+} from '@fractal/views';
 
 // Documents on the phone read through the client's one path to a document (document.get,
-// documents.list and document-references.get) and the shared view in @smalltalk/st3-views, as
+// documents.list and document-references.get) and the shared view in @fractal/views, as
 // stui and web do. Read-only: nothing here edits or publishes, and the text is shown as written.
 
 /** The client reads a document view needs; null while the phone is offline. */
-export type DocumentReader = Pick<St3Client, 'documentGet' | 'documentsList' | 'documentReferencesGet'>;
+export type DocumentReader = Pick<FractalClient, 'documentGet' | 'documentsList' | 'documentReferencesGet'>;
 
 /** Whether this st serves documents to the phone: true, false (an older st, or not granted), or null before it has said. */
 export function documentsServed(caps: Pick<Capabilities, 'capabilities'> | null | undefined): boolean | null {

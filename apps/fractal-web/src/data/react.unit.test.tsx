@@ -4,8 +4,8 @@ import {
   type AgentEncoded,
   type ResourceObservationEncoded,
   type TerminalScreen,
-} from '@smalltalk/st3-client/schema'
-import type { DecodedAgent } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { renderToStaticMarkup } from 'react-dom/server'

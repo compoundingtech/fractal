@@ -24,7 +24,7 @@ let
       --extract-to "$1" \
       --extract-overwrite \
       --no-tests=fail \
-      -E 'package(=st2) and binary(=integration) and (test(/^transport_isolation::/) or test(/^nomad_survival::managed_agent_color_contract_crosses_systemd_scope$/))'
+      -E 'package(=fractal-legacy-runner) and binary(=integration) and (test(/^transport_isolation::/) or test(/^nomad_survival::managed_agent_color_contract_crosses_systemd_scope$/))'
   '';
 in
 pkgs.testers.runNixOSTest {

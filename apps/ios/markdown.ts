@@ -1,8 +1,8 @@
-// Block markdown the way stui renders an assistant reply (crates/stui/src/ui/text.rs markdown
+// Block markdown the way stui renders an assistant reply (crates/fractal-tui/src/ui/text.rs markdown
 // and inline): headings, bullets with a hanging marker, fenced code, quotes, rules, and tables
 // kept as monospace rows. Anything else is a plain line. A `doc/…` reference is a link that opens
 // the document (docs/clients/ui-contract.md#documents).
-import { documentLinks, parseDocumentReference } from '@smalltalk/st3-views';
+import { documentLinks, parseDocumentReference } from '@fractal/views';
 
 export type Run = { text: string; style: 'plain' | 'bold' | 'code' | 'link'; url?: string; path?: string; document?: string };
 export type Block =

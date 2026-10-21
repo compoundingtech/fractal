@@ -43,7 +43,7 @@ vi.mock('../folders/client.ts', async (importOriginal) => ({
 }))
 
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { openAgent } from '@st3/sdk/effect'
+import { openAgent } from '@fractal/sdk/effect'
 import { fleetFromAgents } from '../data/projections.ts'
 import { DataSourceProvider, useSubjectList } from '../data/react.tsx'
 import type { DataSource } from '../data/source.ts'

@@ -3,7 +3,7 @@ import { FlatList, ScrollView, View } from 'react-native';
 import {
   documentListPlaceholder, emptyDocumentList, loadingDocument, parseDocumentReference,
   type DocumentList, type DocumentRow, type DocumentView,
-} from '@smalltalk/st3-views';
+} from '@fractal/views';
 import type { RootScreen } from '../navigation';
 import { Banners, StatusLine } from '../chrome';
 import { changedAt, DOCUMENTS_NOT_SERVED, documentsServed, followDocument, nextDocumentPage, openDocument, versionLine } from '../documents';

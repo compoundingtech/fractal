@@ -10,7 +10,7 @@ own timeline; a client that shows the question joins its text from there.
 
 A question is the subject `harness-question/ID`. `ID` is the first 16 bytes, in hex, of a SHA-256
 over the agent subject, harness session id and canonical native call id, each length-prefixed
-(`st3_schema::harness_questions::subject`). The canonical native id is `sha256:` plus the
+(`fractal_schema::harness_questions::subject`). The canonical native id is `sha256:` plus the
 64 lowercase hex digits of SHA-256 over the raw native call id. The store hashes every raw
 native id before deriving the subject or storing the observation; paths, command strings and
 other native text are never stored verbatim as ids. The same native call in the same session
