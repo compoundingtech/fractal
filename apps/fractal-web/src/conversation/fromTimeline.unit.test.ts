@@ -1,4 +1,4 @@
-import { TimelineEntry, Timestamp } from '@smalltalk/st3-client/schema'
+import { TimelineEntry, Timestamp } from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from './fromTimeline.ts'

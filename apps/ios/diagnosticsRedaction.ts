@@ -1,4 +1,4 @@
-import type { ClientDiagnosticEvent } from '../../clients/typescript/st3-client';
+import type { ClientDiagnosticEvent } from '../../clients/typescript/fractal-client';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

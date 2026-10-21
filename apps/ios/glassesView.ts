@@ -1,4 +1,4 @@
-import type { Agent, Attention, Glass, GlassLayout, GlassTab, Mission } from '../../clients/typescript/st3-client';
+import type { Agent, Attention, Glass, GlassLayout, GlassTab, Mission } from '../../clients/typescript/fractal-client';
 import { agentGlyph, agentName, agentReported, agentState, agentWord } from './agentsView';
 import { missionWord, wordName, wordStyle } from './missionsView';
 import { missionLabels } from './presentation';
@@ -8,7 +8,7 @@ import type { MachineView } from './projectionCache';
 // named workspaces from stui, read from st. Each space has panes with their own tabs;
 // choosing a space lists its tabs grouped by pane. A tab opens its pane full screen.
 // Pane keys are stui's
-// (crates/stui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
+// (crates/fractal-tui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
 
 /** What a pane opens on the phone. */
 export type PaneTarget = {
