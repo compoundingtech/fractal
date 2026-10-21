@@ -130,7 +130,7 @@ const overflowLightDismissPlay = async ({ canvasElement }: { readonly canvasElem
 const meta = {
   title: 'Fractal/App/Changelog', component: ChangelogStoryHarness,
   render: (args) => <ChangelogStoryHarness key={args.mode} {...args} />,
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "The catalog has no changelog slice; local release entries exercise seen, loading and failure contracts." },
     layout: 'fullscreen',
     viewport: { options: {
       changelog1440: { name: 'Changelog desktop', styles: { width: '1440px', height: '900px' }, type: 'desktop' },

@@ -5,8 +5,8 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
-import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
 import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingProof';
@@ -33,6 +33,8 @@ import { readSidebarResources } from './sidebarResources';
 import { SIDEBAR_RETIRED, sidebarArrangement, sidebarRetired, sidebarSubject } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
+import { DiagnosticsConnection } from './DiagnosticsConnection';
+import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 
@@ -44,7 +46,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 /** A message.send request as sent, kept whole so an unconfirmed one can be sent again unchanged. */
-export type MessageRequest = Parameters<St3Client['messageSend']>[0];
+export type MessageRequest = Parameters<FractalClient['messageSend']>[0];
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -136,7 +138,7 @@ function useAppStore(proof?: FabricProfile) {
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
   const [cachedHostId, setCachedHostId] = useState('');
   const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const capsClient = useRef<St3Client | null>(null);
+  const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const [status, setStatus] = useState<Status>('setup');
@@ -287,7 +289,7 @@ function useAppStore(proof?: FabricProfile) {
   // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
-  const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const client = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
   const pushRef = useRef<PushRegistrationLifecycle | null>(null);
   if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
     readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
@@ -309,7 +311,7 @@ function useAppStore(proof?: FabricProfile) {
     const remotes = new Map<string, PushRemote | undefined>();
     const remoteFor = (baseUrl: string, bearer: string): PushRemote => {
       // Capture each issuer's own credential, never a mutable selected-route credential.
-      const remote = (signal: AbortSignal) => new St3Client({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      const remote = (signal: AbortSignal) => new FractalClient({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       return {
         register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
         unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
@@ -366,7 +368,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
   }, [proof, client, observations]);
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const uploader = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
 
   // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT, set in an
   // ignored env file on the build host) opens on fabric until the person chooses otherwise.
@@ -451,6 +453,7 @@ function useAppStore(proof?: FabricProfile) {
     try {
       const capability = await client.capabilities();
       if (!current()) return;
+      recordDiagnosticCapabilities(client, capability.value);
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
       capsClient.current = client;
@@ -703,7 +706,7 @@ function useAppStore(proof?: FabricProfile) {
     try {
       if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-      const gatewayClient = new St3Client({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
@@ -1157,7 +1160,10 @@ export type Store = ReturnType<typeof useAppStore>;
 const StoreContext = createContext<Store | null>(null);
 export function StoreProvider({ children, proof }: { children: ReactNode; proof?: FabricProfile }) {
   const store = useAppStore(proof);
-  return <StoreContext.Provider value={store}>{children}</StoreContext.Provider>;
+  return <StoreContext.Provider value={store}>
+    <DiagnosticsConnection client={store.client} url={store.url} credential={store.credential} enabled={!proof} />
+    {children}
+  </StoreContext.Provider>;
 }
 export function useStore(): Store {
   const store = useContext(StoreContext);

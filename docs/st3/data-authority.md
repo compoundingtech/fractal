@@ -1,7 +1,7 @@
 # st data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
-(`crates/st3-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
+(`crates/fractal-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
 are listed in `SHARED_TABLES` there and in the production projection digests. Replicated storage tables
 have their own logical authority digests; local physical fields and caches are outside those identities.
 
@@ -238,6 +238,7 @@ order from the same admitted claims.
 | `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |
 | `local_mailbox_owners` | Local | This daemon's native socket subscription owner, live runtime incarnation and replacement epoch. Survives daemon restart; excluded from replicated projection digests. |
 | `local_observations` | Local | Local-retention observations and their local frontier/id; never replicated. |
+| `client_diagnostic_receipts` | Local operational fact | Paired-device diagnostic retry receipts and admission accounting; retained for 30 days independently of local observations, never replicated or included in projection digests. |
 | `local_publication_claims`, `local_publication_starts`, `local_publication_pending`, `local_publication_batches`, `local_publication_bootstrap`, `local_publication_launch_epoch` | Local derived state | Rebuildable retained runtime and incarnation launch evidence, canonical keys, exact delta and coalesced batch queues, cache generation, and durable bootstrap cursor. Outside replicated digests; missing or incomplete evidence is Unknown. |
 | `local_resource_projection_pending` | Local projection work queue | Resource subjects whose admitted observations changed in the current transaction; flushed before commit |
 | `local_seat_accounts` | Local operational fact | The account chosen for each pooled seat on this node; retained across restarts, never replicated |
@@ -274,6 +275,8 @@ order from the same admitted claims.
 | `claim_positions` | Shared storage | Each claim's canonical batch position: stored at admission, lowered only by a later record of the same claim, frozen before a claim or record deletion could renumber it, and never deleted. An input of canonical order, not a projection; it is not compared or exchanged. |
 | `repaired_claim_replacements` | Local storage | Each repaired original claim's current replacement and record reference, copied by trigger from repaired records and kept after a checkpoint deletes the record; never deleted. The original's exclusion stays in `projection_digest_repaired_claims`; the authenticated meaning stays in `record.repaired` claims. |
 | `retired_claim_ids`, `retired_envelopes` | Shared storage | Exact identity sets of every claim ID and envelope identity a checkpoint table has held; they only grow. A SHA-256 hex identity is stored as its 32 bytes, any other value as its TEXT. Not yet read by admission or evidence; never compared or exchanged. |
+| `claim_range_digests` | Local storage | Count and order-independent digest of the retained claim IDs in each of 4,096 leaf and 64 top ranges, folded from `claim_range_pending`. A transport summary for claims sync, not authentication; not yet read or exchanged. |
+| `claim_range_pending`, `claim_range_import` | Local storage | Claim inserts and deletes queued by trigger until the background fold, and the cursor of the one-time fold of claims that predate the triggers. |
 | `retired_claim_withdrawals`, `retired_envelope_withdrawals` | Local storage | Retired identities a checkpoint table stopped holding (adoption keeping only a manifest), with the recording checkpoint, so a later conversion can judge them under the old recorded-state rules. |
 | `retired_operation_receipts`, `retired_claim_ancestry` | Shared storage | Operation receipts and ancestry (subject, kind, predecessors) of every claim a checkpoint table has held; they only grow. Not yet read; retries, ancestry walks and seat history still read `checkpoint_claims`. |
 | `writer_heads` | Local storage | Each writer's highest (sequence, hash), raised on batch insert and stored before batch delete, never lowered or deleted. Local sequence allocation and the chain's previous hash read it with `batches`, so a trimmed head is never reused. |

@@ -5,7 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-IMPORT = re.compile(r"\b(?:r#)?st2\s*::|\bextern\s+crate\s+(?:r#)?st2\b")
+IMPORT = re.compile(r"\b(?:r#)?fractal_legacy_runner\s*::|\bextern\s+crate\s+(?:r#)?fractal_legacy_runner\b")
 LEGACY = re.compile("st2", re.IGNORECASE)
 # Legacy install components include st2-tools and cache.st2, not random substrings
 # in temporary ancestors such as nix-shell.Cst2Ln.
@@ -29,12 +29,12 @@ def isolated_path(bin_dir):
 
 
 def source_findings(root):
-    for crate in ("st3", "stui"):
+    for crate in ("fractal", "fractal-tui"):
         for path in sorted((root / "crates" / crate).rglob("*.rs")):
             source = path.read_text()
             for match in IMPORT.finditer(source):
                 number = source[:match.start()].count("\n") + 1
-                yield f"{path.relative_to(root)}:{number}: st2 import"
+                yield f"{path.relative_to(root)}:{number}: fractal_legacy_runner import"
 
 
 def dependency_findings(metadata):
@@ -42,7 +42,7 @@ def dependency_findings(metadata):
     # features and target/dev/build dependencies. Traverse neutral crates too: an alias or
     # indirect workspace dependency must not let st2 back into either current product.
     packages = {package["name"]: package for package in metadata["packages"]}
-    for product in ("st3",):
+    for product in ("fractal",):
         pending = [(product, [product])]
         seen = set()
         while pending:
@@ -52,8 +52,8 @@ def dependency_findings(metadata):
             seen.add(name)
             for dependency in packages.get(name, {}).get("dependencies", []):
                 target = dependency["name"]
-                if target == "st2":
-                    yield "st2 dependency: " + " -> ".join([*chain, target])
+                if target == "fractal-legacy-runner":
+                    yield "fractal-legacy-runner dependency: " + " -> ".join([*chain, target])
                 elif target in packages:
                     pending.append((target, [*chain, target]))
 

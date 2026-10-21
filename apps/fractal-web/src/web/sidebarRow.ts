@@ -1,4 +1,4 @@
-import type { SidebarAgentRowData, SidebarAgentStatus } from '@smalltalk/fractal-ui/assistant-ui'
+import type { SidebarAgentRowData, SidebarAgentStatus } from '@fractal/ui/assistant-ui'
 import type { Agent } from '../data/source.ts'
 
 /**

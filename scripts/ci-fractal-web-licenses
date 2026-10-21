@@ -151,7 +151,15 @@ def archive_manifest(data, integrity, key):
     if hashlib.sha512(data).digest() != expected:
         raise ValueError(f"archive integrity mismatch: {key}")
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-        member = archive.getmember("package/package.json")
+        # npm archives use one enclosing directory, not necessarily "package".
+        members = archive.getmembers()
+        roots = {member.name.split("/", 1)[0] for member in members}
+        if len(roots) != 1 or roots & {"", ".", ".."}:
+            raise ValueError(f"archive must have exactly one top-level directory: {key}")
+        root = next(iter(roots))
+        if any(member.name == root and not member.isdir() for member in members):
+            raise ValueError(f"archive root is not a directory: {key}")
+        member = archive.getmember(f"{root}/package.json")
         if not member.isfile():
             raise ValueError(f"archive manifest is not a regular file: {key}")
         manifest = json.load(archive.extractfile(member))

@@ -4,9 +4,9 @@ import type {
   TranscriptEmptyState,
   TranscriptHistory,
   TranscriptTurn,
-} from '@smalltalk/fractal-ui/assistant-ui'
-import { workLogTurnFromItems, type WorkKind } from '@smalltalk/fractal-ui/assistant-ui/work-log'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+} from '@fractal/ui/assistant-ui'
+import { workLogTurnFromItems, type WorkKind } from '@fractal/ui/assistant-ui/work-log'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'

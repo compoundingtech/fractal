@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { DiffPanel } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DiffPanel.tsx'
-import { ResourceCardV1, ResourceChipV1 } from '@smalltalk/fractal-ui/assistant-ui/resources'
+import { ResourceCardV1, ResourceChipV1 } from '@fractal/ui/assistant-ui/resources'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useConversation, useDataSource, useFeedInterest } from '../data/react.tsx'
 import type { Feed, ConversationPage } from '../data/source.ts'
@@ -46,7 +46,7 @@ export function CapturedChangesView({ feed, width, onClose }: { readonly feed: F
   </>
   return <aside ref={root} aria-label="Changes" style={typeof width === 'number' ? { width } : undefined} {...stylex.props(styles.root, fill && styles.fillRoot)}>
     {width === 'dock' ? null : info}
-    {choice !== undefined || width === 'dock' ? <div {...stylex.props(styles.diff, fill && styles.fillRegion)}><DiffPanel key={choice?.id ?? 'empty'} open width="100%" title={width === 'dock' ? 'Changes' : 'Captured change'} closeLabel="Close changes" diff={lines?._tag === 'Known' ? lines.value : undefined} path={choice?.diff.path} added={choice?.diff.added} removed={choice?.diff.removed} info={width === 'dock' ? dockInfo : undefined} scopeLabel={width === 'dock' ? 'Captured' : undefined} showSurfaceTabs={width !== 'dock'} onOpenFile={width === 'dock' ? () => { const code = root.current?.querySelector<HTMLElement>('[data-testid="diff-code"]'); code?.focus(); code?.scrollIntoView({ block: 'nearest' }) } : undefined} onClose={onClose} /></div> : null}
+    {choice !== undefined || width === 'dock' ? <div {...stylex.props(styles.diff, fill && styles.fillRegion)}><DiffPanel key={choice?.id ?? 'empty'} open width="100%" title={width === 'dock' ? 'Changes' : 'Captured change'} landmarkContext={width === 'dock' ? 'captured diff' : undefined} closeLabel="Close changes" diff={lines?._tag === 'Known' ? lines.value : undefined} path={choice?.diff.path} added={choice?.diff.added} removed={choice?.diff.removed} info={width === 'dock' ? dockInfo : undefined} scopeLabel={width === 'dock' ? 'Captured' : undefined} showSurfaceTabs={width !== 'dock'} onOpenFile={width === 'dock' ? () => { const code = root.current?.querySelector<HTMLElement>('[data-testid="diff-code"]'); code?.focus(); code?.scrollIntoView({ block: 'nearest' }) } : undefined} onClose={onClose} /></div> : null}
   </aside>
 }
 

@@ -1,9 +1,9 @@
-import type { Agent, Attention, Mission, MissionStep, WorkState } from '../../clients/typescript/st3-client';
+import type { Agent, Attention, Mission, MissionStep, WorkState } from '../../clients/typescript/fractal-client';
 import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
 
-// The Missions list, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list,
+// The Missions list, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs missions_list,
 // adapt.rs missions): one word per mission naming who has to move, in this order.
 export const WORDS = ['decision', 'stalled', 'unstaffed', 'unclaimed', 'queued', 'working', 'watching', 'held', 'idle', 'done', 'failed', 'cancelled'] as const;
 export type Word = typeof WORDS[number];

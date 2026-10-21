@@ -3,8 +3,9 @@ import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
+import type { ScenarioMountedWindow } from '@fractal/scenarios/storybook/check'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
+import { EmbraceScrollViewport, historyBatchSize } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
@@ -23,6 +24,12 @@ import { observeUserMessageOverflow, TranscriptActiveContext } from './user-mess
 import { TranscriptSearch } from './TranscriptSearch'
 import { useClockLabel } from '../../time/clock'
 import { NarrowLayoutContext } from './NarrowLayout'
+
+export const transcriptInitialTailCount = 2
+/** Story-declared window tied to the same constants as the real initial mount. */
+export const transcriptMountedWindow: Extract<ScenarioMountedWindow, { readonly _tag: 'tail' }> = {
+  _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
+}
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -390,8 +397,8 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={2} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
-      renderHeader={(startIndex, revealRow, materializing) => committed.length > 2 && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - 4)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={transcriptInitialTailCount} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+      renderHeader={(startIndex, revealRow, materializing) => committed.length > transcriptInitialTailCount && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - historyBatchSize)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
       {(startIndex, revealRow) => <>
       {history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
       {committed.length === 0 ? empty : <TranscriptSearch turns={committed} startIndex={startIndex} revealRow={revealRow} {...stylex.props(styles.timeline)}>
