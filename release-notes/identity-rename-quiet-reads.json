@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Avoid per-member identity reads for quiet attention scans",
+  "replay": {
+    "status": "none",
+    "detail": "No replay behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No claim or storage schema changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Parked-runtime attention first checks whether an agent has a crash-loop decision before resolving its declaration and identity. Unstarted-seat attention first excludes seats with any runtime observation. Quiet rosters no longer pay identity reads for every agent. Actual attention candidates retain their full declaration and lifecycle admission fences."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No peer compatibility changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual migration is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery changes."
+  }
+}
