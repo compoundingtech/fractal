@@ -164,10 +164,16 @@ user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.
 cannot change what deletes), runs it with `--fetch --apply` and the lock config in `~/.config/evidence-gc/lock.json`
 when present, keeps 30 days of summaries and plans, and stores each summary as a new version of the st document
 `doc/fleet/factory/evidence-gc/runs`. The unit's `ExecStopPost` runs `--relock-only` after every stop, so even a run
-killed inside its window leaves the protection on.
+killed inside its window leaves the protection on. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
+and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
+writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
 
-**Safety.** It fails closed: if a commit named by `--head` cannot be turned into a tree, or no branch tip is known at
-all, `--apply` deletes nothing. A failed remote push leaves the local refs alone. A second run finds nothing to do.
+**Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
+file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero
+or cannot run, `--apply` changes nothing (`refused`, exit 1) and the lock window is never opened.
+
+**Safety.** It fails closed: if a commit named by `--head` cannot be turned into a tree, no branch tip is known at
+all, or the `--before-delete` command fails, `--apply` deletes nothing. A failed remote push leaves the local refs alone. A second run finds nothing to do.
 Refs outside the evidence namespaces and refs that are not well-formed records are never touched. The first layout
 (`refs/notes/evidence/<record>`) is read from the note: in a live tree it is migrated to
 `refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), in a dead tree it goes
@@ -217,7 +223,13 @@ when the record carries that key. It then commits the log, every time, even with
 the log key and its message carries its time, so a verifier can refuse a head that is not fresh. `--publish` pushes the
 head to `refs/evidence-log/main`; a logged record the remote no longer has is reported (`missing`, exit 4), and
 `--restore` pushes it back. `evidence-log gc --plan FILE` appends a GC line for each tree and input key of an
-evidence-gc plan and drops their copies; it runs before the plan's deletions, so a pull does not restore them.
+evidence-gc plan and drops their copies; it runs before the plan's deletions (`evidence-gc --before-delete`), so a pull
+does not restore them. It also keeps the plan's ref names as pending deletions in the copy
+(`evidence-log.gc-pending.json`): a pull that runs between the GC lines and the deletions does not log those records
+again after the GC line, which would turn their deletion into `missing` and let `--restore` push them back. A name stops
+being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
+any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
+next pull.
 
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
