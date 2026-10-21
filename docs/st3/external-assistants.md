@@ -2,7 +2,7 @@
 
 Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter and local stdio `st-mcp` adapter use separate caller-bound assistant principals; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
 
-The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p st3-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
+The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p fractal-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
 
 ## Connect an MCP client to st
 
@@ -14,7 +14,7 @@ ChatGPT-specific deployment remain separate and compatible.
 
 The complete ChatGPT `tools/list` result is pinned as identical JSON (tool order,
 names, descriptions, schemas, annotations) by
-`crates/st-chatgpt/src/testdata/chatgpt-tools-list.json`, captured from main commit
+`crates/fractal-chatgpt/src/testdata/chatgpt-tools-list.json`, captured from main commit
 `bed66fbea69fae546ce2a5f7d6df942ae335ce47`. The compatibility test reads this immutable
 fixture rather than rebuilding its expected tool definitions from current schemas.
 JSON object key order is ignored because it depends on the build's
@@ -152,10 +152,10 @@ work around rejection by switching credentials.
 
 ## Adapter call diagnostics
 
-`st-chatgpt` emits one structured `tracing` completion event per dispatched tool
+`fractal-chatgpt` emits one structured `tracing` completion event per dispatched tool
 call, including local validation failures and cancellation when its future is
 dropped. Capture is off by default. Operators may opt in with
-`RUST_LOG=st_chatgpt::call=info` on the adapter process; records go to stderr,
+`RUST_LOG=fractal_chatgpt::call=info` on the adapter process; records go to stderr,
 never the MCP stdio output or the default user answer. Only the adapter call
 target is admitted, even with a broader `RUST_LOG` setting. This does not enable
 daemon OTLP export; configure the daemon's existing trace export separately.
@@ -274,7 +274,7 @@ Assistant identifier disclosure remains restricted to nonempty ASCII tokens of a
 
 Mission cursors bind the store claim cut and inspect at most 513 intervening claim headers. Changed mission inputs or more than 512 intervening claims return `page-cursor-expired`, since an updated mission can move across the mutable sort key; unrelated read-authorization receipts do not themselves invalidate a continuation. Clients restart rather than silently losing that mission. Mission metadata selects the latest live run, falling back to the latest terminal run, independently of the native three-run preview. Summary agent-state counts apply the same scalar delivery-presence assessment as agent pages; rich attention and exact-alert content retain update-type request payloads.
 
-Mission claim invalidation uses the canonical subject families from `st3_schema::registry()`, not substring matching; the projection fence below can additionally expire a cursor:
+Mission claim invalidation uses the canonical subject families from `fractal_schema::registry()`, not substring matching; the projection fence below can additionally expire a cursor:
 
 | Source input | Cursor treatment |
 | --- | --- |

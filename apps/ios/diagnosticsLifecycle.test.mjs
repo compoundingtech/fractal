@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { registerHooks } from 'node:module';
 import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
-import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
 
 // Substitute only the native/platform edges; execute the real lifecycle module,
 // durable queue, redaction and ClientError classification.

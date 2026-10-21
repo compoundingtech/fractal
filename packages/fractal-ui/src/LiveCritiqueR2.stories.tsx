@@ -77,7 +77,7 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
   </main>
 }
 const meta = {
-  title: 'Fractal UI/Live critique r2', component: Critique, parameters: { layout: 'fullscreen' },
+  title: 'Fractal UI/Live critique r2', component: Critique, parameters: { scenario: { _tag: 'contract-fixture', reason: "Local regression toggles and fixed prose isolate critique acceptance contracts." }, layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: false, failure: 'none' },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failure: { control: 'select', options: failures, description: 'Select one old behavior. Its production-component play must fail after Apply selected regression re-renders the tree.' } },
 } satisfies Meta<typeof Critique>

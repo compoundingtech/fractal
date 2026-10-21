@@ -98,12 +98,14 @@ def main(argv):
         data = json.loads(Path(args.publish_result).read_text())
         tree = data['tree']
         accepted = data.get('accepted') or []
-        # An entry may name its ref (the tree-prefixed layout); without one it is refs/notes/evidence/<record>.
-        refs = {a['record']: a.get('ref') or f'{NOTES}{a["record"]}' for a in accepted if OID.match(a.get('record', ''))}
+        # An entry may name its tag and its ref (the tree-prefixed layouts); without either it is refs/notes/evidence/<record>.
+        # The tag is what a gate reads first, so the tag is what is fetched.
+        refs = {a['record']: a.get('tag') or a.get('ref') or f'{NOTES}{a["record"]}' for a in accepted if OID.match(a.get('record', ''))}
         if not all(REF.match(ref) for ref in refs.values()):
             raise ValueError('bad ref')
         published = {a['check']: a['record'] for a in accepted if a.get('record') in refs}
-        refs_added = len(accepted) + sum(1 for a in accepted if a.get('input_ref'))
+        refs_added = sum(max(1, sum(1 for name in ('tag', 'ref') if a.get(name))) + sum(1 for name in ('input_tag', 'input_ref') if a.get(name))
+                         for a in accepted)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'evidence-shadow v1 total error=unreadable_publish_result detail={token(type(error).__name__)}')
         return 0

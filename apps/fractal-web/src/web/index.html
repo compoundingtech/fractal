@@ -38,7 +38,7 @@
     </style>
     <script data-wf-early-connect>
       // Early roster connect: open the collections socket and subscribe to the fleet roster while
-      // the main bundle loads. The SDK (`@st3/sdk/effect` early.ts) takes this handle, adopts the
+      // the main bundle loads. The SDK (`@fractal/sdk/effect` early.ts) takes this handle, adopts the
       // socket, and answers its own identical roster subscribe from it. Memory only; bounded
       // buffer; closes itself on overflow, socket end, pagehide, or 15 s without being taken.
       ;(() => {

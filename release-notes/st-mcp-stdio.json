@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from 059d60c401c736e9c2121008d2e6888156f57962dec47a54444ceaca1a0d5fa8 to cd0db5963a1252e8ed1af11d681de2376a3b3205cee1f562d51ba6c154035dfa. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added by MCP. These digests include main's client diagnostic subject and claims. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
+    "detail": "The claim registry assistant subject pattern expands from assistant/chatgpt[/session/assistant-grant/ID] to assistant/{chatgpt|mcp}[/session/assistant-grant/ID], changing the registry digest from 23c83a98d8138ca27215b962f7dde3180db11402bfa1580155b04170b8fcaabf to 3ad363642c10bafab1e60160926e743409e6f139a24d7819e4b65fce43ffe62c. SCHEMA_NAME remains st3.v1 and storage schema remains 20 -> 20; no SQL tables, columns, indexes, claim kinds or claim fields are added by MCP. These digests include current main's client diagnostic subject and claims and harness.inventory.observed claim. Client-v0 adds assistant/mcp to principal/session contracts. Missing historical grant principal means ChatGPT only; explicit invalid or null principals are refused."
   },
   "rules": {
     "status": "changed",
