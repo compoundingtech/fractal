@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { St3Client } from '../../clients/typescript/st3-client/index.ts';
+import { FractalClient } from '../../clients/typescript/fractal-client/index.ts';
 import { collectionSocketFactory } from './collectionSocket.ts';
 
 const flush = async () => { for (let n = 0; n < 5; n++) await Promise.resolve(); };
@@ -16,7 +16,7 @@ function bridge() {
 
 test('the native socket forwards authentication, commands, frames and protocol ping without a read', async () => {
   const native = bridge(), socketFactory = collectionSocketFactory(native);
-  const client = new St3Client({ baseUrl: 'https://gateway.invalid', credential: async () => 'test-credential' });
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', credential: async () => 'test-credential' });
   let pings = 0, ended = 0;
   const frames = [];
   const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: () => ended++, socket: (...args) => {

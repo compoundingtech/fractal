@@ -813,9 +813,13 @@ mod tests {
                 .with_requester(Arc::new(requester), "/v1/intent/mission".to_owned())
                 .spawn_blocking(|| 42));
             assert!(matches!(futures_util::poll!(job.as_mut()), std::task::Poll::Pending));
+            // The queue counts whole microseconds, and a release build can sample within the
+            // microsecond it enqueued, at age 0. Hold the job queued long enough to measure.
+            let queued = Duration::from_millis(2);
+            std::thread::sleep(queued);
             let (depth, age) = writer.worker_queue.sample();
             assert_eq!(depth, 1);
-            assert!(age > 0.0);
+            assert!(age >= queued.as_secs_f64(), "{age} s");
             assert!(writer.worker_queue.sample().1 >= age);
             provider.force_flush().unwrap();
             let finished = exporter.get_finished_metrics().unwrap();

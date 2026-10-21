@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -123,7 +123,12 @@ const separator = () => host.querySelector<HTMLElement>('[role="separator"][aria
 const close = () => host.querySelector<HTMLButtonElement>('button[aria-label="Close changes"]')!
 const openChanges = async () => {
   if (toggle().getAttribute('aria-pressed') !== 'true') await act(async () => toggle().click())
-  await act(async () => vi.dynamicImportSettled())
+  // The mocked module factories load asynchronously, which dynamicImportSettled does not track:
+  // wait until the lazy inspector has mounted rather than assuming one settle covers a slow load.
+  await vi.waitFor(async () => {
+    await act(async () => vi.dynamicImportSettled())
+    expect(host.querySelector('[data-testid="diff-panel"]')).not.toBeNull()
+  })
 }
 const key = async (value: string) => {
   await act(async () => separator().dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true })))

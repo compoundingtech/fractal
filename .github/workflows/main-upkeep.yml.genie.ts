@@ -78,10 +78,12 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
-  // Fill caches for current main; keep pinned manual runs independent.
+  // Fill caches for current main; keep pinned manual runs independent. Main pushes share one group
+  // without cancelling: a started cache fill finishes, and GitHub keeps only the newest pending run, so
+  // a burst of merges coalesces into one more run instead of cancelling each one half way.
   concurrency: {
     group: "main-upkeep-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}",
-    'cancel-in-progress': "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    'cancel-in-progress': false,
   },
   actionlint: {
     ...defaultActionlintConfig,
@@ -122,6 +124,9 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        // As Workspace CI's typescript-client: pnpm reads workspace packages from the megarepo members.
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        megarepoApplyStep,
         { uses: 'actions/setup-node@v4', with: { 'node-version': '24.18.0' } },
         {
           name: 'Fingerprint locked dependencies', id: 'lockfiles',
@@ -136,8 +141,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           },
         },
         {
-          name: 'Fill missing dependencies', if: "steps.typescript-cache.outputs.cache-hit != 'true'", env: pnpmStoreEnv,
-          run: 'corepack enable\npnpm fetch',
+          ...nixDevelopStep({ name: 'Fill missing dependencies', flake: '.#web', command: ['pnpm', 'fetch'] }),
+          if: "steps.typescript-cache.outputs.cache-hit != 'true'", env: pnpmStoreEnv,
         },
       ],
     },
