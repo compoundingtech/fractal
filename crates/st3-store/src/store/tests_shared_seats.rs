@@ -275,6 +275,7 @@ pub fn full_canonical_claim_id_oracle(
 pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationExchange {
     ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: peer.into(),
         fleet_id: TEST_FLEET.into(),

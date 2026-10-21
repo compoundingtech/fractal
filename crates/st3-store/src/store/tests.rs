@@ -4258,6 +4258,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
     });
     let input = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
@@ -4332,6 +4333,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
     });
     let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
@@ -5073,6 +5075,7 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                 FLEET,
                 &ReplicationExchange {
                     build: None,
+                    claim_ranges: None,
                     projection_digests: Default::default(),
                     peer: "source".into(),
                     fleet_id: FLEET.into(),

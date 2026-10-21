@@ -31,6 +31,7 @@ fn push(from: &Store, to: &Store) {
         .export_replication_exchange(FLEET, &ReplicationInventory::default())
         .unwrap();
     to.receive_replication_exchange("alder", FLEET, &push).unwrap();
+    to.validate_replication_backlog().unwrap();
     to.project_replication_backlog().unwrap();
 }
 fn receive(to: &Store, exchange: &ReplicationExchange) -> ReplicationPeerSync {

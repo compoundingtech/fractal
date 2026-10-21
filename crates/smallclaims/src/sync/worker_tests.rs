@@ -580,6 +580,7 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
     };
     let exchange = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
@@ -690,6 +691,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
     };
     let exchange = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
