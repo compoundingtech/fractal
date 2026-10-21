@@ -53,6 +53,18 @@ PROTECTED = (
 HEAD_TREE_MAX_BEHIND = 24
 
 NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
+TAGS = 'refs/tags/evidence'  # and, protected by a ruleset, under refs/tags/evidence/<tree>/ (docs/st3/gate-evidence.md, "Records as tags")
+
+
+def record_refspecs(tree):
+    """One tree's records in both namespaces: two refspecs, one fetch."""
+    return [f'+{TAGS}/{tree}/*:{TAGS}/{tree}/*', f'+{NOTES}/{tree}/*:{NOTES}/{tree}/*']
+
+
+def input_refspecs(check, key):
+    """The records indexed under this check and input key, in both namespaces."""
+    return [f'+{TAGS}/input/{check}/{key}/*:{TAGS}/input/{check}/{key}/*',
+            f'+refs/notes/evidence-input/{check}/{key}/*:refs/notes/evidence-input/{check}/{key}/*']
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
 KEYS = '.st/evidence-keys'
@@ -168,8 +180,7 @@ def observe(context, revision='HEAD'):
     tree = run('git', 'rev-parse', '--verify', '--quiet', f'{revision}^{{tree}}')
     tree_id = tree.stdout.decode().strip() if tree.returncode == 0 else ''
     if OID.match(tree_id):
-        prefix = f'{NOTES}/{tree_id}'
-        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{prefix}/*:{prefix}/*').returncode == 0 else 'failed'
+        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)).returncode == 0 else 'failed'
     else:
         context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
@@ -212,8 +223,7 @@ def fetch_input_notes(verifier, base, check, repository, revision='HEAD'):
     except (ValueError, AttributeError, subprocess.TimeoutExpired, OSError):
         return
     if isinstance(key, str) and OID.match(key):
-        prefix = f'refs/notes/evidence-input/{check}/{key}'
-        run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'{prefix}/*:{prefix}/*')
+        run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *input_refspecs(check, key))
 
 
 def field(value):

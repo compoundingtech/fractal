@@ -2,10 +2,12 @@
 """Does a trusted, signed evidence note exist for this tree and this check?
 
 Standalone on purpose: git, ssh-keygen and the Python standard library, no built st.
-It reads the notes written by `st evidence` (refs/notes/evidence/<tree>/<record-id>, one
-SSH-signed commit per record, found by ONE prefix listing of the tree's own refs; the first layout,
-refs/notes/evidence/<record-id>, is still read until scripts/evidence-gc has removed it) and answers
-with one JSON document on stdout.
+It reads the notes written by `st evidence` (refs/tags/evidence/<tree>/<record-id> or
+refs/notes/evidence/<tree>/<record-id>, one SSH-signed commit per record, found by one prefix listing
+of the tree's own refs in each namespace; the first layout, refs/notes/evidence/<record-id>, is still
+read until scripts/evidence-gc has removed it) and answers with one JSON document on stdout.
+Records are moving to tags because a ruleset can protect tags and not notes (docs/st3/gate-evidence.md,
+"Records as tags"); either name of a record is the same signed commit, read once.
 
   exit 0  satisfied
   exit 1  not satisfied (JSON carries the reason), including unreadable input
@@ -31,6 +33,9 @@ OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
 SHA256 = re.compile(r'^[0-9a-f]{64}\Z')
 NOTES = 'refs/notes/evidence/'
 INPUT_NOTES = 'refs/notes/evidence-input/'
+# The protected layout first, then the notes it replaces. A tree id is hex, so `input/` never collides with a tree's prefix.
+TAGS = 'refs/tags/evidence/'
+INPUT_TAGS = 'refs/tags/evidence/input/'
 STATEMENT_TYPE = 'https://in-toto.io/Statement/v1'
 PREDICATE_TYPE = 'https://compounding.tech/fractal/evidence/gate/v1'
 # Permanent signed-history decoder exception: evidence predicate URI, #3032.
@@ -289,7 +294,8 @@ def project(repo, tree, paths):
     with tempfile.TemporaryDirectory() as scratch:
         env = {'GIT_INDEX_FILE': os.path.join(scratch, 'index')}
         git(repo, 'update-index', '-z', '--index-info', stdin=b''.join(entries), env=env)
-        return git(repo, 'write-tree', env=env).decode().strip()
+        # --missing-ok: a tree id does not depend on its blobs being here, and in a partial clone checking them fetches them.
+        return git(repo, 'write-tree', '--missing-ok', env=env).decode().strip()
 
 
 def kind_of(runner):
@@ -356,33 +362,32 @@ def legacy_refs(repo, width):
     return found
 
 
-def tree_refs(repo, tree):
-    """Records of ONE tree, refs/notes/evidence/<tree>/<record-id>: a single prefix listing, bounded by that tree's own records, however many
-    trees have records. A ref that names another object than its suffix finds nothing, and load() requires the note to be about this tree."""
-    prefix = f'{NOTES}{tree}/'
-    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', prefix.rstrip('/')).decode()
+def records_under(repo, prefixes):
+    """The records named <prefix><record-id> under each prefix, in that order, each once: one listing per prefix. A ref that names another
+    object than its suffix finds nothing."""
     found = []
-    for line in out.splitlines():
-        oid, _, name = line.partition(' ')
-        if OID.match(oid) and name == prefix + oid:
-            found.append(oid)
+    for prefix in prefixes:
+        out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', prefix.rstrip('/')).decode()
+        for line in out.splitlines():
+            oid, _, name = line.partition(' ')
+            if OID.match(oid) and name == prefix + oid and oid not in found:
+                found.append(oid)
     return found
+
+
+def tree_refs(repo, tree):
+    """Records of ONE tree, refs/tags/evidence/<tree>/<record-id> and refs/notes/evidence/<tree>/<record-id>: one prefix listing in each,
+    bounded by that tree's own records, however many trees have records. load() requires the note to be about this tree."""
+    return records_under(repo, (f'{TAGS}{tree}/', f'{NOTES}{tree}/'))
 
 
 def input_refs(repo, check, key):
-    """Records indexed under this check and input key: refs/notes/evidence-input/<check>/<key>/<record id>.
-    The ref is only an index. A ref that names another object than its suffix, or a malformed name, finds nothing,
-    and whatever it finds must still carry this key in its signed statement."""
+    """Records indexed under this check and input key: refs/tags/evidence/input/<check>/<key>/<record id> and
+    refs/notes/evidence-input/<check>/<key>/<record id>. The ref is only an index. A ref that names another object than its
+    suffix, or a malformed name, finds nothing, and whatever it finds must still carry this key in its signed statement."""
     if not CHECK_NAME.fullmatch(check) or not OID.fullmatch(key):
         return []
-    prefix = f'{INPUT_NOTES}{check}/{key}/'
-    out = git(repo, 'for-each-ref', '--format=%(objectname) %(refname)', prefix.rstrip('/')).decode()
-    found = []
-    for line in out.splitlines():
-        oid, _, name = line.partition(' ')
-        if OID.match(oid) and name == prefix + oid:
-            found.append(oid)
-    return found
+    return records_under(repo, (f'{INPUT_TAGS}{check}/{key}/', f'{INPUT_NOTES}{check}/{key}/'))
 
 
 def with_note_for(repo, commits, tree):
@@ -416,9 +421,13 @@ def load(repo, commit, tree=None):
     if parents != [subject]:
         return None
     # The signed statement already names the tree. When the subject commit is present it must
-    # agree; when it is not (shallow fetch), the signer's claim stands.
+    # agree; when it is not (shallow fetch), the signer's claim stands. Never fetched to find out: in a partial
+    # clone (the gate's checkout after it deepens with blob:none) a missing commit is fetched lazily with no
+    # negotiation, that is with its whole history, about 3.4 s each; a record found by input key names another
+    # tree's commit, so 34 of them took a verify to 55 s and past the gate's 30 s.
     try:
-        present = git(repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', subject + '^{tree}').decode().strip()
+        present = git(repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', subject + '^{tree}',
+                      env={'GIT_NO_LAZY_FETCH': '1'}).decode().strip()
     except Failure:
         present = None
     if present is not None and present != tree:

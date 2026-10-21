@@ -5,7 +5,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import * as Atom from 'effect/reactivity/Atom'
 import { DateTime } from 'effect'
-import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { ChromeControl } from '@fractal/ui/assistant-ui/shell'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
@@ -32,6 +32,8 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
   const conversation = useConversation(agentRef)
   const sync = useConversationSync(agentRef)
   const retainedFailure = conversation._tag === 'Observed' && conversation.value.items.length > 0 && sync?.status._tag === 'Failed'
+  // A recovered failure must not leave the details open, or the next failure reopens them unasked.
+  React.useEffect(() => { if (!retainedFailure) setSyncDetailsOpen(false) }, [retainedFailure])
   const changeResourcesOpen = (open: boolean) => {
     if (open) markStart('resources_panel', { key: agentRef })
     else cancelMeasure('resources_panel')

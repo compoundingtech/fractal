@@ -5,16 +5,16 @@ import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { St3Client, TimelineEntry } from '../../../clients/typescript/st3-client';
-import type { ConversationContentRef } from '../../../clients/typescript/st3-client';
-import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@smalltalk/st3-views';
+import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
+import type { ConversationContentRef } from '../../../clients/typescript/fractal-client';
+import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
 import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
@@ -32,7 +32,7 @@ import { AlertsStrip } from './Alerts';
 const RULES: ConversationRules = rules;
 const c = tokenColor;
 
-const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
+const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
 type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
@@ -63,11 +63,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     const current = timelineNow.current;
     const sessionId = current.sessionId;
     if (!dragged.current || !current.hasOlder || current.older.loading || !sessionId || status !== 'online') return;
+    // A replacement can arrive while this page is loading, even for the same session.
+    const request = { sessionId, historyVersion: current.historyVersion };
     const keep = (next: Conversation<TimelineEntry>) => { rememberBounded(conversationCache.current, target, next, 24); return next; };
-    setTimeline(previous => olderLoading(previous));
+    setTimeline(previous => olderLoading(previous, request));
     void actions.olderTimeline(sessionId, current.older, current.entries[0]).then(
-      page => setTimeline(previous => keep(applyOlderPage(previous, sessionId, page))),
-      error => setTimeline(previous => olderFailed(previous, error instanceof Error ? error.message : String(error))),
+      page => setTimeline(previous => keep(applyOlderPage(previous, request, page))),
+      error => setTimeline(previous => olderFailed(previous, request, error instanceof Error ? error.message : String(error))),
     );
   };
   // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
@@ -531,7 +533,7 @@ const EntryView = memo(function EntryView(props: { entry: ConversationEntry; con
 });
 
 type NativeImage = { uri: string; size: number };
-type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: St3Client | null };
+type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: FractalClient | null };
 
 // Class lifecycle owns native measurement and invalidates late responses on unmount.
 // All mounted images share the viewport queue; FlatList overscan never authorizes reads.
