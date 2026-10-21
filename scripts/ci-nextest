@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Compile the workspace and preserve the selected test binaries with nextest filters.
 set -euo pipefail
 action=${1:?usage: scripts/ci-nextest run|list [nextest options]}
@@ -21,6 +22,31 @@ if [[ "$action" == run && " $* " != *" --no-run "* && "${GITHUB_ACTIONS:-}" == t
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     printf '### Temporary test gate\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
   fi
+fi
+
+launch=(exec)
+# Local runs on Linux keep the tests' temporary files in tmpfs. Their SQLite stores sync every WAL commit to
+# disk, and that wait, not CPU, is most of the wall time of the file-store tests (the st3 library set: 251 s
+# on /dev/shm against 407 s on disk with the same CPU, scratch peak about 0.5 GiB either way; four convergence
+# seeds: 48 s against 160 s). CI never takes this branch, so the hosted runs keep real disks and every test that
+# syncs to one. It applies only when TMPDIR is unset or one of the two ordinary directories, and when /dev/shm
+# has 4 GiB free (a check at start, not a reservation: concurrent local runs share that RAM); ST_NEXTEST_TMPDIR=disk turns it off, and a TMPDIR you set yourself is kept.
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if [[ "$action" == run && -z "${GITHUB_ACTIONS:-}" && "$(uname -s)" == Linux && "${FRACTAL_NEXTEST_TMPDIR-${ST_NEXTEST_TMPDIR:-}}" != disk ]]; then
+  case "${TMPDIR:-}" in
+    ''|/tmp|/tmp/|/var/tmp|/var/tmp/)
+      if [[ -d /dev/shm && -w /dev/shm ]] && [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ]]; then
+        # One directory per run, removed when the run ends. A run killed with SIGKILL leaves it behind in RAM:
+        # sweep with `find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`.
+        nextest_scratch=$(mktemp -d /dev/shm/st-nextest.XXXXXX) && {
+          export TMPDIR=$nextest_scratch
+          trap 'rm -rf "$nextest_scratch"' EXIT
+          trap 'exit 143' TERM INT HUP
+          launch=()
+          echo "ci-nextest: test temporary files in $nextest_scratch (ST_NEXTEST_TMPDIR=disk to use the disk)" >&2
+        }
+      fi ;;
+  esac
 fi
 
 # Keep the former workspace and three legacy integration targets in one invocation.
@@ -55,9 +81,9 @@ fi
 if [[ -n "${CI_TEST_EXTRACTED:-}" ]]; then
   [[ " ${arguments[*]} " != *" --no-run "* ]] || { echo 'archive consumers must not rebuild' >&2; exit 2; }
   target="$CI_TEST_EXTRACTED/workspace/target"
-  exec cargo nextest "$action" --binaries-metadata "$target/nextest/binaries-metadata.json" \
+  "${launch[@]}" cargo nextest "$action" --binaries-metadata "$target/nextest/binaries-metadata.json" \
     --cargo-metadata "$target/nextest/cargo-metadata.json" --target-dir-remap "$target" \
     --workspace-remap "$CI_TEST_WORKSPACE" --profile ci -E "$selection" "${partition[@]}" "${arguments[@]}"
 else
-  exec cargo nextest "$action" --workspace --locked --profile ci -E "$selection" "${partition[@]}" "${arguments[@]}"
+  "${launch[@]}" cargo nextest "$action" --workspace --locked --profile ci -E "$selection" "${partition[@]}" "${arguments[@]}"
 fi

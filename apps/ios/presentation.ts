@@ -1,6 +1,6 @@
-import { ago, alertsHeading } from '@smalltalk/st3-views';
-export { ago } from '@smalltalk/st3-views';
-import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep, WorkState } from '../../clients/typescript/st3-client';
+import { ago, alertsHeading } from '@fractal/views';
+export { ago } from '@fractal/views';
+import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep, WorkState } from '../../clients/typescript/fractal-client';
 
 // The daemon annotates every resource with its operational layer. It is not part of the
 // generated resource types, so read it at the UI boundary.
@@ -209,5 +209,5 @@ export function pingPresentation(text: string): { from: string | null; text: str
 export function smallTalkPresentation(body: unknown): { from: string; text: string } {
   const message = (body && typeof body === 'object' ? body : {}) as { from?: unknown; to?: unknown; title?: unknown };
   const name = (id: unknown) => typeof id === 'string' ? senderName(id) : 'someone';
-  return { from: `${name(message.from)} → ${name(message.to)}`, text: typeof message.title === 'string' && message.title.trim() ? message.title : 'Small Talk' };
+  return { from: `${name(message.from)} → ${name(message.to)}`, text: typeof message.title === 'string' && message.title.trim() ? message.title : 'Fractal' };
 }

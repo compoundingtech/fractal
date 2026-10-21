@@ -81,11 +81,11 @@ class StTest(unittest.TestCase):
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', f'{name} {content}')
 
-    def run_st_test(self, *args, command=None):
+    def run_st_test(self, *args, command=None, extra_env=None):
         if command is not None:
             st_test.LOCAL['demo'] = command
         out, err = io.StringIO(), io.StringIO()
-        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE)
+        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, **(extra_env or {}))
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
@@ -119,6 +119,55 @@ class StTest(unittest.TestCase):
         self.assertIn('(HEAD)', out)
         self.assertNotIn('behind', out)  # the branch holds the base's tip: nothing to report
         self.assertIn('clean worktree', out)
+
+    def test_a_host_that_preloads_a_library_into_every_process_still_signs(self):
+        """hetz2 sets LD_PRELOAD (jemalloc) for every process; the signer refuses it, so the launcher must not pass it on."""
+        self.commit('b.txt', 'two')
+        empty = Path(self.tmp.name) / 'empty'
+        empty.mkdir()
+        hostile = {'LD_PRELOAD': '/nonexistent/libpreload.so', 'LD_AUDIT': '/nonexistent/libaudit.so', 'LD_LIBRARY_PATH': str(empty),
+                   'GLIBC_TUNABLES': 'glibc.malloc.check=3', 'PYTHONPATH': str(empty), 'PYTHONSTARTUP': '/nonexistent/startup.py'}
+        code, out, err = self.run_st_test('--check', 'demo', extra_env=hostile)
+        self.assertEqual(code, 0, err + out)
+        statement, = self.statements()
+        self.assertEqual((statement['predicate']['signer'], statement['predicate']['tier']), ('host/box-1', 'full'))
+        self.assertIn('covered by wrapper', out)
+
+    def lane_file(self, definition=('scripts/lane.sh',)):
+        lanes = {'version': 1, 'lanes': {'demo': {'argv': ['sh', '-c', 'echo ran'], 'definition_paths': list(definition)}}}
+        (self.work / 'scripts/lane.sh').write_text('lane\n')
+        (self.work / '.st/required-lanes.json').write_text(json.dumps(lanes))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'lane file')
+        git(self.work, 'push', '-q', 'origin', 'HEAD:main')
+        git(self.work, 'fetch', '-q', 'origin')
+
+    def test_a_lane_defined_at_the_base_puts_its_definition_digest_in_the_note(self):
+        self.lane_file()
+        self.commit('b.txt', 'two')  # the change touches no definition path
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, err)
+        statement, = self.statements()
+        digest = statement['predicate']['observed']['inputs']['lane_definition_sha256']
+        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
+        base_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
+        self.assertEqual(digest, verifier.lane_definition(str(self.work), base_tree, git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256'])
+
+    def test_a_tree_that_edits_its_own_lane_is_not_signed(self):
+        self.lane_file()
+        self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.statements(), [])
+        self.assertIn('FAILED', out)  # the wrapper's own message goes to the child's stderr, not to this capture
+
+    def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, err)
+        statement, = self.statements()
+        self.assertNotIn('lane_definition_sha256', statement['predicate']['observed']['inputs'])
 
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
@@ -154,6 +203,46 @@ class StTest(unittest.TestCase):
         self.assertEqual(statement['predicate']['observed']['checks']['demo']['exit_code'], 3)
         self.assertIn('FAILED (3)', out)
         self.assertNotIn('covered by', out)
+
+    def test_a_tree_with_a_megarepo_lock_gets_its_members_before_its_checks_run(self):
+        self.commit('.gitignore', '/repos/\n')
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        fill = ['sh', '-c', 'mkdir -p repos/effect-utils && touch repos/effect-utils/external.ts']
+        with mock.patch.object(st_test, 'members_command', lambda directory: fill):
+            code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', 'test -e repos/effect-utils/external.ts'])
+        self.assertEqual(code, 0, out + err)
+        statement, = self.statements()
+        self.assertEqual(statement['predicate']['observed']['checks']['demo']['exit_code'], 0)
+        self.assertFalse((self.work / 'repos').exists())  # into the throwaway worktree, not this checkout
+
+    def test_members_that_cannot_be_materialized_run_no_check_and_sign_nothing(self):
+        self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
+        with mock.patch.object(st_test, 'members_command', lambda directory: ['sh', '-c', 'echo no network >&2; exit 7']):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.statements(), [])
+        self.assertIn('NOT RUN', out)
+        self.assertIn('materializing the megarepo members failed (7)', out)
+        self.assertIn('no network', err)
+
+    def test_a_tree_without_a_megarepo_lock_materializes_nothing(self):
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'members_command', side_effect=AssertionError('called')):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+
+    def test_the_members_command_is_the_one_ci_runs_before_the_lanes(self):
+        directory = Path(self.tmp.name) / 'pin'
+        directory.mkdir()
+        rev = 'a' * 40
+        (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': rev}}}}))
+        command = st_test.members_command(directory)
+        step = (ROOT / '.github/workflows/workspace-ci.ts').read_text().split('export const megarepoApplyStep', 1)[1].split('} as const', 1)[0]
+        ci = step.replace('$(jq -r \'.nodes["effect-utils"].locked.rev\' flake.lock)', rev)
+        self.assertIn(f'nix run "{command[2]}" {" ".join(command[3:])}', ci)
+        (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'main; rm -rf /'}}}}))
+        with self.assertRaises(ValueError):
+            st_test.members_command(directory)
 
     def test_a_time_limit_is_a_failure_not_a_hang(self):
         self.commit('b.txt', 'two')
@@ -252,6 +341,49 @@ class StTest(unittest.TestCase):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--check', 'genie-freshness', '--base', 'origin/main'],
                               capture_output=True, text=True, cwd=self.work, env=dict(env, PATH='/nonexistent'))
         self.assertEqual(done.returncode, 1, done.stderr)  # the check could not run its command: a failed check, not a refusal
+
+    def test_a_check_cannot_reach_the_callers_repository_through_a_leaked_git_environment(self):
+        """st2#3014: git exports GIT_DIR to a hook run from a linked worktree; a check that makes its own repository and uses
+        `git -C` would otherwise act on the caller's."""
+        self.commit('b.txt', 'two')
+        linked = Path(self.tmp.name) / 'linked'
+        git(self.work, 'worktree', 'add', '-q', str(linked), '-b', 'linked', 'feature')
+        victim_config = (self.work / '.git/config').read_text()
+        def own_refs():  # what the run may add is its own record, refs/tags/evidence/<tree>/<record>; nothing else
+            return [line for line in git(self.work, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags').splitlines()
+                    if not line.startswith('refs/tags/evidence/')]
+        victim_refs = own_refs()
+        script = ('d=$(mktemp -d) && git -C "$d" init -q && git -C "$d" config user.name Evil && git -C "$d" config user.email e@e.invalid '
+                  '&& git -C "$d" commit -q --allow-empty -m initial && git -C "$d" checkout -q -b accepted-main && git -C "$d" commit -q --allow-empty -m author')
+        leaked = {'GIT_DIR': str(self.work / '.git/worktrees/linked'), 'GIT_WORK_TREE': str(linked), 'GIT_INDEX_FILE': str(self.work / '.git/worktrees/linked/index')}
+        code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', script], extra_env=leaked)
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual((self.work / '.git/config').read_text(), victim_config)
+        self.assertEqual(own_refs(), victim_refs)
+        self.assertNotIn('Evil', (self.work / '.git/config').read_text())
+        self.assertEqual(git(self.work, 'branch', '--list', 'accepted-main'), '')
+
+    def test_scrub_git_environment_drops_the_selecting_variables_and_keeps_the_transport_ones(self):
+        with mock.patch.dict(os.environ, {'GIT_DIR': '/x', 'GIT_AUTHOR_NAME': 'a', 'GIT_WORK_TREE': '/y', 'GIT_PUSH_OPTION_COUNT': '1',
+                                          'GIT_SSH_COMMAND': 'ssh', 'GIT_ASKPASS': 'z', 'GIT_CONFIG_COUNT': '1', 'KEPT': 'yes'}):
+            st_test.scrub_git_environment()
+            self.assertEqual({k: os.environ[k] for k in ('GIT_SSH_COMMAND', 'GIT_ASKPASS', 'GIT_CONFIG_COUNT', 'KEPT')},
+                             {'GIT_SSH_COMMAND': 'ssh', 'GIT_ASKPASS': 'z', 'GIT_CONFIG_COUNT': '1', 'KEPT': 'yes'})
+            for name in ('GIT_DIR', 'GIT_AUTHOR_NAME', 'GIT_WORK_TREE', 'GIT_PUSH_OPTION_COUNT'):
+                self.assertNotIn(name, os.environ)
+
+    def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
+        self.commit('b.txt', 'two')
+        seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'e', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
+                'ST_AGENT': 'agent/x', 'ST_AGENT_FOO': 'x', 'ST_SKIP_EVIDENCE': '0', 'ST_EVIDENCE_TIME_LIMIT': '9'}
+        out = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        for name in ('ST_MISSION', 'ST3_ENDPOINT', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ST_AGENT_FOO'):
+            self.assertNotIn(name, seen)
+        for name in ('ST_AGENT', 'ST_SKIP_EVIDENCE', 'ST_EVIDENCE_TIME_LIMIT'):
+            self.assertIn(name, seen)
 
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')

@@ -1,12 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
-import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
 import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingProof';
@@ -16,11 +16,12 @@ import { rememberBounded } from './boundedCache';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
+import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
-import { buildFabricDefault, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
+import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
 import { ForegroundGate } from './foreground';
 import type { FabricProfile } from './fabricProof';
@@ -32,6 +33,10 @@ import { readSidebarResources } from './sidebarResources';
 import { SIDEBAR_RETIRED, sidebarArrangement, sidebarRetired, sidebarSubject } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
+import { DiagnosticsConnection } from './DiagnosticsConnection';
+import { recordDiagnosticCapabilities } from './diagnostics';
+import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
+import { nativePushPorts, pushWrite } from './pushNative';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -41,7 +46,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 /** A message.send request as sent, kept whole so an unconfirmed one can be sent again unchanged. */
-export type MessageRequest = Parameters<St3Client['messageSend']>[0];
+export type MessageRequest = Parameters<FractalClient['messageSend']>[0];
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -56,6 +61,8 @@ type PhoneSigning = DeviceKey & { handle?: string };
 type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string };
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
+// Notifications: off by default, stored only on this phone. APNs tokens are never persisted here.
+const PUSH_KEY = 'st3.push.enabled';
 // The carrier: the saved gateway (default) or fabric, an opt-in; the saved fabric members, in the
 // person's order; and whether a fabric that cannot be used falls back to the saved gateway. The list
 // has its own key; the old single-target key keeps the member that uses this device's own pairing,
@@ -110,7 +117,9 @@ function observedContext(route: Route, fabricPath: 'direct' | 'relay' | 'unknown
     case 'fabric': return { carrier: 'fabric', ...(fabricPath === 'direct' || fabricPath === 'relay' ? { path: fabricPath } : {}) };
     case 'lan': return { carrier: 'lan' };
     case 'https': return { carrier: 'https' };
-    default: return { carrier: 'tailscale' };
+    case 'tailnet': return { carrier: 'tailscale' };
+    // No route chosen yet: whatever is measured now is not a measurement of any carrier.
+    default: return { carrier: 'none' };
   }
 }
 
@@ -129,10 +138,16 @@ function useAppStore(proof?: FabricProfile) {
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
   const [cachedHostId, setCachedHostId] = useState('');
   const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const capsClient = useRef<FractalClient | null>(null);
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const [status, setStatus] = useState<Status>('setup');
   const [hasSynced, setHasSynced] = useState(false);
+  // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
+  // small page read supplies it while online. Unread is `undefined`, and level with its peers is `null`.
+  const [sync, setSync] = useState<SyncRead>(undefined);
+  // A read that failed while a behind notice was up: that notice stays, marked as not refreshed.
+  const [syncStale, setSyncStale] = useState(false);
   // Whether the missions window (followed only while a missions screen shows) has delivered its rows.
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
@@ -273,7 +288,54 @@ function useAppStore(proof?: FabricProfile) {
   // What the phone measured goes to the member it is connected to, as one report at a time and never
   // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
-  const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
+  const client = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  const pushRef = useRef<PushRegistrationLifecycle | null>(null);
+  if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
+    readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
+    writeEnabled: enabled => AsyncStorage.setItem(PUSH_KEY, enabled ? '1' : '0'),
+  }), {
+    read: async () => {
+      const raw = await AsyncStorage.getItem('st3.push.owners');
+      if (!raw) return [];
+      const owners: unknown = JSON.parse(raw);
+      if (!Array.isArray(owners) || !owners.every(owner => typeof owner === 'string' && (owner === PROFILE_KEY || /^st3\.fabric\.profile\.[a-f0-9]{64}\.[a-f0-9]+$/.test(owner)))) throw new Error('Push cleanup ownership could not be read.');
+      return owners;
+    },
+    write: owners => AsyncStorage.setItem('st3.push.owners', JSON.stringify(owners)),
+  });
+  const push = pushRef.current;
+  const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
+  const pushIssuer = selected.route.kind === 'fabric' && fabricMember && !fabricMember.device ? memberProfileKey(fabricMember) : PROFILE_KEY;
+  const pushIssuers = useMemo(() => {
+    const remotes = new Map<string, PushRemote | undefined>();
+    const remoteFor = (baseUrl: string, bearer: string): PushRemote => {
+      // Capture each issuer's own credential, never a mutable selected-route credential.
+      const remote = (signal: AbortSignal) => new FractalClient({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
+      return {
+        register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
+        unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
+      };
+    };
+    if (!proof && credential) remotes.set(PROFILE_KEY, url && !isFabricGatewayId(url) ? remoteFor(url, credential) : undefined);
+    if (!proof) for (const [key, profile] of ownProfiles) {
+      remotes.set(key, !isFabricGatewayId(profile.url) ? remoteFor(profile.url, profile.credential) : undefined);
+    }
+    // Cleanup needs only the current member-bound carrier route, not a live session:
+    // an expired/revoked bearer still proves erasure ownership to its issuer.
+    // Registration remains gated separately by the current granted capability below.
+    if (!proof && connectUrl && clientCredential) remotes.set(pushIssuer, remoteFor(connectUrl, clientCredential));
+    return remotes;
+  }, [proof, credential, url, ownProfiles, connectUrl, clientCredential, pushIssuer]);
+  const pushRemote = pushGranted && status === 'online' ? pushIssuers.get(pushIssuer) : undefined;
+  const subscribePush = useCallback((changed: () => void) => {
+    const unsubscribe = push.subscribe(changed);
+    push.configure({ paired: !proof && !!clientCredential, granted: pushGranted, issuer: pushIssuer, issuers: pushIssuers, remote: pushRemote });
+    if (!proof) void push.start();
+    const leaveForeground = foreground.current.subscribe(active => { if (active && !proof) void push.refresh(); });
+    return () => { unsubscribe(); leaveForeground(); push.stop(); };
+  }, [push, proof, clientCredential, pushGranted, pushRemote, pushIssuer, pushIssuers]);
+  const pushState = useSyncExternalStore(subscribePush, push.snapshot);
   // Image bytes go up through Expo's fetch: React Native's cannot send a byte array as a body.
   useEffect(() => {
     if (proof || !client) { observations.ready = undefined; return; }
@@ -290,7 +352,12 @@ function useAppStore(proof?: FabricProfile) {
         state.last = Date.now();
         void client.observationsReport(report as never).then(
           () => observations.accepted(batch.report_id),
-          () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
+          error => {
+            // A report the member refuses for its content is refused the same way every time: drop it, or nothing
+            // this phone measures is ever reported again. Anything else (no link, an older member, a busy one)
+            // sends the identical batch again at the next measurement.
+            if (error instanceof ClientError && [400, 413, 422].includes(error.status)) observations.refused(batch.report_id);
+          },
         ).finally(() => { state.busy = false; });
       } catch (error) {
         state.busy = false;
@@ -300,9 +367,10 @@ function useAppStore(proof?: FabricProfile) {
     observations.ready = state.send;
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
   }, [proof, client, observations]);
-  const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  const uploader = useMemo(() => connectUrl ? new FractalClient({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, clientCredential]);
 
-  // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_ST3_FABRIC_DEFAULT, set in an
+  // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT, set in an
   // ignored env file on the build host) opens on fabric until the person chooses otherwise.
   useEffect(() => {
     if (proof) return;
@@ -317,7 +385,7 @@ function useAppStore(proof?: FabricProfile) {
       const built = buildFabricDefault();
       setFabricBuilt(available);
       const saved = readFabricMembers(storedList, stored);
-      setFabricMemberList(saved.length ? saved : built ? [{ ...built, name: defaultMemberName(0) }] : []);
+      setFabricMemberList(saved.length ? saved : builtFabricMembers(built));
       setCarrierChoice(choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale');
       setFallbackOn(fallback !== '0');
     })();
@@ -385,11 +453,19 @@ function useAppStore(proof?: FabricProfile) {
     try {
       const capability = await client.capabilities();
       if (!current()) return;
+      recordDiagnosticCapabilities(client, capability.value);
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
+      capsClient.current = client;
       setCaps(capability.value);
     } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
+
+  useEffect(() => {
+    setSync(undefined); setSyncStale(false);
+    if (!client || status !== 'online' || proofRef.current) return;
+    return watchSync(async () => (await client.attentionList({ limit: 1 })).value.sync ?? null, (value, stale) => { setSync(value); setSyncStale(stale); });
+  }, [client, status]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
@@ -441,7 +517,7 @@ function useAppStore(proof?: FabricProfile) {
             if (state === 'reconnecting' && held.everLive && held.recover === null) held.recover = observations.begin('ios-recover');
           }
         }
-        if (state !== 'live') { connection++; setCaps(null); }
+        if (state !== 'live') { connection++; capsClient.current = null; setCaps(null); }
         if (state === 'live') {
           const epoch = connection;
           setError(''); void loadCapabilities(() => current() && epoch === connection);
@@ -586,11 +662,14 @@ function useAppStore(proof?: FabricProfile) {
     const capability = await client.capabilities();
     return { snapshot_id: capability.snapshot.id, subject_revisions: revisions };
   }
-  /** Run an action, trying again (with a fresh fence each time) while st refused it only because it raced a busy store. */
-  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = []): Promise<boolean> {
+  /**
+   * Run an action, trying again (with a fresh fence each time) while st refused it only because it
+   * raced a busy store, as `retryable` says.
+   */
+  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied): Promise<boolean> {
     if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
     setBusy(true);
-    try { await retryTransient(8, action, notApplied); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
   }
 
   /**
@@ -625,9 +704,12 @@ function useAppStore(proof?: FabricProfile) {
     let consumed = false;
     let deviceId = '';
     try {
-      const gatewayClient = new St3Client({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
+      if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
       consumed = true; deviceId = result.value.device_id;
+      if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
       await verifyPairing(result.value, made.key, pin, {
         hash: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))),
         verify: verifyGrantSignature,
@@ -662,16 +744,23 @@ function useAppStore(proof?: FabricProfile) {
         throw new Error(`${errorText(error)} The code was consumed; inspect and revoke ${safeId} on the trusted member before pairing again. The previous profile was retained.`);
       }
       throw error;
+    } finally {
+      push.releaseIssuer(profileKey);
     }
   }
 
   /** Forget this phone's own pairing with one member: its Keychain entry and its signing key. */
-  async function forgetMemberProfile(member: FabricMember): Promise<void> {
+  async function forgetMemberProfile(member: FabricMember): Promise<boolean> {
     const key = memberProfileKey(member);
     const profile = ownProfiles.get(key);
+    if (!await push.forgetIssuer(key)) {
+      setError('Notification cleanup is incomplete. Reconnect to this member and try again; its pairing was kept.');
+      return false;
+    }
     await SecureStore.deleteItemAsync(key).catch(() => {});
     if (profile?.signing?.handle) await removeDeviceKey(profile.signing.handle).catch(() => {});
     setOwnProfiles(held => { const next = new Map(held); next.delete(key); return next; });
+    return true;
   }
   /** Save the fabric members in the person's order: the list under its key, the device's member under the old key. */
   async function saveFabricMembers(next: FabricMember[]): Promise<void> {
@@ -699,7 +788,7 @@ function useAppStore(proof?: FabricProfile) {
       const gateway = pairDraft?.gateway ?? (url || fabricOnly);
       if (!gateway || !id.trim() || !code.trim()) return false;
       setBusy(true);
-      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
     },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
@@ -733,7 +822,7 @@ function useAppStore(proof?: FabricProfile) {
     async removeFabricMember(index: number) {
       const member = fabricMemberList[index];
       if (!member) return;
-      if (!member.device) await forgetMemberProfile(member);
+      if (!member.device && !await forgetMemberProfile(member)) return;
       if (pairingMember && sameFabricTarget(pairingMember, member)) setPairingMember(null);
       await saveFabricMembers(fabricMemberList.filter((_, i) => i !== index));
     },
@@ -774,6 +863,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** Whether a fabric that cannot be used falls back to the saved gateway. */
     async setFabricFallback(on: boolean) { await AsyncStorage.setItem(FABRIC_FALLBACK_KEY, on ? '1' : '0').catch(() => {}); setFallbackOn(on); },
+    setPushEnabled(on: boolean) { return push.setEnabled(on); },
     retryFabric() { carrier.retry(); },
     /** This phone's public fabric node ID, for the member's grant; created on first use. */
     async loadFabricNode() { if (!fabricBuilt) return; try { setFabricNode(await fabricIdentity()); } catch { setFabricNode(''); } },
@@ -781,6 +871,10 @@ function useAppStore(proof?: FabricProfile) {
     async refreshFabricPath() { setFabricPath(await fabricPathInUse()); },
     async forget() {
       if (proof) { proof.close(); return; }
+      if (!await push.forget()) {
+        setError('Notification cleanup is incomplete. Reconnect to the paired members and try Forget again; pairings were kept.');
+        return;
+      }
       const saved = await SecureStore.getItemAsync(PROFILE_KEY);
       const profile: PhoneProfile | undefined = saved ? JSON.parse(saved) : undefined;
       await SecureStore.deleteItemAsync(PROFILE_KEY);
@@ -849,14 +943,18 @@ function useAppStore(proof?: FabricProfile) {
       acted.current.add(item.id);
       return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
     },
-    /** Answer a Claude permission prompt from its alert. Only the prompt still waiting is answered, once; an answer in the terminal wins. */
-    async respondPrompt(item: Attention, answer: 'allow' | 'deny') {
+    /**
+     * Answer a native prompt from its alert with one of the answers it offers: a question's
+     * `answer` sends `sent`, its choices (see `questionAnswer`). Only the prompt still waiting is
+     * answered, once; an answer in the terminal wins, and a prompt st says is gone is not sent again.
+     */
+    async respondPrompt(item: Attention, answer: string, sent: string = answer) {
       if (!client) return false;
       const prompt = promptAnswers(item);
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
-      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },
@@ -1046,12 +1144,13 @@ function useAppStore(proof?: FabricProfile) {
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
 
   return {
-    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
+    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
+    pushInfo: { ...pushState, granted: pushGranted, canEnable: !proof && status === 'online' && !!clientCredential && pushGranted && pushState.loaded && !!pushState.environment },
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, members: fabricMemberList, pairings: fabricMemberList.map(member => memberPairing(member, !!credential, ownKeys)), pairingMember, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
     sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, watchSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
   };
@@ -1061,7 +1160,10 @@ export type Store = ReturnType<typeof useAppStore>;
 const StoreContext = createContext<Store | null>(null);
 export function StoreProvider({ children, proof }: { children: ReactNode; proof?: FabricProfile }) {
   const store = useAppStore(proof);
-  return <StoreContext.Provider value={store}>{children}</StoreContext.Provider>;
+  return <StoreContext.Provider value={store}>
+    <DiagnosticsConnection client={store.client} url={store.url} credential={store.credential} enabled={!proof} />
+    {children}
+  </StoreContext.Provider>;
 }
 export function useStore(): Store {
   const store = useContext(StoreContext);

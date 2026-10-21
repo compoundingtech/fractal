@@ -9,7 +9,7 @@ import {
   type UsageSummaryEncoded,
   type VisualizationEncoded,
   type WorkState,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 import { Option } from 'effect'
 
 /**
@@ -90,7 +90,7 @@ const usageOf = ({
   const input = sum((t) => t.input)
   const output = sum((t) => t.output)
   return {
-    aggregation: 'cumulative-per-incarnation-else-response-deltas',
+    aggregation: 'rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas',
     input_tokens: input,
     output_tokens: output,
     cached_tokens: sum((t) => t.cached),

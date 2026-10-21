@@ -1,7 +1,7 @@
 # st observability
 
 This reference describes the current daemon, CLI, replication worker and hook
-telemetry in the `crates/st3` implementation. The shared client-class vocabulary
+telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
 and bounded attributes are used by production code.
 
 ## Requirements
@@ -50,7 +50,7 @@ hook signals ── daemon observations exporter ──────────�
 
 ## Pipeline and identity
 
-`crates/st3/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
+`crates/fractal-telemetry/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
 The tracer provider uses `Sampler::AlwaysOn` and a plain SDK `BatchSpanProcessor` to export
 every span, including spans with an unsampled remote parent. There is no in-process sampler
 or span buffer beyond the SDK batch queue. The manifest pins OpenTelemetry API, SDK
@@ -85,13 +85,13 @@ unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 | Driver hook | `st-hook` via daemon observations exporter; no direct SDK export | No collector flush in the hook |
 | `driver claude-statusline` | None; `telemetry::local_only()` | No pipeline |
 
-`crates/st3/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
+`crates/fractal-telemetry/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
 never contact a collector. The observations exporter emits hook spans and hook invocation
 metrics as `st-hook`; observation logs and usage metrics retain `st-daemon`. Statusline calls remain local-only and do not initialize an SDK pipeline.
 
 The shared resource contains `service.name`, `service.version` from
-`st_drivers::version::machine_version()`, a random per-process `service.instance.id`,
-`host.name`, and `st3.node`. The observations exporter in `crates/st3/src/otlp.rs` uses this
+`fractal_drivers::version::machine_version()`, a random per-process `service.instance.id`,
+`host.name`, and `st3.node`. The observations exporter in `crates/fractal-telemetry/src/otlp.rs` uses this
 resource builder, including the version: hook spans and invocation metrics are `st-hook`,
 observation logs and usage metrics are `st-daemon`. The bare `st` service name is retired.
 The platform edge supplies fleet-owned attributes.
@@ -247,8 +247,13 @@ GET /v1/client/agents SERVER / first_frame     st.roster.rebuild INTERNAL root (
 | Attribute | Type | Vocabulary / meaning |
 | --- | --- | --- |
 | `st.roster.path` | string enum | `published_complete`, `published_head`, `exact_warm`, `exact_cold`, `filtered_full`, `not_ready`; any status-filtered read is `filtered_full` |
-| `st.roster.fresh_requested` | boolean | The HTTP agents query's `fresh` value, including exact reads, published first pages, continuations and `not_ready`; WebSocket reads and background rebuild roots report `false` because they have no freshness query |
-| `st.roster.requested_cut` | integer | Store index of the read's snapshot |
+| `st.roster.fresh_requested` | boolean | Whether the HTTP agents query asks for legacy `fresh=true` or a named `min_cut`, including exact reads, published first pages, continuations and `not_ready`; WebSocket reads and background rebuild roots report `false` because they have no freshness query |
+| `st.roster.fresh_wait` | string enum | Exit of the fresh published-first-page wait: `published`, `unchanged`, `refresh_failed`, `disconnected`, `timeout`, `read_failed`; absent when no wait ran |
+| `st.roster.fresh_wait_cut` | integer | Actual wait target read when the wait starts, distinct from the earlier request cut and the publication served; absent if that index read failed |
+| `st.roster.fresh_proof` | string enum | Proof for the exact complete publication served: `not_checked` for other wait exits, `verified`, `refused` (including head-only, not-ready or evicted publication), `read_failed` |
+| `st.roster.fresh_unchanged_verified` | boolean | True exactly when `fresh_proof=verified`; only an `unchanged` wait exit can receive verification |
+| `st.roster.requested_cut` | integer | Named `min_cut`, if supplied; otherwise store index of the read's snapshot |
+| `st.roster.publication_wait_ms` | double | Milliseconds spent in the explicit `min_cut` publication barrier |
 | `st.roster.publication_cut` | integer | Store index of the publication served; absent for `not_ready` |
 | `st.roster.worker_queue_ms` | double | Cumulative submission-to-start time of the read's blocking workers, excluding reader acquisition and execution |
 | `st.roster.reader_acquire_ms` | double | Cumulative SQLite reader acquisition, connection opening, `BEGIN`, and first index read |
@@ -353,10 +358,16 @@ The class is observational only; it does not grant identity or authority.
 | `other` | Any other present value; `curl` maps here on purpose, not to `cli` |
 | `unknown` | Header absent or blank after trimming |
 
-`http.server.request.duration` records request duration in seconds at the same point as
-the in-memory meter, independent of trace sampling. Its labels are `http.request.method`,
-`http.route`, `st3.client.class`, and `http.response.status_class`. An SDK cardinality limit
-caps this instrument at 1,500 series; excess combinations go to the
+`http.server.request.duration` records request duration in seconds, independent of trace
+sampling, outside the read-deadline envelope. Its labels are `http.request.method`,
+`http.route`, `st3.client.class`, and `st3.request.outcome`. The outcome is a closed enum:
+`ok` for 1xx/2xx/3xx (including WebSocket upgrades), `client_error` for 4xx,
+`server_error` for other 5xx, `deadline` for an explicitly marked read-deadline response,
+and `cancelled` when the request future is dropped before producing a response.
+An upstream 504 without the read-deadline marker is `server_error`. A drop guard
+records exactly once, including cancellation; the in-process meter and slow logs
+retain their completion-only behavior. The outcome has five values. An SDK cardinality
+limit caps this instrument at 1,500 series; excess combinations go to the
 `otel.metric.overflow=true` series. This runtime cap enforces O11Y-R14's 2,000 active-series
 budget rather than the theoretical label product.
 
@@ -369,22 +380,121 @@ Duration buckets are
 | Instrument | Type | Unit | Additional attributes / meaning |
 | --- | --- | --- | --- |
 | `db.client.operation.duration` | Histogram | `s` | `db.operation.name=write.batched` or `write.lend`; writer enqueue through ACK |
-| `st.db.writer.queue.duration` | Histogram | `s` | —; enqueue through writer dequeue |
+| `st.db.writer.queue.duration` | Histogram | `s` | `st.db.writer.origin`; enqueue through writer dequeue |
 | `st.db.writer.batch.size` | Histogram | `{job}` | —; jobs in a writer batch |
 | `st.db.writer.commit.duration` | Histogram | `s` | —; writer commit duration |
 | `st.db.writer.batch.duration` | Histogram | `s` | —; whole writer batch duration |
+| `st.db.writer.hold` | Histogram | `s` | `st.db.writer.origin`; acquisition through release, including loans and batched writes |
+| `st.db.writer.current_hold` | Observable gauge | `s` | `st.db.writer.origin`; current hold age, zero when idle |
 | `db.client.connection.wait_time` | Histogram | `s` | `db.operation.name=read`; reader checkout wait |
 | `st.db.readers.open` | Observable gauge | `{connection}` | —; current open readers |
 | `st.db.readers.idle` | Observable gauge | `{connection}` | —; current idle readers |
 | `st.db.readers.opened` | Counter | `{connection}` | —; readers opened |
+| `st.db.read.loan.oldest_age` | Observable gauge | `s` | `origin`; oldest live pooled connection loan per bounded route/task origin, not confirmed transaction age |
 | `st.db.wal.size` | Observable gauge | `By` | —; stat the main database's `-wal` file |
-| `st.db.wal.checkpoint.duration` | Histogram | `s` | `db.operation.name=checkpoint.truncate`; truncate checkpoint duration |
+| `st.db.wal.checkpoint.duration` | Histogram | `s` | `db.operation.name=checkpoint.truncate\|checkpoint.passive`, `st.db.wal.checkpoint.outcome=recycled\|empty\|deferred\|error`; checkpoint attempt duration |
+| `st.db.wal.checkpoint.deferred` | Counter | `{attempt}` | —; physical checkpoint attempts with nonempty WAL not recycled |
+| `st.db.wal.checkpoint.lag` | Observable gauge | `{frame}` | —; last known WAL frames minus backfilled frames, summed across live pools |
+| `st.db.wal.checkpoint.deferred_age` | Observable gauge | `s` | —; age since the first consecutive deferred attempt, maximum across live pools |
 
-Every storage metric carries `db.system.name=sqlite`. These are the complete attribute
-sets: at most two combinations per instrument, with no paths, SQL, ids, or other
-unbounded attributes. Duration histograms use the seconds buckets above; batch size uses
-explicit boundaries `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`.
-Storage metrics are not sampled.
+Checkpoint duration records backup TRUNCATE attempts as `checkpoint.truncate` with
+`recycled` or `error`. Each idle-WAL worker attempt records `checkpoint.passive`,
+including any follow-on truncate and writer wait, with `empty` for zero frames,
+`recycled` for a recycled nonempty WAL, `deferred` for a nonempty WAL not recycled,
+or `error` for a failed attempt. These two operations and four outcomes add at most
+eight attribute sets, without a separate outcome counter.
+
+Every storage metric carries `db.system.name=sqlite`. Writer hold, queue, and oldest-loan origins reuse
+the bounded writer-span vocabulary: normalized router `MatchedPath` templates prefixed
+by one of nine HTTP methods, the fourteen fixed task names in the storage origin table,
+and `other` for unknown origins. No paths, SQL, ids, or raw request URIs are attributes.
+Each batch's hold uses its first queued operation's origin for its entire lifetime;
+loans use the borrowing caller's origin. When multiple stores share an origin, the
+current-hold gauge reports their maximum age, and reports zero for previously seen
+origins after release. Collection does not require storage phase spans to be enabled.
+Receive, admission, repair, and replay retain `POST /v1/internal/replication/receive`
+through the blocking request scope; deferred wake passes retain `POST /v1/internal/replication-wake`.
+The independent contention retry uses `task replication-projection-retry`. Startup uses
+the existing `startup validate-replication-backlog`, `startup apply-replication-repairs`,
+and `startup project-replication-backlog` labels. These are four additional closed values,
+not dynamic task labels or new origin sources.
+Wait and hold histogram boundaries are `0.001`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`,
+`0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `15`, `30`, `60`, `120`, `300`, `600` seconds.
+Other duration histograms use the seconds buckets above; batch size uses explicit
+boundaries `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`. Storage metrics are not sampled.
+
+The daemon exports `st.runtime.lag` as an observable gauge in seconds with no instrument
+attributes. One Tokio sleep per second measures expected-versus-actual wakeup delay;
+the SDK samples the maximum of the last delay and an overdue pending wakeup, so a
+stalled runtime remains visible before the sampling task resumes.
+Synchronous storage-only telemetry registers no lag instrument when no Tokio runtime exists.
+
+### Write-worker admission
+
+These process-wide instruments cover the asynchronous admission queue before a
+writer-bound blocking callback starts, not the SQLite writer's separate batch queue.
+They use the existing SDK meter provider and daemon resource identity.
+
+| Instrument | Kind | Unit | Attributes / meaning |
+| --- | --- | --- | --- |
+| `st.write_workers.queue.depth` | Observable gauge | `{job}` | Queued, not-yet-started top-level callbacks |
+| `st.write_workers.queue.busy_age` | Observable gauge | `s` | Maximum per-store busy-period age: conservative upper bound on oldest queued age, not exact; zero when empty |
+| `st.write_workers.queue.wait` | Histogram | `s` | `origin`: normalized HTTP route when available, otherwise `other`; enqueue through callback start (or explicit admission grant) |
+| `st.write_workers.abandoned_callback_starts` | Counter | `{job}` | `outcome=ran`: callbacks starting after their request waiter was dropped |
+
+Inherited dependent callbacks do not add queue entries. Pending admission cancellation
+removes the entry; admitted callbacks remain queued until their blocking thread starts.
+Explicit `admit_write` calls leave the queue when granted capacity. Each store tracks
+depth and a busy-period start using atomics, without a per-write mutex, map allocation
+or job scan. Across stores the gauges sum depth and take the maximum busy age.
+
+On a 0-to-1 depth transition, an atomic minimum publishes the busy start. On the
+1-to-0 decrement, the start is cleared, then depth is rechecked: if a new enqueue
+raced the clear, an atomic minimum restores the earlier start. Acquire/release
+operations order depth transitions and busy-start publication; overlapping transitions
+may conservatively retain an earlier start. Empty observations always emit zero.
+Busy age is an upper bound, **not exact oldest age**: a continuously nonempty queue
+never resets even if its oldest items have started, and overlapping empty transitions
+can retain an earlier start. Thus false-positive alerts are possible. A busy queue
+observed before its start is published uses process-local queue uptime as the bound.
+The wait histogram remains unchanged.
+
+Mutation handlers retain their existing detached completion behavior. A closed response
+oneshot detects abandonment before each synchronous handler poll; it only counts and
+never cancels or skips work. Consequently the counter counts callback starts, not unique
+HTTP requests; a pending handler can contribute again on a later abandoned poll.
+`outcome=skipped` is reserved for jobs skipped after abandonment; the current implementation
+does not skip jobs and emits only `ran`. Wait histograms use the storage duration buckets.
+
+An alert for potentially old queued work uses the conservative upper bound:
+
+```promql
+max by (host_name) (st_write_workers_queue_busy_age_seconds * on(instance) group_left(host_name) target_info{job="infra/st-daemon"}) > 5
+```
+
+Proof: `worker_queue_exports_wait_and_abandoned_callback_starts` blocks worker capacity,
+checks exported depth and busy-age bound, drops the requester before start,
+and checks the exported abandonment counter, wait histogram, and empty-queue reset.
+It also checks pending-admission cancellation removes queue entries.
+`busy_period_covers_all_queued_callbacks_and_clears` checks busy-period publication,
+retention across queued callbacks, clear and restart.
+
+Loan age covers a connection checkout, which may have no active transaction; it does
+not identify a WAL frame owner. An empty registry reports zero with origin `other`.
+Checkpoint lag is the most recent successful PASSIVE report, not a WAL file-size estimate.
+Deferral age continues between attempts and across errors (errors do not prove recovery);
+an empty or recycled WAL resets it. A fully backfilled WAL awaiting recycling has zero
+lag but can still have nonzero deferral age.
+
+Replication export (`POST /v1/internal/replication/export`) retains its bulk read deadline,
+but, like long-poll routes, has no handler-wide or nested blocking callback read loan.
+Sealing and verdict writer waits therefore retain no reader. The snapshot-build gate
+and snapshot-cache mutex waits check deadline/cancellation at most every 5 ms.
+Authoritative inventory, graph and projection inputs remain captured together by
+`sealed_replication_snapshot`'s explicit `read_snapshot`; payload/signature lookups
+use scoped read guards. No snapshot is released and reacquired halfway through a build.
+An expired export returns the existing `read-deadline` error, not a partial exchange;
+the peer retries without acknowledging a partial inventory or advancing its cursor.
 
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
@@ -401,8 +511,9 @@ when TRUNCATE was attempted or the result is abnormal. It uses the OTel API with
 an explicit empty parent context, retaining the attempt's start time without constructing
 a span for ordinary idle passes. `span.label` and `db.operation.name` are
 `checkpoint.truncate` for TRUNCATE attempts, otherwise `checkpoint.passive`;
-`db.system.name=sqlite`. A TRUNCATE result records `st.db.wal.checkpoint.duration`
-in seconds, reusing the existing instrument vocabulary without adding a metric.
+`db.system.name=sqlite`. A TRUNCATE span carries its duration in the
+`st.db.wal.checkpoint.duration` span attribute; the histogram independently records
+every worker attempt as described above, regardless of span sampling.
 Failures, PASSIVE durations at least 1000 ms, writer waits or TRUNCATE durations
 at least 100 ms, and at least three consecutive no-progress pinned-WAL samples
 mark the root ERROR. Successful ordinary TRUNCATE leaves status UNSET.
@@ -613,7 +724,7 @@ successfully sent envelopes. Neither counts signatures or claims.
 `peer` is bounded by fleet members plus explicitly
 configured/bootstrap peers; it is a node name, never a URL, route, session,
 agent, or message id. Outcomes, directions, and reasons are closed
-lowercase registries owned by Smalltalk. No other identities become metric
+lowercase registries owned by Fractal. No other identities become metric
 attributes.
 
 Error reasons preserve worker failure classification: typed `PeerOverloaded`
@@ -703,14 +814,14 @@ metrics, or logs. Span names and labels use bounded operation vocabulary. Existi
 `profile::Op` and `profile::task` labels supply that vocabulary where available.
 
 W3C `traceparent` and `tracestate` are the wire context, not hash-derived identities.
-`crates/st3-client/src/propagation.rs` supplies one injector for both the CLI's internal
+`crates/fractal-client/src/propagation.rs` supplies one injector for both the CLI's internal
 daemon client and the generated typed Rust client. Every HTTP request, Unix HTTP request,
 and WebSocket handshake injects the current tracing span's OpenTelemetry context through
 the global text-map propagator. This makes the daemon's SERVER span a child of the CLI's
 `st3.cli.command` span (or its current child); hook requests use their current span in the
 same way. No SDK/OTel layer or an invalid context produces no trace headers.
 
-The wire-only tracestate entry `st=c` is owned by Smalltalk and means sampling is decided
+The wire-only tracestate entry `st=c` is owned by Fractal and means sampling is decided
 by the collector. Injection replaces an existing `st` entry without growing the list.
 When adding `st` to a full 32-entry list, it first drops the rightmost entry; all other
 entries retain their order. It does not mutate the current span's context. The daemon
@@ -722,7 +833,7 @@ bridge dependencies, not an exporter or SDK initializer. `st3` enables the featu
 `stui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
-`crates/st3-client-codegen/templates/lib.rs.in`; the
+`crates/fractal-client-codegen/templates/lib.rs.in`; the
 shared propagation module is handwritten. Invalid-context injection performs only a
 current-span/context check, with no allocation, header formatting, or propagator lookup.
 Valid-context injection clones/updates tracestate and uses the propagator to format the
