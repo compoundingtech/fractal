@@ -2362,16 +2362,18 @@ async fn refusal_settings_writer_across_leave(stage: &str) {
     } else {
         // An in-flight settings writer owns the directory until both renames finish.
         // No service manager stops it on the CLI's behalf.
+        // The worker's own endpoint publication may contend too; the CLI must be among them.
+        let cli = leave.id().to_string();
         wait_until(
             "the leave CLI contends with the active settings writer",
             20,
-            || async { barrier.join("contended").exists() },
+            || {
+                let contended = fs::read_to_string(barrier.join("contended"))
+                    .is_ok_and(|pids| pids.lines().any(|pid| pid == cli));
+                async move { contended }
+            },
         )
         .await;
-        assert_eq!(
-            fs::read_to_string(barrier.join("contended")).unwrap(),
-            leave.id().to_string()
-        );
     }
     let completed_before_release = leave.try_wait().unwrap().is_some();
     fs::write(barrier.join("release"), b"continue").unwrap();
