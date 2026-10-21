@@ -1,6 +1,6 @@
 import { Predicate } from 'effect'
-import type { AgentDeclaration, PublicationDefinition } from '@smalltalk/st3-client/schema'
-import type { DeclarationPanelState } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import type { AgentDeclaration, PublicationDefinition } from '@fractal/client/schema'
+import type { DeclarationPanelState } from '@fractal/ui/assistant-ui/shell'
 import type { Feed } from '../data/source.ts'
 
 /** st's placeholder for an environment value it did not disclose. */

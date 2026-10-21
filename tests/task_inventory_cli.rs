@@ -146,7 +146,7 @@ fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_default
     let ambient_scope = seeded_supervisor_scope(&ambient_catalog, None, &state);
     assert_ne!(selected_scope, ambient_scope);
     for scope in [&selected_scope, &ambient_scope] {
-        let projection = st2::park::ParkProjection::current(scope.join("parked")).unwrap();
+        let projection = fractal_legacy_runner::park::ParkProjection::current(scope.join("parked")).unwrap();
         assert!(
             projection
                 .publish(
@@ -168,8 +168,8 @@ fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_default
     execute_recovery(recovery, &bin, &ambient_catalog, &state);
 
     let (selected, selected_errors) =
-        st2::park::take_unpark_requests(&selected_scope.join("unpark"));
-    let (ambient, ambient_errors) = st2::park::take_unpark_requests(&ambient_scope.join("unpark"));
+        fractal_legacy_runner::park::take_unpark_requests(&selected_scope.join("unpark"));
+    let (ambient, ambient_errors) = fractal_legacy_runner::park::take_unpark_requests(&ambient_scope.join("unpark"));
     assert!(selected_errors.is_empty() && ambient_errors.is_empty());
     assert_eq!(selected, ["h.worker"]);
     assert!(
@@ -367,7 +367,7 @@ fn completed_catalog_aba_during_runtime_observation_is_incomplete() {
     }
 
     let apply = |prepared: &Path, expected: &str| {
-        let input_sha256 = st2::catalog_transaction::digest_prepared(&catalog, prepared)
+        let input_sha256 = fractal_legacy_runner::catalog_transaction::digest_prepared(&catalog, prepared)
             .unwrap()
             .root_sha256;
         Command::new(test_env!("CARGO_BIN_EXE_st2"))
