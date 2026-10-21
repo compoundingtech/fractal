@@ -585,7 +585,7 @@ The separate [Storybook deployment workflow](../.github/workflows/storybook-depl
 authored with `githubWorkflow` in `storybook-deploy.yml.genie.ts`, is not a required
 check and does not change Workspace CI or its gates. It builds
 `packages/fractal-ui/storybook-static` and deploys the Alchemy v2 stack
-`@smalltalk/storybook-deploy` with Cloudflare remote state: `main` for the canonical
+`@fractal/storybook-deploy` with Cloudflare remote state: `main` for the canonical
 [Storybook](https://storybook.compounding.tech), and `pr-N` for non-draft,
 same-repository pull requests (including `ready_for_review`). Drafts do not
 deploy. An existing preview stays up when its PR goes back to draft; closing or
