@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check PR CI jobs refuse drafts while closed Storybook previews still get destroyed."""
+"""Check PR CI jobs refuse drafts and Storybook deployment runs only on main pushes."""
 import ast
 from pathlib import Path
 import re
@@ -10,12 +10,19 @@ count = 0
 for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
     workflow = path.read_text()
     triggers = workflow.split('\njobs:', 1)[0]
+    if path.name == 'storybook-deploy.yml':
+        assert triggers.split('\non:\n', 1)[1].split('\npermissions:', 1)[0] == '  push:\n    branches: [main]\n', 'Storybook must only trigger on pushes to main'
+        assert 'pull_request' not in workflow and 'ready_for_review' not in workflow
+        assert 'destroy' not in workflow and 'pr-' not in workflow
+        assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
+        assert 'ref: ${{ github.sha }}' in workflow and 'STAGE: main' in workflow
+        assert '  cancel-in-progress: false\n' in workflow
+        print('passed: Storybook deploy has only the main push trigger and no PR lifecycle or credentials path')
+        continue
     if not re.search(r'^  pull_request:', triggers, re.M):
         continue
     for event in ('ready_for_review', 'converted_to_draft'):
         assert event in triggers, (path.name, event)
-    if path.name == 'storybook-deploy.yml':
-        assert 'closed' in triggers and not re.search(r'^    paths(?:-ignore)?:', triggers, re.M), 'close cleanup must survive reverted Storybook changes'
     blocks = re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow.split('\njobs:\n', 1)[1])
     for name, block in blocks:
         match = re.search(r'^    if: (.+)$', block, re.M)
@@ -23,15 +30,6 @@ for path in sorted((ROOT / '.github/workflows').glob('*.yml')):
         raw = match[1]
         condition = ast.literal_eval(raw) if raw.startswith(('"', "'")) else raw
         expression = condition.removeprefix('${{ ').removesuffix(' }}')
-        if path.name == 'storybook-deploy.yml' and name == 'destroy':
-            # A deployed preview must be destroyed even when its PR closes as a draft.
-            assert expression == "github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository", condition
-            assert 'run destroy --stage "$STAGE" --yes' in block
-            assert 'run deploy' not in block
-            assert '    needs:' not in block, 'cleanup must not depend on deployment scope'
-            continue
-        if path.name == 'storybook-deploy.yml' and name == 'deploy':
-            assert "needs.changes.outputs.changed == 'true'" in expression, 'only deploy is gated by changed inputs'
         prefix = GUARD + ' && ('
         assert expression.startswith(prefix) and expression.endswith(')'), (path.name, name, condition)
         # Evaluate the generated guard with both outcomes of the existing condition.

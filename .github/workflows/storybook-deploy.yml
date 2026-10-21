@@ -6,114 +6,25 @@ name: Storybook deploy
 on:
   push:
     branches: [main]
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-      - converted_to_draft
-      - closed
 
 permissions:
   contents: read
 
 concurrency:
-  group: "storybook-deploy-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}"
+  group: storybook-deploy-main
   cancel-in-progress: false
 
 jobs:
-  changes:
-    name: storybook-changes
-    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository))
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      changed: ${{ steps.scope.outputs.changed }}
-    steps:
-      - name: Detect Storybook input changes
-        id: scope
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STORYBOOK_PATHS: '["packages/fractal-ui/**","apps/fractal-web/**","clients/typescript/fractal-client/**","clients/typescript/fractal-views/**","clients/typescript/fractal-scenarios/**","docs/st3/client-v0/schemas/**","fixtures/**","**/package.json*","**/pnpm-workspace.yaml*","**/pnpm-lock.yaml","**/tsconfig*.json*",".npmrc","pnpm-install-contract.json*","pnpm-source-inputs.json*","megarepo.kdl","megarepo.lock","flake.nix","flake.lock","nix/**","genie/**","scripts/**","infra/storybook/**",".github/workflows/storybook-deploy.yml*",".github/workflows/workspace-ci.ts",".github/workflows/cache-audit.ts"]'
-        run: |
-          python3 - <<'STORYBOOK_CHANGES_PY'
-          #!/usr/bin/env python3
-          """Scope Storybook deployment without filtering the PR-close cleanup event."""
-          import fnmatch
-          import json
-          import os
-          from pathlib import Path
-          import urllib.request
-
-
-          def matches(path, patterns):
-              return any(fnmatch.fnmatchcase(path, pattern) or
-                         (pattern.startswith('**/') and fnmatch.fnmatchcase(path, pattern[3:]))
-                         for pattern in patterns)
-
-
-          def changed(event, patterns, get_page):
-              if 'pull_request' not in event:
-                  return True  # Every push to main publishes the canonical site.
-              seen = 0
-              for page in range(1, 31):  # GitHub's PR-files endpoint caps responses at 3,000 files.
-                  files = get_page(page)
-                  for file in files:
-                      if matches(file['filename'], patterns) or matches(file.get('previous_filename', ''), patterns):
-                          return True
-                  seen += len(files)
-                  if len(files) < 100:
-                      # Never skip a deployment based on a truncated or changing file inventory.
-                      return seen != event['pull_request']['changed_files']
-              return True
-
-
-          def main():
-              event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
-              patterns = json.loads(os.environ['STORYBOOK_PATHS'])
-
-              def get_page(page):
-                  url = (f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
-                         f"/pulls/{event['number']}/files?per_page=100&page={page}")
-                  request = urllib.request.Request(url, headers={
-                      'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
-                      'Accept': 'application/vnd.github+json',
-                      'X-GitHub-Api-Version': '2022-11-28',
-                  })
-                  with urllib.request.urlopen(request, timeout=30) as response:
-                      return json.load(response)
-
-              result = changed(event, patterns, get_page)
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-                  output.write(f'changed={str(result).lower()}\n')
-              print('Storybook inputs changed' if result else 'No Storybook input changes; deployment skipped')
-
-
-          if __name__ == '__main__':
-              main()
-
-          STORYBOOK_CHANGES_PY
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Reads GitHub PR file metadata only; no checkout, install or build.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   deploy:
     name: storybook-deploy
-    needs: [changes]
-    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (needs.changes.outputs.changed == 'true' && (github.event_name == 'push' || (github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
       run:
         shell: bash
     env:
-      STAGE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
+      STAGE: main
     steps:
       - name: Check deployment credentials
         id: credentials
@@ -130,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.credentials.outputs.enabled == 'true'
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
@@ -188,8 +99,7 @@ jobs:
           import { appendFileSync } from 'node:fs'
           const fallback = process.env.WORKERS_URL
           const domain = process.env.STORYBOOK_DOMAIN ?? 'storybook.compounding.tech'
-          // Only main owns the canonical domain; previews always use their stage-specific worker.
-          const canonical = process.env.STAGE === 'main' && domain !== '' ? 'https://' + domain : fallback
+          const canonical = domain !== '' ? 'https://' + domain : fallback
           for (const value of [canonical, fallback]) {
             const url = new URL(value)
             if (url.protocol !== 'https:' || !/^[a-z0-9.-]+$/i.test(url.host) || url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
@@ -206,75 +116,4 @@ jobs:
         shell: bash
         env:
           CACHE_REASON: Storybook uses a clean static build and read-only upstream Nix caches; no Actions build cache is configured.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  destroy:
-    name: storybook-destroy
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    env:
-      STAGE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
-    steps:
-      - name: Check deployment credentials
-        id: credentials
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [[ -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_ACCOUNT_ID" ]]; then
-            echo 'enabled=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'enabled=false' >> "$GITHUB_OUTPUT"
-            printf '## Storybook deployment skipped\n\nConfigure both CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets to enable deployment.\n' >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - uses: actions/checkout@v4
-        if: steps.credentials.outputs.enabled == 'true'
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          extra-conf: |
-            experimental-features = nix-command flakes
-            accept-flake-config = true
-            extra-substituters = https://overeng-effect-utils.cachix.org
-            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
-            access-tokens = github.com=${{ github.token }}
-          summarize: true
-        if: steps.credentials.outputs.enabled == 'true'
-      - name: Materialize megarepo members
-        env:
-          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
-        run: |
-          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
-          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
-        if: steps.credentials.outputs.enabled == 'true'
-      - name: Install the standalone deployment stack
-        if: steps.credentials.outputs.enabled == 'true'
-        run: "nix develop .#web --command pnpm --dir infra/storybook install --frozen-lockfile"
-      - name: Destroy the closed pull request preview
-        if: steps.credentials.outputs.enabled == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          STORYBOOK_VARIABLES: ${{ toJSON(vars) }}
-        run: |
-          # Preserve the difference between an absent variable (stack default) and an empty one.
-          if jq -e 'has("STORYBOOK_DOMAIN")' <<< "$STORYBOOK_VARIABLES" > /dev/null; then
-            export STORYBOOK_DOMAIN
-            STORYBOOK_DOMAIN=$(jq -r '.STORYBOOK_DOMAIN' <<< "$STORYBOOK_VARIABLES")
-          fi
-          nix develop .#web --command pnpm --dir infra/storybook run destroy --stage "$STAGE" --yes
-          printf '## Storybook preview removed\n\nStage: %s\n' "$STAGE" >> "$GITHUB_STEP_SUMMARY"
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Destroys remote infrastructure only; no Storybook build or build cache.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

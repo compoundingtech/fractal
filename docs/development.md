@@ -205,14 +205,14 @@ captured changes, composer, arrangements, roster and terminal attachment.
 The UI component reference targets [storybook.compounding.tech](https://storybook.compounding.tech).
 Its Alchemy v2 stack lives in `infra/storybook` (`@fractal/storybook-deploy`).
 The separate [deployment workflow](ci.md#storybook-deployment) is not a required
-check: main deploys stage `main`, non-draft same-repository pull requests deploy
-isolated `pr-N` stages, and closing or merging a pull request destroys its stage,
-even when closed as a draft. Returning to draft keeps an existing preview but
-does not deploy updates; marking ready resumes deployment. Fork pull requests do
-not deploy. Deployment URLs appear in the Actions job summary,
-not PR comments; the workflow needs no repository write permissions.
+check: every push to `main` deploys stage `main` to the one canonical site.
+There are no pull-request deployments or close-cleanup jobs. CI checks out the
+push's immutable commit, so deployment credentials are available only to code
+merged into `main`, not PR-head infrastructure code. No draft-policy exception
+is needed. Deployment URLs appear in the Actions job summary, not PR comments;
+the workflow needs no repository write permissions.
 If either Cloudflare secret is absent, the workflow succeeds with a skip summary
-without installing, building, deploying or destroying resources.
+without installing, building or deploying resources.
 
 #### Account and domain setup
 
@@ -245,20 +245,19 @@ Worker and its Durable Object, with its encryption key and bearer token held
 in Cloudflare Secrets Store, not Workers KV. CI retrieves state credentials via
 a temporary edge-preview Worker bound to Secrets Store; no additional
 `ALCHEMY_PASSWORD` or state-token GitHub secret is required. Preserve the state
-Worker, Durable Object and Secrets Store across deployments and preview cleanup.
-They are shared bootstrap infrastructure, not resources to destroy with `pr-N`.
+Worker, Durable Object and Secrets Store across deployments. They are shared
+bootstrap infrastructure, not resources to remove when redeploying the site.
 
-`STORYBOOK_DOMAIN` controls the canonical domain for `main` only. Unset defaults
+`STORYBOOK_DOMAIN` controls the canonical domain. Unset defaults
 to `storybook.compounding.tech`; a hostname selects another custom domain, and
 an empty string disables the custom domain and uses the Worker's `workers.dev`
 URL. Set the repository Actions variable `STORYBOOK_DOMAIN` to override CI;
 the workflow distinguishes an absent variable from an explicitly empty one.
 For local commands, `export STORYBOOK_DOMAIN=''` selects `workers.dev`.
-Previews use `workers.dev` rather than attaching the canonical domain. Enable
-the account's Workers subdomain before using these URLs. A custom domain must
-belong to a zone in the configured Cloudflare account.
+Enable the account's Workers subdomain before using the fallback URL. A custom
+domain must belong to a zone in the configured Cloudflare account.
 
-#### Build, deploy and cleanup
+#### Build and deploy
 
 Materialize the pinned `effect-utils` member before installing dependencies,
 as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
@@ -281,18 +280,10 @@ Alchemy is pinned exactly to `2.0.0-beta.83` with Effect `4.0.5`; `beta.72` is
 incompatible with Effect 4. The isolated package keeps this deployment-only
 version boundary out of the UI toolchain.
 
-With the same credentials and remote state, deploy a preview or remove an
-abandoned one using its exact stage name:
-
-```sh
-pnpm --dir infra/storybook run deploy --stage pr-N
-pnpm --dir infra/storybook run destroy --stage pr-N
-```
-
-Replace `N` with the pull-request number. Do not destroy `main` to clean up a
-preview. The workflow automates preview cleanup on close; the manual command
-is available if that run fails. These instructions describe the deployment
-configuration, not evidence of a successful live deployment.
+To restore earlier Storybook content, build the desired revision and redeploy
+stage `main` using the same Cloudflare account and remote state.
+These instructions describe the deployment configuration, not evidence of a
+successful live deployment or a recorded approval for public hosting.
 
 ## Continuous integration
 

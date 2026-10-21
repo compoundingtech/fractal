@@ -585,36 +585,25 @@ The separate [Storybook deployment workflow](../.github/workflows/storybook-depl
 authored with `githubWorkflow` in `storybook-deploy.yml.genie.ts`, is not a required
 check and does not change Workspace CI or its gates. It builds
 `packages/fractal-ui/storybook-static` and deploys the Alchemy v2 stack
-`@fractal/storybook-deploy` with Cloudflare remote state: `main` for the canonical
-[Storybook](https://storybook.compounding.tech), and `pr-N` for non-draft,
-same-repository pull requests (including `ready_for_review`). Drafts do not
-deploy. An existing preview stays up when its PR goes back to draft; closing or
-merging the PR destroys it even if the PR is a draft. Fork pull requests do not
-receive deployment credentials or previews.
-
-The PR trigger has **no event-level path filter**. A cheap, metadata-only
-`changes` job reads the paginated PR file inventory with a read-only GitHub token
-and gates only `deploy` on Storybook inputs; main always deploys. `destroy` has
-no dependency on that job or its result. Cleanup therefore still runs if a PR
-previously deployed a preview, then reverted every Storybook-input change (or
-has only unrelated changes remaining) before close. An incomplete file
-inventory selects deployment rather than silently suppressing it.
-
-Alchemy apply/destroy runs are serialized per stage without cancellation and
-this workflow alone is excluded from the draft-transition cancellation observer,
-so a draft transition cannot interrupt infrastructure mutation. Only its
-`destroy` job bypasses the normal draft job guard, strictly on same-repo PR close.
+`@fractal/storybook-deploy` with Cloudflare remote state in stage `main` for the
+canonical [Storybook](https://storybook.compounding.tech). Every push to `main`
+deploys; there is no change-detection job, pull-request trigger, per-PR stage or
+close-cleanup job. The checkout is the push's immutable `github.sha`.
+Deployment credentials are exposed only to code merged into `main`, never to
+PR-head infrastructure code. This is outside the PR admission path, so it needs
+no draft-policy exception and is not a draft-transition cancellation target.
+Infrastructure updates to the canonical site are serialized without cancellation.
 
 The deployment URL is written to the GitHub Actions job summary; the workflow
 does not need repository write permissions or post PR comments. An administrator
 must configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` before deployment.
 If either secret is absent, a credential preflight writes a skip summary and all
-checkout, setup, build, deploy and destroy steps are skipped successfully.
-The `STORYBOOK_DOMAIN` repository variable overrides the main custom domain;
+checkout, setup, build and deploy steps are skipped successfully.
+The `STORYBOOK_DOMAIN` repository variable overrides the canonical custom domain;
 unset uses `storybook.compounding.tech`, while an explicitly empty value disables
 the custom domain in favor of `workers.dev`. The workflow preserves this
 unset-versus-empty distinction. See [Storybook deployment setup](development.md#storybook-deployment)
-for account permissions, state bootstrap and manual deploy/cleanup commands.
+for account permissions, state bootstrap and manual deployment commands.
 
 ### Fractal web
 

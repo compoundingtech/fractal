@@ -10,7 +10,6 @@ cd "$(dirname "$0")/.."
 
 python3 scripts/script-process-test
 python3 scripts/ci-fractal-web-licenses-test
-python3 scripts/ci-storybook-changes-test
 python3 scripts/ci-fractal-web-licenses --check-lockfile
 for test in \
   ci-ready-pr-test ci-draft-admission-test ci-workflow-concurrency-test check-ci-runner-test \

@@ -150,12 +150,6 @@ for candidate in (ROOT / '.github/workflows').glob('*.yml'):
     text = candidate.read_text()
     if re.search(r'^  pull_request:', text.split('\njobs:', 1)[0], re.M):
         name = re.search(r'^name: (.+)$', text, re.M)[1].strip("\"'")
-        if candidate.name == 'storybook-deploy.yml':
-            # Draft transitions must not interrupt an Alchemy apply or destroy.
-            assert name == 'Storybook deploy' and name not in m.WORKFLOWS
-            assert '      - ' + name not in workflow
-            assert '  cancel-in-progress: false\n' in text
-            continue
         assert name in m.WORKFLOWS and '      - ' + name in workflow, (candidate, 'PR workflow not observed')
 script = workflow.split("python3 - <<'DRAFT_ADMISSION_PY'\n", 1)[1].split('\n          DRAFT_ADMISSION_PY', 1)[0]
 assert '\n'.join(line[10:] for line in script.splitlines()).rstrip('\n') == (ROOT / 'scripts/ci-draft-admission').read_text().rstrip('\n')
