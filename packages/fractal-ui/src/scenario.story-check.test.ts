@@ -13,7 +13,8 @@ import { isExportStory } from 'storybook/internal/csf'
 import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import * as nodePath from 'node:path'
-import { globSync } from 'node:fs'
+import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
 import './scenario-fixture-graph.unit.test.ts'
@@ -308,8 +309,38 @@ const loadersByFile = Object.fromEntries(Object.entries(storyLoaders).map(([file
 const storybookDirectory = nodePath.resolve(uiSource, '../.storybook')
 // Do not filter by extension here: every configured file needs a loader or an
 // explicit failure, including newly configured CSF extensions and glob braces.
-const configuredStoryFiles = (globs: string[]) => globSync(globs, { cwd: storybookDirectory })
-  .map(file => nodePath.resolve(storybookDirectory, file))
+const configuredStoryFiles = (globs: string[], directory = storybookDirectory) => {
+  const rejectSymlink = (path: string) => {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) throw new Error(`Symlink in configured Storybook inventory: ${path}`)
+    return stat
+  }
+  const walk = (path: string) => {
+    if (!rejectSymlink(path).isDirectory()) return
+    for (const name of readdirSync(path)) {
+      if (name !== 'node_modules') walk(nodePath.join(path, name))
+    }
+  }
+  const roots = new Set(globs.map(glob => {
+    const segments = glob.split('/')
+    const magic = segments.findIndex(segment => /[*?{[(]/.test(segment))
+    return nodePath.resolve(directory, magic === -1 ? nodePath.dirname(glob) : segments.slice(0, magic).join('/'))
+  }))
+  for (const root of roots) {
+    // Inspect static ancestors too: lstat(root) alone would follow a symlink in
+    // an earlier path component before inspecting the root itself.
+    const ancestors: string[] = []
+    for (let parent = nodePath.dirname(root); ; parent = nodePath.dirname(parent)) {
+      ancestors.push(parent)
+      if (parent === nodePath.dirname(parent)) break
+    }
+    for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
+    walk(root)
+  }
+  // Do not follow links or include dependencies, matching Storybook's exclusion.
+  return globSync(globs, { cwd: directory, exclude: ['**/node_modules/**'] })
+    .map(file => nodePath.resolve(directory, file))
+}
 const configuredFiles = configuredStoryFiles(storyGlobs)
 const storyModules: Record<string, StoryModule> = {}
 for (const file of configuredFiles) {
@@ -323,6 +354,35 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
   expect(storybookConfig.stories).toEqual(storyGlobs)
   expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
   expect(configuredFiles.length).toBeGreaterThan(0)
+})
+
+test('configured inventory rejects directory and file symlinks without following them', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
+  try {
+    const source = nodePath.join(directory, 'src')
+    mkdirSync(source)
+    const story = nodePath.join(source, 'Example.stories.tsx')
+    writeFileSync(story, '')
+    const globs = ['src/**/*.stories.tsx']
+    expect(configuredStoryFiles(globs, directory)).toEqual([story])
+    const directoryLink = nodePath.join(source, 'linked')
+    symlinkSync(directory, directoryLink, 'dir')
+    expect(() => configuredStoryFiles(globs, directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    expect(() => configuredStoryFiles(['src/linked/**/*.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    expect(() => configuredStoryFiles(['src/linked/src/**/*.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    rmSync(directoryLink)
+    const fileLink = nodePath.join(source, 'Linked.stories.tsx')
+    symlinkSync(story, fileLink, 'file')
+    expect(() => configuredStoryFiles(globs, directory)).toThrow(`Symlink in configured Storybook inventory: ${fileLink}`)
+    expect(() => configuredStoryFiles(['src/Linked.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${fileLink}`)
+    rmSync(fileLink)
+    const dependencies = nodePath.join(source, 'node_modules')
+    mkdirSync(dependencies)
+    symlinkSync(directory, nodePath.join(dependencies, 'ignored'), 'dir')
+    expect(configuredStoryFiles(globs, directory)).toEqual([story])
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('configured .stories.ts CSFs are discovered and checked, including brace globs', async () => {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fail scenario story inventory checks closed on symlinked files and directories",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "The scenario check rejects symlinks under configured story roots, including literal file entries, without following them; node_modules is excluded like Storybook. Diagnostics identify the offending path instead of silently omitting linked stories." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}
