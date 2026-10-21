@@ -1,0 +1,32 @@
+{
+  "summary": "Let backup export preparation outlive the response-header deadline while remaining cancellable",
+  "version": 1,
+  "replay": {
+    "status": "none",
+    "detail": "No change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The successful claim-backup stream and checksum format are unchanged; old clients can download from an upgraded server. Preparation runs after headers; a producer failure aborts the response body and the client never publishes its temporary file."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No new startup migration or downtime requirement."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Use the existing backup create command; no request-timeout tuning or offline database copy is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No stored claims, projections or archive format change."
+  }
+}
