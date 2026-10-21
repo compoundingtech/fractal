@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 fn stop_escalation_writes_the_terminal_record_before_sigkill() {
     let tmp = tempfile::tempdir().unwrap();
     let catalog = tmp.path().join("catalog");
-    let host = st_drivers::run::detect_host();
+    let host = fractal_drivers::run::detect_host();
     let declaration = catalog.join("agents").join(&host).join("worker/agent.kdl");
     fs::create_dir_all(declaration.parent().unwrap()).unwrap();
     fs::write(
@@ -170,7 +170,7 @@ fn spawn_opencode_wrapper(
 ) -> (std::path::PathBuf, std::process::Child, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let catalog = tmp.path().join("catalog");
-    let host = st_drivers::run::detect_host();
+    let host = fractal_drivers::run::detect_host();
     let declaration = catalog.join("agents").join(&host).join("worker/agent.kdl");
     fs::create_dir_all(declaration.parent().unwrap()).unwrap();
     fs::write(

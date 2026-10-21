@@ -8,7 +8,7 @@ import type {
   Runtime,
   Snapshot,
   TerminalScreen,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import type { AttachmentSendRequest, MessageSendAction } from './source.ts'
 import { Effect, Layer } from 'effect'
 import * as Option from 'effect/Option'

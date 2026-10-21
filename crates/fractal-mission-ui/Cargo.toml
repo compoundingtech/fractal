@@ -7,9 +7,9 @@ license = "MIT"
 
 [features]
 default = []
-ratatui = ["dep:ratatui", "dep:st3-conversation-ui", "st3-conversation-ui/ratatui"]
+ratatui = ["dep:ratatui", "dep:fractal-conversation-ui", "fractal-conversation-ui/ratatui"]
 
 [dependencies]
-st3-ui-model = { path = "../st3-ui-model" }
-st3-conversation-ui = { path = "../st3-conversation-ui", optional = true }
+fractal-ui-model = { path = "../fractal-ui-model" }
+fractal-conversation-ui = { path = "../fractal-conversation-ui", optional = true }
 ratatui = { workspace = true, optional = true }

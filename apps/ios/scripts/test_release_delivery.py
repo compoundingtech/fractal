@@ -53,7 +53,7 @@ if name == "nice":
     os.execvpe(args[2], args[2:], os.environ)
 if name == "pnpm":
     if args == ["install", "--frozen-lockfile", "--ignore-scripts"]:
-        for package in ("", "apps/ios", "clients/typescript/st3-views", "clients/typescript/st3-client"):
+        for package in ("", "apps/ios", "clients/typescript/fractal-views", "clients/typescript/fractal-client"):
             (Path.cwd() / package / "node_modules").mkdir(parents=True, exist_ok=True)
         sys.exit(0)
     if args == ["run", "export:ios"]:
@@ -202,13 +202,13 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.git("config", "user.email", "delivery-test@example.invalid")
         self.git("remote", "add", "origin", str(self.origin))
         packages = {
-            "apps/ios": {"@smalltalk/st3-views": "workspace:*"},
-            "clients/typescript/st3-views": {"@smalltalk/st3-client": "workspace:*"},
-            "clients/typescript/st3-client": {},
+            "apps/ios": {"@fractal/views": "workspace:*"},
+            "clients/typescript/fractal-views": {"@fractal/client": "workspace:*"},
+            "clients/typescript/fractal-client": {},
         }
         for relative, dependencies in packages.items():
             self.write_source(f"{relative}/package.json", json.dumps({
-                "name": "@smalltalk/" + Path(relative).name, "version": "1.0.0", "dependencies": dependencies,
+                "name": "@fractal/" + Path(relative).name.removeprefix("fractal-"), "version": "1.0.0", "dependencies": dependencies,
             }))
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
         self.write_source("package.json", json.dumps({
@@ -308,8 +308,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assert_installed(self.initial_commit)
         for relative in (
             "apps/ios/index.ts",
-            "clients/typescript/st3-views/index.ts",
-            "clients/typescript/st3-client/index.ts",
+            "clients/typescript/fractal-views/index.ts",
+            "clients/typescript/fractal-client/index.ts",
         ):
             with self.subTest(path=relative):
                 self.write_source(relative, f"export const changed = {json.dumps(relative)};\n")
@@ -338,7 +338,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
 
     def test_dependency_path_prefix_does_not_include_sibling_package(self):
         self.reconcile()
-        self.write_source("clients/typescript/st3-client-extras/index.ts", "export {};\n")
+        self.write_source("clients/typescript/fractal-client-extras/index.ts", "export {};\n")
         self.commit("Unrelated sibling package")
         self.reconcile()
         self.assertIn("irrelevant", self.outcomes())
@@ -515,10 +515,10 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def test_recursive_dependency_scope_recomputes_when_graph_changes(self):
         self.reconcile()
         package = {
-            "name": "@smalltalk/st3-views", "version": "1.0.0",
+            "name": "@fractal/views", "version": "1.0.0",
             "dependencies": {"new-local-package": "file:../new-local-package"},
         }
-        self.write_source("clients/typescript/st3-views/package.json", json.dumps(package))
+        self.write_source("clients/typescript/fractal-views/package.json", json.dumps(package))
         self.write_source("clients/typescript/new-local-package/package.json",
                           json.dumps({"name": "new-local-package", "version": "1.0.0"}))
         self.write_source("clients/typescript/new-local-package/index.ts", "export const fixture = 1;\n")
@@ -529,7 +529,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         changed_commit = self.commit("Change new transitive local dependency")
         self.reconcile()
         self.assert_installed(changed_commit)
-        self.write_source("clients/typescript/st3-client/index.ts", "export const obsolete = true;\n")
+        self.write_source("clients/typescript/fractal-client/index.ts", "export const obsolete = true;\n")
         self.commit("Change package removed from dependency graph")
         self.reconcile()
         self.assert_installed(changed_commit)
@@ -957,7 +957,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
 
     def app_trees(self, commit):
         return [self.git("rev-parse", f"{commit}:{package}") for package in (
-            "apps/ios", "clients/typescript/st3-views", "clients/typescript/st3-client")]
+            "apps/ios", "clients/typescript/fractal-views", "clients/typescript/fractal-client")]
 
     def reset_delivery(self):
         """Fresh delivery state and fault controls for each randomized sequence."""
@@ -1247,7 +1247,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         derived = cache / "derived"
         sentinel = derived / "incremental-cache-sentinel"
         sentinel.write_text("keep incremental outputs")
-        for relative in ("apps/ios/index.ts", "clients/typescript/st3-client/index.ts"):
+        for relative in ("apps/ios/index.ts", "clients/typescript/fractal-client/index.ts"):
             with self.subTest(path=relative):
                 transforms = cache / "tmp" / "metro-transform-cache"
                 transforms.mkdir(parents=True, exist_ok=True)
@@ -1281,8 +1281,8 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
         changes = (
-            ("clients/typescript/st3-client/package.json",
-             json.dumps({"name": "@smalltalk/st3-client", "version": "2.0.0", "dependencies": {}})),
+            ("clients/typescript/fractal-client/package.json",
+             json.dumps({"name": "@fractal/client", "version": "2.0.0", "dependencies": {}})),
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
             ("package.json", (self.source / "package.json").read_text().replace("12.7.0", "12.7.1")),

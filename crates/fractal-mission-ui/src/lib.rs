@@ -1,5 +1,5 @@
 //! Composable mission step documents; no application shell or default renderer.
-pub use st3_ui_model::missions::{Mission, StepState};
+pub use fractal_ui_model::missions::{Mission, StepState};
 
 /// An embedding application executes step expansion itself.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -67,6 +67,18 @@ class Ratchet(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "baseline increased"):
             check(raised, raised, baseline({}))
 
+    def test_source_rename_ancestry_preserves_the_historical_ceiling(self):
+        splits = json.loads((SCRIPT.parent.parent / ".github/clippy-splits.json").read_text())
+        old = baseline({"st3-daemon": {"lint-a": 3}})
+        renamed = baseline({"fractal-daemon": {"lint-a": 2}, "fractal-store": {"lint-a": 1}})
+        check(renamed, renamed, old, splits)
+        raised = baseline({"fractal-daemon": {"lint-a": 3}, "fractal-store": {"lint-a": 1}})
+        with self.assertRaisesRegex(ValueError, "baseline increased: st3-daemon: lint-a: 3 -> 4"):
+            check(raised, raised, old, splits)
+        # Once canonical names exist in the base, the old names cannot lend debt.
+        with self.assertRaisesRegex(ValueError, "baseline increased: fractal-daemon: lint-a: 2 -> 3"):
+            check(raised, raised, renamed, splits)
+
     def test_split_crate_may_take_warnings_from_its_origin_but_not_add_any(self):
         old = baseline({"origin": {"lint-a": 3, "lint-b": 1}})
         splits = {"part": "origin"}

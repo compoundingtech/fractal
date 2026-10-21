@@ -227,7 +227,7 @@ const svgChevron = (host: Element, state: keyof typeof chevronPaths) => {
   return host.childElementCount === 1 && host.textContent === '' && svg instanceof SVGSVGElement && svg.getAttribute('viewBox') === '0 0 16 16' && svg.getAttribute('width') === '12' && svg.getAttribute('height') === '12' && svg.getAttribute('aria-hidden') === 'true' && svg.querySelector('path')?.getAttribute('d') === chevronPaths[state]
 }
 const box = (element: Element) => { const { width, height } = element.getBoundingClientRect(); return { width, height } }
-/** Real and pinned disclosure chevrons are the same kit SVG at the same 24px box and 12px glyph; the negative controls prove the check rejects a Unicode glyph and the wrong state. */
+/** Real and pinned disclosure chevrons share the RM1 16px gutter × 24px first-line box and 12px kit SVG; negative controls reject Unicode and the wrong state. */
 export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   // At 100px the outer parents are pinned while deeper parent rows are still mounted; at the default 600 only leaves stay mounted.
@@ -250,7 +250,7 @@ export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement 
     await expect(box(reference.firstElementChild!)).toEqual({ width: 12, height: 12 })
     await expect(getComputedStyle(chevron).color).toBe(getComputedStyle(reference).color)
   }
-  await expect(box(reference)).toEqual({ width: 24, height: 24 })
+  await expect(box(reference)).toEqual({ width: 16, height: 24 })
   for (const legacy of ['⌄', '›']) { const glyph = document.createElement('span'); glyph.textContent = legacy; await expect(svgChevron(glyph, legacy === '⌄' ? 'open' : 'closed')).toBe(false) }
   await expect(no.querySelectorAll('[data-pinned-chevron]')).toHaveLength(0)
   await userEvent.click(within(no as HTMLElement).getByRole('button', { name: 'Collapse all' }))
@@ -259,11 +259,56 @@ export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement 
   await expect(collapsed.length).toBeGreaterThan(0)
   for (const chevron of collapsed) await expect(svgChevron(chevron, 'closed')).toBe(true)
 } }
+const resizeFixture: readonly Item[] = [
+  ...Array.from({ length: 100 }, (_, index) => ({ id: `before-${index}`, textValue: `Review ${index + 1}`, depth: 0, children: [] })),
+  { id: 'deep', textValue: 'Deep folder', depth: 0, children: Array.from({ length: 20 }, (_, index) => ({ id: `deep-${index}`, textValue: `Deep review ${index + 1}`, depth: 1, children: [] })) },
+]
+function ResizeRevealExample() {
+  const [narrow, setNarrow] = React.useState(false)
+  const [keys, setKeys] = React.useState<Set<Key>>(() => new Set())
+  const handle = React.useRef<SidebarTreeHandle>(null)
+  return <main data-testid="resize-reveal" {...stylex.props(styles.example, narrow ? styles.resizeNarrow : styles.small)}>
+    <div {...stylex.props(styles.toolbar)}>
+      <button onClick={() => setNarrow(true)}>Narrow sidebar</button>
+      <button onClick={() => setKeys(new Set(['deep']))}>Expand deep folder</button>
+      <button onClick={() => handle.current?.reveal('deep-19')}>Reveal offscreen child</button>
+    </div>
+    <div {...stylex.props(styles.viewport)}><SidebarTree ref={handle} aria-label="Resized project reviews" items={resizeFixture} expandedKeys={keys} onExpandedChange={setKeys} renderRow={item => <div {...stylex.props(styles.label)}>{item.textValue}</div>} /></div>
+  </main>
+}
+export const RevealAfterWidthChange: Story = {
+  tags: ['critical'],
+  parameters: { scenario: { _tag: 'primitive', reason: 'Exercises sidebar tree reveal after a container width change with a synthetic row list and no scenario data.' } },
+  render: () => <ResizeRevealExample />,
+  play: async ({ canvasElement }) => {
+    const root = within(canvasElement).getByTestId('resize-reveal')
+    await frames()
+    const view = viewport(root)
+    const oldWidth = view.clientWidth
+    const oldHeight = view.scrollHeight
+    await expect(real(root, 'deep-19')).toBeNull()
+    await userEvent.click(within(root).getByRole('button', { name: 'Narrow sidebar' }))
+    await frames()
+    await expect(view.clientWidth).toBeLessThan(oldWidth)
+    await userEvent.click(within(root).getByRole('button', { name: 'Expand deep folder' }))
+    await frames()
+    // More area does not imply coverage: the old wide extent misses the new bottom.
+    await expect(view.scrollHeight).toBeGreaterThan(oldHeight)
+    await expect(oldWidth * oldHeight).toBeGreaterThan(view.clientWidth * view.scrollHeight)
+    await expect(real(root, 'deep-19')).toBeNull()
+    await userEvent.click(within(root).getByRole('button', { name: 'Reveal offscreen child' }))
+    await waitFor(() => expect(real(root, 'deep-19')).not.toBeNull(), settled)
+    await frames()
+    await expect(view.scrollTop).toBeGreaterThan(0)
+    await expect(clear(root, real(root, 'deep-19')!)).toBe(true)
+  },
+}
 export const AllStates: Story = { render: () => <main {...stylex.props(styles.matrix)}>{[240, 440, 1440].flatMap(width => [false, true].map(light => <Example key={`${width}-${light}`} width={width} light={light} />))}</main> }
 const styles = stylex.create({
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, padding: s.xl, backgroundColor: surface.canvas },
   example: { minWidth: 0, color: ink.fg, backgroundColor: surface.sidebar, fontFamily: t.fontSans, fontSize: t.metaSize },
   narrow: { width: sizes.narrow }, small: { width: sizes.small }, wide: { width: sizes.wide },
+  resizeNarrow: { width: 320 },
   toolbar: { display: 'flex', flexWrap: 'wrap', gap: s.xs, padding: s.xs },
   viewport: { height: sizes.viewport, minHeight: 0 },
   label: { display: 'flex', alignItems: 'center', height: sizes.row, overflow: 'hidden', whiteSpace: 'nowrap', paddingInline: s.sm, minWidth: 0 },

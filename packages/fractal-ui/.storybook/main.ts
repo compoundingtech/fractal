@@ -1,13 +1,10 @@
 import type { StorybookConfig } from '@storybook/react-vite'
 import tailwindcss from '@tailwindcss/vite'
 import { createStylexVitePlugins } from '../../../apps/fractal-web/scripts/stylex.mjs'
+import { storyGlobs } from './stories.ts'
 
 const config: StorybookConfig = {
-  stories: [
-    '../src/**/*.stories.tsx',
-    '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx',
-    '../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx',
-  ],
+  stories: storyGlobs,
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],

@@ -33,8 +33,8 @@ const eagerGraph = (entry: string) => {
       dependencies.add(specifier)
       let local: string | undefined
       if (specifier.startsWith('.')) local = resolve(dirname(file), specifier)
-      else if (specifier === '@smalltalk/fractal-ui' || specifier.startsWith('@smalltalk/fractal-ui/')) {
-        const key = specifier === '@smalltalk/fractal-ui' ? '.' : `.${specifier.slice('@smalltalk/fractal-ui'.length)}`
+      else if (specifier === '@fractal/ui' || specifier.startsWith('@fractal/ui/')) {
+        const key = specifier === '@fractal/ui' ? '.' : `.${specifier.slice('@fractal/ui'.length)}`
         const target = kitPackage.exports[key]
         if (target === undefined) throw new Error(`Missing kit export ${specifier}`)
         local = resolve(kit, target)
@@ -60,6 +60,9 @@ describe('conversation eager graph boundary', () => {
     expect(graph.dependencies.some(specifier => /^(?:refractor|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.dependencies).not.toContain('@assistant-ui/react')
     expect(graph.files).toContain(resolve(web, 'ConversationPaneFallback.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'capturedChanges.ts'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
   })
 
   it('still reaches the real heavy composition through the on-demand pane', () => {
@@ -70,5 +73,16 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+  })
+
+  it('reaches the real diff viewer only through the on-demand Changes inspector', () => {
+    const graph = eagerGraph(resolve(web, 'ChangesInspector.tsx'))
+    expect(graph.files).toContain(resolve(web, 'capturedChanges.ts'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+    expect(graph.files).not.toContain(resolve(web, 'ConversationPane.tsx'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
   })
 })

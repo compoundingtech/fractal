@@ -1,10 +1,10 @@
 use crate::{Intent, Mission, StepState};
+pub use fractal_conversation_ui::Theme;
+pub use fractal_conversation_ui::doc::Doc;
+use fractal_conversation_ui::doc::Target;
+use fractal_conversation_ui::text::{self, run};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-pub use st3_conversation_ui::Theme;
-pub use st3_conversation_ui::doc::Doc;
-use st3_conversation_ui::doc::Target;
-use st3_conversation_ui::text::{self, run};
 
 /// Semantic colors. Defaults reproduce stui's Catppuccin Mocha palette.
 #[derive(Clone, Copy, Debug)]

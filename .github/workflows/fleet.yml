@@ -760,8 +760,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Test release and PR classification safety
         run: python3 scripts/release_notes_test.py
       - name: Require a fresh fragment on the effective PR or queue merge
@@ -805,7 +818,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-execution","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-execution","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -965,8 +978,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1005,6 +1032,13 @@ jobs:
       - name: Use the cached Nix outputs
         if: (env.CI_LOCAL_CACHES != '1') && needs.evidence-gate-genie-freshness.outputs.skip != 'true'
         run: bash scripts/ci-nix-cache use
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Check license coverage, runner selection and generated files
         shell: bash
         run: "nix develop '.#genie' -c bash scripts/ci-genie-freshness"
@@ -1101,8 +1135,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        if: (github.event_name == 'pull_request') && needs.evidence-gate-typescript-client.outputs.skip != 'true'
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - uses: actions/setup-node@v4
         with:
           node-version: 24.18.0
@@ -1121,16 +1189,16 @@ jobs:
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Install the frozen workspace
+        shell: bash
+        run: "nix develop '.#web' -c pnpm install --frozen-lockfile"
         id: install
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
-        run: |
-          corepack enable
-          pnpm install --frozen-lockfile
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Check the client, shared views and iOS consumers
+        shell: bash
+        run: "nix develop '.#web' -c bash scripts/ci-typescript-client"
         id: client
-        run: bash scripts/ci-typescript-client
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - if: (always()) && needs.evidence-gate-typescript-client.outputs.skip != 'true'
         continue-on-error: true
@@ -1205,6 +1273,218 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Cache the locked TypeScript and Effect toolchain","outcome":"${{ steps.typescript-cache.outcome }}","hit":"${{ steps.typescript-cache.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  nix-evidence-genie-freshness:
+    name: nix-evidence-genie-freshness
+    needs: [pick-runner]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    timeout-minutes: 20
+    continue-on-error: true
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - name: Build checks.genie-freshness and record the facts
+        id: nix-build
+        continue-on-error: true
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/nix-check-facts" --check genie-freshness --out "$RUNNER_TEMP/nix-facts.json"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign the nix record for genie-freshness
+        env:
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once nix-genie-freshness
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check genie-freshness \
+            --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s' "$(nix --version 2>/dev/null)" "$RUNNER_ARCH" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: nix-evidence-note-genie-freshness
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  nix-evidence-typescript-client:
+    name: nix-evidence-typescript-client
+    needs: [pick-runner]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    timeout-minutes: 20
+    continue-on-error: true
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - name: Build checks.typescript-client and record the facts
+        id: nix-build
+        continue-on-error: true
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/nix-check-facts" --check typescript-client --out "$RUNNER_TEMP/nix-facts.json"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign the nix record for typescript-client
+        env:
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once nix-typescript-client
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check typescript-client \
+            --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s' "$(nix --version 2>/dev/null)" "$RUNNER_ARCH" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: nix-evidence-note-typescript-client
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   linux-test-build:
     name: linux-test-build
     needs:
@@ -1229,8 +1509,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1401,8 +1694,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1477,6 +1783,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -1581,8 +1897,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1654,6 +1983,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-2-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -1758,8 +2097,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -1831,6 +2183,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-3-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -1935,8 +2297,21 @@ jobs:
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -2008,6 +2383,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-4-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2106,8 +2491,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -2301,8 +2699,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -2501,8 +2912,22 @@ jobs:
         if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+        if: "!(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')"
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -2817,8 +3242,22 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        continue-on-error: true
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Take the signer scripts from the base commit
         id: base
         continue-on-error: true
@@ -2912,8 +3351,22 @@ jobs:
         if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+        if: "!(needs.evidence-gate-isolation-vm.outputs.skip == 'true')"
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -3171,18 +3624,18 @@ jobs:
               "apps/fractal-web/**",
               "packages/fractal-ui/**",
               # Export graph consumed by the app/SDK and Buck's client typecheck inputs.
-              "clients/typescript/st3-client/index.ts",
-              "clients/typescript/st3-client/Models.generated.ts",
-              "clients/typescript/st3-client/Client.generated.ts",
-              "clients/typescript/st3-client/Schema.generated.ts",
-              "clients/typescript/st3-client/errors.ts",
-              "clients/typescript/st3-client/package.json",
-              "clients/typescript/st3-client/tsconfig.json",
-              "clients/typescript/st3-client/tsconfig.schema.json",
-              "clients/typescript/st3-client/types.test.ts",
-              "clients/typescript/st3-client/BUCK*",
-              "clients/typescript/st3-views/**",
-              "clients/typescript/st3-scenarios/**",
+              "clients/typescript/fractal-client/index.ts",
+              "clients/typescript/fractal-client/Models.generated.ts",
+              "clients/typescript/fractal-client/Client.generated.ts",
+              "clients/typescript/fractal-client/Schema.generated.ts",
+              "clients/typescript/fractal-client/errors.ts",
+              "clients/typescript/fractal-client/package.json",
+              "clients/typescript/fractal-client/tsconfig.json",
+              "clients/typescript/fractal-client/tsconfig.schema.json",
+              "clients/typescript/fractal-client/types.test.ts",
+              "clients/typescript/fractal-client/BUCK*",
+              "clients/typescript/fractal-views/**",
+              "clients/typescript/fractal-scenarios/**",
               # The st3-scenarios recording import reads the client wire schema at runtime.
               "docs/st3/client-v0/schemas/client-v0.schema.json",
               # Views tests and scenario lanes read committed client/scenario fixtures.
@@ -3224,8 +3677,8 @@ jobs:
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
               # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
               "apps/fractal-web/.changelog/**",
-              "apps/fractal-web/packages/st3-sdk/src/**",
-              "clients/typescript/st3-views/**",
+              "apps/fractal-web/packages/fractal-sdk/src/**",
+              "clients/typescript/fractal-views/**",
               # The rest of its module closure inside the app, named file by file so other app-only changes still skip kit plays.
               "apps/fractal-web/src/command-palette/fuzzy.ts",
               "apps/fractal-web/src/conversation/alerts/AgentAlerts.tsx",
@@ -3283,6 +3736,8 @@ jobs:
               "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
               "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
               "apps/fractal-web/src/state/persistence.ts",
+              # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+              "apps/fractal-web/src/telemetry/inputPaint.ts",
               "apps/fractal-web/src/telemetry/measurement/counters.ts",
               "apps/fractal-web/src/telemetry/measurement/developer.ts",
               "apps/fractal-web/src/telemetry/measurement/engine.ts",
@@ -3341,8 +3796,8 @@ jobs:
               "apps/fractal-web/src/workbench-kit/icons.tsx",
               "fixtures/clients/words.json",
               "apps/fractal-web/src/web/index.html",
-              "clients/typescript/st3-scenarios/**",
-              "clients/typescript/st3-client/**",
+              "clients/typescript/fractal-scenarios/**",
+              "clients/typescript/fractal-client/**",
               # The st3-scenarios recording import reads the client wire schema at runtime.
               "docs/st3/client-v0/schemas/client-v0.schema.json",
               "package.json*",
@@ -3357,6 +3812,13 @@ jobs:
               "nix/web-shell*",
               ".github/workflows/fleet.yml*",
               ".github/workflows/workspace-ci.ts",
+              # The roster decode story replays captured daemon payloads through the SDK decode and the roster projection.
+              "apps/fractal-web/packages/fractal-sdk/src/**",
+              "apps/fractal-web/src/data/attention.ts",
+              "apps/fractal-web/src/data/projections.ts",
+              "apps/fractal-web/src/data/source.ts",
+              "apps/fractal-web/src/web/LiveRoster.stories.tsx",
+              "apps/fractal-web/src/web/LiveRoster.tsx",
           )
           SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -3470,8 +3932,22 @@ jobs:
           printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        if: github.event_name == 'pull_request'
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
         env:
@@ -3483,7 +3959,15 @@ jobs:
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
+            ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
+            ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - name: Check web shell identity invariants
         run: python3 scripts/ci-web-shell-test
       - name: Identify the web shell inputs
@@ -3498,6 +3982,8 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+      - name: Enable user namespaces for Buck TypeScript sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Restore the web shell closure
         id: web-shell
         uses: actions/cache/restore@v4
