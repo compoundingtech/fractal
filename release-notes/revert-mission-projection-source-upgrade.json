@@ -1,0 +1,11 @@
+{
+  "summary": "Revert the mission projection source upgrade (#3554), which was never deployed",
+  "version": 1,
+  "replay": {"status": "none", "detail": "The reverted change was never released, so no running member has its projection definitions or its one-time repair; replay behaves as on the last deployed build."},
+  "schema": {"status": "none", "detail": "No table, storage-version or claim-schema change; the local meta marker the reverted change would have written is not written."},
+  "rules": {"status": "none", "detail": "No checkpoint retention rules, rules version, envelopes, seals or trim permission changes."},
+  "compatibility": {"status": "none", "detail": "Mission-run, run-generation and step projection definition versions stay as in the last deployed build; no mixed-version behaviour changes."},
+  "downtime": {"status": "none", "detail": "Removes a synchronous first-open walk of every terminal run, generation and carried step claim, so startup does not gain that work."},
+  "manual": {"status": "none", "detail": "No manual step. Deploy through the normal reviewed rollout."},
+  "recovery": {"status": "none", "detail": "Nothing to recover: the reverted change never ran on a deployed member. The divergence it addressed is tracked separately."}
+}
