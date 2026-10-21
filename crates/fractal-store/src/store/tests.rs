@@ -126,6 +126,11 @@ mod activity_purity_tests {
     /* sqlite-large-value: allow-for-now lv-h2c081374795f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
 }
 
+mod subscription_state_full_value_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-haaf140af31b3 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subscription_state_full_value_tests.rs");
+}
+
 mod limits_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-h5244785b99be owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("limits_purity_tests.rs");
