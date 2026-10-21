@@ -168,6 +168,8 @@ fn mixed_builds_keep_signed_unknown_claims_and_project_them_after_upgrade() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("older.sqlite3");
     let older = Store::open(&path, "older").unwrap();
+    current.capture_divergences(true);
+    older.capture_divergences(true);
     older.bind_fleet(FLEET).unwrap();
     older.pin_fleet_anchor(anchor_key.public()).unwrap();
     older.set_member_key(Some(older_key.clone())).unwrap();
@@ -267,6 +269,7 @@ fn mixed_builds_keep_signed_unknown_claims_and_project_them_after_upgrade() {
 
     // The daemon startup path retries with the new registry, then canonically replays.
     let upgraded = Store::open(&path, "older").unwrap();
+    upgraded.capture_divergences(true);
     upgraded.set_member_key(Some(older_key)).unwrap();
     let admission = upgraded.validate_replication_backlog().unwrap();
     assert_eq!(admission.unknown, 0);
