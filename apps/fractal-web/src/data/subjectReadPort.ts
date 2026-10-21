@@ -341,7 +341,7 @@ export const gatewaySubjectReads = ({
           catch: (cause) =>
             new SubjectReadFailure({
               ref,
-              reason: cause instanceof ClientError && cause.status === 403 ? 'ungranted' : 'failed',
+              reason: cause instanceof ClientError && cause.status === 403 ? 'ungranted' : cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed',
               detail: cause instanceof Error ? cause.message : String(cause),
             }),
         }),

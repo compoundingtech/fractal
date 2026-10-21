@@ -18,6 +18,14 @@ const envelope = (value: unknown) => ({
 })
 
 describe('native subject reads', () => {
+  it('classifies a getter that is not implemented as unsupported rather than a retryable failure', async () => {
+    const options: ClientOptions = { baseUrl: 'http://gateway.invalid', fetchImpl: async input =>
+      String(input).endsWith('/capabilities') ? Response.json(recording.capabilities) :
+        Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unsupported', message: 'Not implemented', retryable: false, request_id: 'request/example-unsupported', details: {} }, { status: 501 }) }
+    const reads = gatewaySubjectReads({ options })
+    expect((await Effect.runPromise(Effect.flip(reads.session.read('session/example-details')))).reason).toBe('unsupported')
+    expect((await Effect.runPromise(Effect.flip(reads.agentQueue.read('agent/example-details')))).reason).toBe('unsupported')
+  })
   it('decodes fixture wire once before publishing rich values to typed registry consumers', () => {
     const feed = nativeSubjectFixture({ schema: Agent, wire: recording.cases.agent.payload.value })
     expect(feed._tag).toBe('Observed')
