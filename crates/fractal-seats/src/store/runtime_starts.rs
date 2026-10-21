@@ -894,7 +894,7 @@ impl RuntimeStartsStore for Store {
                     return Ok(false);
                 }
                 tx.execute(
-                    "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-hae4fa84d446d owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
                     [id],
                 )?;
                 release_evidence(tx, id)?;
@@ -1134,7 +1134,7 @@ impl RuntimeStartsStore for Store {
         self.connection
             .batched(|tx| {
                 tx.execute(
-                    /* sqlite-large-value: allow-for-now lv-hae4fa84d446d owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h9ed5e63d218e owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1 WHERE id=?1",
                     [id],
                 )?;
                 release_evidence(tx, id)

@@ -56,7 +56,7 @@ fn seed(connection: &Connection, origin: &str) {
         "closure_proof_id":"start-proof/example", "closure_proof":proof, "unexpected":SECRET
     });
     connection.execute(
-        "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
+        /* sqlite-large-value: allow-for-now lv-hdeaea3ec9912 owner=fractal_api_client_v0::api::client_v0::runtime_start_diagnostics::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
          VALUES(?1,'agent/example-gate','owner/example',?2,'restart/example',1,?3,1,0,1,1)",
         params![OPERATION, body.to_string(), result.to_string()],
     ).unwrap();
@@ -67,7 +67,7 @@ fn seed(connection: &Connection, origin: &str) {
         ("0194b2e0-1234-7000-8000-000000000004", "agent/example-running", false, false, true, None),
     ] {
         connection.execute(
-            "INSERT INTO local_runtime_starts(id,subject,owner,body,finished,applied,dispatched,result)
+            /* sqlite-large-value: allow-for-now lv-hf4488b956ae7 owner=fractal_api_client_v0::api::client_v0::runtime_start_diagnostics::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body,finished,applied,dispatched,result)
              VALUES(?1,?2,'owner/example','{}',?3,?4,?5,?6)",
             params![id, subject, finished, applied, dispatched, result],
         ).unwrap();
@@ -94,7 +94,7 @@ fn fingerprint(connection: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>>
         "SELECT * FROM local_runtime_start_evidence ORDER BY operation_id,observation_id",
         "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name",
     ].iter().map(|sql| {
-        let mut statement = connection.prepare(sql).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h1c1e8afac510 owner=fractal_api_client_v0::api::client_v0::runtime_start_diagnostics::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         let count = statement.column_count();
         statement.query_map([], |row| (0..count).map(|index| row.get(index)).collect())
             .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()

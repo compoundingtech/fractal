@@ -2110,7 +2110,7 @@ fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
             }
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection.execute(
-                "UPDATE local_runtime_starts SET cleanup_verified=0,applied=1,result=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-hb6f3ff597ef3 owner=fractal_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=0,applied=1,result=?2 WHERE id=?1",
                 rusqlite::params![id, serde_json::to_string(&result).unwrap()],
             ).unwrap();
             drop(connection);
