@@ -5546,7 +5546,7 @@ fn a_claim_walk_asks_for_nothing_this_node_holds_or_retired() {
     target
         .connection
         .write()
-        .execute("INSERT INTO retired_claim_ids(id) VALUES (unhex(?1))", [&retired])
+        .execute(/* sqlite-large-value: allow-for-now lv-h5c50c3e143a8 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO retired_claim_ids(id) VALUES (unhex(?1))", [&retired])
         .unwrap();
     fold_claim_ranges(&[&source, &target]);
 
