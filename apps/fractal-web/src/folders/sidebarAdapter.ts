@@ -110,7 +110,7 @@ const planMove = (doc: SidebarDocument, move: SidebarMove): MovePlan | { refused
   return { item, parent, siblings, index: anchor === undefined ? siblings.length : siblings.indexOf(anchor), unchanged }
 }
 
-/** Keep aligned with MAX_KEY_BYTES and valid_key in crates/st3-schema/src/arrangements.rs, and with the fractal TUI port in the dotfiles repository's flakes/fractal. */
+/** Keep aligned with MAX_KEY_BYTES and valid_key in crates/fractal-schema/src/arrangements.rs, and with the fractal TUI port in the dotfiles repository's flakes/fractal. */
 const maxArrangementKeyBytes = 128
 const validArrangementKey = (key: string): boolean => {
   if (!/^[A-Za-z]/.test(key) || /[^0-9A-Za-z]/.test(key) || key.length > maxArrangementKeyBytes) return false
