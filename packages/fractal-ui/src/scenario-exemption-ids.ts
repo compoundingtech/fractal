@@ -260,6 +260,7 @@ export const scenarioExemptionIds: readonly string[] = [
   './assistant-ui/sidebar/SidebarTree.stories.tsx#Modal240Light:contract-fixture',
   './assistant-ui/sidebar/SidebarTree.stories.tsx#PinnedClick:contract-fixture',
   './assistant-ui/sidebar/SidebarTree.stories.tsx#PushOutBoundary:contract-fixture',
+  './assistant-ui/sidebar/SidebarTree.stories.tsx#RevealAfterWidthChange:primitive',
   './assistant-ui/sidebar/SidebarTree.stories.tsx#RevealUnvisitedAncestors:contract-fixture',
   './assistant-ui/sidebar/SidebarTree.stories.tsx#StickyChain:contract-fixture',
   './assistant-ui/sidebar/SidebarTree.stories.tsx#VisibleFocusDoesNotJump:contract-fixture',

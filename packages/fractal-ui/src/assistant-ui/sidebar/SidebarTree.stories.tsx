@@ -56,7 +56,8 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
 // The cold control keeps stickiness and disables measured settling instead: with 24px estimates a
 // non-sticky single scroll already lands clear, so only the sticky band can expose an unsettled reveal.
 function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={cold} noSettle={cold} cold={cold} width={width} light={light} /></main> }
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Synthetic depth-6 tree geometry with controlled breadth and stable reveal keys exercises sticky ancestor caps, push-out, focus, collapse and narrow breadcrumbs. Scenario worlds express tree depths only up to 3, not this geometry contract.' }, layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled, or for the cold reveal with measured settling disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
+const geometryReason = 'Synthetic depth-6 tree geometry with controlled breadth and stable reveal keys exercises sticky ancestor caps, push-out, focus, collapse and narrow breadcrumbs. Scenario worlds express tree depths only up to 3, not this geometry contract.'
+const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled, or for the cold reveal with measured settling disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
 export default meta
 type Story = StoryObj
 const frames = async () => { await document.fonts.ready; for (let i = 0; i < 6; i++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
@@ -74,8 +75,8 @@ async function assertChain(example: Element) {
   await expect(actual).toEqual(parents.get(top))
 }
 const pair = () => <Pair />
-export const StickyChain: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); await assertChain(yes); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0); await expect(parents.get(stack(no).dataset.topKey!)!.length).toBeGreaterThan(0) } }
-export const PushOutBoundary: Story = { render: pair, play: async ({ canvasElement }) => {
+export const StickyChain: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); await assertChain(yes); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0); await expect(parents.get(stack(no).dataset.topKey!)!.length).toBeGreaterThan(0) } }
+export const PushOutBoundary: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement); await frames()
   await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal boundary' }))
   await waitFor(() => expect(real(yes, 'north.a.a.a.a.a.a.69')).not.toBeNull(), settled)
@@ -97,11 +98,11 @@ export const PushOutBoundary: Story = { render: pair, play: async ({ canvasEleme
   await expect(moved).toBe(true)
   await scroll(no); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0)
 } }
-export const DepthCap: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); await expect(yes.querySelector('[data-sidebar-breadcrumb]')).not.toBeNull(); await expect(stack(yes).getBoundingClientRect().height).toBeLessThanOrEqual(viewport(yes).clientHeight * 0.4); await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeLessThanOrEqual(4); await expect(no.querySelector('[data-sidebar-breadcrumb]')).toBeNull() } }
-export const AccessibleRows: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); for (const example of [yes, no]) { await expect(within(example as HTMLElement).getAllByRole('treegrid')).toHaveLength(1); await expect(within(example as HTMLElement).getAllByRole('row')).toHaveLength(example.querySelectorAll('[data-sidebar-tree-key]').length); await expect(stack(example).querySelectorAll('[role="row"]')).toHaveLength(0); await expect(stack(example).getAttribute('aria-hidden')).toBe('true') } await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0) } }
-export const PinnedClick: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const pin = [...yes.querySelectorAll('[data-pinned-key]')].at(-1) as HTMLElement; const key = pin.dataset.pinnedKey!; await userEvent.click(pin); await waitFor(() => expect(document.activeElement).toBe(real(yes, key)), settled); await frames(); await expect(clear(yes, real(yes, key)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
-export const FocusAndReveal: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const top = stack(yes).dataset.topKey!; real(yes, top)!.focus(); await frames(); await expect(clear(yes, real(yes, top)!)).toBe(true); await userEvent.keyboard('{ArrowDown}'); await frames(); await expect(clear(yes, document.activeElement as HTMLElement)).toBe(true); await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })); await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled); await frames(); await expect(clear(yes, real(yes, deepKey)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
-export const VisibleFocusDoesNotJump: Story = { render: pair, play: async ({ canvasElement }) => {
+export const DepthCap: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); await expect(yes.querySelector('[data-sidebar-breadcrumb]')).not.toBeNull(); await expect(stack(yes).getBoundingClientRect().height).toBeLessThanOrEqual(viewport(yes).clientHeight * 0.4); await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeLessThanOrEqual(4); await expect(no.querySelector('[data-sidebar-breadcrumb]')).toBeNull() } }
+export const AccessibleRows: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); for (const example of [yes, no]) { await expect(within(example as HTMLElement).getAllByRole('treegrid')).toHaveLength(1); await expect(within(example as HTMLElement).getAllByRole('row')).toHaveLength(example.querySelectorAll('[data-sidebar-tree-key]').length); await expect(stack(example).querySelectorAll('[role="row"]')).toHaveLength(0); await expect(stack(example).getAttribute('aria-hidden')).toBe('true') } await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0) } }
+export const PinnedClick: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const pin = [...yes.querySelectorAll('[data-pinned-key]')].at(-1) as HTMLElement; const key = pin.dataset.pinnedKey!; await userEvent.click(pin); await waitFor(() => expect(document.activeElement).toBe(real(yes, key)), settled); await frames(); await expect(clear(yes, real(yes, key)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
+export const FocusAndReveal: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const top = stack(yes).dataset.topKey!; real(yes, top)!.focus(); await frames(); await expect(clear(yes, real(yes, top)!)).toBe(true); await userEvent.keyboard('{ArrowDown}'); await frames(); await expect(clear(yes, document.activeElement as HTMLElement)).toBe(true); await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })); await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled); await frames(); await expect(clear(yes, real(yes, deepKey)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
+export const VisibleFocusDoesNotJump: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   await frames()
   await scroll(yes)
@@ -137,7 +138,7 @@ export const VisibleFocusDoesNotJump: Story = { render: pair, play: async ({ can
     }
   }
 } }
-export const CollapseFilterReorder: Story = { render: pair, play: async ({ canvasElement }) => {
+export const CollapseFilterReorder: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   await frames()
   for (const example of [yes, no]) {
@@ -163,7 +164,7 @@ export const CollapseFilterReorder: Story = { render: pair, play: async ({ canva
     await expect(within(example as HTMLElement).getAllByRole('row')).toHaveLength(2)
   }
 } }
-export const ColdRevealBeforeMeasurement: Story = { render: () => <Pair cold />, play: async ({ canvasElement }) => {
+export const ColdRevealBeforeMeasurement: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <Pair cold />, play: async ({ canvasElement }) => {
   const yes = canvasElement.querySelector('[data-example="sticky"]')!
   const no = canvasElement.querySelector('[data-example="control"]')!
   await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled)
@@ -180,7 +181,7 @@ export const ColdRevealBeforeMeasurement: Story = { render: () => <Pair cold />,
   await expect(control).not.toBeNull()
   await expect(clear(no, control!)).toBe(false)
 } }
-export const RevealUnvisitedAncestors: Story = { render: pair, play: async ({ canvasElement }) => {
+export const RevealUnvisitedAncestors: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   await frames()
   for (const example of [yes, no]) {
@@ -196,9 +197,9 @@ export const RevealUnvisitedAncestors: Story = { render: pair, play: async ({ ca
   await expect(stack(yes).getBoundingClientRect().height).toBeLessThanOrEqual(viewport(yes).clientHeight * 0.4)
   await expect(no.querySelectorAll('[data-pinned-key]')).toHaveLength(0)
 } }
-export const Light440: Story = { render: () => <Pair light /> }
-export const Dark1440: Story = { render: () => <Pair width={1440} /> }
-export const Light1440: Story = { render: () => <Pair width={1440} light /> }
+export const Light440: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <Pair light /> }
+export const Dark1440: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <Pair width={1440} /> }
+export const Light1440: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <Pair width={1440} light /> }
 /**
  * At 240px the breadcrumb truncates inside its own block box, the only kind of box that paints
  * text-overflow, and the padded crumb itself never overflows, so no glyph is cut at its edge.
@@ -218,8 +219,8 @@ async function assertBreadcrumbEllipsis(canvas: HTMLElement) {
   const contentEnd = crumb!.getBoundingClientRect().right - parseFloat(getComputedStyle(crumb!).paddingRight)
   await expect(text!.getBoundingClientRect().right).toBeLessThanOrEqual(contentEnd + 0.5)
 }
-export const Modal240: Story = { render: () => <Pair width={240} />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
-export const Modal240Light: Story = { render: () => <Pair width={240} light />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
+export const Modal240: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <Pair width={240} />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
+export const Modal240Light: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <Pair width={240} light />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
 const chevronPaths = { open: 'M3.5 6 8 10.5 12.5 6', closed: 'M6 3.5 10.5 8 6 12.5' } as const
 /** A disclosure chevron is one 12px kit SVG with the state's stroke path and no text; a Unicode glyph fails every attribute check. */
 const svgChevron = (host: Element, state: keyof typeof chevronPaths) => {
@@ -228,7 +229,7 @@ const svgChevron = (host: Element, state: keyof typeof chevronPaths) => {
 }
 const box = (element: Element) => { const { width, height } = element.getBoundingClientRect(); return { width, height } }
 /** Real and pinned disclosure chevrons share the RM1 16px gutter × 24px first-line box and 12px kit SVG; negative controls reject Unicode and the wrong state. */
-export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement }) => {
+export const ChevronIcons: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   // At 100px the outer parents are pinned while deeper parent rows are still mounted; at the default 600 only leaves stay mounted.
   await frames(); await scroll(yes, 100); await scroll(no)
@@ -259,11 +260,56 @@ export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement 
   await expect(collapsed.length).toBeGreaterThan(0)
   for (const chevron of collapsed) await expect(svgChevron(chevron, 'closed')).toBe(true)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.matrix)}>{[240, 440, 1440].flatMap(width => [false, true].map(light => <Example key={`${width}-${light}`} width={width} light={light} />))}</main> }
+const resizeFixture: readonly Item[] = [
+  ...Array.from({ length: 100 }, (_, index) => ({ id: `before-${index}`, textValue: `Review ${index + 1}`, depth: 0, children: [] })),
+  { id: 'deep', textValue: 'Deep folder', depth: 0, children: Array.from({ length: 20 }, (_, index) => ({ id: `deep-${index}`, textValue: `Deep review ${index + 1}`, depth: 1, children: [] })) },
+]
+function ResizeRevealExample() {
+  const [narrow, setNarrow] = React.useState(false)
+  const [keys, setKeys] = React.useState<Set<Key>>(() => new Set())
+  const handle = React.useRef<SidebarTreeHandle>(null)
+  return <main data-testid="resize-reveal" {...stylex.props(styles.example, narrow ? styles.resizeNarrow : styles.small)}>
+    <div {...stylex.props(styles.toolbar)}>
+      <button onClick={() => setNarrow(true)}>Narrow sidebar</button>
+      <button onClick={() => setKeys(new Set(['deep']))}>Expand deep folder</button>
+      <button onClick={() => handle.current?.reveal('deep-19')}>Reveal offscreen child</button>
+    </div>
+    <div {...stylex.props(styles.viewport)}><SidebarTree ref={handle} aria-label="Resized project reviews" items={resizeFixture} expandedKeys={keys} onExpandedChange={setKeys} renderRow={item => <div {...stylex.props(styles.label)}>{item.textValue}</div>} /></div>
+  </main>
+}
+export const RevealAfterWidthChange: Story = {
+  tags: ['critical'],
+  parameters: { scenario: { _tag: 'primitive', reason: 'Exercises sidebar tree reveal after a container width change with a synthetic row list and no scenario data.' } },
+  render: () => <ResizeRevealExample />,
+  play: async ({ canvasElement }) => {
+    const root = within(canvasElement).getByTestId('resize-reveal')
+    await frames()
+    const view = viewport(root)
+    const oldWidth = view.clientWidth
+    const oldHeight = view.scrollHeight
+    await expect(real(root, 'deep-19')).toBeNull()
+    await userEvent.click(within(root).getByRole('button', { name: 'Narrow sidebar' }))
+    await frames()
+    await expect(view.clientWidth).toBeLessThan(oldWidth)
+    await userEvent.click(within(root).getByRole('button', { name: 'Expand deep folder' }))
+    await frames()
+    // More area does not imply coverage: the old wide extent misses the new bottom.
+    await expect(view.scrollHeight).toBeGreaterThan(oldHeight)
+    await expect(oldWidth * oldHeight).toBeGreaterThan(view.clientWidth * view.scrollHeight)
+    await expect(real(root, 'deep-19')).toBeNull()
+    await userEvent.click(within(root).getByRole('button', { name: 'Reveal offscreen child' }))
+    await waitFor(() => expect(real(root, 'deep-19')).not.toBeNull(), settled)
+    await frames()
+    await expect(view.scrollTop).toBeGreaterThan(0)
+    await expect(clear(root, real(root, 'deep-19')!)).toBe(true)
+  },
+}
+export const AllStates: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: () => <main {...stylex.props(styles.matrix)}>{[240, 440, 1440].flatMap(width => [false, true].map(light => <Example key={`${width}-${light}`} width={width} light={light} />))}</main> }
 const styles = stylex.create({
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, padding: s.xl, backgroundColor: surface.canvas },
   example: { minWidth: 0, color: ink.fg, backgroundColor: surface.sidebar, fontFamily: t.fontSans, fontSize: t.metaSize },
   narrow: { width: sizes.narrow }, small: { width: sizes.small }, wide: { width: sizes.wide },
+  resizeNarrow: { width: 320 },
   toolbar: { display: 'flex', flexWrap: 'wrap', gap: s.xs, padding: s.xs },
   viewport: { height: sizes.viewport, minHeight: 0 },
   label: { display: 'flex', alignItems: 'center', height: sizes.row, overflow: 'hidden', whiteSpace: 'nowrap', paddingInline: s.sm, minWidth: 0 },
