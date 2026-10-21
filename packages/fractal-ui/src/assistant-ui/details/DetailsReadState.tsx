@@ -1,10 +1,59 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button } from 'react-aria-components'
+import { Button, VisuallyHidden } from 'react-aria-components'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { HumanTime } from '../../time/HumanTime'
+import { HumanTime, useHumanTimeZone } from '../../time/HumanTime'
+import { formatExact } from '../../time/human-time'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { DetailsReadFailure, DetailsSpendRead } from './model'
+
+type FailureSentence = { readonly message: string; readonly retainedAt?: number | undefined }
+
+/**
+ * Before an outcome removes a focused read action, focus moves to its section's heading control. Every section
+ * keeps that control mounted, as the same element, in every read state, so it is always a stable target.
+ */
+function handOffFocus(action: HTMLElement | null): void {
+  if (action === null || action !== action.ownerDocument.activeElement) return
+  action.closest('section')?.querySelector<HTMLElement>('[data-details-section-control]')?.focus({ preventScroll: true })
+}
+
+/**
+ * The plain-text failure sentence a read last settled with, for its polite announcer. Each settled failure clears
+ * the text and sets it again on the next animation frame, so a repeated identical failure is announced again.
+ * Only a semantic change speaks: a read settling (`pending` → not pending) or a new sentence. Parent re-renders that
+ * recreate an equal failure object stay silent.
+ */
+function useFailureAnnouncement(failure: FailureSentence | undefined, pending: boolean): string | undefined {
+  const [announced, setAnnounced] = React.useState<string>()
+  const zone = useHumanTimeZone()
+  const read = React.useRef<{ wasPending: boolean; settles: number; key: string | undefined }>({ wasPending: false, settles: 0, key: undefined })
+  const message = failure?.message
+  const retainedAt = failure?.retainedAt
+  React.useLayoutEffect(() => {
+    const state = read.current
+    if (pending) { state.wasPending = true; return }
+    if (state.wasPending) { state.wasPending = false; state.settles += 1 }
+    if (message === undefined) { state.key = undefined; setAnnounced(undefined); return }
+    const key = `${state.settles}\u0000${retainedAt ?? ''}\u0000${message}`
+    if (key === state.key) return
+    state.key = key
+    setAnnounced(undefined)
+    let frame = requestAnimationFrame(() => {
+      frame = 0
+      setAnnounced(retainedAt === undefined ? message : `${message} Showing figures from ${formatExact(retainedAt, zone)}.`)
+    })
+    // A superseded or unmounted frame never speaks; its key is forgotten so the next settled run announces.
+    return () => { if (frame !== 0) { cancelAnimationFrame(frame); state.key = undefined } }
+  }, [pending, message, retainedAt, zone])
+  return announced
+}
+
+/** A read's polite status region: mounted empty from the first render, it only ever holds a settled failure sentence. */
+function ReadAnnouncer({ failure, pending }: { readonly failure: FailureSentence | undefined; readonly pending: boolean }) {
+  const text = useFailureAnnouncement(failure, pending)
+  return <VisuallyHidden><span role="status" aria-live="polite" aria-atomic="true" data-details-read-announcer>{text}</span></VisuallyHidden>
+}
 
 /**
  * A quiet text action; the phone sheet raises it to the 44px touch floor. While its read is in flight the same
@@ -30,8 +79,8 @@ function ReadAction({ children, onPress, describedBy, pending, action, buttonRef
   return <Button ref={buttonRef} aria-disabled={pending || undefined} onPress={() => { if (!pending) onPress() }} aria-describedby={describedBy} data-details-read-action={action} data-details-read-pending={pending || undefined} {...stylex.props(styles.action, narrow && styles.actionTouch, pending && styles.actionPending)}>{children}</Button>
 }
 
-/** The failure sentence; a read that kept earlier figures dates them, so no separate `Updated …` line is needed. */
-function FailureText({ failure }: { readonly failure: DetailsReadFailure }) {
+/** The visible failure sentence; a read that kept earlier figures dates them, so no separate `Updated …` line is needed. */
+function FailureText({ failure }: { readonly failure: FailureSentence }) {
   const narrow = React.useContext(NarrowLayoutContext)
   return <>{failure.message}{failure.retainedAt !== undefined && <> Showing figures from <HumanTime at={failure.retainedAt} tooltip={!narrow} />.</>}</>
 }
@@ -46,61 +95,75 @@ function useHeldFailure(failure: DetailsReadFailure | undefined): readonly [Deta
   return [held, setHeld]
 }
 /**
- * One failed read: its plain sentence in a polite status region and a Try again that re-runs only that read.
- * While the retry is `pending` the line and its action stay mounted as **Trying again…**; a repeated failure
- * replaces the sentence in place, so focus stays on the action. A success first moves focus from the action to
- * its section's heading control (only when the action holds focus), then removes the line.
+ * One failed read: its plain sentence (`data-details-read-message`) and a Try again that re-runs only that read, with
+ * a separate polite announcer that speaks each settled failure. While the retry is `pending` the line and its action
+ * stay mounted as **Trying again…**; a repeated failure replaces the sentence in place, so focus stays on the action.
+ * Any other settled outcome (success, refused, unsupported) first moves focus from the action to its section's
+ * heading control, then removes the line.
  */
 export function DetailsReadFailureLine({ failure, pending = false }: { readonly failure: DetailsReadFailure | undefined; readonly pending?: boolean }) {
   const id = React.useId()
   const button = React.useRef<HTMLButtonElement>(null)
   const [held, release] = useHeldFailure(failure)
-  const recovered = failure === undefined && !pending && held !== undefined
+  const settled = failure === undefined && !pending && held !== undefined
   React.useLayoutEffect(() => {
-    if (!recovered) return
-    const action = button.current
-    if (action !== null && action === action.ownerDocument.activeElement) action.closest('section')?.querySelector<HTMLElement>('[data-details-section-control]')?.focus({ preventScroll: true })
+    if (!settled) return
+    handOffFocus(button.current)
     release(undefined)
-  }, [recovered, release])
+  }, [settled, release])
   const shown = failure ?? held
-  if (shown === undefined) return null
   const busy = failure === undefined && pending
-  return <div data-details-read-failure {...stylex.props(styles.line)}>
-    <div id={id} role="status" {...stylex.props(styles.text)}><FailureText failure={shown} /></div>
-    <ReadAction action="retry" buttonRef={button} pending={busy} describedBy={id} onPress={shown.onRetry}>{busy ? 'Trying again…' : 'Try again'}</ReadAction>
-  </div>
+  return <>
+    <ReadAnnouncer failure={failure} pending={pending} />
+    {shown !== undefined && <div data-details-read-failure {...stylex.props(styles.line)}>
+      <div id={id} data-details-read-message {...stylex.props(styles.text)}><FailureText failure={shown} /></div>
+      <ReadAction action="retry" buttonRef={button} pending={busy} describedBy={id} onPress={shown.onRetry}>{busy ? 'Trying again…' : 'Try again'}</ReadAction>
+    </div>}
+  </>
 }
 
 /**
  * Spend is read on open and on request, so its age is always visible: `Updated …` and a Refresh action. A failed
- * read replaces the date with its own sentence (dating any kept figures) in a polite status region, and the same
- * button becomes Try again; in flight it reads **Refreshing…** or **Trying again…**. One button node persists
- * across every state, so focus stays on it.
+ * read replaces the date with its own sentence (dating any kept figures), announced by the polite announcer, and the
+ * same button becomes Try again; in flight it reads **Refreshing…** or **Trying again…**. One button node persists
+ * across every state, so focus stays on it. When the host withdraws the read (`read` becomes undefined: refused or
+ * unsupported) the last read stays painted for one layout pass while focus moves to the Spend heading, then goes.
  */
-export function DetailsSpendReadLine({ read }: { readonly read: DetailsSpendRead }) {
+export function DetailsSpendReadLine({ read }: { readonly read: DetailsSpendRead | undefined }) {
   const narrow = React.useContext(NarrowLayoutContext)
-  const statusId = React.useId()
+  const messageId = React.useId()
   const updatedId = React.useId()
   const button = React.useRef<HTMLButtonElement>(null)
-  const [held, release] = useHeldFailure(read.failure)
-  const settled = read.failure === undefined && !read.refreshing && held !== undefined
+  const [kept, setKept] = React.useState(read)
+  if (read !== undefined && read !== kept) setKept(read)
+  const withdrawn = read === undefined && kept !== undefined
+  React.useLayoutEffect(() => {
+    if (!withdrawn) return
+    handOffFocus(button.current)
+    setKept(undefined)
+  }, [withdrawn])
+  const refreshing = read?.refreshing ?? false
+  const [held, release] = useHeldFailure(read?.failure)
+  const settled = read?.failure === undefined && !refreshing && held !== undefined
   React.useLayoutEffect(() => { if (settled) release(undefined) }, [settled, release])
-  const failure = read.failure ?? (read.refreshing ? held : undefined)
-  const pending = read.refreshing
+  const shown = read ?? kept
+  const failure = shown?.failure ?? (shown?.refreshing === true ? held : undefined)
+  const pending = shown?.refreshing === true
   const label = failure === undefined ? pending ? 'Refreshing…' : 'Refresh' : pending ? 'Trying again…' : 'Try again'
-  return <div data-details-spend-read data-details-read-failure={failure !== undefined || undefined} {...stylex.props(styles.line)}>
-    {/* Mounted before any failure arrives, so the sentence is announced when it appears. */}
-    <div id={statusId} role="status" {...stylex.props(failure === undefined ? styles.statusIdle : styles.text)}>{failure !== undefined && <FailureText failure={failure} />}</div>
-    {failure === undefined && <div id={updatedId} data-details-spend-updated {...stylex.props(styles.text)}>{read.updatedAt === undefined ? null : <HumanTime at={read.updatedAt} prefix="Updated " tooltip={!narrow} />}</div>}
-    <ReadAction action={failure === undefined ? 'refresh' : 'retry'} buttonRef={button} pending={pending} describedBy={failure === undefined ? updatedId : statusId} onPress={failure?.onRetry ?? read.onRefresh}>{label}</ReadAction>
-  </div>
+  return <>
+    <ReadAnnouncer failure={read?.failure} pending={refreshing} />
+    {shown !== undefined && <div data-details-spend-read data-details-read-failure={failure !== undefined || undefined} {...stylex.props(styles.line)}>
+      {failure !== undefined
+        ? <div id={messageId} data-details-read-message {...stylex.props(styles.text)}><FailureText failure={failure} /></div>
+        : <div id={updatedId} data-details-spend-updated {...stylex.props(styles.text)}>{shown.updatedAt === undefined ? null : <HumanTime at={shown.updatedAt} prefix="Updated " tooltip={!narrow} />}</div>}
+      <ReadAction action={failure === undefined ? 'refresh' : 'retry'} buttonRef={button} pending={pending} describedBy={failure === undefined ? updatedId : messageId} onPress={failure?.onRetry ?? shown.onRefresh}>{label}</ReadAction>
+    </div>}
+  </>
 }
 
 const styles = stylex.create({
   line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: s.xs, margin: s.zero, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   text: { minWidth: 0, overflowWrap: 'normal' },
-  // An empty status region stays in the accessibility tree but out of the line's flow and gaps.
-  statusIdle: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
   action: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outline: `2px solid ${accent.primary}` } },
   actionTouch: { height: g.touchTarget, minWidth: g.touchTarget, paddingInline: s.md },
   actionPending: { color: ink.fgMuted, cursor: 'default', ':hover': { backgroundColor: surface.transparent } },

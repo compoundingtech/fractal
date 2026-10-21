@@ -51,7 +51,9 @@ export interface DetailsSection {
   readonly pending?: boolean
   /**
    * This section's own read failed and can be tried again; other sections keep their content. Hosts omit it while the
-   * retry is `pending`: the pane keeps the last failure and its action mounted until the read settles.
+   * retry is `pending`: the pane keeps the last failure and its action mounted until the read settles. A read that
+   * settles refused or unsupported omits both `pending` and `failure` and leaves `items` Unknown; the section, once
+   * read, stays mounted with its availability copy and focus moves from the action to its heading first.
    */
   readonly failure?: DetailsReadFailure
 }
@@ -66,7 +68,8 @@ export interface DetailsReadFailure {
 }
 /**
  * Spend is read when Details opens and on request, never on a timer: the pane shows when it was
- * last read so an old figure looks old, plus a Refresh action.
+ * last read so an old figure looks old, plus a Refresh action. A refused or unsupported read is withdrawn (the pane's
+ * `spendRead` becomes undefined); focus moves from its action to the Spend heading before the action goes.
  */
 export interface DetailsSpendRead {
   /** When the shown spend was read; absent until a read settles. */

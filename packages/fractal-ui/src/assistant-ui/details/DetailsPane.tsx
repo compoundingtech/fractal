@@ -139,6 +139,11 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const pendingShape=noPriorFailure?lastPendingShape.current:currentPendingShape
   const sectionControlsVisible=!pending&&(syncStatus._tag==='Live'||syncStatus._tag==='Stale')
   const sectionNames=['Overview','Context','Spend',...sections.map(section=>section.title)]
+  // Once Spend has a read (and so a Refresh or Try again action), the section and its heading stay mounted for the
+  // pane's life: a retry clears `failure` and a refusal withdraws the read, and neither may remove the focus target the
+  // read line hands off to.
+  const [spendReadSeen,setSpendReadSeen]=React.useState(spendRead!==undefined)
+  if(spendRead!==undefined&&!spendReadSeen)setSpendReadSeen(true)
   const context=trace.meters.context
   const occupancy=contextOccupancy(context)
   const spend=trace.meters.spend
@@ -215,11 +220,12 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         {!pending&&<DetailsReadFailureLine failure={sessionFailure} pending={sessionPending}/>}
       </div>
     </Section>
-    {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!(title==='Spend'&&spendRead?.failure!==undefined)&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
+    {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!(title==='Spend'&&spendReadSeen)&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
       ?<DetailsChartsPending context={variants.context} spend={variants.spend} empty={variants.empty} section={title==='Context'?'context':'spend'} shape={pendingShape}/>
-      :title==='Spend'&&spendRead!==undefined
-        ?<div data-details-spend-body {...stylex.props(styles.readStack)}><DetailsSpendReadLine read={spendRead}/><DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section="spend" empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/></div>
-        :<DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section={title==='Context'?'context':'spend'} empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/>}</Section>)}
+      :title==='Spend'
+        // One wrapper whether or not the host supplies a read, so a withdrawn read hands focus to the Spend heading before its action goes.
+        ?<div data-details-spend-body {...stylex.props(styles.readStack)}><DetailsSpendReadLine read={spendRead}/><DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section="spend" empty={variants.empty} showUnavailableReasons={!consolidateUnavailable||spendReadSeen}/></div>
+        :<DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section="context" empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/>}</Section>)}
     <DetailsResources state={contentState} sections={sections} trace={pending?pendingTrace:trace} now={now} form={variants.resources} empty={variants.empty} onOpen={onOpen} hiddenSections={intent.hiddenSections}/>
     </div>
     {noPriorFailure&&syncStatus._tag==='Failed'&&<div data-details-error {...stylex.props(styles.errorBlock)}>

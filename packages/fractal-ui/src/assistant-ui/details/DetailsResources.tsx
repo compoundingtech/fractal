@@ -54,15 +54,21 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
     .map(section => section.title === 'Subagents' ? { ...section, ...traceSubagentSection(trace) } : section.title === 'History' ? { ...section, ...traceHistorySection(trace) } : section)
     .filter(section => !hidden.has(section.title))
   const hasSubagentEvidence = hasObservedSubagents || hasNoTracedSubagents || trace.subagentCount._tag === 'Known'
+  // A section whose own read has been in flight or failed stays a mounted section for the pane's life, even when the
+  // read settles refused or unsupported (Unknown, no failure): its heading is the focus target the read line hands off to.
+  const [readSections, setReadSections] = React.useState<ReadonlySet<string>>(() => new Set())
+  const reading = suppliedSections.filter(section => section.pending === true || section.failure !== undefined).map(section => section.title)
+  if (reading.some(title => !readSections.has(title))) setReadSections(new Set([...readSections, ...reading]))
+  const ownsRead = (section: DetailsSection): boolean => section.pending === true || section.failure !== undefined || readSections.has(section.title)
   const unreported = empty === 'E3' && state !== 'new'
-    ? candidates.filter(section => !section.pending && section.failure === undefined && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
+    ? candidates.filter(section => !ownsRead(section) && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
     : []
   // Pane-level loading keeps the settled footprint: the unreported-sections tail is reserved, unpainted and inert, so recovery never grows the slot.
   const reserveUnreported = state === 'loading'
   const sections = candidates
-    // First reads stay pending, never masquerading as settled unavailable data; a failed read keeps its own Try again.
-    .filter(section => section.pending === true || section.failure !== undefined || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
-    .filter(section => section.pending === true || section.failure !== undefined || visible(section.items, empty) || (section.title === 'Subagents' && hasSubagentEvidence))
+    // First reads stay pending, never masquerading as settled unavailable data; a read section keeps its own heading and line.
+    .filter(section => ownsRead(section) || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
+    .filter(section => ownsRead(section) || visible(section.items, empty) || (section.title === 'Subagents' && hasSubagentEvidence))
   return <div data-details-state={state} data-details-form={form} data-details-empty={empty} {...stylex.props(styles.root, callerStyles)}>
     {sections.map(section => {
       const isCollapsed = collapsed[section.title] === true
@@ -72,26 +78,26 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
       const pending = state === 'loading' || section.pending === true
       // Nothing read yet and the read failed: the heading names the section and its failure line is the whole body.
       const failedOnly = !pending && section.failure !== undefined && section.items._tag === 'Unknown'
-      if (!failedOnly && !pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)) return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="unavailable" {...stylex.props(styles.section)}>
-        <div {...stylex.props(styles.header, narrow && styles.headerWrap)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.metaLine)}>{section.title}</span><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></div>
-      </section>
-      // Failed, retrying and settled share one tree, so the read line and its focused action survive every transition.
-      return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state={failedOnly ? 'failed' : undefined} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
-        <div {...stylex.props(styles.header)}>
-          {failedOnly
-            ? <><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span></>
-            : <AriaButton data-details-section-control aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton, narrow && styles.touchHeight)}>
-              <Icon name={isCollapsed?'chevron-right':'chevron-down'}/>
-              <span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span>
-              {count !== undefined && (pending
-                ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(count).length} /></span>
-                : <span data-details-section-count {...stylex.props(styles.count)}>{count}</span>)}
-            </AriaButton>}
+      // Settled with nothing reported (including a refused or unsupported read): the heading carries the availability copy.
+      const unavailable = !failedOnly && !pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)
+      const expandable = !failedOnly && !unavailable
+      // Every state shares one tree with one heading button, so the read line and whichever control holds focus survive
+      // every transition; with nothing to expand the button stays focusable but `aria-disabled`.
+      return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state={failedOnly ? 'failed' : unavailable ? 'unavailable' : undefined} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
+        <div {...stylex.props(styles.header, unavailable && narrow && styles.headerWrap)}>
+          <AriaButton data-details-section-control aria-expanded={expandable ? !isCollapsed : undefined} aria-disabled={expandable ? undefined : true} onPress={() => { if (expandable) toggle(section.title) }} {...stylex.props(styles.headerButton, narrow && styles.touchHeight, !expandable && styles.headerButtonStatic, unavailable && styles.headerButtonFit)}>
+            {expandable ? <Icon name={isCollapsed?'chevron-right':'chevron-down'}/> : <span {...stylex.props(styles.chevronSpace)} />}
+            <span data-details-heading {...stylex.props(unavailable ? styles.metaLine : styles.headerTitle)}>{section.title}</span>
+            {count !== undefined && (pending
+              ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(count).length} /></span>
+              : <span data-details-section-count {...stylex.props(styles.count)}>{count}</span>)}
+          </AriaButton>
+          {unavailable && <><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></>}
         </div>
-        <div {...stylex.props(styles.body, isCollapsed && !failedOnly && styles.bodyCollapsed)}>
+        <div {...stylex.props(styles.body, ((isCollapsed && expandable) || unavailable) && styles.bodyCollapsed)}>
           {/* Pane-level loading has no section read in flight; a section's own pending read keeps its held failure mounted. */}
           {state !== 'loading' && <DetailsReadFailureLine failure={pending ? undefined : section.failure} pending={section.pending === true} />}
-          {!failedOnly && !isCollapsed && <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />}
+          {expandable && !isCollapsed && <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />}
         </div>
       </section>
     })}
@@ -371,6 +377,10 @@ const styles = stylex.create({
   section: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   header: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.md },
   headerButton: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, flexGrow: 1, height: g.toolRow, padding: s.zero, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
+  // A heading with nothing to expand keeps its button (focus target) but reads as static text.
+  headerButtonStatic: { cursor: 'default', ':hover': { color: ink.fgMuted } },
+  // An unavailable heading sizes to its title so the availability copy follows it on the same row.
+  headerButtonFit: { flexGrow: 0 },
   headerTitle: { color: ink.fg, fontWeight: t.weightSemibold, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   count: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, flexShrink: 0 },
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInlineStart: s.xxl, paddingInlineEnd: s.md, paddingBottom: s.md, minWidth: 0 },

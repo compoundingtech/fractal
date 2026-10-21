@@ -806,7 +806,7 @@ const ompLines:Record<OmpSupplementState,{readonly line:string;readonly summary:
   retained:{line:'[data-details-supplement]',summary:'Subagent activity may be out of date (last updated just now).',why:'Why? Subagent activity',reasons:["The latest update couldn't be loaded, so earlier activity is shown."]},
 }
 type OmpRead='usage'|'session'|'queue'
-type OmpReadOutcome='ok'|'fail'
+type OmpReadOutcome='ok'|'fail'|'refused'|'unsupported'
 const ompSessionRef='session/example-omp-details'
 const ompSessionWire={id:ompSessionRef,kind:'session',revision:'1',updated_at:'1970-01-01T00:00:08.000Z',owner_id:ompAgentRef,state:'running',started_at:'1970-01-01T00:00:02.000Z',ended_at:null,timeline_cursor:'cursor/example-omp-details',runtime_incarnation:'first'} as const
 const ompQueueWire={kind:'agent-queue',agent_id:ompAgentRef,current_work_ids:[],next_work_id:null,move_count:0,moves:[],runs:[]} as const
@@ -819,6 +819,8 @@ const ompEnvelope=(value:unknown)=>Response.json({api_version:'st3.client.v0',sn
 class OmpGatewayTransport {
   private readonly modes:Record<OmpRead,OmpReadOutcome|'hold'>
   private readonly held=new Map<OmpRead,Set<(outcome:OmpReadOutcome)=>void>>()
+  private readonly calls:Record<OmpRead,number>={usage:0,session:0,queue:0}
+  count(read:OmpRead){return this.calls[read]}
   constructor(initial:Record<OmpRead,OmpReadOutcome>){this.modes={...initial}}
   /** Later requests for `read` wait until `release`. */
   hold(read:OmpRead){this.modes[read]='hold'}
@@ -833,6 +835,7 @@ class OmpGatewayTransport {
     if(path==='/v1/client/capabilities')return ompEnvelope(ompCapabilitiesWire)
     const read:OmpRead|undefined=path==='/v1/client/usage'?'usage':path.startsWith('/v1/client/sessions/')?'session':path.startsWith('/v1/client/agent-queues/')?'queue':undefined
     if(read===undefined)throw new TypeError(`Unexpected gateway request: ${path}`)
+    this.calls[read]++
     const mode=this.modes[read],signal=init?.signal??undefined
     const outcome=mode!=='hold'?mode:await new Promise<OmpReadOutcome>((resolve,reject)=>{
       const waiting=this.held.get(read)??new Set();this.held.set(read,waiting)
@@ -841,6 +844,7 @@ class OmpGatewayTransport {
       waiting.add(settle);signal?.addEventListener('abort',abort,{once:true})
     })
     if(outcome==='fail')throw new TypeError('Connection lost')
+    if(outcome==='refused'||outcome==='unsupported')return Response.json({api_version:'st3.client.v0',error_version:'st3.client.error.v0',code:outcome==='refused'?'forbidden':'unsupported',message:'This read is not available.',retryable:false,request_id:'request/example-refusal',details:{}},{status:outcome==='refused'?403:501})
     return ompEnvelope(read==='usage'?ompUsagePeriodWire:read==='session'?ompSessionWire:ompQueueWire)
   }
 }
@@ -980,11 +984,11 @@ const ompRetainedSpend="Couldn't refresh spend. Showing figures from 12m ago.|Tr
  */
 function assertOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplementState){
   const spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]'),missions=panel.querySelector<HTMLElement>('section[aria-label$="Missions"]'),failures:string[]=[]
-  const failed=(root:HTMLElement|null)=>root?[...root.querySelectorAll<HTMLElement>('[data-details-read-failure]')].map(line=>`${line.querySelector('[role="status"]')?.textContent}|${line.querySelector('button')?.textContent}`):[]
+  const failed=(root:HTMLElement|null)=>root?[...root.querySelectorAll<HTMLElement>('[data-details-read-failure]')].map(line=>`${line.querySelector('[data-details-read-message]')?.textContent}|${line.querySelector('button')?.textContent}`):[]
   const updated=[...spend?.querySelectorAll('[data-details-spend-updated]')??[]].map(node=>node.textContent??'')
   const refresh=spend?within(spend).queryAllByRole('button',{name:'Refresh'}):[]
   if(state==='unavailable'){
-    const kept=spend?.querySelectorAll('[data-details-read-failure] [role="status"] time[data-human-time="relative"]')??[]
+    const kept=spend?.querySelectorAll('[data-details-read-failure] [data-details-read-message] time[data-human-time="relative"]')??[]
     if(failed(spend).join()!==ompRetainedSpend||kept.length!==1||refresh.length!==0)failures.push(`spend "${failed(spend).join()}" with ${kept.length} kept times and ${refresh.length} Refresh`)
     if(updated.length!==0)failures.push(`failed spend also dated "${updated.join('|')}"`)
     if(failed(missions).join()!=="Couldn't load the agent queue.|Try again"||missions?.querySelector('[data-details-read-failure] time'))failures.push(`queue "${failed(missions).join()}"`)
@@ -1000,12 +1004,12 @@ async function checkOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplemen
   assertOmpReads(panel,narrow,state)
   if(state!=='unavailable')return
   const doc=panel.ownerDocument,spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]')!,missions=panel.querySelector<HTMLElement>('section[aria-label$="Missions"]')!
-  const time=spend.querySelector<HTMLElement>('[data-details-read-failure] [role="status"] time')!,label=time.textContent
+  const time=spend.querySelector<HTMLElement>('[data-details-read-failure] [data-details-read-message] time')!,label=time.textContent
   try{time.textContent='just now';await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{time.textContent=label}
   const extra=doc.createElement('div');extra.setAttribute('data-details-spend-updated','');extra.textContent='Updated 12m ago'
   spend.querySelector('[data-details-read-failure]')!.after(extra)
   try{await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{extra.remove()}
-  const queueStatus=missions.querySelector<HTMLElement>('[data-details-read-failure] [role="status"]')!,queueCopy=queueStatus.textContent
+  const queueStatus=missions.querySelector<HTMLElement>('[data-details-read-failure] [data-details-read-message]')!,queueCopy=queueStatus.textContent
   try{queueStatus.textContent="Couldn't refresh the agent queue. Showing figures from 12m ago.";await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{queueStatus.textContent=queueCopy}
   assertOmpReads(panel,narrow,state)
 }
@@ -1021,12 +1025,29 @@ function assertReadAction(action:HTMLElement,label:string,pending:boolean,status
   if(action.textContent!==label)failures.push(`label "${action.textContent}"`)
   if(action.hasAttribute('disabled'))failures.push('natively disabled')
   if((action.getAttribute('aria-disabled')==='true')!==pending||(action.getAttribute('aria-busy')==='true')!==pending)failures.push(`aria-disabled ${action.getAttribute('aria-disabled')} aria-busy ${action.getAttribute('aria-busy')}`)
-  const text=action.closest('[data-details-spend-read],[data-details-read-failure]')?.querySelector('[role="status"]')?.textContent??''
+  const text=action.closest('[data-details-spend-read],[data-details-read-failure]')?.querySelector('[data-details-read-message]')?.textContent??''
   if(status!==undefined&&(typeof status==='string'?text!==status:!status.test(text)))failures.push(`status "${text}"`)
   requireContract(failures.length===0,`${readFocus}: ${failures.join('; ')}`)
 }
 /** Keyboard activation, as a user reaches the action. */
 async function pressRead(action:HTMLElement){action.focus();requireContract(action.ownerDocument.activeElement===action,`${readFocus}: action did not take focus`);await userEvent.keyboard('{Enter}')}
+/** Pending actions must ignore keyboard and pointer activations without replacing the held request. */
+async function assertPendingDedup(action:HTMLElement,read:OmpRead){
+  const transport=ompTransport(),before=transport.count(read)
+  await userEvent.keyboard('{Enter}');await userEvent.keyboard(' ');await userEvent.click(action)
+  requireContract(transport.count(read)===before,`${readFocus}: pending ${read} started duplicate requests`)
+  requireContract(action.ownerDocument.activeElement===action&&action.isConnected,`${readFocus}: pending activation lost focus`)
+}
+/** Each settled failure, even identical copy, must cause a fresh polite announcement. */
+async function releaseAnnouncedFailure(section:HTMLElement,read:OmpRead){
+  const region=section.querySelector<HTMLElement>('[data-details-read-announcer]');requireContract(region,`${readFocus}: ${read} announcer is not mounted during pending`)
+  requireContract(region.getAttribute('aria-live')==='polite'||region.getAttribute('role')==='status',`${readFocus}: ${read} failure is not polite`)
+  const spoken:string[]=[]
+  const observer=new MutationObserver(()=>{const text=region.textContent?.trim();if(text)spoken.push(text)})
+  observer.observe(region,{childList:true,subtree:true,characterData:true})
+  try{ompTransport().release(read,'fail');await waitFor(()=>requireContract(spoken.some(text=>text.startsWith("Couldn't ")),`${readFocus}: ${read} failure was not announced again`))}
+  finally{observer.disconnect()}
+}
 /**
  * Spend's one button through a held read each way: pending keeps the node focused as Refreshing… or Trying again…,
  * a failed Refresh and a repeated failure turn it into Try again with the failure sentence, and success into Refresh.
@@ -1040,22 +1061,36 @@ async function checkSpendFocus(panel:HTMLElement,state:OmpSupplementState){
   if(failed){
     transport.hold('usage');await pressRead(action)
     await waitFor(()=>assertReadAction(action,'Trying again…',true,kept))
-    transport.release('usage','fail')
+    await assertPendingDedup(action,'usage')
+    await releaseAnnouncedFailure(spend,'usage')
     await waitFor(()=>assertReadAction(action,'Try again',false,kept))
     transport.hold('usage');await pressRead(action)
     await waitFor(()=>assertReadAction(action,'Trying again…',true,kept))
+    await assertPendingDedup(action,'usage')
     transport.release('usage','ok')
     await waitFor(()=>{assertReadAction(action,'Refresh',false);updated()})
   }
   transport.hold('usage');await pressRead(action)
   await waitFor(()=>{assertReadAction(action,'Refreshing…',true);updated()})
-  transport.release('usage','fail')
+  await assertPendingDedup(action,'usage')
+  await releaseAnnouncedFailure(spend,'usage')
   await waitFor(()=>assertReadAction(action,'Try again',false,failed?kept:refreshFailed))
   if(failed)return
   transport.hold('usage');await pressRead(action)
   await waitFor(()=>assertReadAction(action,'Trying again…',true,refreshFailed))
+  await assertPendingDedup(action,'usage')
   transport.release('usage','ok')
   await waitFor(()=>{assertReadAction(action,'Refresh',false);updated()})
+  // A successful Refresh followed by another Refresh must start exactly one request each.
+  for(let attempt=0;attempt<2;attempt++){
+    const before=transport.count('usage')
+    transport.hold('usage');await pressRead(action)
+    await waitFor(()=>{assertReadAction(action,'Refreshing…',true);requireContract(transport.count('usage')===before+1,`${readFocus}: Refresh did not start exactly one request`)})
+    await assertPendingDedup(action,'usage')
+    transport.release('usage','ok')
+    await waitFor(()=>{assertReadAction(action,'Refresh',false);updated()})
+    requireContract(transport.count('usage')===before+1,`${readFocus}: successful Refresh duplicated its request`)
+  }
 }
 /**
  * A section's Try again through a held retry: pending keeps the line, its sentence and the focused action; a repeated
@@ -1069,30 +1104,64 @@ async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
   const action=within(section).getByRole('button',{name:'Try again'})
   transport.hold(read);await pressRead(action)
   await waitFor(()=>{assertReadAction(action,'Trying again…',true,copy);others()})
-  transport.release(read,'fail')
+  await assertPendingDedup(action,read)
+  await releaseAnnouncedFailure(section,read)
   await waitFor(()=>{assertReadAction(action,'Try again',false,copy);others()})
+  const stableHeading=section.querySelector<HTMLElement>('[data-details-section-control]')!
   transport.hold(read);await pressRead(action)
   await waitFor(()=>assertReadAction(action,'Trying again…',true,copy))
+  stableHeading.focus()
+  await releaseAnnouncedFailure(section,read)
+  await waitFor(()=>requireContract(stableHeading.isConnected&&section.querySelector('[data-details-section-control]')===stableHeading&&panel.ownerDocument.activeElement===stableHeading&&!action.hasAttribute('aria-busy'),`${readFocus}: ${name} replaced its focused heading after failure`))
+  transport.hold(read);await pressRead(action)
+  await waitFor(()=>assertReadAction(action,'Trying again…',true,copy))
+  await assertPendingDedup(action,read)
   transport.release(read,'ok')
   await waitFor(()=>{
     const heading=section.querySelector<HTMLElement>('[data-details-section-control]'),active=panel.ownerDocument.activeElement
     requireContract(section.isConnected&&heading!==null&&active===heading&&!action.isConnected&&!section.querySelector('[data-details-read-failure]'),`${readFocus}: ${name} success left focus on ${focusName(active)}${action.isConnected?' with its action mounted':''}`)
   })
 }
-/**
- * Read recovery from the keyboard over the production adapters: session and queue Try again, then spend. A healthy
- * seat ends on Refresh; `unavailable` remounts over a fresh transport so it ends on its three initial failures.
- */
+async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:HTMLElement,state:OmpSupplementState='unavailable'){
+  const seen=new Map<Element,string>()
+  const observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)if(node instanceof Element)for(const region of [node,...node.querySelectorAll('[data-details-read-announcer]')])if(region.matches('[data-details-read-announcer]')&&!seen.has(region))seen.set(region,region.textContent??'')})
+  observer.observe(canvasElement.ownerDocument.body,{childList:true,subtree:true})
+  try{
+    const before=ompTransport();ompStoryControls!.reset()
+    await waitFor(()=>requireContract(ompStoryControls!==undefined&&ompStoryControls.transport!==before,'OMP story did not remount its initial transport'))
+    const root=narrow?within(canvasElement).getByRole('dialog',{name:'Agent details'}):canvasElement
+    const remounted=await within(root).findByRole('complementary',{name:'Agent inspector'})
+    await waitFor(()=>{requireContract(remounted!==panel&&remounted.isConnected,'OMP story kept the recovered inspector');assertOmpReads(remounted,narrow,state)})
+    requireContract(seen.size>=(state==='unavailable'?3:1)&&[...seen.values()].every(text=>text===''),`${readFocus}: failure announcers were not mounted empty before announcing`)
+    return remounted
+  }finally{observer.disconnect()}
+}
+/** A terminal refusal must hand off focus before removing an action, never discard its section. */
+async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'|'unsupported',refresh=false){
+  const transport=ompTransport(),name=read==='usage'?'Spend':read==='session'?'Overview':'Missions',section=ompSection(panel,name)
+  const heading=section.querySelector<HTMLElement>('[data-details-section-control]');requireContract(heading,`${readFocus}: ${name} lacks its stable heading`)
+  const action=within(section).queryByRole('button',{name:'Refresh'})??within(section).getByRole('button',{name:'Try again'})
+  if(refresh&&action.textContent!=='Refresh'){transport.hold(read);await pressRead(action);await waitFor(()=>assertReadAction(action,'Trying again…',true));transport.release(read,'ok');await waitFor(()=>assertReadAction(action,'Refresh',false))}
+  transport.hold(read);await pressRead(action)
+  await waitFor(()=>assertReadAction(action,refresh?'Refreshing…':'Trying again…',true))
+  await assertPendingDedup(action,read)
+  transport.release(read,outcome)
+  await waitFor(()=>requireContract(section.isConnected&&heading.isConnected&&section.querySelector('[data-details-section-control]')===heading&&panel.ownerDocument.activeElement===heading&&!action.isConnected,`${readFocus}: ${name} ${outcome} lost its stable same-section focus target`))
+  requireContract(!section.querySelector('[data-details-read-action]'),`${readFocus}: ${name} ${outcome} still offers a read action`)
+}
+/** Exercise retry success/failure, pending deduplication, heading stability, and every terminal refusal. */
 async function checkReadFocus(canvasElement:HTMLElement,narrow:boolean,state:OmpSupplementState,panel:HTMLElement){
   if(state==='unavailable'){await checkSectionRetryFocus(panel,'session');await checkSectionRetryFocus(panel,'queue')}
   await checkSpendFocus(panel,state)
-  if(state!=='unavailable')return panel
-  const before=ompTransport();ompStoryControls!.reset()
-  await waitFor(()=>requireContract(ompStoryControls!==undefined&&ompStoryControls.transport!==before,'OMP story did not remount its initial transport'))
-  const root=narrow?within(canvasElement).getByRole('dialog',{name:'Agent details'}):canvasElement
-  const remounted=await within(root).findByRole('complementary',{name:'Agent inspector'})
-  await waitFor(()=>{requireContract(remounted!==panel&&remounted.isConnected,'OMP story kept the recovered inspector');assertOmpReads(remounted,narrow,state)})
-  return remounted
+  if(state!=='unavailable'){
+    for(const outcome of ['refused','unsupported'] as const){panel=await resetOmpInspector(canvasElement,narrow,panel,state);await checkRefusedRead(panel,'usage',outcome,true)}
+    return resetOmpInspector(canvasElement,narrow,panel,state)
+  }
+  for(const outcome of ['refused','unsupported'] as const){
+    for(const read of ['usage','session','queue'] as const){panel=await resetOmpInspector(canvasElement,narrow,panel);await checkRefusedRead(panel,read,outcome)}
+    panel=await resetOmpInspector(canvasElement,narrow,panel);await checkRefusedRead(panel,'usage',outcome,true)
+  }
+  return resetOmpInspector(canvasElement,narrow,panel)
 }
 function ompPlay(narrow:boolean,state:OmpSupplementState){
   return async({canvasElement}:{canvasElement:HTMLElement})=>{
