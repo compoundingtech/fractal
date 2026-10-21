@@ -9,6 +9,8 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { MilestoneAgentRow } from './MilestoneAgentRow'
+import { SidebarTree, SidebarTreeDisclosure, type SidebarTreeItem } from './SidebarTree'
+import type { Key } from 'react-aria-components'
 import { missionHues } from './SidebarMissionLine'
 import { statuses, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
 import { geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
@@ -46,6 +48,26 @@ const folders: readonly { readonly label: string; readonly rows: readonly Row[] 
   ] },
 ]
 
+interface MissionTreeItem extends SidebarTreeItem<MissionTreeItem> { readonly row: Row }
+const missionChild: Row = { ...folders[0]!.rows[1]!, ref: 'agent/mission-parent/child', parentRef: 'agent/mission-parent', title: 'Observed mission helper', children: [] }
+const missionParent: Row = { ...folders[1]!.rows[3]!, ref: 'agent/mission-parent', title: 'Mission parent with subagents', children: [missionChild] }
+const missionTree: readonly MissionTreeItem[] = [{
+  id: missionParent.ref, depth: 0, textValue: missionParent.title, row: missionParent, disclosurePlacement: 'trailing',
+  children: [{ id: missionChild.ref, depth: 1, textValue: missionChild.title, row: missionChild, children: [], isDisabled: true }],
+}]
+
+function MissionParentStory() {
+  const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([missionParent.ref]))
+  const [opened, setOpened] = React.useState<string>()
+  return <section aria-label="Mission parent" data-host="mission-parent" data-opened={opened} {...stylex.props(styles.column, styles.phoneColumn, styles.parentViewport)}>
+    <SidebarTree aria-label="Mission parent and helper" items={missionTree} expandedKeys={expanded} onExpandedChange={setExpanded}
+      onAction={key => setOpened(String(key))}
+      renderRow={(item, state) => <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} active={item.isDisabled}
+        onOpen={item.isDisabled ? undefined : row => setOpened(row.ref)}
+        touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined} />} />
+  </section>
+}
+
 
 function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; readonly phone?: boolean }) {
   return <main data-testid="mission-rows" data-scheme={scheme} {...stylex.props(styles.root, phone && styles.phoneFrame, scheme === 'light' && lightTheme)}>
@@ -57,6 +79,7 @@ function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; 
           {folder.rows.map(item => <MilestoneAgentRow key={item.ref} row={item} now={storyNow} />)}
         </section>)}
       </div>
+      {phone && <MissionParentStory />}
     </ThemePortal></NarrowLayoutContext.Provider>
   </main>
 }
@@ -87,7 +110,7 @@ const probe = (canvasElement: HTMLElement) => getComputedStyle(canvasElement.que
 
 /** Geometry and content shared by the desktop and phone stories. */
 const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
-  const pills = await waitFor(() => { const found = [...canvasElement.querySelectorAll<HTMLElement>('[data-box="pill"]')]; expect(found.length).toBeGreaterThanOrEqual(7); return found })
+  const pills = await waitFor(() => { const found = [...canvasElement.querySelectorAll<HTMLElement>('[data-host="designed"] [data-box="pill"]')]; expect(found.length).toBeGreaterThanOrEqual(7); return found })
   // Every pill starts at line 2's first pixel, so all share one x; each is 16px and fully rounded.
   const x = pills[0]!.getBoundingClientRect().left
   for (const pill of pills) {
@@ -225,6 +248,29 @@ export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued mis
 /** 390px phone: the same pill geometry; "+N" keeps a 44 × 44 hit area and opens from a touch press. */
 const phonePlay: NonNullable<Story['play']> = async context => {
   await missionRowsPlay(context)
+  const parentSection = context.canvasElement.querySelector<HTMLElement>('[data-host="mission-parent"]')!
+  const parent = parentSection.querySelector<HTMLElement>('[data-milestone-row]')!
+  const disclosure = within(parent).getByRole('button', { name: 'Hide subagents' })
+  const actions = within(parent).getByRole('button', { name: `Actions for ${missionParent.title}` })
+  for (const control of [disclosure, actions]) {
+    const box = control.getBoundingClientRect()
+    await expect(box.width).toBeGreaterThanOrEqual(44)
+    await expect(box.height).toBeGreaterThanOrEqual(44)
+    await expect(line2(parent).getBoundingClientRect().right).toBeLessThanOrEqual(box.left + 0.5)
+  }
+  const parentPill = parent.querySelector<HTMLElement>('[data-box="pill"]')!
+  await expect(parentPill.getBoundingClientRect().height).toBe(16)
+  await expect(parentPill.getBoundingClientRect().width).toBeLessThanOrEqual(line2(parent).getBoundingClientRect().width * 0.56 + 0.5)
+  await expect(parent.querySelector('[data-line2-slot="step"]')!.getBoundingClientRect().width).toBeGreaterThan(0)
+  const child = parentSection.querySelectorAll<HTMLElement>('[data-milestone-row]')[1]!
+  await expect(line2(child).textContent).toBe('Needs you·build-1')
+  await expect(child.querySelector('[data-agent-menu], [data-row-action], [data-mission-pill], [data-queued-mission], button')).toBeNull()
+  await userEvent.click(child)
+  await expect(parentSection).not.toHaveAttribute('data-opened')
+  await userEvent.click(disclosure)
+  await expect(within(parent).getByRole('button', { name: 'Show subagents' })).toBeVisible()
+  await userEvent.click(within(parent).getByRole('button', { name: 'Show subagents' }))
+  await expect(within(parentSection).getByText(missionChild.title)).toBeVisible()
   const trigger = queuedTrigger(context.canvasElement)
   await expect(Math.abs(within(context.canvasElement).getByTestId('mission-rows').getBoundingClientRect().width - 390)).toBeLessThanOrEqual(1)
   const hit = getComputedStyle(trigger, '::before')
@@ -239,7 +285,7 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   })
 }
 
-export const Phone: Story = { tags: ['critical'], name: 'Phone · mission pill and "+N" touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px row matrix proves pill alignment, truncation and 44px queued-mission touch targets across every optional field case.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
+export const Phone: Story = { tags: ['critical'], name: 'Phone · mission pill and "+N" touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px row matrix proves pill alignment, truncation, 44px queued-mission targets and two trailing parent controls; a child carrying mission data proves display-only rows omit mission controls.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
 export const PhoneLight: Story = { ...Phone, name: 'Phone · mission pill and "+N" touch target · light', args: { scheme: 'light', phone: true } }
 
 
@@ -250,6 +296,7 @@ const styles = stylex.create({
   folder: { display: 'flex', flexDirection: 'column', gap: s.xs2 },
   phoneFrame: { flexDirection: 'column', width: '390px', maxWidth: '100%', padding: 0, gap: 0 },
   phoneColumn: { width: '100%' },
+  parentViewport: { height: '144px', minHeight: 0 },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the plays: attention amber (decision handle) and soft ink (pill text).
   toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: tone.attention, backgroundColor: ink.fgSoft },

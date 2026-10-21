@@ -3,7 +3,7 @@ import { sidebarRow } from './sidebarRow.ts'
 import type { Agent } from '../data/source.ts'
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 import * as Option from 'effect/Option'
-import type { Attention, MissionRunSummary } from '@smalltalk/st3-client/schema'
+import type { Attention, MissionRunSummary } from '@fractal/client/schema'
 import fc from 'fast-check'
 const agent: Agent = { ref:'agent/fixture/readonly', terminal:'', name:'Reported name', lifecycle: {_tag:'Unknown'}, host:'build-1', connected:true, activity:'idle', status:'idle', usage: {_tag:'Unknown'}, checkout: {_tag:'Unknown'}, workspace: {_tag:'Unknown'}, startedAt: {_tag:'Unknown'}, endedAt: {_tag:'Unknown'}, blockedOn: {_tag:'Unknown'}, ask: {_tag:'Unknown'}, lastActivityAt: {_tag:'Unknown'} }
 const row = (change: Partial<Agent> = {}, stale = false) => sidebarRow({agent:{...agent,...change},stale})

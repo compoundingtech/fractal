@@ -1,8 +1,8 @@
 /** @vitest-environment jsdom */
 /// <reference types="vite/client" />
-import { scenarioStoryCheck, withScenario } from '@smalltalk/st3-scenarios/storybook/check'
-import { loadWorld } from '@smalltalk/st3-scenarios'
-import { useScenarioSlice } from '@smalltalk/st3-scenarios/react'
+import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
+import { loadWorld } from '@fractal/scenarios'
+import { useScenarioSlice } from '@fractal/scenarios/react'
 import { scenarioSections } from './scenario-transcript.story-harness'
 import { scenarioExemptionIds } from './scenario-exemption-ids.ts'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
@@ -31,6 +31,11 @@ class ReadCheckResizeObserver {
 const originalFonts = Object.getOwnPropertyDescriptor(document, 'fonts')
 beforeAll(() => {
   vi.stubGlobal('ResizeObserver', ReadCheckResizeObserver)
+  vi.stubGlobal('matchMedia', (media: string) => ({
+    matches: false, media, onchange: null,
+    addEventListener() {}, removeEventListener() {},
+    addListener() {}, removeListener() {}, dispatchEvent: () => true,
+  }))
   Object.defineProperty(document, 'fonts', { configurable: true, value: Object.assign(new EventTarget(), { ready: Promise.resolve() }) })
 })
 afterAll(() => {
@@ -325,7 +330,7 @@ test('exempt CSF runtime import graphs cannot reach domain fixture roots', () =>
   const started = performance.now()
   expect([...exemptFiles.keys()].filter(file => sliceFiles.has(file)), 'Slice and exempt stories must use separate CSF files').toEqual([])
   const uiSource = nodePath.resolve(process.cwd(), 'src')
-  const kitRoot = nodePath.resolve(uiSource, '../../../clients/typescript/st3-scenarios')
+  const kitRoot = nodePath.resolve(uiSource, '../../../clients/typescript/fractal-scenarios')
   const contractDataModules = [
     ...ts.sys.readDirectory(uiSource, ['.ts', '.tsx'], ['**/*.test.ts', '**/*.test.tsx', '**/*.stories.tsx'])
       .filter(file => /fixture/i.test(nodePath.basename(file)) && nodePath.basename(file) !== 'scenario-fixture-graph.ts'),

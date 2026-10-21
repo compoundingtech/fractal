@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
-import { SidebarTree, openAgentRowMenu, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarTree, SidebarTreeDisclosure, openAgentRowMenu, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@fractal/ui/assistant-ui/shell'
 import {
   Button as AriaButton,
   useDragAndDrop,
@@ -633,14 +633,16 @@ const sameElements = (
 
 // Presentation changes (query highlights, spend and selection) must not replace RAC items.
 const BoundFolderPresentation = React.createContext<AgentFoldersProps | null>(null)
-const BoundFolderRow = ({ node }: { readonly node: SidebarNode }) => {
+const BoundFolderRow = ({ node, touchDisclosure }: { readonly node: SidebarNode; readonly touchDisclosure?: React.ReactNode }) => {
   const props = React.useContext(BoundFolderPresentation)
   if (props === null) throw new Error('Bound folder rows require their presentation provider')
   const status = props.rowStatus?.get(node.id)
+  // RAC 1.21.1 Tree.mjs:518 warns about a missing drag slot even for disabled keys.
+  // Children are excluded by getItems and the per-item hook; do not add a dead button.
   return <div data-sidebar-content="" {...stylex.props(styles.treeContent)}>
-    <AriaButton slot="drag" isDisabled={node._tag === 'Agent' && node.parent !== undefined}
-      aria-label={node._tag === 'Agent' && node.parent !== undefined ? 'Subagent moves with parent' : `Move ${node.label}`} {...stylex.props(styles.drag)} />
-    {node._tag === 'Agent' ? props.renderAgent?.(node) : (
+    {node._tag === 'Agent' && node.parent !== undefined ? null : <AriaButton slot="drag"
+      aria-label={`Move ${node.label}`} {...stylex.props(styles.drag)} />}
+    {node._tag === 'Agent' ? props.renderAgent?.(node, touchDisclosure) : (
       <div {...stylex.props(styles.folder)}>
         <span {...stylex.props(styles.folderLabel)}>{node.label}</span>
         {props.renderFolderSignal?.(node)}
@@ -709,8 +711,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
   const dragAndDropHooks = React.useMemo(() => {
     const useNativeDraggableItem = nativeDragHooks.useDraggableItem
     if (useNativeDraggableItem === undefined) return nativeDragHooks
-    // RAC's public draggable-item hook accepts a disabled collection state. Disable only
-    // native children here, not TreeItem itself: children must remain keyboard actionable.
+    // RAC's draggable-item hook uses the same disabled state as display-only child rows.
     const useSidebarDraggableItem: typeof useNativeDraggableItem = (item, state) => {
       const node = foldersById.get(String(item.key))
       const disabled = node?._tag === 'Agent' && node.parent !== undefined
@@ -734,12 +735,13 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
       if (cached !== undefined && cached.node._tag === node._tag && cached.element.depth === depth &&
         cached.element.textValue === node.label && cached.element.accessibleName === accessibleName &&
         cached.element.agentRef === agentRef && sameChildren &&
-        cached.node.collapsed === node.collapsed &&
-        (node._tag !== 'Agent' || (cached.node._tag === 'Agent' && cached.node.activationRef === node.activationRef))) return cached.element
+        cached.node.collapsed === node.collapsed) return cached.element
       const element: AgentFolderTreeItem = {
         id: node.id, depth, textValue: node.label, accessibleName, agentRef, children,
-        onAction: node._tag === 'Agent' && (node.parent === undefined || node.activationRef !== undefined) ? () => props.onSelect?.(node.id) : undefined,
-        render: () => <BoundFolderRow node={node} />,
+        isDisabled: node._tag === 'Agent' && node.parent !== undefined,
+        disclosurePlacement: node._tag === 'Agent' ? 'trailing' : 'leading',
+        onAction: node._tag === 'Agent' && node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
+        render: state => <BoundFolderRow node={node} touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined} />,
       }
       elements.set(node.id, { node, element })
       return element

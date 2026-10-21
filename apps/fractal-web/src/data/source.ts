@@ -23,9 +23,9 @@ import type {
   BlobChunk,
   BlobUpload,
   ConversationSearch,
-} from '@smalltalk/st3-client/schema'
-import type { ErrorEnvelope } from '@smalltalk/st3-client'
-import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import type { ErrorEnvelope } from '@fractal/client'
+import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
 

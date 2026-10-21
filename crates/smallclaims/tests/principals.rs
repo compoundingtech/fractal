@@ -20,7 +20,7 @@ const FLEET: &str = "6f1e8a52-3c4d-4b7e-9a10-2d5c8e7f9b31";
 fn signature_upgrade_uses_the_version_assigned_by_queue_order() {
     // The landed runtime-operation migration owns 19; signature migration takes 20.
     // Update this assertion only with the reviewed queue disposition.
-    assert_eq!(st_storage_version::STORAGE_VERSION, 20);
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 20);
 }
 
 fn key() -> Arc<MemberKey> {
@@ -819,7 +819,7 @@ fn nonce_inventory_transition(online: bool, snapshot_overlap: bool, remove_earli
                 .get()
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            st_storage_version::STORAGE_VERSION
+            fractal_storage_version::STORAGE_VERSION
         );
     }
     while target.signature_migration().unwrap().phase == "legacy" {

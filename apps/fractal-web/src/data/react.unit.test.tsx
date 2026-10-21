@@ -4,8 +4,8 @@ import {
   type AgentEncoded,
   type ResourceObservationEncoded,
   type TerminalScreen,
-} from '@smalltalk/st3-client/schema'
-import type { DecodedAgent } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -20,7 +20,7 @@ import { initialFeedSync, transitionFeedSync, type FeedSyncObservation } from '.
 import { useAtomValue } from '@effect/atom-react'
 import { useAgent, useAgentAttention, useDataSource } from './react.tsx'
 import { sidebarRow } from '../web/sidebarRow.ts'
-import type { SidebarMissionContext } from '@smalltalk/fractal-ui/assistant-ui'
+import type { SidebarMissionContext } from '@fractal/ui/assistant-ui'
 import type { Feed } from './source.ts'
 
 const blocked = unavailable({ reason: 'unsupported', detail: 'This family is not served.' })

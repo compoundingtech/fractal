@@ -1,4 +1,4 @@
-import type { Undecodable } from '@st3/sdk/effect'
+import type { Undecodable } from '@fractal/sdk/effect'
 import { expect, test, vi } from 'vitest'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))

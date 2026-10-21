@@ -1,8 +1,8 @@
-import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@smalltalk/fractal-ui/assistant-ui'
+import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@fractal/ui/assistant-ui'
 import { statuses } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import type { Agent } from '../data/source.ts'
 import type { AgentSubagent } from '../data/source.ts'
-import type { Attention, Mission } from '@smalltalk/st3-client/schema'
+import type { Attention, Mission } from '@fractal/client/schema'
 import * as Option from 'effect/Option'
 import { isWaitingForAnswer } from '../data/attention.ts'
 

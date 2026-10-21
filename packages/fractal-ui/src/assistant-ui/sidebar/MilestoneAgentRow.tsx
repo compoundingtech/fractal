@@ -14,6 +14,8 @@ import { useSidebarHoverIntent } from './useSidebarHoverIntent'
 export interface MilestoneAgentRowProps {
   readonly row: Row
   readonly active?: boolean
+  /** Readable observation only: no menu, hover affordance, selection or activation. */
+  readonly displayOnly?: boolean
   /**
    * The roster is a last-observed snapshot: glyphs go muted with shape cues, accents go neutral, and `now` should be the
    * observation instant. Independent of the row's own `status` and `freshness`, which render unchanged.
@@ -29,6 +31,8 @@ export interface MilestoneAgentRowProps {
   readonly focused?: boolean
   /** Standalone tree hosts only: the item's disclosure button, in a fixed trailing column. `SidebarTree` draws its own. */
   readonly chevron?: React.ReactNode
+  /** Touch tree hosts reserve a separate 44px disclosure track before the row-action button. */
+  readonly touchDisclosure?: React.ReactNode
   /** Host callbacks enable the corresponding actions; reported details are always available. */
   readonly onOpen?: (row: Row) => void
   readonly actions?: SidebarActions
@@ -54,35 +58,35 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * card with no timers: the CSS entrance delay supplies hover intent. The shared action trigger overlays line 2 on
  * desktop; narrow rows reserve an always-visible touch-sized action column.
  */
-export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, frozen = false, now, query, depth = 0, focused = false, chevron, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
+export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
-  const mission = row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
+  const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
   const signal = row.needsMe
     ? mission?.step._tag === 'Waiting' ? null : <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
-  return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-narrow={narrow || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
-    onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
-    onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
+  return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
+    onMouseEnter={displayOnly ? undefined : () => setHovered(true)} onMouseLeave={displayOnly ? undefined : () => setHovered(false)}
+    onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
-    {...stylex.props(styles.row, chevron !== undefined && styles.withChevron, narrow && styles.narrowRow, narrow && chevron !== undefined && styles.narrowWithChevron, active && styles.active, focused && styles.focused)}>
+    {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, narrow && !displayOnly && styles.narrowRow, narrow && !displayOnly && chevron !== undefined && styles.narrowWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     <span data-row-column="time" {...stylex.props(styles.time, frozen && styles.frozenInk)}>{row.lastTurn._tag === 'Known' && <span data-row-field="last-turn"><SidebarTime at={row.lastTurn.at} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>}</span>
     <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>
-    {chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
-    {/* A "+N" control on line 2 ends before the last column, where the desktop action trigger overlays the row. */}
-    <span data-row-column="line2" {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, (narrow || (mission?.queued.length ?? 0) > 0) && styles.line2BeforeMenu)}>
+    {!displayOnly && chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
+    {!displayOnly && touchDisclosure !== undefined && <span data-row-column="touch-disclosure" {...stylex.props(styles.touchDisclosureSlot)}>{touchDisclosure}</span>}
+    <span data-row-column="line2" {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, !displayOnly && (narrow || (mission?.queued.length ?? 0) > 0) && styles.line2BeforeMenu, !displayOnly && touchDisclosure !== undefined && styles.touchDisclosureLine2)}>
       {mission !== undefined
         ? <SidebarMissionLine mission={mission} frozen={frozen} />
         : <><span data-row-field="status-label">{row.statusLabel}</span><span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
-    <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
-      menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible]} />
-    {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+    {!displayOnly && <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+      menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />}
+    {!displayOnly && hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
       <AgentHoverCard row={row} now={now} />
     </Popover>}
   </div>
@@ -90,13 +94,18 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
 
 const styles = stylex.create({
   // Relative: the containing block for the visually hidden details trigger, so it never escapes the scroll clip.
-  row: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status}`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':hover': { backgroundColor: surface.rowHover } },
+  row: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status}`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  interactive: { ':hover': { backgroundColor: surface.rowHover } },
   // Overlays the end of line 2 (same grid area, no track of its own); filled so truncated text never shows through.
   menuButton: { gridColumn: '-2 / -1', gridRow: '2', justifySelf: 'end', zIndex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fgSoft, cursor: 'pointer', opacity: 0, ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
   menuVisible: { opacity: 1 },
   withChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon}` },
   narrowRow: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.touchTarget}` },
   narrowWithChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon} ${g.touchTarget}` },
+  touchWithDisclosure: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.touchTarget} ${g.touchTarget}` },
+  touchDisclosureSlot: { gridColumn: '5', gridRow: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.touchTarget },
+  touchDisclosureLine2: { gridColumn: '2 / -3' },
+  touchMenuButton: { gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
   active: { backgroundColor: surface.rowActive },
   // Sidebar rows ring keyboard focus in neutral fgMuted, never the accent, so focus does not read as selection.
   focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },

@@ -2,12 +2,12 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@fractal/client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
-import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -18,8 +18,7 @@ import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
-import type { ConnectionState } from '@st3/sdk/effect'
-import { ViewportStore } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
+import type { ConnectionState } from '@fractal/sdk/effect'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -79,68 +78,66 @@ const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
 
-it('nests authoritative children in the same tree, keeps parent filter context and omits invented child facts', async () => {
+it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {
   if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
-  const retainedStores: ViewportStore[] = []
-  const retain = ViewportStore.prototype.retain
-  const retention = vi.spyOn(ViewportStore.prototype, 'retain').mockImplementation(function (this: ViewportStore, keys) {
-    retainedStores.push(this)
-    retain.call(this, keys)
-  })
+  // Both producers publish the parent's hook session_id on each child, not a child conversation.
+  // Claude: subagents.rs:378-402,914-917; OMP: subagents.rs:643-673.
+  const parentSession = 'example-parent-session'
+  const reviewLabel = driver === 'claude' ? 'Review changes' : 'example-reviewer'
   const child = {
-    id: 'reviewer', driver: 'omp', description: Option.some('Review changes'),
-    session_id: Option.some('session/review'), started_at: Option.none(),
-    subagent_type: Option.none(), work_id: Option.none(),
-    lease_expires_at: DateTime.makeUnsafe(60_000),
+    id: 'example-reviewer', driver, description: driver === 'claude' ? 'Review changes' : null,
+    subagent_type: driver === 'claude' ? 'Explore' : 'task', session_id: parentSession,
+    started_at: '2026-10-04T12:00:00Z', lease_expires_at: '2026-10-04T12:01:00Z',
   }
-  registry.set(agents, observed({ value: [{ ...agent, harness_state: Option.some('working'), subagents: [child, { ...child, id: 'no-session', description: Option.some('Review unavailable'), session_id: Option.none() }] }] }))
+  const observation = openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1',
+    driver, runtime_ids: ['runtime/example-parent'], reachability: 'reachable', state: 'running',
+    harness_state: 'working', blocked_on: null, fault: null, revision: '1',
+    updated_at: '2026-10-04T12:00:00Z',
+    subagents: [child, { ...child, id: 'example-checks', description: driver === 'claude' ? 'Review checks' : null }],
+  }))
+  registry.set(agents, observed({ value: [observation] }))
   await mount(1440)
-  expect(roster().textContent).not.toContain('Review changes')
+  expect(roster().textContent).not.toContain(reviewLabel)
   const parent = roster().querySelector('[data-wf-agent-ref="agent/example"]')!.closest('[role="row"]')!
   await act(async () => {
     parent.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true }))
   })
   const input = sidebar().querySelector('input')!
   await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Review')
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, driver === 'claude' ? 'Review' : 'example-')
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
   expect(roster().textContent).toContain('Example Agent')
-  expect(roster().textContent).toContain('Review changes')
-  const childRow = [...roster().querySelectorAll('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes('Review changes'))!
+  expect(roster().textContent).toContain(reviewLabel)
+  const childRow = [...roster().querySelectorAll('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes(reviewLabel))!
   expect(childRow.getAttribute('aria-level')).toBe(String(Number(parent.getAttribute('aria-level')) + 1))
-  expect(childRow.querySelector('[aria-label="Move Review changes"]')).toBeNull()
+  expect(childRow.querySelector(`[aria-label="Move ${reviewLabel}"]`)).toBeNull()
   expect(childRow.getAttribute('draggable')).not.toBe('true')
-  expect(childRow.querySelector<HTMLButtonElement>('button[aria-label="Subagent moves with parent"]')?.disabled).toBe(true)
+  expect(childRow.querySelector('button, a, [role="button"], [role="link"], [data-agent-menu], [data-row-action]')).toBeNull()
   expect(childRow.querySelector('[data-status="working"]')).toBeNull()
   expect(childRow.querySelector('time')).toBeNull()
   expect(childRow.textContent).not.toContain('$0')
-  const unavailable = [...roster().querySelectorAll<HTMLElement>('[role="row"]')].find(row => row.getAttribute('aria-label')?.includes('Review unavailable'))!
-  const previousPath = window.location.pathname
-  await act(async () => unavailable.focus())
-  await act(async () => unavailable.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  await act(async () => unavailable.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  expect(window.location.pathname).toBe(previousPath)
-  await act(async () => (childRow as HTMLElement).focus())
-  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  // RAC performs a row's Enter action on keyup, after a complete native key press.
-  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  expect(window.location.pathname).toBe('/w/session/review')
-  // A child session owns its reading position independently of its parent's agent ref.
-  const store = retainedStores.at(-1)!
-  const reading = { top: 120, following: false, unread: false, firstRenderedId: 'message/earlier' }
-  store.save('session/review', reading)
-  await act(async () => (parent as HTMLElement).focus())
-  await act(async () => parent.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  await act(async () => parent.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  expect(window.location.pathname).toBe('/w/agent/example')
-  expect(store.get('session/review')).toEqual(reading)
-  await act(async () => (childRow as HTMLElement).focus())
-  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  await act(async () => childRow.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })))
-  expect(window.location.pathname).toBe('/w/session/review')
-  expect(store.get('session/review')).toEqual(reading)
-  retention.mockRestore()
+  const previousLocation = window.location.href
+  const parentSelection = parent.getAttribute('aria-selected')
+  const parentClass = parent.className
+  const childRows = [...roster().querySelectorAll<HTMLElement>('[role="row"][aria-disabled="true"]')]
+  expect(childRows).toHaveLength(2)
+  for (const row of childRows) {
+    expect(row.getAttribute('tabindex')).not.toBe('0')
+    expect(row.getAttribute('role')).toBe('row')
+    expect(row.querySelector('[data-display-only="true"]')).not.toBeNull()
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+      row.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }))
+    })
+    expect(window.location.href).toBe(previousLocation)
+    expect(parent.getAttribute('aria-selected')).toBe(parentSelection)
+    expect(parent.className).toBe(parentClass)
+    expect(row.getAttribute('aria-selected')).not.toBe('true')
+  }
 })
 it('keeps workspace providers and unchanged roster rows out of the one-second clock render', async () => {
   const now = Atom.make(5000)
