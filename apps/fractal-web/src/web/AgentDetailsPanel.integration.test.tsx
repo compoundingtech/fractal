@@ -18,7 +18,8 @@ import type { Feed } from '../data/source.ts'
 import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
-import { ompAgentRef, ompDetailsSource, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from './ompDetailsFixtures.ts'
+import { ompDetailsSource } from './ompDetailsFixtures.ts'
+import { ompAgentRef, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from '../../../../packages/fractal-ui/src/assistant-ui/details/omp-fixtures.ts'
 import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))

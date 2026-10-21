@@ -250,6 +250,8 @@ export const scenarioExemptionIds: readonly string[] = [
   './ThreadHeader.stories.tsx#ConstrainedLaneLight:contract-fixture',
   './ThreadHeader.stories.tsx#NarrowPhone:contract-fixture',
   './ThreadHeader.stories.tsx#NarrowPhoneLight:contract-fixture',
+  './ThreadHeader.stories.tsx#NarrowPhoneTerminalDisabled:contract-fixture',
+  './ThreadHeader.stories.tsx#NarrowPhoneTerminalDisabledLight:contract-fixture',
   './ThreadHeader.stories.tsx#TerminalDisabled:contract-fixture',
   './ThreadHeader.stories.tsx#TerminalDisabledLight:contract-fixture',
   './ThreadHeader.stories.tsx#TerminalHidden:contract-fixture',

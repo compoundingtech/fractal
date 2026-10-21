@@ -22,7 +22,7 @@ const PanelSurface = ({ scheme = 'dark', width = 1440, initiallyOpen = false }: 
     </main>
     {open && <SidePanel id={panelId} aria-label="Agent resources" heading="Resources" actions={<Button aria-label="Close resources" onPress={() => setOpen(false)} {...stylex.props(styles.button)}>Close resources</Button>} onClose={() => setOpen(false)}>
       <div {...stylex.props(styles.panelBody)}>
-        <section aria-label="Todos"><h3 {...stylex.props(styles.title)}>Todos</h3><p>No harness todo snapshot observed.</p></section>
+        <section aria-label="To-dos"><h3 {...stylex.props(styles.title)}>To-dos</h3><p>This session has not shared a to-do list.</p></section>
         <section aria-label="Observed resources"><h3 {...stylex.props(styles.title)}>Observed resources</h3><ul>{['Project notes', 'Build checkout', 'Review thread'].map(name => <li key={name}>{name}</li>)}</ul></section>
       </div>
     </SidePanel>}

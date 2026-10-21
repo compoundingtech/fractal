@@ -157,8 +157,8 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
     if (settled) return measureEnd('resources_panel', agentRef)
   }, [agentRef, settled])
   return <div {...stylex.props(styles.contents)}>
-    <section aria-label="Todos">
-      <h2 {...stylex.props(styles.sectionTitle)}>Todos</h2>
+    <section aria-label="To-dos">
+      <h2 {...stylex.props(styles.sectionTitle)}>To-dos</h2>
       <LiveAgentTodos agentRef={agentRef} placement="resources" />
     </section>
     <section aria-label="Agent queue">

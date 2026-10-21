@@ -111,6 +111,48 @@ it('keeps conversation actions in the header and gives the Details sheet only on
   }, { timeout: 15_000 })
 })
 
+const phoneTerminal = () => host.querySelector<HTMLButtonElement>('[data-testid="thread-header"] button[aria-label="Terminal"]')!
+const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Agent details'].includes(name ?? ''))
+
+it('keeps a labelled Terminal toggle in the phone header that stays described and paints its reason when the agent has no terminal', async () => {
+  expect(headerOrder()).toEqual(['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Agent details'])
+  expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Toggle terminal drawer"]')).toBeNull()
+  const terminal = phoneTerminal()
+  expect(terminal.textContent).toBe('Terminal')
+  expect(terminal.hasAttribute('title')).toBe(false)
+  expect(terminal.getAttribute('aria-pressed')).toBe('false')
+  expect(terminal.getAttribute('aria-disabled')).toBe('true')
+  expect(terminal.disabled).toBe(false)
+  expect(document.getElementById(terminal.getAttribute('aria-describedby')!)?.textContent).toBe('This agent has no terminal.')
+  await act(async () => terminal.click())
+  const reason = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Terminal unavailable"]')!
+  expect(reason).not.toBeNull()
+  expect(reason.textContent).toBe('This agent has no terminal.')
+  expect(new URLSearchParams(window.location.search).get('open')).toBeNull()
+  expect(terminal.getAttribute('aria-pressed')).toBe('false')
+  expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+  await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Terminal unavailable"]')).toBeNull())
+})
+
+it('toggles the terminal drawer from the phone header Terminal button and reports its pressed state', async () => {
+  const withTerminal = { ...agent, runtime_ids: ['runtime/metric-track'] } as typeof agent
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
+  await vi.waitFor(() => expect(phoneTerminal().hasAttribute('aria-disabled')).toBe(false))
+  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
+  expect(phoneTerminal().getAttribute('aria-describedby')).toBeNull()
+  await act(async () => phoneTerminal().click())
+  expect(new URLSearchParams(window.location.search).get('open')).toBe('terminal/metric-track:detail')
+  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('true')
+  expect(host.querySelector('[data-testid="terminal-pane"]')).not.toBeNull()
+  expect(headerOrder()).toEqual(['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Agent details'])
+  await act(async () => phoneTerminal().click())
+  expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
+  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
+  expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+})
+
 it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {
   const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
   expect(tabs.map(tab => tab.textContent)).toEqual(['Thread', 'Changes'])

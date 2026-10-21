@@ -403,6 +403,12 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const terminalOpen = selectedPane.includes('terminal/')
   const toggleTerminal = () => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
   const resourcesDockOpen = !narrow && current !== '' && resourcesAgent === current
+  // The dock separator names the inspector view on screen. Every panel mount starts on Details, so the stored
+  // view resets whenever the mounted inspector changes or goes away, before this render paints the label.
+  const dockedInspector = !resourcesDockOpen && !narrow && diffOpen && openedTool === undefined && current !== '' ? current : undefined
+  const [inspectorView, setInspectorView] = React.useState<{ readonly mount: string | undefined; readonly view: 'changes' | 'details' }>({ mount: undefined, view: 'details' })
+  if (inspectorView.mount !== dockedInspector) setInspectorView({ mount: dockedInspector, view: 'details' })
+  const dockLabel = resourcesDockOpen ? 'Resize resources' : inspectorView.view === 'changes' ? 'Resize Changes' : 'Resize Details'
   const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} ux={ux} {...(narrow ? {} : { resourcesDock: { host: resourcesHost, open: resourcesDockOpen, onOpenChange: (open: boolean) => { setResourcesAgent(open ? current : undefined); if (open) { setDiffOpen(false); setOpenedTool(undefined) } } } })} /></>
   // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
   const narrowDetailsOpen = narrow && current !== '' && (diffOpen || openedTool !== undefined)
@@ -469,9 +475,9 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 </aside>
                 <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               </>}
-              <DockedSplit persistKey={`live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}`} label={resourcesDockOpen ? 'Resize resources' : 'Resize changes'} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : !narrow && diffOpen && openedTool === undefined && current !== '' ? (
+              <DockedSplit persistKey={`live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}`} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
-                  <AgentDetailsPanel key={current} agentRef={current} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} />
+                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
                 </React.Suspense>
               ) : undefined}>
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>

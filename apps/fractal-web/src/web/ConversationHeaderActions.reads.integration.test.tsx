@@ -107,19 +107,21 @@ it('shows the agent Todos as the first Resources section, naming a missing snaps
   await show('agent/example')
   await click('Resources')
   const sections = [...document.querySelectorAll('aside[aria-label="Agent resources"] section[aria-label]')]
-  expect(sections.map(section => section.getAttribute('aria-label'))).toEqual(['Todos', 'Agent queue', 'Observed resources'])
-  expect(sections[0]!.textContent).toBe('TodosNo harness todo snapshot observed. This is not an empty todo list.')
+  expect(sections.map(section => section.getAttribute('aria-label'))).toEqual(['To-dos', 'Agent queue', 'Observed resources'])
+  expect(sections[0]!.textContent).toBe('To-dosThis session has not shared a to-do list.')
 })
-it('keeps the Todos disclosure with phase, progress and harness inside Resources', async () => {
+it('keeps the To-dos disclosure with phase and progress without developer identity fields', async () => {
   const state = projectTodos({ feed: observed({ value: [todoAgent] }), agentRef: todoAgentRef })
   expect(state._tag).toBe('Observed')
   await act(async () => root.render(<AgentTodos state={state} placement="resources" />))
-  const disclosure = host.querySelector('details[aria-label="Harness todos"]') as HTMLDetailsElement
+  const disclosure = host.querySelector('details[aria-label="To-dos"]') as HTMLDetailsElement
   expect(disclosure.open).toBe(false)
   const summary = disclosure.querySelector('summary')!.textContent!
   if (state._tag !== 'Observed') return
   expect(summary).toContain(`${state.completed}/${state.total}`)
-  expect(summary).toContain(state.todo.snapshot.harness)
+  expect(summary).toContain('To-dos')
+  expect(host.textContent).not.toMatch(/Source:|fact\.todo|Claim |incarnation|current binding|Tasks shared by this session/)
+  expect(host.querySelector('time[data-human-time="relative"]')?.textContent).toMatch(/^Updated /)
 })
 it('keeps the Resources panel inside its owning scheme root', async () => {
   host.dataset.scheme = 'light'
@@ -156,7 +158,7 @@ it('opens Resources as a non-modal complementary panel that returns focus on Esc
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
 })
 
-it('shows pending binding verification instead of Stale while the roster request is pending', async () => {
+it('shows Checking rather than an out-of-date warning while the roster request is pending', async () => {
   const state = projectTodos({
     feed: observed({ value: [todoAgent], freshness: 'stale' }),
     agentRef: todoAgentRef,
@@ -164,7 +166,33 @@ it('shows pending binding verification instead of Stale while the roster request
   })
   await act(async () => root.render(<AgentTodos state={state} placement="resources" />))
   const summary = host.querySelector('summary')!
-  expect(summary.textContent).toContain('Pending · omp')
-  expect(summary.textContent).not.toContain('Stale')
-  expect(host.textContent).toContain('binding verification pending')
+  expect(summary.textContent).toContain('Checking')
+  expect(summary.textContent).not.toContain('May be out of date')
+  expect(host.textContent).toContain('Checking to-dos…')
+  expect(host.textContent).not.toContain('binding verification pending')
+})
+
+it.each([
+  [{ _tag: 'Waiting' } as const, 'Loading to-dos…'],
+  [{ _tag: 'Unavailable', detail: 'Source: fact.todo · incarnation unavailable' } as const, "To-dos aren't available right now."],
+  [{ _tag: 'Missing' } as const, 'This session has not shared a to-do list.'],
+] as const)('uses plain To-dos availability copy (%j)', async (state, copy) => {
+  await act(async () => root.render(<AgentTodos state={state} placement="resources" />))
+  expect(host.textContent).toBe(copy)
+  expect(host.textContent).not.toMatch(/fact\.todo|incarnation|harness/)
+})
+
+it('names out-of-date and partial to-do lists without exposing transport or identity fields', async () => {
+  const state = projectTodos({ feed: observed({ value: [todoAgent], freshness: 'stale' }), agentRef: todoAgentRef })
+  expect(state._tag).toBe('Observed')
+  if (state._tag !== 'Observed') return
+  const partial = { ...state, total: state.total + 2, todo: { ...state.todo, snapshot: {
+    ...state.todo.snapshot, truncated: true, totals: { ...state.todo.snapshot.totals, abandoned: 2 },
+  } } }
+  await act(async () => root.render(<AgentTodos state={partial} placement="resources" />))
+  expect(host.querySelector('summary')?.textContent).toContain('May be out of date · Some shown')
+  expect(host.textContent).toContain('These to-dos may be out of date.')
+  expect(host.textContent).toContain('Only some to-dos are shown. Progress counts the full list.')
+  expect(host.textContent).toContain('2 abandoned, not counted as done.')
+  expect(host.textContent).not.toMatch(/Source:|fact\.todo|Claim |incarnation|stale snapshot|full-source/)
 })

@@ -119,7 +119,9 @@ const mount = async () => {
   await act(async () => vi.dynamicImportSettled())
 }
 const toggle = () => host.querySelector<HTMLButtonElement>('button[aria-label="Toggle right panel"]')!
-const separator = () => host.querySelector<HTMLElement>('[role="separator"][aria-label="Resize changes"]')!
+const separator = () => host.querySelector<HTMLElement>('[role="separator"][aria-label="Resize Changes"]')!
+const inspectorSeparators = () => [...host.querySelectorAll<HTMLElement>('[role="separator"]')].map(node => node.getAttribute('aria-label')).filter(label => label !== 'Agent sidebar width')
+const inspectorTab = (name: 'Changes' | 'Details') => [...host.querySelectorAll<HTMLElement>('[data-testid="agent-details-panel"] [role="tab"]')].find(tab => tab.textContent?.trim() === name)!
 const close = () => host.querySelector<HTMLButtonElement>('button[aria-label="Close agent inspector"]')!
 const openChanges = async () => {
   if (toggle().getAttribute('aria-pressed') !== 'true') await act(async () => toggle().click())
@@ -196,6 +198,34 @@ describe('live captured Changes dock', () => {
     expect(host.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
     await act(async () => toggle().click())
     expect(separator()).toBeNull()
+  })
+
+  it('names the dock separator after the visible inspector view and starts every inspector mount on Details', async () => {
+    await mount()
+    expect(inspectorSeparators()).toEqual([])
+    await act(async () => toggle().click())
+    await act(async () => vi.dynamicImportSettled())
+    await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
+    expect(inspectorSeparators()).toEqual(['Resize Details'])
+    await act(async () => inspectorTab('Changes').click())
+    expect(inspectorTab('Changes').getAttribute('aria-selected')).toBe('true')
+    expect(inspectorSeparators()).toEqual(['Resize Changes'])
+    await act(async () => inspectorTab('Details').click())
+    expect(inspectorSeparators()).toEqual(['Resize Details'])
+    await act(async () => inspectorTab('Changes').click())
+    // Closing and reopening remounts the panel on Details; the separator follows it rather than the last selection.
+    await act(async () => close().click())
+    expect(inspectorSeparators()).toEqual([])
+    await act(async () => toggle().click())
+    await act(async () => vi.dynamicImportSettled())
+    await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
+    expect(inspectorSeparators()).toEqual(['Resize Details'])
+    // Another agent's inspector is another mount.
+    await act(async () => inspectorTab('Changes').click())
+    expect(inspectorSeparators()).toEqual(['Resize Changes'])
+    await selectAgent('agent/changes-peer')
+    await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
+    expect(inspectorSeparators()).toEqual(['Resize Details'])
   })
 
   it('clamps keyboard resizing and persists the committed width across close and remount', async () => {

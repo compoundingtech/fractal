@@ -525,6 +525,9 @@ hover title until the live roster establishes a runtime for the selected agent. 
 loading, its reason is “Waiting for the live agent roster to find this agent’s terminal.”
 An absent roster row or an empty runtime list keeps it disabled with the specific cause.
 An explicit terminal deep link still shows its local reason beside the usable thread.
+On phones the same direct control is labelled **Terminal**, has a 44px target and reports
+its pressed state. When unavailable it stays focusable; pressing it opens a reason
+popover rather than relying on a hover title.
 
 `NO_TERMINAL=1 node apps/fractal-web/scripts/terminal-failure-e2e.mjs <baseUrl> <outDir> <seat>`
 is a read-only proof for a terminal-less seat. It samples the page-level button's disabled,

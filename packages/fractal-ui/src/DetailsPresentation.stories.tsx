@@ -16,12 +16,17 @@ import { NarrowLayoutContext, NarrowSheet } from './assistant-ui/composition/Nar
 import { Workbench } from './assistant-ui/workbench/Workbench'
 import { group, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
 import { accentVars as accent, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
+import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, UsagePeriod, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import type * as Native from '@smalltalk/st3-client/schema'
+import { ompAgentRef, ompAgentWire, ompDeclarationsNotReported, ompNow, ompSubagent, ompSupplementFeeds, ompUsagePeriodWire, type OmpSupplementState } from './assistant-ui/details/omp-fixtures'
 import { AgentDetailsPanel } from '../../../apps/fractal-web/src/web/AgentDetailsPanel'
 import { DataSourceProvider } from '../../../apps/fractal-web/src/data/react'
 import { fixtureSource } from '../../../apps/fractal-web/src/data/fixtureSource'
-import { ompAgentRef, ompDetailsSource, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from '../../../apps/fractal-web/src/web/ompDetailsFixtures'
+import type { DataSource, Feed } from '../../../apps/fractal-web/src/data/source'
+import type { NativeDetailsSource } from '../../../apps/fractal-web/src/data/nativeDetailsSource'
+import type { NativeDeclarations } from '../../../apps/fractal-web/src/data/nativeDeclarations'
 import { accountingNoteSummary, spendWindowReason } from '../../../apps/fractal-web/src/web/detailsSupplement'
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
@@ -798,10 +803,21 @@ const ompLines:Record<OmpSupplementState,{readonly line:string;readonly summary:
   reported:{line:'[data-details-accounting-note]',summary:accountingNoteSummary,why:'Why? Agent and total spend',reasons:[spendWindowReason]},
   retained:{line:'[data-details-supplement]',summary:'Subagent activity may be out of date (last updated just now).',why:'Why? Subagent activity',reasons:["The latest update couldn't be loaded, so earlier activity is shown."]},
 }
+/** The kit's omp seat over the production fixture source, with its priced session as the native Details read. */
+function ompStorySource():DataSource{
+  const rawDeclarations=Atom.make<Feed<Native.AgentDeclaration>>(ompDeclarationsNotReported),declarations=Atom.make<Feed<NativeDeclarations>>(ompDeclarationsNotReported)
+  return {
+    ...fixtureSource({world:{now:ompNow,agents:[decodeUnknownSync(Agent)(ompAgentWire)],missions:[],attention:[],events:[],conversations:{},terminals:{},envelopes:{},usage:{_tag:'undeclared'}}}),
+    nativeDetails:{
+      usagePeriod:Atom.make<Feed<Native.UsagePeriod>>({_tag:'Observed',value:decodeUnknownSync(UsagePeriod)(ompUsagePeriodWire),freshness:'live'}),
+      rawDeclarations:()=>rawDeclarations,declarations:()=>declarations,retry:()=>undefined,
+    } satisfies NativeDetailsSource,
+  }
+}
 /** The real inspector over an omp-driven seat; its subagent activity flows through the composition's feed seam. */
 function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:boolean;readonly state:OmpSupplementState}){
   const [registry]=React.useState(()=>AtomRegistry.make())
-  const [source]=React.useState(ompDetailsSource)
+  const [source]=React.useState(ompStorySource)
   React.useEffect(()=>()=>registry.dispose(),[registry])
   if(narrow)return <DataSourceProvider source={source} registry={registry}>
     <ProductionPhoneSheet scheme={scheme}>{close=><AgentDetailsPanel agentRef={ompAgentRef} width="fill" scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>}</ProductionPhoneSheet>
@@ -915,7 +931,17 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
       requireContract(dialog.textContent?.includes("Reported details only; this resource can't be opened from here."),'Subagent dialog lacks its plain read-only line')
       await checkPlainCopy(dialog,[dialog])
       assertPlainCopy(panel)
-      await userEvent.click(within(dialog).getByRole('button',{name:'Close'}))
+      const dialogClose=within(dialog).getByRole('button',{name:'Close'})
+      if(narrow){
+        // Measured only once the dialog is open: its Close joins the 44px phone sweep, and a shrunken Close is rejected.
+        requireContract(touchTargets(dialog).includes(dialogClose),'Phone dialog sweep omitted its Close')
+        assertTouch(touchTargets(dialog))
+        const closeStyle=dialogClose.getAttribute('style')
+        try{dialogClose.style.minWidth='0';dialogClose.style.width='24px';dialogClose.style.height='24px';await rejectsCause(touchFloor,()=>assertTouch(touchTargets(dialog)))}
+        finally{if(closeStyle===null)dialogClose.removeAttribute('style');else dialogClose.setAttribute('style',closeStyle)}
+        assertTouch(touchTargets(dialog))
+      }
+      await userEvent.click(dialogClose)
       await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
     }
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)

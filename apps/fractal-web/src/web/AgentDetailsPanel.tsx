@@ -35,13 +35,15 @@ export interface AgentDetailsPanelProps {
   readonly variants?: DetailsVariants
   /** The composition's subagent-activity feed; defaults to the build-time extension. Fixed for the panel's lifetime. */
   readonly detailsSupplement?: UseDetailsSupplement
+  /** Reports each user tab selection; the panel still owns its selection, starting on Details at every mount. */
+  readonly onSelectedViewChange?: (view: InspectorView) => void
 }
 
 /**
  * One fixed row: Changes and Details tabs, Details' status/section controls, then the dock's close.
  * In the phone sheet (`fill`) the sheet header owns the only close. Hidden tabs unmount, releasing reader demand.
  */
-export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement }: AgentDetailsPanelProps) {
+export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement, onSelectedViewChange }: AgentDetailsPanelProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const [selected, setSelected] = React.useState<InspectorView>('details')
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
@@ -49,7 +51,7 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
   const [accessoryHost, setAccessoryHost] = React.useState<HTMLDivElement | null>(null)
   return <aside aria-label="Agent inspector" data-testid="agent-details-panel" style={typeof width === 'number' ? { width } : undefined} {...stylex.props(styles.root, typeof width !== 'number' && styles.fillRoot)}>
     {/* data-testid="tab-group" lets Details return focus to the selected tab after Retry. */}
-    <Tabs selectedKey={selected} onSelectionChange={key => setSelected(key === 'changes' ? 'changes' : 'details')} data-testid="tab-group" {...stylex.props(styles.tabs)}>
+    <Tabs selectedKey={selected} onSelectionChange={key => { const view = key === 'changes' ? 'changes' : 'details'; setSelected(view); onSelectedViewChange?.(view) }} data-testid="tab-group" {...stylex.props(styles.tabs)}>
       <div data-agent-inspector-tabs {...stylex.props(styles.row, narrow && styles.rowTouch)}>
         <TabList aria-label="Agent inspector views" {...stylex.props(styles.tabList)}>
           <Tab id="changes" {...stylex.props(styles.tab, narrow && styles.tabTouch)}>Changes</Tab>
@@ -89,6 +91,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
   readonly onOpen: (uri: string, split: boolean) => void
   readonly useSupplement: UseDetailsSupplement
 }) {
+  const narrow = React.useContext(NarrowLayoutContext)
   const native = useNativeDetails({ agentRef })
   const protectedSections = useDetailsSections({ agentRef })
   const suppliedSections = native.sections.map(section => protectedSections.find(contribution => contribution.title === section.title) ?? section)
@@ -162,7 +165,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
         <Heading slot="title">{inspection?.label}</Heading>
         <p {...stylex.props(styles.inspectionText)}>{inspection?.detail}</p>
         <p {...stylex.props(styles.inspectionText)}>Reported details only; this resource can't be opened from here.</p>
-        <Button onPress={() => setInspectedUri(undefined)}>Close</Button>
+        <Button onPress={() => setInspectedUri(undefined)} {...stylex.props(styles.dialogClose, narrow && styles.dialogCloseTouch)}>Close</Button>
       </Dialog></Modal>
     </ModalOverlay>
   </div>
@@ -190,4 +193,7 @@ const styles = stylex.create({
   modal: { maxWidth: 'min(520px, 90vw)', maxHeight: '90vh', overflowY: 'auto', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   inspection: { backgroundColor: c.canvas, color: c.fg, padding: s.lg, outline: 'none' },
   inspectionText: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  // A plain text action at dense height; the phone sheet raises it to the 44px touch floor.
+  dialogClose: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, borderRadius: r.control, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', ':hover': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '2px' } },
+  dialogCloseTouch: { minWidth: g.touchTarget, height: g.touchTarget, paddingInline: s.lg },
 })

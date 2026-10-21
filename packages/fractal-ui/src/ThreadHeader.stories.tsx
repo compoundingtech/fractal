@@ -1,17 +1,21 @@
+import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
+import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { colorVars as c, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 const terminalReason = 'The terminal opens once this agent is running on a host.'
 function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = false, laneWidth }: { scheme?: Scheme; terminalDisabledReason?: string; narrow?: boolean; laneWidth?: number }) {
+  const [drawerOpen, setDrawerOpen] = React.useState(false)
   return <main data-scheme={scheme} style={laneWidth === undefined ? undefined : { width: laneWidth }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     {narrow
       ? <div data-testid="phone-frame" {...stylex.props(styles.phone)}>
-        <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+        {/* The app's phone header carries the agent's actions and the conversation menu beside the toggles. */}
+        <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} nativeActions={<><ChromeControl icon="person" label="Actions for Row projection" /><ChromeControl icon="gear" label="Conversation menu" /></>} terminalAvailable={terminalDisabledReason === undefined} terminalDisabledReason={terminalDisabledReason} panelOpen={false} drawerOpen={drawerOpen} onTogglePanel={() => {}} onToggleDrawer={() => setDrawerOpen(open => !open)} />
       </div>
       : <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} terminalDisabledReason={terminalDisabledReason} />}
   </main>
@@ -62,28 +66,72 @@ export const ConstrainedLane: Story = { tags: ['critical'], args: { laneWidth: 3
   }
 } }
 export const ConstrainedLaneLight: Story = { ...ConstrainedLane, args: { ...ConstrainedLane.args, scheme: 'light' } }
-/**
- * A 390px phone: the header keeps the breadcrumb and status, drops the terminal toggle, and its two controls
- * (Expand sidebar, Agent details) are 44px touch targets that stay inside the header without overflowing it.
- */
-export const NarrowPhone: Story = { tags: ['critical'], args: { narrow: true }, play: async ({ canvasElement }) => {
+/** Every phone header control is a 44×44px target inside the 390px frame; none overlaps another or the breadcrumb, and the header never scrolls. */
+const assertPhoneHeaderFits = async (canvasElement: HTMLElement) => {
   const header = within(canvasElement).getByTestId('thread-header')
   const frame = within(canvasElement).getByTestId('phone-frame').getBoundingClientRect()
-  const buttons = within(header).getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', 'Agent details'])
-  for (const button of buttons) {
-    const rect = button.getBoundingClientRect()
-    await expect(rect.width).toBeGreaterThanOrEqual(44)
-    await expect(rect.height).toBeGreaterThanOrEqual(44)
-    await expect(rect.left).toBeGreaterThanOrEqual(frame.left)
-    await expect(rect.right).toBeLessThanOrEqual(frame.right)
+  await expect(frame.width).toBe(390)
+  const controls = within(header).getAllByRole('button').map(button => button.getBoundingClientRect())
+  for (const a of controls) {
+    await expect(a.width).toBeGreaterThanOrEqual(44)
+    await expect(a.height).toBeGreaterThanOrEqual(44)
+    await expect(a.left).toBeGreaterThanOrEqual(frame.left)
+    await expect(a.right).toBeLessThanOrEqual(frame.right)
+    for (const b of controls) if (a !== b) await expect(a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top).toBe(false)
   }
+  const breadcrumb = within(header).getByRole('navigation', { name: 'Breadcrumb' })
+  await expect(breadcrumb).toBeVisible()
+  const crumb = breadcrumb.getBoundingClientRect()
+  await expect(crumb.width).toBeGreaterThan(0)
+  for (const control of controls) await expect(crumb.left < control.right && crumb.right > control.left).toBe(false)
+  await expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
+  return header
+}
+const phoneHeaderNames = ['Expand sidebar', 'Actions for Row projection', 'Conversation menu', 'Terminal', 'Agent details']
+/**
+ * A 390px phone: the header keeps the breadcrumb and status beside the agent's actions, the conversation menu, a
+ * labelled Terminal toggle and Agent details, all 44px touch targets inside the header without overflowing it.
+ */
+export const NarrowPhone: Story = { tags: ['critical'], args: { narrow: true }, play: async ({ canvasElement }) => {
+  const header = await assertPhoneHeaderFits(canvasElement)
+  await expect(within(header).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(phoneHeaderNames)
   await expect(within(header).getByRole('button', { name: 'Expand sidebar' })).toHaveAttribute('aria-expanded', 'false')
   await expect(within(header).getByRole('button', { name: 'Agent details' })).toHaveAttribute('aria-haspopup', 'dialog')
-  await expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
-  await expect(within(header).getByRole('navigation', { name: 'Breadcrumb' })).toBeVisible()
+  // Its visible label names it: the meaning never waits for a tooltip, which touch cannot show.
+  const terminal = within(header).getByRole('button', { name: 'Terminal' })
+  await expect(terminal).toBeVisible()
+  await expect(terminal).toHaveTextContent('Terminal')
+  await expect(terminal).not.toHaveAttribute('title')
+  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await userEvent.click(terminal)
+  await expect(terminal).toHaveAttribute('aria-pressed', 'true')
+  await expect(within(document.body).queryByRole('tooltip')).toBeNull()
+  await assertPhoneHeaderFits(canvasElement)
+  terminal.focus()
+  await userEvent.keyboard('{Enter}')
+  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
 } }
 export const NarrowPhoneLight: Story = { ...NarrowPhone, args: { narrow: true, scheme: 'light' } }
+/** A phone host that knows why the terminal is unavailable: the labelled toggle stays, disabled and described, and pressing it paints the reason instead of a hover-only tooltip. */
+export const NarrowPhoneTerminalDisabled: Story = { tags: ['critical'], args: { narrow: true, terminalDisabledReason: terminalReason }, play: async ({ canvasElement }) => {
+  const header = await assertPhoneHeaderFits(canvasElement)
+  await expect(within(header).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(phoneHeaderNames)
+  const terminal = within(header).getByRole('button', { name: 'Terminal' })
+  await expect(terminal).toHaveTextContent('Terminal')
+  await expect(terminal).toHaveAttribute('aria-disabled', 'true')
+  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await expect(terminal).toHaveAccessibleDescription(terminalReason)
+  await expect(within(header).queryByText(terminalReason)).not.toBeVisible()
+  await userEvent.click(terminal)
+  const reason = await within(document.body).findByRole('dialog', { name: 'Terminal unavailable' })
+  await expect(reason).toHaveTextContent(terminalReason)
+  await expect(reason).toBeVisible()
+  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Terminal unavailable' })).toBeNull())
+  await waitFor(() => expect(terminal).toHaveFocus())
+} }
+export const NarrowPhoneTerminalDisabledLight: Story = { ...NarrowPhoneTerminalDisabled, args: { ...NarrowPhoneTerminalDisabled.args, scheme: 'light' } }
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },
   phone: { width: '390px', maxWidth: '100%' },
