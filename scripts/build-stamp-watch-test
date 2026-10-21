@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """A ref updated elsewhere in the repository must not rebuild a crate that stamps itself from Git; a new commit must.
 
-crates/agent-spec/build.rs and crates/st-drivers/build.rs stamp the build with the Git revision. They used to tell Cargo to
-watch `git rev-parse --git-path refs`, which in a linked worktree is the COMMON directory of every worktree: any ref anyone
-updated re-ran the stamp scripts and rebuilt the whole workspace (about 12 minutes) with HEAD unmoved. This test builds each
+crates/st-build-stamp/build.rs stamps the build with the Git revision. It used to tell Cargo to watch
+`git rev-parse --git-path refs`, which in a linked worktree is the COMMON directory of every worktree: any ref anyone
+updated re-ran the stamp scripts and rebuilt the whole workspace (about 12 minutes) with HEAD unmoved. This test builds the
 real build script in a linked worktree, moves unrelated refs in the common directory and in the main checkout, and asserts
 that the next build is a no-op; then it commits in the worktree and asserts a rebuild whose stamp names the new revision."""
 import json
@@ -19,8 +19,8 @@ root = Path(__file__).resolve().parent.parent
 GIT = ['git', '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', '-c', 'commit.gpgsign=false',
        '-c', 'core.hooksPath=/dev/null']
 CASES = {
-    'agent-spec': ('crates/agent-spec/build.rs', 'env!("AGENT_SPEC_REVISION").to_owned()'),
-    'st-drivers': ('crates/st-drivers/build.rs', 'env!("ST_BUILD_STAMP_LOCAL").to_owned()'),
+    'st-build-stamp': ('crates/st-build-stamp/build.rs',
+                       'format!("{}|{}", env!("ST_BUILD_STAMP_LOCAL"), env!("AGENT_SPEC_REVISION"))'),
 }
 
 
@@ -35,11 +35,9 @@ def head_of(directory):
 
 
 def stamp(binary, name, expected):
-    printed = run(str(binary), cwd=binary.parent)[0]
-    if name == 'agent-spec':
-        assert printed == expected, (printed, expected)
-    else:
-        assert json.loads(printed)['fullRev'] == expected, (printed, expected)
+    local, revision = run(str(binary), cwd=binary.parent)[0].split('|')
+    assert json.loads(local)['fullRev'] == expected, (name, local, expected)
+    assert revision == expected, (name, revision, expected)
 
 
 for name, (script, expression) in CASES.items():
@@ -52,7 +50,7 @@ for name, (script, expression) in CASES.items():
         run('git', 'add', 'README', cwd=main)
         run(*GIT, 'commit', '-qm', 'First', cwd=main)
         run('git', 'worktree', 'add', '-q', '-b', 'fixture', str(work), cwd=main)
-        # The crate sits two levels below the workspace root, where agent-spec's script expects Cargo.lock (`../../Cargo.lock`).
+        # The crate sits two levels below the workspace root, as in the workspace.
         crate = work / 'crates/stamp-fixture'
         (crate / 'src').mkdir(parents=True)
         (work / 'Cargo.toml').write_text('[workspace]\nmembers=["crates/stamp-fixture"]\nresolver="3"\n')

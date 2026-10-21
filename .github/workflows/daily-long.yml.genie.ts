@@ -1,5 +1,6 @@
-import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
+import { githubWorkflow, nixDevelopStep } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import {
   buildEnv,
   commonSetupSteps,
@@ -8,14 +9,17 @@ import {
   linuxRunner,
   linuxStageJob,
   linuxStageRunner,
+  macosRunner,
+  performanceRunner,
   perfStoresCache,
   testArchiveConsumerSetup,
   testArchiveProducer,
 } from './workspace-ci.ts'
+import { macosColdSetupSteps, perfLoadCachePolicy, perfLoadJobs } from './perf-load.ts'
 
 // The long lanes, once a day on main: the ones that need a VM, real sockets across restarts or an older
-// st3, the cost check, and the whole test selection at full scale (docs/ci.md, Daily long lanes). Each runs exactly as Workspace CI (the cost check: Main upkeep) runs it, from the same shared
-// steps, on Namespace and at the lowest job priority. There is no pick-runner (its token is a secret), no
+// st3, the cost check, the load tests, and the whole test selection at full scale (docs/ci.md, Daily long lanes). Each runs exactly as Workspace CI (the cost check: Main upkeep; the load tests: Performance) runs it, from the same shared
+// steps, on Namespace (the macOS hog run and the macOS compile check: a Namespace Mac) and at the lowest job priority. There is no pick-runner (its token is a secret), no
 // evidence signing and no cache write the warm-up jobs own. Job names carry a `daily-` prefix so no check
 // on main ever looks like a required check. The report job writes each lane's result, time and failed
 // steps, and on red opens, or comments on, the one open issue with the title below.
@@ -31,6 +35,10 @@ const lanes = {
   'daily-tests': 'daily-tests',
   'daily-tests-shard-2': 'daily-tests-shard-2',
   'perf-cost': 'daily-perf-cost',
+  'perf-load': 'daily-perf-load',
+  'perf-load-hog': 'daily-perf-load-hog',
+  'perf-load-hog-macos': 'daily-perf-load-hog-macos',
+  'daily-macos-check': 'daily-macos-check',
 } as const
 
 const onMain = "github.ref == 'refs/heads/main'"
@@ -51,8 +59,12 @@ const fullScaleShard = (shard: 1 | 2) => ({
   ...consumer,
 })
 
-export default githubWorkflow(auditCaches({
-  actionlint: linuxActionlintConfig,
+// No daily lane enables user namespaces, so none may keep the strict Linux Nix sandbox (nix-sandbox-scope.ts).
+export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+  actionlint: {
+    ...linuxActionlintConfig,
+    selfHostedRunnerLabels: [...linuxActionlintConfig.selfHostedRunnerLabels, ...performanceRunner, ...macosRunner],
+  },
   name: 'Daily long lanes',
   on: {
     schedule: [{ cron: '7 5 * * *' }],
@@ -127,6 +139,28 @@ export default githubWorkflow(auditCaches({
       }),
       if: onMain,
     },
+    // The load tests (perf-load.ts), as the Performance workflow runs them by dispatch. They ran on every
+    // push to main, where newer pushes cancelled nearly every run, so no result reached anyone; here each
+    // completes once a day and a red one reaches the daily report and its issue. Main's daily perf-load
+    // publishes the build and store snapshots and the baseline reports scripts/ci-perf-cache restores.
+    ...Object.fromEntries((['perf-load', 'perf-load-hog', 'perf-load-hog-macos'] as const).map((job) =>
+      [job, { name: lanes[job], if: onMain, ...perfLoadJobs[job] }])),
+    // The whole workspace, tests included, type-checked on a Mac: macOS CI no longer runs on each push,
+    // so this is where a Linux-only item a macOS build still reaches shows up, the same day. The same
+    // targets and flags as clippy on Linux and macOS (--workspace --all-targets --locked; dev-dependencies
+    // turn on the test-support features). It runs no tests and builds cold, keeping no cache.
+    'daily-macos-check': {
+      name: lanes['daily-macos-check'],
+      if: onMain,
+      'runs-on': macosRunner,
+      'timeout-minutes': 45,
+      defaults: { run: { shell: 'bash' } },
+      env: buildEnv,
+      steps: [
+        ...macosColdSetupSteps,
+        nixDevelopStep({ name: 'Type-check the workspace and its tests on macOS', command: ['cargo', 'check', '--workspace', '--all-targets', '--locked'] }),
+      ],
+    },
     'daily-report': {
       name: 'daily-report',
       needs: Object.keys(lanes),
@@ -150,4 +184,8 @@ export default githubWorkflow(auditCaches({
       ],
     },
   },
-}, { 'daily-report': 'Reads job results through the API and builds nothing.' }))
+}, {
+  ...perfLoadCachePolicy,
+  'daily-macos-check': 'Type-checks cold on a macOS runner and keeps no cache.',
+  'daily-report': 'Reads job results through the API and builds nothing.',
+})))

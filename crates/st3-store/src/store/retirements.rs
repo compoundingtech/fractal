@@ -54,6 +54,29 @@ pub fn record(
     )).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hb69e2bc07570 owner=st3_store::store::retirements TODO=trace-statement-and-value-representation */ params![subject,at], claim_from_row).optional().map_err(internal)
 }
 
+/// Terminal identities for a page of agents, using the same admitted lifecycle records as
+/// `record` and first-send admission. Read once per page rather than probing each card.
+pub fn retired_subjects_at(
+    connection: &Connection,
+    subjects: &[String],
+    at: u64,
+) -> Result<BTreeSet<String>> {
+    if subjects.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let subjects = serde_json::to_string(subjects)?;
+    let mut statement = connection.prepare_cached(
+        "SELECT DISTINCT claims.subject FROM json_each(?1) subjects
+         CROSS JOIN claims ON claims.subject=subjects.value
+         WHERE claims.kind='agent.retired' AND claims.store_index<=?2
+           AND NOT EXISTS(SELECT 1 FROM replica_records
+             WHERE replica_records.claim_id=claims.id AND state='repaired')",
+    )?;
+    Ok(statement
+        .query_map(params![subjects, at], |row| row.get(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+}
+
 fn retired(recipient: &str, claim: &ClaimRecord) -> St3Error {
     MessageSendRefusal::Retired {
         recipient: recipient.into(),

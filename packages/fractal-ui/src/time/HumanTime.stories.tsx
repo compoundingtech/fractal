@@ -43,7 +43,7 @@ function HumanTimeStory({ scheme = 'dark', width = 440, host = false, live = fal
   </main>
 }
 const meta = {
-  title: 'Fractal UI/Human time', component: HumanTimeStory, parameters: { layout: 'fullscreen' },
+  title: 'Fractal UI/Human time', component: HumanTimeStory, parameters: { scenario: { _tag: 'primitive', reason: "Frozen clock values and explicit tooltip timing isolate human-time formatting and tick behavior." }, layout: 'fullscreen' },
   args: { scheme: 'dark', width: 440, instantTooltips: true },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [440, 1440], control: 'select' }, instantTooltips: { control: 'boolean' } },
 } satisfies Meta<typeof HumanTimeStory>

@@ -7,7 +7,7 @@ const meta = {
   title: 'Fractal UI/Visual language',
   component: Workshop,
   args: { direction: 'folio', scheme: 'light', density: 'comfortable' },
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Workshop owns its internal demonstration state and exposes no props seam for scenario slices." },
     a11y: {
       options: {
         rules: {

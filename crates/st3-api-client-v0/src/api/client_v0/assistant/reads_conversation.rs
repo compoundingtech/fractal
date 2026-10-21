@@ -34,7 +34,7 @@ pub(super) async fn project_bound(
     parameters: &BTreeMap<String, String>, max_bytes: usize, binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     let context = response_body::Context {
-        state: state.clone(), client_request: true, observation_report: false,
+        state: state.clone(), client_request: true, local_only_response: false,
         request_id: "request/00000000-0000-0000-0000-000000000000".into(),
         client_snapshot: Some(snapshot.clone()), server: None, roster: false,
     };

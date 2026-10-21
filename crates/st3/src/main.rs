@@ -3,6 +3,7 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::AgentMessagesStore;
 use st3::CoordinationStore;
 use st3::MissionsStore;
 use st3::LimitsStore;
@@ -694,6 +695,13 @@ fn leave_confirmation(
     {
         return Ok(Some(peer.peer.clone()));
     }
+    leave_receipt_confirmation(removed)
+}
+
+/// Only the worker's authenticated receipt ACK permits post-leave cleanup.
+fn leave_receipt_confirmation(
+    removed: Option<&st3::config::FleetRemoval>,
+) -> Result<Option<String>> {
     match removed {
         Some(removal) if removal.code == "member-left" => Ok(Some(removal.reported_by.clone())),
         Some(removal) => anyhow::bail!(
@@ -738,13 +746,19 @@ async fn wait_for_leave_confirmation(
     state_dir: &Path,
     stage: &str,
     seconds: u64,
+    require_leave_receipt: bool,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
     loop {
         let status: ReplicationStatus = client.get("/v1/replication/status").await?;
         let file = st3::config::FleetFile::load(state_dir)?;
         let removed = file.as_ref().and_then(|file| file.removed.as_ref());
-        if let Some(member) = leave_confirmation(&status, removed)? {
+        let confirmation = if require_leave_receipt {
+            leave_receipt_confirmation(removed)?
+        } else {
+            leave_confirmation(&status, removed)?
+        };
+        if let Some(member) = confirmation {
             return Ok(member);
         }
         anyhow::ensure!(
@@ -801,6 +815,7 @@ async fn fleet_leave(
             &config.state_dir,
             "before writing the leave",
             wait_seconds,
+            false,
         )
         .await?;
         let claim: ClaimRecord = client
@@ -817,6 +832,7 @@ async fn fleet_leave(
                 &config.state_dir,
                 "after writing the leave",
                 wait_seconds,
+                true,
             )
             .await?,
         );
@@ -4357,6 +4373,10 @@ fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) 
 }
 
 fn main() -> ExitCode {
+    // Before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
+    use st_build_stamp::{CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL};
+    st_drivers::version::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
+    stui::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
     cli_output::finish(cli_main())
 }
 
@@ -6032,6 +6052,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = st3::maintenance::divergence_check_interval(
         std::env::var(st3::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
@@ -6115,6 +6136,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     st3::api::start_agent_roster(&state);
+    // Pairing-secret expiry cleanup runs even with no attention readers or publications.
+    st3::api::start_push_registration_cleanup(&state);
     // Nor does an attention window fold every person's attention.
     st3::api::start_attention_list(&state);
     // Nor does a missions window fold the missions it shows.
@@ -18172,6 +18195,28 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
                 eprintln!("st3: coordination count bootstrap failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Count the retained sends for the usage estimate in bounded pages, one writer turn each, so
+/// neither opening the store nor the first usage read rebuilds every send. A usage read that
+/// arrives before the last page completes the rest itself.
+async fn backfill_agent_message_days(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.agent_message_days", || {
+                page_store.advance_agent_message_days()
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
+            error => {
+                eprintln!("st3: agent message usage backfill failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
