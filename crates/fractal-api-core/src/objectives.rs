@@ -2,7 +2,8 @@
 //!
 //! An objective is a target with windows and an error budget: the daemon's latency targets, its
 //! store and CPU targets, the database's size and the paired phone's reported targets, all from
-//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`. A budget is an
+//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`, and CI's durations
+//! and counts, which `slo/targets.toml` declares and nothing feeds yet. A budget is an
 //! allowance that resets: each account's weekly and 5-hour limits, from the readings `st usage`
 //! shows. Nothing here measures anything. It reads those two sources and says, for each row, its
 //! target, its current value, its window, what is left of its budget and what that means.
@@ -59,6 +60,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             }
         }
     }
+    rows.extend(ci(crate::slo::targets()));
     for limit in limits {
         let name = limit.account_ref.as_deref().unwrap_or(&limit.account);
         let stale = now_unix_ms.saturating_sub(limit.measured_at_unix_ms) > stale_after_ms;
@@ -240,6 +242,45 @@ pub fn divergence(open: u64) -> Value {
             }
         ),
     })
+}
+
+/// A duration in minutes once it is a minute or more: CI's targets are minutes, not milliseconds.
+fn duration(target_ms: u64) -> String {
+    if target_ms < 60_000 {
+        return ms(target_ms as f64);
+    }
+    let minutes = target_ms as f64 / 60_000.0;
+    if minutes.fract() == 0.0 { format!("{minutes} min") } else { format!("{minutes:.1} min") }
+}
+
+/// CI's objectives: each percentile of a duration and each count an hour. No source feeds their
+/// series yet, so each is no-data, with its target and what it would spend.
+fn ci(targets: &crate::slo::Targets) -> Vec<Value> {
+    let durations = targets.duration.iter().map(|target| {
+        let (p, within) = (target.percentile, duration(target.target_ms));
+        json!({
+            "id": target.id(), "kind": "objective", "about": target.about,
+            "target": format!("p{p} ≤ {within}"), "current": "no source yet", "window": "1d",
+            "remaining_percent": null, "status": "no-data",
+            "explain": format!(
+                "{}. Goal: {p} of every 100 finish within {within}, so {} in 100 may run over. Nothing feeds {} yet, so there is no budget to spend or save.",
+                target.about, 100 - p, target.path,
+            ),
+        })
+    });
+    let counts = targets.count.iter().map(|target| {
+        let max = target.max_per_hour;
+        json!({
+            "id": target.name, "kind": "objective", "about": target.about,
+            "target": format!("≤ {max} an hour"), "current": "no source yet", "window": "1h",
+            "remaining_percent": null, "status": "no-data",
+            "explain": format!(
+                "{}. Goal: at most {max} an hour{}. Nothing feeds {} yet, so there is nothing to count.",
+                target.about, if max == 0 { ", so one spends the whole allowance" } else { "" }, target.path,
+            ),
+        })
+    });
+    durations.chain(counts).collect()
 }
 
 /// A minimum share (a phone's live time over its foreground time). The budget is the allowed
@@ -482,12 +523,53 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "database"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "database", "merge-latency/p50", "flakes"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), rows.len(), "ids are unique");
+    }
+
+    #[test]
+    fn ci_objectives_are_declared_with_their_targets_and_no_data_until_fed() {
+        let rows = rows(&json!({"targets": []}), &[], 0, 0);
+        for (id, target, window) in [
+            ("merge-latency/p50", "p50 ≤ 10 min", "1d"),
+            ("merge-latency/p95", "p95 ≤ 10 min", "1d"),
+            ("ci-critical-path/p95", "p95 ≤ 13 min", "1d"),
+            ("flakes", "≤ 0 an hour", "1h"),
+        ] {
+            let row = by_id(&rows, id);
+            assert_eq!(
+                (row["kind"].as_str(), row["target"].as_str(), row["window"].as_str(), row["status"].as_str()),
+                (Some("objective"), Some(target), Some(window), Some("no-data")),
+                "{id}"
+            );
+            assert!(row["remaining_percent"].is_null(), "{id}");
+            // The same fields as every other row, and no others: the client's SloRow is closed.
+            let mut keys = row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["about", "current", "explain", "id", "kind", "remaining_percent", "status", "target", "window"],
+                "{id}"
+            );
+        }
+        assert!(by_id(&rows, "merge-latency/p95")["explain"].as_str().unwrap().contains("5 in 100 may run over"));
+        assert!(by_id(&rows, "flakes")["explain"].as_str().unwrap().contains("ci/flakes"));
+        // Objectives come before budgets.
+        let rows = super::rows(&json!({"targets": []}), &[limit("claude/abc", None, Some(1.0), Some(1.0))], 10_000_000, 3_600_000);
+        let first_budget = rows.iter().position(|row| row["kind"] == "budget").unwrap();
+        assert!(rows[..first_budget].iter().any(|row| row["id"] == "flakes"));
+    }
+
+    #[test]
+    fn a_ci_duration_reads_in_minutes() {
+        assert_eq!(duration(600_000), "10 min");
+        assert_eq!(duration(780_000), "13 min");
+        assert_eq!(duration(90_000), "1.5 min");
+        assert_eq!(duration(1_500), "1500 ms");
     }
 }
