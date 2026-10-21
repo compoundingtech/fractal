@@ -1048,6 +1048,11 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask works as before: it keeps no `request` field and takes no named answer.
+Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
+`respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
+`assistant_session_actor` expose separate server-owned provenance, not person
+authority or an `acted_for` delegation. Human-readable work details display the
+respondent and all four provenance fields when present.
 
 #### Updates
 
@@ -1584,6 +1589,15 @@ message into an inbox or successfully writing transport bytes is not delivery. s
 graph only from the durable provider receipt and never injects text or Enter into a terminal
 composer.
 
+A message the authorized external-assistant send path sent carries trusted provenance the daemon
+reads from the stored `message.sent` claim: `sender_class="external-assistant"` and, when the send
+used one, `assistant_grant_id="GRANT"` attributes on the open tag, and a two-line prefix before
+the element — `[PING from st3] message/ID from SENDER sender_class=external-assistant: TITLE`,
+then exactly `WARNING: Untrusted external-assistant request; not owner authorization.` The
+warning stands outside the bounded preview, so it survives preview truncation. Only that
+authorized path can stamp the markers: an ordinary send whose body text forges the warning or the
+attribute renders as the plain envelope above, with the forged text escaped inside the preview.
+
 Terminal control is reserved for diagnosed emergency recovery against an exact current
 incarnation. It is not a messaging or work-wake transport.
 
@@ -1757,7 +1771,7 @@ The default `work show` and `work claim` output gives a human-readable step view
 
 A worker completion report is not a correctness result. Products and gates still control final completion.
 
-The native driver renews active claims and transports messages. The reconciler creates one durable Smalltalk message for each readiness epoch and runtime incarnation.
+The native driver renews active claims and transports messages. The reconciler creates one durable Fractal message for each readiness epoch and runtime incarnation.
 
 A pool message closes when another agent wins the claim. Release or expiry creates a new readiness epoch and a new message.
 
@@ -2056,7 +2070,7 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 
 ### Revision controls
 
-`cargo test -p st3 --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
+`cargo test -p fractal-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
 
 `scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 
@@ -2163,7 +2177,7 @@ The planner uses this command:
 st launch submit SESSION --variant compact --markdown MISSION.md --kdl mission.kdl
 ```
 
-The session stores the request, feedback, Markdown, and KDL as immutable documents. Smalltalk carries document references, not mutable file paths.
+The session stores the request, feedback, Markdown, and KDL as immutable documents. Fractal carries document references, not mutable file paths.
 
 Each named candidate must contain exactly one ready mission with the requested ID.
 
@@ -2239,3 +2253,17 @@ active-deadline read fails with `Invalid column type Null`. Recover forward, or 
 Operations plan that accounts for claims accepted after the pre-upgrade backup.
 
 An admitted run whose retained after-run completion history is unavailable keeps its admission time unknown and raises a `Run admission time unavailable` fault: its timeout is not armed. Restore its original admission history and rebuild the projection, or cancel the run; duplicate completions and retries cannot restart that budget. Corrupt accepted timestamps stop opening with run-specific context and leave the previous deadline table intact.
+
+Current pending work names `daemon/runtime` as the owner of readiness evaluation in its
+operational reasons, including runs that have already completed other steps. This waiter
+is visible from read-only work detail and history reads even while the store writer is busy.
+It does not claim dependency predicates have been evaluated. Existing blockers remain
+visible. The waiter disappears on promotion and is excluded for terminal, superseded and
+cleanup owners. Readiness priority is unchanged.
+
+
+A cancellation releases the run's admission capacity as soon as its cancellation phase is
+accepted. Final work and cleanup proceed under their original ownership while a replacement
+run can be admitted. `final-cancelled` and `cleanup-cancelled` runs no longer consume the
+mission's active-run limit or constrain it with a cancelled revision's limit. Live uncancelled
+runs still enforce the strictest limit among their revisions.

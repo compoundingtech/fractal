@@ -10,7 +10,7 @@ import { IBMPlexMono_400Regular } from '@expo-google-fonts/ibm-plex-mono/400Regu
 import { IBMPlexMono_400Regular_Italic } from '@expo-google-fonts/ibm-plex-mono/400Regular_Italic';
 import { IBMPlexMono_600SemiBold } from '@expo-google-fonts/ibm-plex-mono/600SemiBold';
 import { IBMPlexMono_700Bold } from '@expo-google-fonts/ibm-plex-mono/700Bold';
-import { openAlerts } from '@smalltalk/st3-views';
+import { openAlerts } from '@fractal/views';
 import { FULL_SCREEN, navigationRef, ROOTS, type StackParams, type TabParams } from './navigation';
 import { StoreProvider, useStore } from './store';
 import { parseDevLink, tabLabel, tabNamed, type Tab } from './tabs';
@@ -29,6 +29,7 @@ import { FabricProofScreen } from './screens/FabricProof';
 import { quality } from './qualityNative';
 import { qualityVisibility } from './qualityView';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
+import { DiagnosticsBoundary } from './DiagnosticsBoundary';
 
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
@@ -141,11 +142,13 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       }
     };
     void Linking.getInitialURL().then(handle);
-    handle(process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
-    handle(process.env.EXPO_PUBLIC_ST3_TEST_PAIR_LINK ?? null);
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — keep literal Expo lookups; empty masks legacy.
+    handle(process.env.EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK ?? process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
+    handle(process.env.EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK ?? process.env.EXPO_PUBLIC_ST3_TEST_PAIR_LINK ?? null);
     // Links to follow at launch, six seconds apart, for headless screenshots: the simulator asks
     // before opening each link it is handed, and nobody is there to answer.
-    (process.env.EXPO_PUBLIC_ST3_TEST_LINKS ?? '').split(/\s+/).filter(Boolean).forEach((link: string, index: number) => setTimeout(() => handle(link), 6000 * (index + 1)));
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    (process.env.EXPO_PUBLIC_FRACTAL_TEST_LINKS ?? process.env.EXPO_PUBLIC_ST3_TEST_LINKS ?? '').split(/\s+/).filter(Boolean).forEach((link: string, index: number) => setTimeout(() => handle(link), 6000 * (index + 1)));
     const subscription = Linking.addEventListener('url', event => handle(event.url));
     return () => subscription.remove();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -155,7 +158,8 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       <Stack.Screen name="NowRoot" component={PairScreen} options={{ title: 'Pair this device' }} />
     </Stack.Navigator>;
   }
-  const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_FRACTAL_TEST_TAB ?? process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
   const systemSurface = shownName === 'NowRoot' || shownName === 'Attention';
   return <ThemeProvider value={systemSurface ? {
     ...(scheme === 'dark' ? DarkTheme : DefaultTheme),
@@ -181,7 +185,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
 
 const qualityLayout = () => quality.commit();
 
-export default function App() {
+function AppContent() {
   const [fabricProof, setFabricProof] = useState<FabricProofInput | null>(null);
   useEffect(() => {
     if (!__DEV__) return;
@@ -190,7 +194,8 @@ export default function App() {
       // or trial uses a fresh pairing link, whose challenge id changes this key.
       current?.node === input.node && current.service === input.service && current.id === input.id ? current : input); } };
     void Linking.getInitialURL().then(handle);
-    handle(process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    handle(process.env.EXPO_PUBLIC_FRACTAL_FABRIC_PROOF_LINK ?? process.env.EXPO_PUBLIC_ST3_FABRIC_PROOF_LINK ?? null);
     const subscription = Linking.addEventListener('url', event => handle(event.url));
     return () => subscription.remove();
   }, []);
@@ -205,4 +210,8 @@ export default function App() {
       <NavigationContainer ref={navigationRef} theme={navigationTheme}><Main /></NavigationContainer>
     </StoreProvider>}
   </SafeAreaProvider>;
+}
+
+export default function App() {
+  return <DiagnosticsBoundary><AppContent /></DiagnosticsBoundary>;
 }

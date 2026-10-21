@@ -57,7 +57,11 @@ mission "fixture/network-$name" state="ready" {
     workspace "$PWD"
     command "sleep 300"
     restart "never"
-    env { ST3_MESSAGE_ROOT "$state/messages" }
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    env {
+      FRACTAL_MESSAGE_ROOT "$state/messages"
+      ST3_MESSAGE_ROOT "$state/messages"
+    }
     exec "ding" { argv "st3" "driver" "ding" }
   }
   pty "session-$name" { workspace "$PWD"; command "bash -c 'echo ${name^^}-READY; sleep 300'"; restart "never" }
