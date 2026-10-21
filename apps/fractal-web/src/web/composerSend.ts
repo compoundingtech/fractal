@@ -1,4 +1,4 @@
-import type { ConversationRuntimeOptions } from '@smalltalk/fractal-ui/assistant-ui'
+import type { ConversationRuntimeOptions } from '@fractal/ui/assistant-ui'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import type { AttachmentSendRequest, DataSource, Grants } from '../data/source.ts'
 

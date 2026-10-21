@@ -1,5 +1,5 @@
-import type { ClientOptions } from '@smalltalk/st3-client'
-import { AgentDeclaration, PublicationDefinition, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import type { ClientOptions } from '@fractal/client'
+import { AgentDeclaration, PublicationDefinition, decodeUnknownSync } from '@fractal/client/schema'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 

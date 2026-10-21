@@ -139,7 +139,7 @@ of the agent there: they select and click as the agent and have no actions of th
 ## Tests
 
 `scripts/st3-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
-subagents through the real hooks, with no model. `crates/st3/tests/subagents_seat.rs` runs it. It
+subagents through the real hooks, with no model. `crates/fractal/tests/subagents_seat.rs` runs it. It
 covers:
 
 - appear then end, Claude's phantom stop, and many subagents at once;
@@ -157,7 +157,7 @@ covers:
 `ST3_SUBAGENT_LEASE_MS` can only shorten the driver's lease, so these tests need not wait out ten
 minutes.
 
-`crates/st3/tests/subagent_publisher.rs` drives an omp seat's channel observer with the frames the
+`crates/fractal/tests/subagent_publisher.rs` drives an omp seat's channel observer with the frames the
 extension sends and reads the agents list. A running subagent shows with its ID, type, driver and
 lease, and leaves the list at its end. While the seat's driver ticks and renews, a subagent that
 stops reporting leaves the list after the silence bound, and a sibling that keeps reporting stays.

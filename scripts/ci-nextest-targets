@@ -9,7 +9,7 @@ import subprocess
 def selection(metadata):
     members = set(metadata['workspace_members'])
     legacy = [package for package in metadata['packages']
-              if package['id'] in members and package['name'] == 'st2']
+              if package['id'] in members and package['name'] == 'fractal-legacy-runner']
     if not legacy:
         return 'all()'
     if len(legacy) != 1:
@@ -19,7 +19,7 @@ def selection(metadata):
     if not set(retained) <= targets:
         raise ValueError('the legacy runner is missing a retained integration target')
     binaries = ' or '.join(f'binary(={name})' for name in retained)
-    return f'not package(=st2) or (kind(test) and ({binaries}))'
+    return f'not package(=fractal-legacy-runner) or (kind(test) and ({binaries}))'
 
 
 def main():

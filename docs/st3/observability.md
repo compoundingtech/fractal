@@ -1,7 +1,7 @@
 # st observability
 
 This reference describes the current daemon, CLI, replication worker and hook
-telemetry in the `crates/st3` implementation. The shared client-class vocabulary
+telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
 and bounded attributes are used by production code.
 
 ## Requirements
@@ -50,7 +50,7 @@ hook signals ── daemon observations exporter ──────────�
 
 ## Pipeline and identity
 
-`crates/st3-telemetry/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
+`crates/fractal-telemetry/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
 The tracer provider uses `Sampler::AlwaysOn` and a plain SDK `BatchSpanProcessor` to export
 every span, including spans with an unsampled remote parent. There is no in-process sampler
 or span buffer beyond the SDK batch queue. The manifest pins OpenTelemetry API, SDK
@@ -85,13 +85,13 @@ unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 | Driver hook | `st-hook` via daemon observations exporter; no direct SDK export | No collector flush in the hook |
 | `driver claude-statusline` | None; `telemetry::local_only()` | No pipeline |
 
-`crates/st3-telemetry/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
+`crates/fractal-telemetry/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
 never contact a collector. The observations exporter emits hook spans and hook invocation
 metrics as `st-hook`; observation logs and usage metrics retain `st-daemon`. Statusline calls remain local-only and do not initialize an SDK pipeline.
 
 The shared resource contains `service.name`, `service.version` from
-`st_drivers::version::machine_version()`, a random per-process `service.instance.id`,
-`host.name`, and `st3.node`. The observations exporter in `crates/st3-telemetry/src/otlp.rs` uses this
+`fractal_drivers::version::machine_version()`, a random per-process `service.instance.id`,
+`host.name`, and `st3.node`. The observations exporter in `crates/fractal-telemetry/src/otlp.rs` uses this
 resource builder, including the version: hook spans and invocation metrics are `st-hook`,
 observation logs and usage metrics are `st-daemon`. The bare `st` service name is retired.
 The platform edge supplies fleet-owned attributes.
@@ -358,10 +358,16 @@ The class is observational only; it does not grant identity or authority.
 | `other` | Any other present value; `curl` maps here on purpose, not to `cli` |
 | `unknown` | Header absent or blank after trimming |
 
-`http.server.request.duration` records request duration in seconds at the same point as
-the in-memory meter, independent of trace sampling. Its labels are `http.request.method`,
-`http.route`, `st3.client.class`, and `http.response.status_class`. An SDK cardinality limit
-caps this instrument at 1,500 series; excess combinations go to the
+`http.server.request.duration` records request duration in seconds, independent of trace
+sampling, outside the read-deadline envelope. Its labels are `http.request.method`,
+`http.route`, `st3.client.class`, and `st3.request.outcome`. The outcome is a closed enum:
+`ok` for 1xx/2xx/3xx (including WebSocket upgrades), `client_error` for 4xx,
+`server_error` for other 5xx, `deadline` for an explicitly marked read-deadline response,
+and `cancelled` when the request future is dropped before producing a response.
+An upstream 504 without the read-deadline marker is `server_error`. A drop guard
+records exactly once, including cancellation; the in-process meter and slow logs
+retain their completion-only behavior. The outcome has five values. An SDK cardinality
+limit caps this instrument at 1,500 series; excess combinations go to the
 `otel.metric.overflow=true` series. This runtime cap enforces O11Y-R14's 2,000 active-series
 budget rather than the theoretical label product.
 
@@ -386,10 +392,17 @@ Duration buckets are
 | `st.db.readers.opened` | Counter | `{connection}` | —; readers opened |
 | `st.db.read.loan.oldest_age` | Observable gauge | `s` | `origin`; oldest live pooled connection loan per bounded route/task origin, not confirmed transaction age |
 | `st.db.wal.size` | Observable gauge | `By` | —; stat the main database's `-wal` file |
-| `st.db.wal.checkpoint.duration` | Histogram | `s` | `db.operation.name=checkpoint.truncate`; truncate checkpoint duration |
+| `st.db.wal.checkpoint.duration` | Histogram | `s` | `db.operation.name=checkpoint.truncate\|checkpoint.passive`, `st.db.wal.checkpoint.outcome=recycled\|empty\|deferred\|error`; checkpoint attempt duration |
 | `st.db.wal.checkpoint.deferred` | Counter | `{attempt}` | —; physical checkpoint attempts with nonempty WAL not recycled |
 | `st.db.wal.checkpoint.lag` | Observable gauge | `{frame}` | —; last known WAL frames minus backfilled frames, summed across live pools |
 | `st.db.wal.checkpoint.deferred_age` | Observable gauge | `s` | —; age since the first consecutive deferred attempt, maximum across live pools |
+
+Checkpoint duration records backup TRUNCATE attempts as `checkpoint.truncate` with
+`recycled` or `error`. Each idle-WAL worker attempt records `checkpoint.passive`,
+including any follow-on truncate and writer wait, with `empty` for zero frames,
+`recycled` for a recycled nonempty WAL, `deferred` for a nonempty WAL not recycled,
+or `error` for a failed attempt. These two operations and four outcomes add at most
+eight attribute sets, without a separate outcome counter.
 
 Every storage metric carries `db.system.name=sqlite`. Writer hold, queue, and oldest-loan origins reuse
 the bounded writer-span vocabulary: normalized router `MatchedPath` templates prefixed
@@ -498,8 +511,9 @@ when TRUNCATE was attempted or the result is abnormal. It uses the OTel API with
 an explicit empty parent context, retaining the attempt's start time without constructing
 a span for ordinary idle passes. `span.label` and `db.operation.name` are
 `checkpoint.truncate` for TRUNCATE attempts, otherwise `checkpoint.passive`;
-`db.system.name=sqlite`. A TRUNCATE result records `st.db.wal.checkpoint.duration`
-in seconds, reusing the existing instrument vocabulary without adding a metric.
+`db.system.name=sqlite`. A TRUNCATE span carries its duration in the
+`st.db.wal.checkpoint.duration` span attribute; the histogram independently records
+every worker attempt as described above, regardless of span sampling.
 Failures, PASSIVE durations at least 1000 ms, writer waits or TRUNCATE durations
 at least 100 ms, and at least three consecutive no-progress pinned-WAL samples
 mark the root ERROR. Successful ordinary TRUNCATE leaves status UNSET.
@@ -800,7 +814,7 @@ metrics, or logs. Span names and labels use bounded operation vocabulary. Existi
 `profile::Op` and `profile::task` labels supply that vocabulary where available.
 
 W3C `traceparent` and `tracestate` are the wire context, not hash-derived identities.
-`crates/st3-client/src/propagation.rs` supplies one injector for both the CLI's internal
+`crates/fractal-client/src/propagation.rs` supplies one injector for both the CLI's internal
 daemon client and the generated typed Rust client. Every HTTP request, Unix HTTP request,
 and WebSocket handshake injects the current tracing span's OpenTelemetry context through
 the global text-map propagator. This makes the daemon's SERVER span a child of the CLI's
@@ -819,7 +833,7 @@ bridge dependencies, not an exporter or SDK initializer. `st3` enables the featu
 `stui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
-`crates/st3-client-codegen/templates/lib.rs.in`; the
+`crates/fractal-client-codegen/templates/lib.rs.in`; the
 shared propagation module is handwritten. Invalid-context injection performs only a
 current-span/context check, with no allocation, header formatting, or propagator lookup.
 Valid-context injection clones/updates tracestate and uses the propagator to format the

@@ -206,7 +206,7 @@ printf '\ngraceful-messaging replacement %s\n' "$(now_ms)" >>"$root/bin/st3.next
 chmod 0755 "$root/bin/st3.next"
 mv -f "$root/bin/st3.next" "$root/bin/st3"
 swapped_at=$(now_ms)
-kill -TERM "$(cat "$root/daemon.pid")"
+python3 "$repo/scripts/script_process.py" "$(cat "$root/daemon.pid")" 15 --root "$root"
 for _ in $(seq 1 100); do kill -0 "$(cat "$root/daemon.pid")" 2>/dev/null || break; sleep 0.2; done
 start_daemon
 restarted_at=$(now_ms)
