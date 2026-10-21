@@ -622,15 +622,18 @@ fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
         (json!({"code":"unknown-tool"}), true, r#"{"code":"unknown-tool"}"#),
     ] {
         let legacy = serde_json::to_value(tool_result(Profile::ChatGpt, value.clone(), error)).unwrap();
+        // Key order inside the text follows serde_json's `preserve_order`, which only workspace
+        // builds enable, so the literal is compared as parsed JSON.
+        let actual_text = legacy["content"][0]["text"].as_str().unwrap().to_owned();
+        assert_eq!(serde_json::from_str::<Value>(&actual_text).unwrap(), serde_json::from_str::<Value>(text).unwrap());
         // Pin the wire fields independently of rmcp's result constructors.
-        let mut expected = json!({"resultType":"complete","content":[{"type":"text","text":text}],"isError":error});
-        assert_eq!(serde_json::to_vec(&legacy).unwrap(), serde_json::to_vec(&expected).unwrap());
+        let mut expected = json!({"resultType":"complete","content":[{"type":"text","text":actual_text}],"isError":error});
+        assert_eq!(legacy, expected);
         assert!(legacy.get("structuredContent").is_none());
         let mcp = serde_json::to_value(tool_result(Profile::Mcp, value.clone(), error)).unwrap();
         expected["structuredContent"] = value.clone();
         assert_eq!(mcp, expected);
         assert_eq!(mcp["isError"], error);
-        assert_eq!(mcp["content"][0]["text"], text);
         assert_eq!(mcp["structuredContent"], value);
     }
 }
