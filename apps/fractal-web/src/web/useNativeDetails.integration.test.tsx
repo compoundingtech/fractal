@@ -254,7 +254,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       await act(async () => { await vi.waitFor(() => expect(missions()?.failure).toBeUndefined()) })
       expect([count('/v1/client/usage'), count('/v1/client/agent-queues/agent%2Fexample-details')]).toEqual([before.usage, before.queue + 1])
       await act(async () => last?.spendRead?.failure?.onRetry())
-      await act(async () => { await vi.waitFor(() => expect(last?.spendRead).toMatchObject({ updatedAt: 5000, refreshing: false })) })
+      await act(async () => { await vi.waitFor(() => expect(last?.spendRead).toMatchObject({ updatedAt: 10000, refreshing: false })) })
       expect(last?.spendRead?.failure).toBeUndefined()
       expect(count('/v1/client/usage')).toBe(before.usage + 1)
       // Refresh is exactly one more spend read.
