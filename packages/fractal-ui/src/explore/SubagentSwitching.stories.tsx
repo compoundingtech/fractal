@@ -123,7 +123,7 @@ const meta = {
     }
     return <Explorer {...args} onUpdate={update} />
   },
-  parameters: { layout: 'fullscreen' },
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Compares subagent switching layouts over a local synthetic roster and thread (switching-fixtures.ts) that no scenario slice represents.' } },
   args: { switcher: 'S2', placement: 'chip', sidebarWidth: 240, state: 'running', compare: false, allLanes: false, scheme: 'dark', width: 1440, focusRequest: 0, focusLane: '', probe: false },
   argTypes: { switcher: { options: variants, control: 'radio' }, placement: { options: ['chip', 'badge'], control: 'radio' }, sidebarWidth: { options: [240, 320], control: 'radio' }, state: { options: scenarios, control: 'select' }, compare: { control: 'boolean' }, allLanes: { control: 'boolean' }, scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [1440, 900], control: 'radio' }, focusRequest: { table: { disable: true } }, focusLane: { table: { disable: true } }, probe: { table: { disable: true } }, onUpdate: { table: { disable: true } } },
 } satisfies Meta<typeof Explorer>

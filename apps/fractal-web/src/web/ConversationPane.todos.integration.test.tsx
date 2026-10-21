@@ -5,17 +5,13 @@ import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({ tag: 'Waiting' }))
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('@effect/atom-react', () => ({ useAtomValue: () => false }))
 vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({}), useConversation: () => state.tag === 'Waiting' ? { _tag: 'Waiting' } : { _tag: 'Unavailable', reason: 'failed', detail: 'example' },
-  useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0,
+  useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0, useAttention: () => ({ _tag: 'Waiting' }),
+  useNowSnapshot: () => 0,
+  useConnection: () => ({ _tag: 'Live' }),
 }))
 vi.mock('./composerSend.ts', () => ({ composerSendBinding: () => ({ runtime: {}, disabledReason: 'Waiting for access' }) }))
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', () => ({ EmbraceRuntimeProvider: ({ children }: { children: React.ReactNode }) => children }))

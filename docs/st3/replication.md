@@ -10,6 +10,80 @@ or replica. Devices read and act through a member's client gateway and are not s
 
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
+
+## Local adapter membership and leave authority
+
+Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
+socket. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
+`members`, and legacy removals. A member's `member_key` identifies its incarnation;
+names are not identity. `state = "current"` is application membership authority.
+An ended member is not authorized for ordinary replication or owner RPC, even if
+a transport temporarily remains available for leave completion. Published
+endpoints describe routes, not grants or live reachability. This endpoint remains
+a read-only membership projection and does not start or renew leave grace.
+
+Adapters that retain a departing member's transport must instead make their
+decision from one `GET /v1/internal/fleet/leave-state` response:
+
+```json
+{
+  "fleet_id": "fleet-id",
+  "own_member_key": "member-key",
+  "membership": { "anchor": null, "members": [], "legacy_removed": [] },
+  "members": [
+    {
+      "member_key": "departed-member-key",
+      "state": "awaiting-confirmation",
+      "grace_deadline_unix_ms": 1234567890000
+    }
+  ],
+  "persistence_error": null
+}
+```
+
+`membership` has exactly the membership endpoint's `FleetView` schema, captured
+with the leave authority under the worker's membership-generation barrier. Do not
+combine two endpoint responses to decide retention: their generations can differ.
+`members` contains only ended members whose reason is `left`, keyed by exact
+incarnation. States are `awaiting-confirmation`, `confirmed`, or `unconfirmed`.
+Deadlines are absolute Unix milliseconds (JSON integers, Rust `u128`) or null.
+Only an ended-left member with `awaiting-confirmation`, a deadline strictly after
+the adapter's current time, and null `persistence_error` qualifies for receiver-side
+transport retention. Equality to the deadline is expired. Confirmation ends this
+retention; expiry never manufactures confirmation. The leaving node's final local
+carrier remains owned by its leave operation until the authenticated receipt ACK
+or an explicit offline leave, not by receiver grace.
+
+The replication worker durably journals a conservative first-receive timestamp
+*before* admitting a direct signed leave. Once sealed membership proves that
+departure, receiver grace is 120 seconds from that timestamp, surviving restart.
+Ordinary signatures can trigger the conservative filter; a membership fold that
+still shows the sender current clears the provisional record, so a false positive
+cannot consume a later departure's grace. Replaying an already-ended leave never
+renews its deadline. A failed journal/deadline persistence denies retention and is
+reported in `persistence_error`.
+
+The leaving worker durably chooses one current listening confirmer before
+exporting its leave. A signed `member-left` refusal naming the exact leaving key
+is retained as a proof and acknowledged over the authenticated
+`POST /v1/replication/leave-receipt` protocol. The receiver verifies both the
+leaving member's signature and its own signed refusal before persisting completion;
+the sender accepts only the selected confirmer's signed ACK. Lost responses remain
+retryable from the durable proof. Matching replication digests suffice for the
+pre-leave drain, but never for post-leave cleanup: the CLI waits for the completed
+receipt handshake before removing settings or its final carrier.
+
+The daemon proxies leave-state reads to the live worker's private, mode-0600
+`fleet/leave-state.sock`; it does not infer authority from the receipt journal.
+This also exposes in-memory persistence failures. A per-socket reservation fences
+concurrent worker startup. A configured fleet with no reachable worker, or a worker
+from another fleet/key incarnation, fails the read rather than returning an empty
+success. A local-only daemon returns null identities and an empty membership and
+leave list. Polling never imports claims, writes the journal, refreshes membership,
+selects a confirmer, starts grace, or changes transport policy. External adapters
+own transport-policy reconciliation; neither daemon nor worker reconciles Fabric
+runtime peers.
+
 ## Sync invariants
 
 Every shared projection folds claims in the canonical total order: numeric acceptance time,
@@ -46,6 +120,63 @@ keeps the newest observation per origin/subject after the D+2 cut; a two-to-thre
 window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
 arithmetic bounds, not measured saturated-daemon costs.
 
+The receive path's latest-observation lookup uses a local transport-only side index once
+its background bootstrap completes. Store opening does no work for this index: after both
+APIs serve, the managed background writer queue atomically installs capture triggers and a
+high-water mark, then commits after 128 source rows or 20 ms of work, whichever comes
+first, checking the elapsed budget between rows and preserving the last processed cursor.
+The budget bounds work, not I/O latency: one cold read, capture setup or commit can still
+exceed 20 ms. A page always processes at least one row to make progress; 100 ms yields
+between pages remain unchanged.
+Each page releases its background loan; pending foreground writers retain priority.
+Sharing the writer also preserves deferred read-then-write snapshots: no independent
+bootstrap connection can commit across an application writer's pending upgrade.
+Inserts, identity/kind/time updates and deletes maintain the index in their claim
+transaction. Until the final page commits, readers use the original canonical query.
+WAL readers remain available during a copy page; other writers wait only for that page,
+not a whole-history `CREATE INDEX`. `st.db.migration.index.ready{index="transport_observation_seek"}`
+reports the switch; `st.db.migration.index.build.duration` records elapsed build seconds and
+`st.db.migration.index.write_hold.duration` records each page's begin-through-commit
+write-hold upper bound, including finalizers and SQLite acquisition wait but excluding
+background queue admission. The index is rebuildable local acceleration, not replicated authority.
+
+For offline production-size evidence, build the aggregate-only
+`smallclaims` example `transport_observation_bench` in release mode with the
+`transport-bench` feature. Run `--store COPY --n 1000 --mode before --bootstrap-yield-ms 0`,
+then the same command with `--mode after`, using the same checkpointed disposable input.
+Both modes measure a private temporary copy; the before mode removes the helper
+objects and uses main's identical SQL literal, per-call canonical expansion and
+uncached `query_row` preparation path, without readiness probes. The after mode
+executes every real bootstrap page. The example-only `--bootstrap-yield-ms` defaults
+to the daemon's 100 ms inter-page yield; use `0` for the accelerated measurement
+without changing transaction boundaries or sampling. Production pacing is unchanged.
+Project production-paced bootstrap time as `bootstrap_elapsed_ms / 1000 +
+bootstrap_pages * 0.1` seconds from a zero-yield run (a conservative extra yield
+for the final page). Removing deliberate sleeps targets an approximately one-hour
+operator run, but storage speed and unknown claim count can still exceed that target.
+The harness rejects open databases, SQLite sidecars and nearby daemon socket/lock
+artifacts; Linux write-lease support is required. Set `TMPDIR` to private local
+storage with capacity for the database plus its working WAL (reflinks are attempted).
+Only aggregate JSON is emitted, including every bootstrap transaction and the
+writer-transaction totals and wall time per synthetic receive-shaped claim insert.
+The JSON also reports `source_claim_rows` from one premeasurement count,
+`bootstrap_elapsed_ms`, `bootstrap_pages`, `bootstrap_yield_ms` and `index_bytes`.
+When `index_bytes_dbstat` is true, size sums `dbstat.pgsize` for both helper tables
+and their indexes. Otherwise it is the checkpointed `page_count * page_size` growth
+across bootstrap, excluding WAL; reused free pages can make this fallback undercount
+the objects' occupied space. Sizing/checkpoint work is outside transaction samples.
+The advance API exposes copied observation rows, not scanned source rows, so
+`bootstrap_rows_copied` must not be interpreted as the scanned claim count.
+The workload persists a synthetic message and its transport observation, not the
+full replication authentication or runtime projection path. No stored message
+bodies or identifiers are emitted; failures are deliberately detail-free.
+
+The daemon caches its sealed membership view at the store's fleet generation, rather than
+folding the full fleet history on every worker poll. The generation and fold share a read
+snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
+anchor invalidate it. This view never supplies the client's unsealed local-signer fallback;
+`current` describes an open writer window, not a wall-clock lease.
+
 Gateways cache filtered links and sealed membership for at most five seconds, including
 per-item `reaches()` checks. Links involving current dial-out members never support
 bidirectional owner routes, even while fresh. Dial-out owners return `remote-unavailable`
@@ -70,6 +201,28 @@ conservatively keeps all existing shared blobs.
 A keyed worker signs batches beyond its last processed batch, including envelopes another
 unkeyed process already sealed at startup. Signature requests recover missing signatures after
 an upgrade. Equal envelope inventories alone cannot prove equal claim admission.
+
+Sealing prepares each chunk of local batches on a read transaction before it takes the writer.
+A chunk is at most 64 batches and 16 MiB of payload: a batch that would take it past 16 MiB
+starts the next chunk, and only a first batch larger than that is sealed alone. Preparation reads
+each batch's claims and the blobs they name, signs each claim that has no stored signature,
+encodes and hashes the envelope and its records, and signs each envelope with the member key.
+Under the writer, sealing reads again what it prepared from:
+- the chunk's unsealed batches and their claims;
+- which named blobs are stored;
+- each claim's stored signature;
+- the member key and the fleet id;
+- for the claims it signed, the key, principal, principal acted for and chain the keyring would
+  sign them with now. This is read in one view that no keyring change overlapped, once per
+  distinct signer input (a key grant's issuer and issuer key, and the claim's actor), not once
+  per claim.
+
+Only then does it write the prepared rows. If any of these changed, it writes nothing and
+prepares the chunk again off the writer. Keys added or replaced for principals the chunk's claims
+are not signed as do not count as a change. Claims and blobs are compared by id and hash, which
+name their content. A blob that is not stored when a batch is sealed stays out of its envelope,
+as before. This moves signing and encoding off the writer but does not bound the hold: the
+rereads and writes still grow with the chunk's claims and bytes.
 
 `store::tests::canonical_audit::every_shared_projection_agrees_after_shuffle_restart_and_checkpoint`
 checks both invariants by comparing shared rows, selected readers and per-table digest oracles
@@ -113,6 +266,13 @@ not know remain in the original envelope and in retryable `unknown` receipt reco
 claims in that envelope and later envelopes from the same writer continue to project. An
 unknown claim alone does not degrade its envelope or mark a projection unhealthy.
 
+For `arrangement.edited`, an unfamiliar operation tag or placement subject family also waits
+as `unknown-claim-field`. Admission uses the receiving member's operation vocabulary and subject
+registry; upgrading admits the original immutable edit and projects its original revisions.
+Malformed known operations and references remain invalid. Local client edits do not use this
+leniency: they refuse unknown tags with `invalid-arrangement-operations` and unknown placement
+families with `invalid-subject-reference`.
+
 `st replication status` reports `waiting` claims; JSON exposes `waiting_claims` and retains
 `unknown_records` for existing readers. Doctor reports the waiting count without treating it
 as a fault. At daemon startup, admission retries those original records using the upgraded
@@ -123,6 +283,21 @@ decide it, but it builds no replication snapshot and skips the once-per-process 
 batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
 two-million-envelope store, and the daemon listens only after admission. The first export or
 replication activation after the daemon serves runs them on a read connection.
+
+Admission prepares each envelope before it takes the writer: it decodes the payload, checks
+the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
+classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+only for the checks that read stored state and the writes: the envelope row is still there and
+not dropped by a checkpoint, membership and signatures still admit it, earlier record states
+(a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
+so a preparation always describes the row's content. Admission also compares the row's rowid and
+receipt time with those it prepared from; an envelope whose row is seen to differ (deleted and
+received again) is left `pending` for the admission pass that its new receipt runs, and is never
+re-prepared under the writer. Admission prepares at most 8 envelopes and 16 MiB of payload ahead of the
+writer, one larger envelope alone. That is a payload budget, not a bound on resident memory:
+decoded, the set takes roughly twice its payload, plus its structures. The comparison can miss a reused rowid received in the same
+millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
+stored-state reads and writes still grow with the envelope's claims and bytes.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
@@ -324,6 +499,27 @@ See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
 
+Only transport failures advance to the next configured route: connection failures,
+broken request/response streams (including typed TLS fatal alerts and bad records),
+HTTP transport timeouts, and unavailable carriers (including Fabric's typed `fault`
+class or no installed carrier). The worker marks failures at the outbound HTTP
+send/raw-body boundary using typed Hyper/I/O/TLS causes, not by parsing error text;
+broad reqwest request/decode categories are insufficient. An I/O `InvalidData`
+error is transport evidence only when its retained cause identifies the TLS layer.
+An HTTP error response, backend/export/receive failure, metadata budget rejection,
+authentication or grant refusal, invalid protocol/JSON/compression, request-builder
+error, Fabric `usage` error, or ambiguous/untyped error keeps the current route and
+uses normal accumulating backoff. A backend failure with a nested network cause
+does not establish failure of the selected peer route. Overload polling exhaustion
+is an application overload, not a transport timeout.
+
+After a successful exchange on a fallback route, the worker keeps using it for a
+60-second cooldown, then starts the next exchange from the preferred route again.
+Successful fallback exchanges do not extend that cooldown. If the preferred route
+still has a transport failure, normal route failover resumes. Application failures
+do not select fallback or discard a working HTTP connection pool.
+Per-peer worker status reports `route_is_preferred` and `preferred_retry_at_unix_ms`; `st replication status` shows the preferred/fallback selection and pending preferred-route retry deadline.
+
 The peer HTTP listener is not the privileged local Unix API: it exposes only fleet replication,
 join, and owner-forwarded client operations. Replication and forwarded client requests require
 the fleet HMAC and peer admission; current members must also sign with their member key.
@@ -400,7 +596,19 @@ without resetting its failure count. It neither exports an inventory nor records
 Probes do not extend their own eligibility window. Only authenticated activity, including an
 overload answer, keeps the 30-second cap active; a peer that answers probes but keeps failing
 signed exchanges returns to the long retry schedule after five minutes. A route that has never
-worked or a replaced route keeps the long retry schedule. Graph wakes
+worked or a replaced route keeps the long retry schedule.
+
+An outage is different from a refusal. When the failed exchange got no response head on its
+route, the peer never answered: the connection could not be made, or was closed, reset or
+aborted first. If a probe of that same route then answers, the link is back, and the exchange
+is retried at that probe instead of up to 30 seconds after the failure. That early attempt is
+spent until a probe finds the route down again or an exchange over it succeeds, so a link that
+answers `HEAD` but drops every exchange costs one early attempt (one export, signature and
+exchange) per outage and recovery, and otherwise keeps the 30-second cap. A peer that answered
+and failed (an error status, an overload, a body cut off after its head), or one that stalled
+until the exchange timed out after connecting, keeps the cap. The failure count is kept across
+an early attempt. The classification rests on how reqwest 0.12.28 and hyper 1.11.0 report a
+close before the response head; a control fails if that changes. Graph wakes
 still leave intentionally absent peers alone. Transport life only schedules an exchange;
 the exchange still authenticates every claim and peer.
 
@@ -483,6 +691,11 @@ The inventory is a set, not a high-water cursor. Sparse delivery and two candida
 
 The inventory is compact. It carries one digest per writer range of 256 sequences, and it lists identities only for ranges whose digests differ. A peer sends a range the other side lacks entirely, and it sends identities within a differing range only after the other side has listed that complete range and verified its count and digest. An ordinary two-phase exchange makes progress in both directions without sending the whole authority log. A peer without range digests receives and sends the full identity list, as before.
 
+An equal-digest answer retains its range digests even though it lists no identities or payloads.
+Equality applies to the exported snapshot only: a concurrent local or replicated write may make
+that digest stale before the next export. Retaining the ranges keeps that next request compact
+instead of accidentally selecting the older peer's full-inventory answer path.
+
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
@@ -540,6 +753,15 @@ An unknown or invalid record stays in `replica_records`. It does not block a val
 Admission commits once per pass over the pending envelopes, so one disk flush covers an exchange. Each envelope is admitted in its own savepoint, so an invalid one is rolled back and recorded alone.
 
 A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `st now`, `st missions ls` and the terminal UI say the node is syncing.
+
+A claim that reaches a mission run tree out of the replay's order rebuilds that tree from its own
+claims. Runs in one tree affect each other only from the root down: a run that ends cancels the
+runs started from its steps, and step claims read whether the root has ended. While the root has
+never ended, a claim rebuilds only its part of the tree: the run started from the root that it
+is about, with every run below that run and the asks those runs own, or the root with the asks
+it owns. A standing root with thousands of child runs, such as an intake, is not rebuilt for a
+late claim about one request; the 2,085-run intake tree took one 10.5 s writer hold to rebuild.
+A tree whose root has ended, or whose links have not all arrived, rebuilds whole.
 
 Person-work asks, completions and cancellations rebuild only their owning mission run tree.
 Standalone asks embed their run and generation in the asking claim; indexed lookups recover
@@ -674,37 +896,59 @@ st doctor
 
 The status view reports the authority digest, graph digest, record counts, projection health, and last peer results.
 
-A Fabric `peer not permitted for service` answer means the member's grants refuse that direct
-route. It shows as `refused`, with the Fabric node and service, in `st replication status`,
+A Fabric refusal (error class `refusal`: `peer_not_permitted_for_service` when the member's grants
+refuse that direct route, `peer_not_in_allow_list` when it does not trust this machine) means
+that route will not work until the member changes its trust. `fabric dial` never connects, so
+the worker learns of it when the tunnel closes, and then asks `fabric probe --json` for the code.
+A typed `fault` can select another route; a grant/trust refusal cannot.
+It shows as `refused`, with the Fabric node and service, in `st replication status`,
 `st fleet status` and `st doctor`. It is neither an absent member nor a replication error;
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
 
-The worker retries that route every 24–36 minutes, at most three attempts per hour including
-the first refusal. Local writes, inbound exchanges, Fabric online events and local network
-changes do not shorten this delay. A changed route retries immediately, and a later successful outbound
-exchange clears the refusal. Other routes to the same member remain usable. Members that do
-not grant each other the service can still converge through a common hub; the hub must grant
-and exchange with both leaves. The worker never changes Fabric grants itself.
+The worker keeps a refused route selected and retries with normal peer backoff, as
+for other application errors; it does not bypass the refusal through a fallback
+route. A changed membership route retries immediately, and a later successful
+outbound exchange clears the refusal. Members that do not grant each other the
+service can still converge through a common hub; the hub must grant and exchange
+with both leaves. The worker never changes Fabric grants itself.
 
 For each peer, the status view also reports when the last exchange happened and how far apart the
 two envelope sets were at that exchange:
 
 ```text
-sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m
+sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m (arrival only)
 peer	node-b	up
   last exchange 2s ago
   node-b has 124,384 envelopes this node lacks
   this node has 3 envelopes node-b lacks
-  receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)
+  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m (arrival only; measured 2s ago)
 ```
 
 Each node measures the difference from the inventory its peer already sends in every exchange, so
 the protocol does not change and a peer on an older build is measured too. A range both sides hold
 with different digests counts exactly once the peer lists it; until then its count is a lower
 bound. The estimate divides the remaining envelopes by how fast that number shrank over recent
-10-second windows, so a peer that keeps writing lengthens it. The measurements live in memory; the
-first exchange after a restart rebuilds them.
+10-second windows, so a peer that keeps writing lengthens it. It never divides by more than the
+rate envelopes arrive, and gives no estimate while either rate is unknown; the status shows that
+rate as `closing at`. That cap is a guard, not a proof: the number can also fall without a receipt,
+when a checkpoint drops envelopes or the comparison narrows, and when receipts coincide with such a
+drop the estimate can still be too short.
+A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
+says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
+of more than five minutes between measurements forgets both rates, and so does a change in what
+the count is compared against: the peer's advertised checkpoint, a change to this node's own
+inventory below its tail (which its checkpoints make), or a switch between range and full
+inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
+comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
+checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
+as stale, with its counts and time but no rates or estimate; when nothing was missing, the status
+says so of the last measurement and when it was taken, rather than "caught up". Zero envelopes missing means nothing
+the peer listed is missing here, at arrival: admission, projection and visibility can lag behind
+it.
+The estimate is for arrival only: claims admitted, projected and visible can lag behind it, and
+the clients' JSON field (`estimated_catch_up_seconds`) is absent in every case without a forecast.
+The measurements live in memory; the first exchange after a restart rebuilds them.
 
 The `timings` line shows where this daemon has spent replication time since it started:
 
@@ -716,7 +960,7 @@ Each store stage counts only the time it holds the store's write connection, so 
 not count another's wait. Round trips are this node's own requests to its peers, including the
 peer's work to answer them. SQLite time is every statement the daemon ran; each commit waits for
 a disk flush. `/v1/replication/status` carries the same numbers as `timings`.
-`crates/st3/tests/first_sync.rs` uses them to profile an empty node syncing from a peer; `cargo test --release -p st3 --test integration first_sync:: -- --nocapture` runs it.
+`crates/fractal/tests/first_sync.rs` uses them to profile an empty node syncing from a peer; `cargo test --release -p fractal --test integration first_sync:: -- --nocapture` runs it.
 
 A node is catching up while a peer measured in the last five minutes holds more envelopes than one
 exchange carries. During that time its projections can show early history as current: a request
@@ -756,6 +1000,44 @@ wrongly. That defect is fixed in the build, with a test that fails without the f
 readmit envelopes a node already holds, does not replay its graph from nothing, and does not
 fetch a peer's projected rows. A member on an older build that still starts a heal gets an
 unsigned 404 from `/v1/peer/heal`, reports the heal as unavailable, and backs off.
+
+### A divergence is a P1 bug
+
+A divergence is a projection pure-function bug that needs a reproduction, never something to
+repair. Where the daemon's environment sets `ST3_DIVERGENCE_CHECK_INTERVAL_MS`, it looks for
+divergences at that interval, never more often than hourly; unset or zero, it never looks. The
+check is cheap by construction. Exchanges already compare digests; with the check on, a
+comparison that first finds a difference also keeps what a reproduction needs, with one pass over
+the inventory in memory, and a difference that lasts keeps the range it opened with. The check
+reads those comparisons in memory and, with one indexed read on the reader pool, every divergence
+fault and recovery on its own and its peers' daemon subjects, however old: an episode is open while
+a failure in it has no recovery that names it. That read goes through every `operational.failure`
+and `operational.recovered` claim ever recorded on those daemon subjects and keeps the divergence
+ones, so a daemon with a very large operational-fault history pays for all of it on each check. It skips a round while the store's writer or a
+write transaction ran over its target in the last minute, or replication is catching up or has put projection off, waiting a minute and
+then doubling. It writes only to open or end a fault.
+
+Each divergence is one `operational.failure` claim on the daemon subject (`daemon/NODE`) of the
+member that recorded it, with the condition `projection-divergence`, an episode starting
+`projection-divergence/` and severity `error`, so it shows as a high-priority fault for the
+fleet's fault agent. Its episode is one per member pair and projection, whichever member
+records it first. Its `reproduction` field names the projection, both members, the claim range
+(the inventory digest at the comparison that first found it and each writer's highest sequence
+in it), both members' digests for that projection, and both builds; a peer whose exchange does not
+say its build is recorded as `unknown`. Exchanges carry the sender's `build` for this; older peers
+leave it out. Nothing repairs the divergence. Its fault ends with an `operational.recovered`
+claim when the latest comparison with that peer, at the same envelopes, found the whole graph
+equal and no difference since. While another projection still differs with that peer, the
+episode stays open; that projection opens its own episode. The same pair and projection
+diverging again reopens the same episode. Comparisons are held in memory, so after a restart an
+open fault stays open until the next comparison that agrees.
+
+The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
+read, so `st doctor` (as `slo/projection-divergence`), `st slo` and the SLO history read no claims
+for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any
+other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
+replication check fails `st doctor` as above.
 
 ### First sync
 
@@ -861,6 +1143,12 @@ st replication checkpoint plan --cut 2026-09-27    # what it would drop here, pr
 st replication checkpoint excuse node-c --reason "away for a week" --as person/operator
 ```
 
+`plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
+runs there at a time. While another proof runs, as one does right after the daemon starts, the
+daemon holds the plan for up to a minute, and `st` asks again for up to four minutes more and
+prints that it is waiting. A proof still running after that is refused with
+`checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
+
 An excusal fences nothing. What the excused writer wrote while away still replicates when it
 returns, and its next seal ends the excusal.
 
@@ -893,3 +1181,46 @@ After a partition, each node continues local work. A later exchange transfers ev
 If two nodes differ, inspect unresolved records and peer errors first. Publish a replacement repair when a record needs correction.
 
 Do not copy one live SQLite file over another. A file copy can discard concurrent authority and local runtime state.
+
+### Carrier evidence for exchanges
+
+Replication and fleet status expose optional `last_successful_exchange` and
+`last_failed_exchange` per peer. Each describes the last **locally initiated**
+exchange or attempt of that outcome and records `at_unix_ms`, the locally dialed
+`carrier` (`tailscale`, `fabric`, `loopback`, or `unknown`), and, for Fabric,
+`fabric_route: "unknown"`. A failed record names the attempted carrier; a
+successful record names the carrier of the accepted exchange. Client sync notices
+expose the same two optional records with an ISO timestamp in `at`.
+
+These are two independent host-local records kept in memory, never replicated
+claims or a growing history. A successful fallback replaces the successful
+record and preserves the failed one, even after the existing `last_error` clears.
+An incoming exchange updates ordinary last-seen status but preserves the outbound
+carrier record and its original timestamp. It cannot establish an incoming carrier:
+Fabric tunnels can arrive on loopback. An inbound-only peer has no carrier record;
+absence means unknown/unavailable evidence, not an inferred loopback route. An older
+worker's locally initiated success can still have carrier `unknown`.
+Restart clears both records;
+absence means evidence is unavailable, even when durable last-seen status exists.
+Worker phase changes, connectivity events and separate probes do not rewrite them.
+
+The replication-status JSON failed record also carries optional `failure` metadata:
+`code`, `phase`, `elapsed_ms`, optional `http_status`, and a bounded sanitized `cause`.
+The phases are `dial`, `local-export`, `request-headers`, `response-body`, `verify`,
+`local-receive`, and `follow-up-export`; they describe the failing operation, not the
+carrier. Authenticated peer backend failures preserve allowlisted machine codes such
+as `replication-exchange-metadata-too-large` and the backend phase. The elapsed time
+is the local outbound attempt's duration, including any dial and polling time, not
+a remote clock measurement. Local daemon failures retain their typed API codes.
+
+Causes retain safe error categories and typed I/O kinds, not free-form error/source
+displays, URLs, credentials, claim content, request bodies, or unsigned peer prose.
+Success records omit `failure`. Older worker requests and older observations without
+details remain readable and do not invent a cause. Carrier-only client sync notices
+remain unchanged; use replication-status JSON for the diagnostic details.
+
+The worker captures a Fabric route before converting it to its loopback tunnel
+URL. Fabric currently supplies no direct/relay evidence for that exact dial or
+stream. Probe transport, connection presence snapshots and session lifetime
+counters cannot prove the path used by an earlier exchange. Part 2 of #2697
+requires Fabric API evidence; this status addition reports `unknown` meanwhile.

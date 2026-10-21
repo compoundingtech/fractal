@@ -57,6 +57,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
 
     fn checkpoint_manifest(
@@ -90,6 +91,8 @@ pub trait Backend: Clone + Send + Sync + 'static {
         peer: &str,
         status: &str,
         error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// Publish host-local worker progress without adding replicated claims.
@@ -162,7 +165,7 @@ where
         let fleet_id = fleet_id.to_owned();
         let inventory = inventory.clone();
         let signature_requests = signature_requests.to_vec();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.export", || {
             let store = backend.store();
             let exchange = if summary_only {
                 store.export_replication_summary(&fleet_id)?
@@ -177,7 +180,7 @@ where
                 exchange,
                 store_index: store.index()?,
             })
-        })
+        }))
         .await?
     }
 
@@ -187,22 +190,24 @@ where
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
         let backend = self.clone();
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
         let exchange = exchange.clone();
-        tokio::task::spawn_blocking(move || {
+        self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
             let store = backend.store();
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
             }
             let receipt = store
-                .receive_replication_exchange_asking(
+                .receive_replication_exchange_via(
                     &peer,
                     &fleet_id,
                     &exchange,
                     round_trip.is_some(),
+                    carrier,
                 )
                 .map_err(anyhow::Error::msg)?;
             store.record_transport_observation(&peer, "up", None, None)?;
@@ -214,7 +219,7 @@ where
                 changed: projected && (admission.changed || repairs != 0),
                 store_index: store.index()?,
             })
-        })
+        }))
         .await?
     }
 
@@ -261,8 +266,17 @@ where
         Ok(())
     }
 
-    async fn record_failure(&self, peer: &str, status: &str, error: &str) -> Result<()> {
-        if self.store().record_peer_failure(peer, status, error)? {
+    async fn record_failure(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
+    ) -> Result<()> {
+        if self
+            .store().record_peer_failure_via(peer, status, error, carrier, failure)?
+        {
             self.store()
                 .record_transport_observation(peer, status, Some(error), None)?;
         }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { COLLAPSED_TOOL_LINES, folds, HOME_LEGEND } from '@smalltalk/st3-views';
+import { COLLAPSED_TOOL_LINES, folds, HOME_LEGEND } from '@fractal/views';
 import { tokenColor } from './conversationStyle.ts';
 
 // stui writes the drawing rules; the phone draws from the same file. Every colour it names must

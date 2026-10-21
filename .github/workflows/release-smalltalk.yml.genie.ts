@@ -1,5 +1,6 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -12,7 +13,7 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 // breakage fails on main instead of at tag time (the daily release publishes those artifacts).
 // After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
 // the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
-export default githubWorkflow(readyPRJobs(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Smalltalk tag release",
   "on": {
@@ -22,7 +23,9 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ],
       "tags": [
         "**",
-        "!edge"
+        "!edge",
+        // Evidence records may live under refs/tags/evidence/ (one immutable tag per signed note); pushing one must never release.
+        "!evidence/**"
       ]
     },
     "workflow_dispatch": null,
@@ -32,8 +35,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "crates/st-drivers/build.rs",
-        "crates/st-drivers/src/version.rs",
+        "crates/fractal-build-stamp/**",
+        "crates/fractal-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",
         "scripts/linux-release-cc",
@@ -43,6 +46,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         "scripts/fixtures/install-release-v0.3.17",
         "scripts/release-smalltalk*",
         "scripts/release_notes*",
+        "scripts/compat-baseline-release*",
+        ".github/*-compat-baseline.json",
         "scripts/ci-build-snapshot*",
         "scripts/ci-cache-audit*",
         "scripts/ci-perf-cache",
@@ -88,7 +93,11 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         },
         {
           "name": "Test install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\npython3 scripts/compat-baseline-release-test\n"
+        },
+        {
+          "name": "Test the daily release failure path",
+          "run": "python3 scripts/release-smalltalk-daily-test"
         }
       ]
     },
@@ -246,13 +255,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       },
       "steps": [
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "fetch-depth": 0,
-            "persist-credentials": false
-          }
-        },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         {
           "uses": "actions/download-artifact@v4",
           "with": {
@@ -281,12 +284,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "SOURCE_SHA": "${{ github.sha }}"
       },
       "steps": [
-        {
-          "uses": "actions/checkout@v4",
-          "with": {
-            "fetch-depth": 0
-          }
-        },
+        ...fullHistoryCheckoutSteps(),
         {
           "uses": "actions/download-artifact@v4",
           "with": {
@@ -296,9 +294,29 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         },
         {
           "name": "Publish the verified tag artifacts",
-          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-smalltalk-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --draft --title \"Smalltalk $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json\ngh release edit \"$TAG\" --draft=false\n"
+          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-smalltalk-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json\ngh release edit \"$TAG\" --draft=false\n"
         }
       ]
+    },
+    advance: {
+      name: 'advance-compatibility-baselines',
+      if: "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
+      needs: 'publish',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 20,
+      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },
+      env: {
+        GH_TOKEN: '${{ github.token }}',
+        GH_REPO: '${{ github.repository }}',
+        TAG: '${{ github.ref_name }}',
+      },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Propose compatibility baselines after publication',
+          run: 'python3 scripts/compat-baseline-release advance "$TAG"',
+        },
+      ],
     }
   }
-}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))
+}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))))

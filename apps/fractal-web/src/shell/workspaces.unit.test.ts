@@ -1,4 +1,4 @@
-import { Attention, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Attention, decodeUnknownSync } from '@fractal/client/schema'
 import { describe, expect, it } from 'vitest'
 
 import type { SubjectSummary } from './context.tsx'
