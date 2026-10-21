@@ -373,7 +373,7 @@ fn reconnecting_status(reason: &str, tries: u32, next: Option<Instant>) -> Strin
             format!("try {} in {wait}s", tries + 1)
         }
     };
-    format!("reconnecting: {reason} · {doing} · Ctrl+\\ conversation")
+    format!("reconnecting: {reason} · {doing} · Ctrl+\\ c conversation")
 }
 
 /// How long a second Ctrl+T may follow the first and leave the terminal.
@@ -476,6 +476,8 @@ pub struct Ui {
     terminal_confirm: Option<(KeyCode, Instant)>,
     /// A Ctrl+T held back from an attached terminal: a second press soon leaves it.
     terminal_hold: Option<(KeyEvent, Instant)>,
+    /// The leader (Ctrl+\) is open: its list shows and the next key chooses from it.
+    leader: bool,
     /// The New mission form: title, request, mission id, workspace; and the focused field.
     new_mission: Option<([String; 4], usize)>,
     /// A device awaiting a confirmed revoke.
@@ -814,6 +816,7 @@ impl Ui {
             terminal: None,
             terminal_confirm: None,
             terminal_hold: None,
+            leader: false,
             new_mission: None,
             revoke: None,
             snoozed: HashSet::new(),
@@ -1084,7 +1087,7 @@ impl Ui {
         self.flash(if self.conversation_first() {
             "Conversation first: agents open on their conversation · Ctrl+] attaches the terminal"
         } else {
-            "Agents attach their terminal when opened · Ctrl+\\ shows the conversation"
+            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation"
         });
     }
 
@@ -1804,6 +1807,9 @@ impl Ui {
         self.draw_context_menu(buf, area);
         if self.help {
             self.draw_help(buf, area);
+        }
+        if self.leader {
+            self.draw_leader(buf, area);
         }
         self.draw_hover(buf);
         for view in self.terminal.iter().chain(self.parked.iter()) {
@@ -3381,7 +3387,7 @@ impl Ui {
             buf.set_stringn(
                 area.x,
                 area.y + 1,
-                " Not attached. Ctrl+] attaches the terminal; Ctrl+\\ leaves it.",
+                " Not attached. Ctrl+] attaches the terminal; Ctrl+\\ opens the leader list.",
                 area.width as usize,
                 theme::dim(),
             );
@@ -3443,7 +3449,7 @@ impl Ui {
             let header = Line::from(vec![
                 Span::styled(
                     format!(
-                        " ← Ctrl+\\  {}",
+                        " ← Ctrl+\\ leader  {}",
                         native.title().unwrap_or_else(|| view.title.clone())
                     ),
                     theme::strong(theme::ACCENT),
@@ -3509,7 +3515,7 @@ impl Ui {
             (Some(reason), _) => format!("ended: {reason}"),
             (None, Some(reason)) if view.lines.is_empty() => format!("{reason}…"),
             (None, Some(reason)) => {
-                format!("not current, reconnecting: {reason} · Ctrl+\\ conversation")
+                format!("not current, reconnecting: {reason} · Ctrl+\\ c conversation")
             }
             (None, None) => "Ctrl-C and Ctrl-D need a second press to reach the agent".into(),
         };
@@ -3937,8 +3943,12 @@ impl Ui {
                 ),
                 ("drag", "select text in one pane; release copies it"),
                 (
-                    "ctrl+]  ctrl+\\  ctrl+t ctrl+t",
-                    "attach the agent's terminal; leave it for the conversation (or Ctrl+T twice)",
+                    "ctrl+\\",
+                    "the leader, in a terminal too: a list of what to press next; Ctrl+\\ again closes the tab, c shows the conversation",
+                ),
+                (
+                    "ctrl+]  ctrl+t ctrl+t",
+                    "attach the agent's terminal; Ctrl+T twice leaves it for the conversation",
                 ),
                 (
                     "opening an agent",
@@ -4357,6 +4367,12 @@ impl Ui {
                 }
             }
         }
+        if self.leader {
+            if key.kind == KeyEventKind::Press {
+                self.leader_key(key);
+            }
+            return;
+        }
         if key.kind != KeyEventKind::Press {
             // Repeats and releases belong to the child, never to stui shortcuts or confirmations.
             if self.terminal_focused()
@@ -4380,12 +4396,14 @@ impl Ui {
             }
             return;
         }
-        // Ctrl+\ always leaves the attached tab, including through palette overlays.
-        if self.terminal_focused()
+        // Ctrl+\ is the leader, in a terminal and through palette overlays: it lists what to press
+        // next, and is never sent to the program.
+        if self.voice.is_none()
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('\\' | '4'))
         {
-            self.leave_terminal();
+            self.terminal_hold = None;
+            self.leader = true;
             return;
         }
         self.sync_terminal_slot();
@@ -5950,6 +5968,12 @@ impl Ui {
             }
         }
         self.sync_terminal_slot();
+        if self.leader {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.leader = false;
+            }
+            return;
+        }
         if self.help {
             if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.help = false;
@@ -9695,9 +9719,15 @@ mod tests {
         ui.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(_))));
         ui.key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::CONTROL));
+        assert!(ui.leader, "0x1c arrives as Ctrl+4 and opens the leader");
+        assert!(
+            !matches!(ui.effects.last(), Some(Effect::CloseTerminal)),
+            "the leader alone leaves nothing"
+        );
+        press(&mut ui, KeyCode::Char('c'));
         assert!(
             matches!(ui.effects.last(), Some(Effect::CloseTerminal)),
-            "0x1c arrives as Ctrl+4"
+            "the leader then c returns"
         );
     }
 

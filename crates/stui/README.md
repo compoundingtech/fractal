@@ -35,10 +35,10 @@ Middle-click a tab to close it: press and release over the same tab. This uses t
 close action as `Ctrl+W` and the tab's right-click menu.
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
-attaches the agent's terminal and `Ctrl+\` leaves it. A drag selects text in one pane and copies
+attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
-Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` shows its
+Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
 conversation. An agent without a terminal (a session st did not start, a harness without one) opens
 its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
 conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
@@ -46,7 +46,7 @@ device that saved the older `terminal_first` keeps attaching. An alert for the a
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Now". Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
 answers an alert. When the link to the
-terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ conversation`;
+terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
 it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Now cards show
 their own keys; `y` confirms what a card asks, and Enter never does.
 
@@ -80,7 +80,7 @@ binary, pass its path followed by `--ui --no-panic`; the release build has no de
 real terminal tab in PTYs through the default attach, conversation first, an alert over the
 terminal and a dropped link. The two
 QA scripts need a live daemon and the `pty` executable: one opens an agent from `Ctrl+K`, scrolls
-it and drags to copy; the other attaches the agent's terminal and leaves it by `Ctrl+\` and by a
+it and drags to copy; the other attaches the agent's terminal and leaves it by `Ctrl+\` then `c` and by a
 click on its header. Use a person of their own (such as `person/<qa-name>`) so they mark nothing
 read for anyone.
 
