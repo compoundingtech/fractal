@@ -105,6 +105,44 @@ class StTest(unittest.TestCase):
             found.append(json.loads(git(self.work, 'cat-file', 'blob', blob)))
         return found
 
+    def nudge_recorder(self, exit_code=0):
+        calls = Path(self.tmp.name) / f'nudge-calls-{exit_code}'
+        argv = [sys.executable, '-c', f'import sys; open({str(calls)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n"); sys.exit({exit_code})', 'pull-now']
+        return calls, json.dumps(argv)
+
+    def test_a_push_asks_this_host_s_evidence_log_to_pull_once_and_a_run_without_push_does_not(self):
+        self.commit('b.txt', 'two')
+        calls, argv = self.nudge_recorder()
+        code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_EVIDENCE_LOG_NUDGE': argv})
+        self.assertEqual(code, 0, err)
+        self.assertFalse(calls.exists(), 'nothing was pushed, so the log has nothing new')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_LOG_NUDGE': argv})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls.read_text(), 'pull-now\n')
+        self.assertIn("asked this host's log to pull now", out)
+        pushed = subprocess.run(['git', '-C', str(Path(self.tmp.name) / 'origin.git'), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/'],
+                                capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(pushed), 1, 'the record reached the remote before the log was asked')
+
+    def test_a_failing_or_malformed_nudge_never_changes_the_result(self):
+        self.commit('b.txt', 'two')
+        calls, argv = self.nudge_recorder(exit_code=5)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_LOG_NUDGE': argv})
+        self.assertEqual(code, 0, err)
+        self.assertIn('its timer will', out)
+        self.commit('c.txt', 'three')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_LOG_NUDGE': '"systemctl"'})
+        self.assertEqual(code, 0, err)
+        self.assertIn('not asked', out)
+
+    def test_without_a_configured_command_the_log_is_asked_only_where_its_unit_is_installed(self):
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.object(st_test.shutil, 'which', return_value='/bin/systemctl'):
+            self.assertIsNone(st_test.log_nudge_argv())
+            unit = self.home / '.config/systemd/user/evidence-log.service'
+            unit.parent.mkdir(parents=True)
+            unit.write_text('[Service]\n')
+            self.assertEqual(st_test.log_nudge_argv(), ['systemctl', '--user', 'start', '--no-block', 'evidence-log.service'])
+
     def test_a_branch_that_holds_the_base_tip_is_signed_in_place_and_reported_covered(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test('--check', 'demo')

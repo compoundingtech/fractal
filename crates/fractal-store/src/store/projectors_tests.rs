@@ -21,6 +21,7 @@ fn open_installs_each_domain_in_order() {
         names(projectors::OPEN),
         [
             "publication-facts",
+            "identities",
             "custom",
             "resources",
             "glass-heads",
@@ -38,12 +39,14 @@ fn append_projects_each_claim_kind_in_order() {
         ("resource.observed", &["custom", "resources"][..]),
         ("glass.upserted", &["custom", "glass-heads"]),
         ("glass.deleted", &["custom", "glass-heads"]),
-        ("agent.retired", &["custom", "retirements"]),
+        ("agent.retired", &["identities", "custom", "retirements"]),
+        ("agent.renamed", &["identities", "custom"]),
+        ("mission.renamed", &["identities", "custom"]),
         ("person.directive-note-set", &["custom", "directive-notes"]),
         ("message.sent", &["custom", "agent-messages"]),
         ("harness.limits", &["custom", "limits"]),
         ("arrangement.edited", &["custom", "arrangements"]),
-        ("intent.desired", &["custom"]),
+        ("intent.desired", &["identities", "custom"]),
         ("work.claimed", &["custom"]),
         ("message.read", &["custom"]),
     ] {
@@ -52,6 +55,7 @@ fn append_projects_each_claim_kind_in_order() {
     assert_eq!(
         projectors::APPEND.iter().map(|projector| projector.name).collect::<Vec<_>>(),
         [
+            "identities",
             "custom",
             "resources",
             "glass-heads",
@@ -76,7 +80,7 @@ fn replicated_claims_project_arrangements_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "resources", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements"]
+        ["custom", "identities", "resources", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements"]
     );
 }
 
@@ -84,12 +88,13 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "resources", "glass-heads", "directive-notes", "arrangements"]
+        ["planning", "identities", "resources", "glass-heads", "directive-notes", "arrangements"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
         [
             "full-replay/planning",
+            "full-replay/identities",
             "full-replay/resources",
             "full-replay/glass-heads",
             "full-replay/directive-notes",
