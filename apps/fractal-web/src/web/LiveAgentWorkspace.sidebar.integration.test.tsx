@@ -248,7 +248,7 @@ it('renders the RM1 two-line facts and freezes age without replacing the working
   await mount(1440)
   const row = roster().querySelector('[data-testid="taste-agent-row"]')!
   expect(row.querySelector('[data-row-column="title"]')?.textContent).toContain(agent.name)
-  expect(row.querySelector('[data-row-column="line2"]')?.textContent).toContain('build-1')
+  expect(row.querySelector('[data-row-column="line2"]')?.textContent).toContain('example-primary')
   expect(row.querySelector('[data-row-column="time"] time')?.textContent).toBe('4s')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   await act(async () => registry.set(now, 60_000))
