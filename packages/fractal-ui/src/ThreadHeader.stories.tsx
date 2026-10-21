@@ -125,7 +125,8 @@ export const NarrowPhoneTerminalDisabled: Story = { tags: ['critical'], args: { 
   await userEvent.click(terminal)
   const reason = await within(document.body).findByRole('dialog', { name: 'Terminal unavailable' })
   await expect(reason).toHaveTextContent(terminalReason)
-  await expect(reason).toBeVisible()
+  // The popover mounts at the start of its entrance transition (opacity 0) and is painted once it settles.
+  await waitFor(() => expect(reason).toBeVisible())
   await expect(terminal).toHaveAttribute('aria-pressed', 'false')
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Terminal unavailable' })).toBeNull())

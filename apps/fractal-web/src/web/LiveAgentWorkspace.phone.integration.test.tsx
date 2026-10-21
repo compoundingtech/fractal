@@ -3,7 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, RuntimeId, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -136,7 +136,7 @@ it('keeps a labelled Terminal toggle in the phone header that stays described an
 })
 
 it('toggles the terminal drawer from the phone header Terminal button and reports its pressed state', async () => {
-  const withTerminal = { ...agent, runtime_ids: ['runtime/metric-track'] } as typeof agent
+  const withTerminal = { ...agent, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/metric-track')] }
   const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
   await vi.waitFor(() => expect(phoneTerminal().hasAttribute('aria-disabled')).toBe(false))

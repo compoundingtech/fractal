@@ -2,6 +2,7 @@ import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as Atom from 'effect/reactivity/Atom'
+import { RuntimeId, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -10,15 +11,18 @@ import { fixtureProjections } from '../fixtures/projections.ts'
 import { LiveAgentWorkspace, narrowLayoutQuery } from './LiveAgentWorkspace.tsx'
 
 // The real workspace over the deterministic fixture world, with resources supported as on the live gateway.
-const source = {
-  ...fixtureSource({ world: fixtureProjections }),
-  resources: { byAgent: () => Atom.make(observed({ value: { items: [], nextCursor: null } })), byId: () => Atom.make(waiting), subjects: Atom.make([]), loadMore: () => undefined, refresh: () => undefined, resolveFile: () => undefined },
-}
+const resources = { byAgent: () => Atom.make(observed({ value: { items: [], nextCursor: null } })), byId: () => Atom.make(waiting), subjects: Atom.make([]), loadMore: () => undefined, refresh: () => undefined, resolveFile: () => undefined }
 const storyAgent = 'agent/build-host-a/workbench-shell'
+// Fixture agents report no runtime, so their terminal is unavailable ("This agent has no terminal.").
+const source = { ...fixtureSource({ world: fixtureProjections }), resources }
+// The same world where the roster reports the story agent's runtime, as the live roster does for a seat with a terminal.
+// Its screen is the fixture world's terminal screen for that agent.
+const storyRuntime = decodeUnknownSync(RuntimeId)('runtime/build-host-a/workbench-shell')
+const terminalSource = { ...fixtureSource({ world: { ...fixtureProjections, agents: fixtureProjections.agents.map(row => row.id === storyAgent ? { ...row, runtime_ids: [storyRuntime] } : row) } }), resources }
 
-const NarrowLayoutStory = (_: { readonly scheme: 'dark' | 'light' }) => {
+const NarrowLayoutStory = ({ terminalRuntime = false }: { readonly scheme: 'dark' | 'light'; readonly terminalRuntime?: boolean }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
-  return <DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>
+  return <DataSourceProvider source={terminalRuntime ? terminalSource : source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>
 }
 
 /** Below 900 px the thread is the only thing on screen; one Agent details button opens the agent's actions and Details as a sheet. Wider windows keep the inline panel. */
@@ -40,6 +44,15 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
+/**
+ * The workspace routes through `history.pushState`. A play that selects an agent or a pane puts the frame back on the
+ * story's own URL when it ends, so Storybook and its runners still address this story when it finishes.
+ */
+const restoringStoryUrl = (play: NonNullable<Story['play']>): NonNullable<Story['play']> => async context => {
+  const storyUrl = window.location.href
+  try { await play(context) } finally { window.history.replaceState(window.history.state, '', storyUrl) }
+}
+
 const workspace = async (canvasElement: HTMLElement) => {
   await waitFor(() => expect(within(canvasElement).getByText('Let me find where groups close.')).toBeVisible(), { timeout: 60000 })
   const narrow = window.matchMedia(narrowLayoutQuery).matches
@@ -58,15 +71,25 @@ const assertWide = async (canvasElement: HTMLElement) => {
   await expect(header.queryByRole('button', { name: 'Agent details' })).toBeNull()
   await expect(header.queryByRole('button', { name: 'Terminal' })).toBeNull()
 }
+/**
+ * The inspector is a lazy chunk whose loading fallback carries the same "Agent inspector" landmark, so its own tab
+ * list marks the loaded panel. Tabs are read from that list: the Changes view's diff panel has its own tab strip.
+ */
+const loadedInspector = async (scope: HTMLElement) => {
+  const views = await within(scope).findByRole('tablist', { name: 'Agent inspector views' }, { timeout: 15000 })
+  const inspector = views.closest<HTMLElement>('aside[aria-label="Agent inspector"]')!
+  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name }) }
+}
 /** The docked inspector opens on Details; its separator names the visible view and follows the tab selection. */
 const openWideDetails = async (canvasElement: HTMLElement) => {
   await assertWide(canvasElement)
   const { canvas, header } = await workspace(canvasElement)
   await userEvent.click(header.getByRole('button', { name: 'Toggle right panel' }))
-  const inspector = await canvas.findByRole('complementary', { name: 'Agent inspector' }, { timeout: 15000 })
-  await expect(within(inspector).getByRole('tab', { name: 'Details' })).toHaveAttribute('aria-selected', 'true')
+  const { inspector, tab } = await loadedInspector(canvasElement)
+  await expect(tab('Details')).toHaveAttribute('aria-selected', 'true')
   await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
-  await userEvent.click(within(inspector).getByRole('tab', { name: 'Changes' }))
+  await userEvent.click(tab('Changes'))
+  await expect(tab('Changes')).toHaveAttribute('aria-selected', 'true')
   await expect(await within(inspector).findByRole('complementary', { name: 'Changes' }, { timeout: 15000 })).toBeVisible()
   await expect(canvas.getByRole('separator', { name: 'Resize Changes' })).toBeVisible()
   await expect(canvas.queryByRole('separator', { name: 'Resize Details' })).toBeNull()
@@ -75,8 +98,8 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
   await userEvent.click(within(inspector).getByRole('button', { name: 'Close agent inspector' }))
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
   await userEvent.click(header.getByRole('button', { name: 'Toggle right panel' }))
-  const reopened = await canvas.findByRole('complementary', { name: 'Agent inspector' }, { timeout: 15000 })
-  await expect(within(reopened).getByRole('tab', { name: 'Details' })).toHaveAttribute('aria-selected', 'true')
+  const reopened = await loadedInspector(canvasElement)
+  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
   await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
 }
 
@@ -131,7 +154,10 @@ export const Drawers: Story = { play: async ({ canvasElement }) => {
   await expect(breadcrumb).toHaveTextContent('build-host-a')
   await expect(breadcrumb).toHaveTextContent('WorkbenchShell')
   const { terminal } = await assertPhoneHeader(canvasElement)
+  // The fixture roster reports no runtime for this agent: the toggle stays, disabled and described by why.
   await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await expect(terminal).toHaveAttribute('aria-disabled', 'true')
+  await expect(terminal).toHaveAccessibleDescription('This agent has no terminal.')
   await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
 } }
 export const DrawersLight: Story = { ...Drawers, args: { scheme: 'light' } }
@@ -141,16 +167,16 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   const opener = header.getByRole('button', { name: 'Agent details' })
   await userEvent.click(opener)
   const sheet = await canvas.findByRole('dialog', { name: 'Agent details' })
-  // The inspector is a lazy chunk; on a cold dev server its first load takes longer than findBy's default second.
-  const inspector = await within(sheet).findByRole('complementary', { name: 'Agent inspector' }, { timeout: 15000 })
+  // On a cold dev server the inspector chunk's first load takes longer than findBy's default second.
+  const inspector = await loadedInspector(sheet)
   await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true))
-  return { canvas, sheet, inspector, opener }
+  return { canvas, sheet, opener, ...inspector }
 }
 /** The right sheet holds the agent inspector: Details first, Changes one tab away; the conversation actions stay in the header. */
 export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   const { narrow } = await workspace(canvasElement)
   if (!narrow) return openWideDetails(canvasElement)
-  const { canvas, sheet, inspector, opener } = await openDetailsSheet(canvasElement)
+  const { canvas, sheet, inspector, views, tab, opener } = await openDetailsSheet(canvasElement)
   await expect(opener).toHaveAttribute('aria-expanded', 'true')
   // The sheet header's X is its only close; the header's actions are not repeated in the sheet.
   await expect(within(sheet).getByRole('button', { name: 'Close agent details' })).toBeVisible()
@@ -158,18 +184,17 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   await expect(within(sheet).queryByRole('toolbar', { name: 'Agent actions' })).toBeNull()
   for (const name of ['Actions for WorkbenchShell', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
   await expect(canvas.queryByRole('separator', { name: /^Resize / })).toBeNull()
-  const tabs = within(within(inspector).getByRole('tablist', { name: 'Agent inspector views' })).getAllByRole('tab')
-  await expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Changes', 'Details'])
-  for (const tab of tabs) {
-    const rect = tab.getBoundingClientRect()
+  const tabs = within(views).getAllByRole('tab')
+  await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Changes', 'Details'])
+  for (const node of tabs) {
+    const rect = node.getBoundingClientRect()
     await expect(rect.width).toBeGreaterThanOrEqual(44)
     await expect(rect.height).toBeGreaterThanOrEqual(44)
   }
-  const details = within(inspector).getByRole('tab', { name: 'Details' })
-  await expect(details).toHaveAttribute('aria-selected', 'true')
+  await expect(tab('Details')).toHaveAttribute('aria-selected', 'true')
   // Changes scrolls as one column inside the sheet; the captured-change rows sit above the 'Captured change' header, never under it.
-  await userEvent.click(within(inspector).getByRole('tab', { name: 'Changes' }))
-  await expect(within(inspector).getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(tab('Changes'))
+  await expect(tab('Changes')).toHaveAttribute('aria-selected', 'true')
   const changes = await within(inspector).findByRole('complementary', { name: 'Changes' }, { timeout: 15000 })
   const capturedHeader = await within(changes).findByRole('heading', { name: 'Captured change' })
   const rows = [...changes.querySelectorAll('[data-captured-change]')]
@@ -181,10 +206,10 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   await userEvent.click(within(sheet).getByRole('button', { name: 'Close agent details' }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
   const reopened = await openDetailsSheet(canvasElement)
-  await expect(within(reopened.inspector).getByRole('tab', { name: 'Details' })).toHaveAttribute('aria-selected', 'true')
+  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
 } }
 /** Keyboard path through both sheets: each opens with focus inside, Escape or the backdrop closes it, and focus returns to its opener. */
-export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
+export const DrawersFlow: Story = { play: restoringStoryUrl(async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) return assertWide(canvasElement)
   // Agents, from the left.
@@ -235,25 +260,31 @@ export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   const reopened = await canvas.findByRole('dialog', { name: 'Agent details' })
   await userEvent.click(within(reopened).getByRole('button', { name: 'Close agent details' }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
-} }
-/** The header's terminal toggle, off then on then off: on a phone it is the labelled 44px Terminal button; wider windows keep the icon toggle. */
-export const TerminalToggle: Story = { play: async ({ canvasElement }) => {
+}) }
+/**
+ * The header's terminal toggle, off then on then off, for an agent whose roster row reports a runtime: on a phone it is
+ * the labelled 44px Terminal button; wider windows keep the icon toggle.
+ */
+export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: restoringStoryUrl(async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) await assertWide(canvasElement)
   const terminal = narrow ? (await assertPhoneHeader(canvasElement)).terminal : header.getByRole('button', { name: 'Toggle terminal drawer' })
   await expect(terminal).toHaveAttribute('aria-pressed', 'false')
   await expect(terminal).not.toHaveAttribute('aria-disabled')
   await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  const thread = canvasElement.querySelector<HTMLElement>('[data-testid="conversation-history-host"]')
+  await expect(thread).not.toBeNull()
   await userEvent.click(terminal)
   await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'true'))
-  // The terminal opens as a drawer under the thread, which stays on screen.
+  // The terminal opens as a drawer under the thread, which keeps its node and stays on screen.
   await expect(await canvas.findByRole('region', { name: 'Terminal drawer' }, { timeout: 15000 })).toBeVisible()
-  await expect(canvas.getByText('Let me find where groups close.')).toBeVisible()
+  await expect(canvasElement.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
+  await expect(thread!.getBoundingClientRect().height).toBeGreaterThan(0)
   if (narrow) await assertPhoneHeader(canvasElement)
   terminal.focus()
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'false'))
   await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull())
   if (narrow) await assertPhoneHeader(canvasElement)
-} }
-export const TerminalToggleLight: Story = { ...TerminalToggle, args: { scheme: 'light' } }
+}) }
+export const TerminalToggleLight: Story = { ...TerminalToggle, args: { ...TerminalToggle.args, scheme: 'light' } }
