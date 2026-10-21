@@ -872,6 +872,36 @@ fn an_unbound_observation_keeps_the_provider_account() {
 }
 
 #[test]
+fn usage_shows_agent_messages_per_merged_pull_request() {
+    let line = |coordination: Value| {
+        let output = render_usage_report(&json!({"rows": [], "coordination": coordination}), 24, None);
+        output.lines().find(|line| line.starts_with("MESSAGES  ")).map(str::to_owned)
+    };
+    assert_eq!(
+        line(json!({"agent_to_agent": 26, "silent": 10, "merged_pull_requests": 4,
+            "agent_to_agent_per_merged_pull_request": 6.5, "complete": true})).as_deref(),
+        Some("MESSAGES  26 agent to agent (10 silent) · 4 merged PRs · 6.5 per merged PR")
+    );
+    assert_eq!(
+        line(json!({"agent_to_agent": 25, "silent": 0, "merged_pull_requests": 4,
+            "agent_to_agent_per_merged_pull_request": null, "complete": false})).as_deref(),
+        Some("MESSAGES  25 agent to agent (0 silent) · 4 merged PRs · per merged PR unknown until message history is counted")
+    );
+    assert_eq!(
+        line(json!({"agent_to_agent": 3, "silent": 0, "merged_pull_requests": 0,
+            "agent_to_agent_per_merged_pull_request": null, "complete": true})).as_deref(),
+        Some("MESSAGES  3 agent to agent (0 silent) · 0 merged PRs · per merged PR unknown with none merged")
+    );
+    // An older daemon counts messages but not merged pull requests.
+    assert_eq!(
+        line(json!({"agent_to_agent": 3, "silent": 1, "complete": true})).as_deref(),
+        Some("MESSAGES  3 agent to agent (1 silent)")
+    );
+    // Without the count read at all, spend shows alone.
+    assert_eq!(line(Value::Null), None);
+}
+
+#[test]
 fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
     let report = json!({"rows": [], "limits": [
         {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 84.0, "stale": true,
@@ -4821,6 +4851,42 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     };
     assert_eq!(explicit.identity.as_deref(), Some("agent/explicit"));
     assert!(explicit.archive);
+}
+
+#[test]
+fn fyi_is_the_silent_kind_on_send_and_reply() {
+    let parse = |extra: &[&str]| {
+        let mut args = vec!["st3", "conversations", "send", "agent/example/worker", "--from", "agent/example/peer", "--body", "Merged."];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args).map(|cli| match cli.command {
+            Command::Conversations {
+                command: MessageCommand::Send(send),
+            } => send.wake,
+            _ => panic!("send did not parse"),
+        })
+    };
+    let fyi = parse(&["--fyi"]).unwrap();
+    assert!(fyi.silent());
+    assert_eq!(fyi.tags().collect::<Vec<_>>(), [st3::silent::SILENT_TAG]);
+    assert_eq!(
+        parse(&["--kind", "silent"]).unwrap().tags().collect::<Vec<_>>(),
+        fyi.tags().collect::<Vec<_>>()
+    );
+    assert!(!parse(&[]).unwrap().silent());
+    // One way to choose: --fyi with an explicit kind is refused, even --kind silent.
+    assert!(parse(&["--fyi", "--kind", "wake"]).is_err());
+    assert!(parse(&["--fyi", "--kind", "silent"]).is_err());
+    let reply = Cli::try_parse_from([
+        "st3", "conversations", "reply", "message/example", "--from", "agent/example/peer", "--body", "Noted.", "--fyi",
+    ])
+    .unwrap();
+    let Command::Conversations {
+        command: MessageCommand::Reply(reply),
+    } = reply.command
+    else {
+        panic!("reply did not parse");
+    };
+    assert!(reply.wake.silent());
 }
 
 #[test]
