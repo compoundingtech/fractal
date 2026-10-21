@@ -2032,12 +2032,37 @@ mod tests {
         let queries = QUERIES.with(|queries| std::mem::take(&mut *queries.borrow_mut()));
         assert!(!queries.iter().any(|sql|sql.contains("owned-set.revised")),
             "message page body folding cannot scan owned-set receipts: {queries:?}");
-        let desired = queries.iter().find(|sql|sql.contains("SELECT kind, revision, claim_id, body") && sql.contains("FROM desired WHERE subject="))
-            .expect("the actual body fold must issue the desired primary-key lookup");
-        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {desired}")).unwrap()
-            .query_map([], |row|row.get::<_,String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert!(plan.iter().any(|step|step.contains("SEARCH desired") && step.contains("subject=")),
-            "desired lookup must be a subject-key seek: {plan:?}");
+        // Identify body reads by their result columns, independent of SQL aliases
+        // and join shape. Exclude desired-existence probes, which have no body.
+        let desired_queries: Vec<_> = queries.iter()
+            .filter(|sql| sql.split_whitespace().any(|token| token.eq_ignore_ascii_case("desired")))
+            .filter(|sql| connection.prepare(sql).unwrap().column_names().starts_with(
+                &["kind", "revision", "claim_id", "body"]))
+            .collect();
+        assert!(!desired_queries.is_empty(),
+            "the actual body fold must issue the desired primary-key lookup: {queries:?}");
+        for desired in desired_queries {
+            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {desired}")).unwrap()
+                .query_map([], |row|row.get::<_,String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            for (table, alias, key) in [
+                ("desired", "d", "subject="),
+                ("identity_heads", "h", "identity="),
+                ("identity_names", "identity_names", "name="),
+                ("replica_records", "replica_records", "subject_hint="),
+            ] {
+                assert!(plan.iter().any(|step| {
+                    let mut tokens = step.split_whitespace();
+                    tokens.next() == Some("SEARCH")
+                        && tokens.next().is_some_and(|name| name == table || name == alias)
+                        && step.contains(key)
+                }), "{table} lookup must be a keyed seek on {key}: {plan:?}");
+            }
+            // The one-row identity expression is a coroutine, not a stored table.
+            // Only its synthetic rows may be scanned; every real table must be sought.
+            assert!(!plan.iter().any(|step| step.starts_with("SCAN ")
+                && step != "SCAN CONSTANT ROW" && step != "SCAN requested"),
+                "message body lookup cannot scan stored tables: {plan:?}");
+        }
     }
 
     #[test]

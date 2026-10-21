@@ -31,6 +31,11 @@ class ReadCheckResizeObserver {
 const originalFonts = Object.getOwnPropertyDescriptor(document, 'fonts')
 beforeAll(() => {
   vi.stubGlobal('ResizeObserver', ReadCheckResizeObserver)
+  vi.stubGlobal('matchMedia', (media: string) => ({
+    matches: false, media, onchange: null,
+    addEventListener() {}, removeEventListener() {},
+    addListener() {}, removeListener() {}, dispatchEvent: () => true,
+  }))
   Object.defineProperty(document, 'fonts', { configurable: true, value: Object.assign(new EventTarget(), { ready: Promise.resolve() }) })
 })
 afterAll(() => {
@@ -362,7 +367,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(263)
+  expect(exemptions).toHaveLength(272)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 

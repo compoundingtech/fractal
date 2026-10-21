@@ -227,7 +227,7 @@ const svgChevron = (host: Element, state: keyof typeof chevronPaths) => {
   return host.childElementCount === 1 && host.textContent === '' && svg instanceof SVGSVGElement && svg.getAttribute('viewBox') === '0 0 16 16' && svg.getAttribute('width') === '12' && svg.getAttribute('height') === '12' && svg.getAttribute('aria-hidden') === 'true' && svg.querySelector('path')?.getAttribute('d') === chevronPaths[state]
 }
 const box = (element: Element) => { const { width, height } = element.getBoundingClientRect(); return { width, height } }
-/** Real and pinned disclosure chevrons are the same kit SVG at the same 24px box and 12px glyph; the negative controls prove the check rejects a Unicode glyph and the wrong state. */
+/** Real and pinned disclosure chevrons share the RM1 16px gutter × 24px first-line box and 12px kit SVG; negative controls reject Unicode and the wrong state. */
 export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   // At 100px the outer parents are pinned while deeper parent rows are still mounted; at the default 600 only leaves stay mounted.
@@ -250,7 +250,7 @@ export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement 
     await expect(box(reference.firstElementChild!)).toEqual({ width: 12, height: 12 })
     await expect(getComputedStyle(chevron).color).toBe(getComputedStyle(reference).color)
   }
-  await expect(box(reference)).toEqual({ width: 24, height: 24 })
+  await expect(box(reference)).toEqual({ width: 16, height: 24 })
   for (const legacy of ['⌄', '›']) { const glyph = document.createElement('span'); glyph.textContent = legacy; await expect(svgChevron(glyph, legacy === '⌄' ? 'open' : 'closed')).toBe(false) }
   await expect(no.querySelectorAll('[data-pinned-chevron]')).toHaveLength(0)
   await userEvent.click(within(no as HTMLElement).getByRole('button', { name: 'Collapse all' }))

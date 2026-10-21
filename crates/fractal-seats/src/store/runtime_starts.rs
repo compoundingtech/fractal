@@ -710,7 +710,11 @@ impl RuntimeStartsStore for Store {
                     && original.kind == request.kind && original.actor == request.actor
                     && original.origin == request.origin && original.body == request.body)
                     || request.subject != operation.subject || request.kind != "runtime.action.requested"
-                    || request.body.pointer("/fields/action").and_then(Value::as_str) != Some("restart")
+                    // A self-restart released at its quiet boundary starts like any restart.
+                    || !matches!(
+                        request.body.pointer("/fields/action").and_then(Value::as_str),
+                        Some("restart" | fractal_store::restart::WHEN_IDLE)
+                    )
                     || request.body.pointer("/evidence/0").and_then(Value::as_str)
                         != selected.as_deref() {
                     return Ok(RuntimeStartAdmission::Superseded);
