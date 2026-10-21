@@ -10100,6 +10100,11 @@ fn nonowner_terminal_observation(
         )
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static ACTUAL_HISTORY_BODIES_DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn latest_actual_at(
     connection: &Connection,
     subject: &str,
@@ -10137,6 +10142,8 @@ pub fn latest_actual_at(
             let index: u64 = row.get(0)?;
             let (kind, body): (String, String) =
                 bodies.query_row(/* sqlite-large-value: allow-for-now lv-h6a4734d1f7f8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            #[cfg(any(test, feature = "test-support"))]
+            ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
             Ok((kind, serde_json::from_str::<Value>(&body)?))
         })())
     }))
