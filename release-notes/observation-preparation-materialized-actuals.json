@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Read resource observation preparation from a rebuildable canonical projection instead of replaying resource and item history",
+  "replay": {
+    "status": "changed",
+    "detail": "Opening an existing store builds the local preparation projection from retained claims. Canonical late arrivals, repairs and ordering changes refresh affected subjects; historical at-index reads continue to use the canonical fold. Replicated claim identity and history are unchanged."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds local, rebuildable preparation state and dirty tracking alongside resource_observations. The storage version and replicated schema are unchanged. The preparation state preserves the canonical actual value, including legacy flat versus nested facts and first-opener attribution, plus the existing raw timestamp and resource-kind selectors."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No observation frequency, subscription rule, retry, timeout, checkpoint or retention changes. Observer and subscription actual readers are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Resource and item facts, normalization errors, first-opener attribution and preparation timestamps retain their existing selection semantics, including timestamps selected from repaired originals. Preparation point reads share the existing pinned SQLite read cut and preparation fence."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No manual migration is needed. Initial projection construction is performed during the normal store-open transaction."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The preparation projection is disposable and reconstructible from retained claims. Downgrading restores historical preparation reads without converting claim data."
+  }
+}
