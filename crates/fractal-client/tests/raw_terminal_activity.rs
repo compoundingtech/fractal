@@ -121,10 +121,14 @@ async fn attach_selected_use_is_rejected_without_closing_pty() {
             let (stream, _) = listener.accept().await.unwrap();
             let mut websocket = tokio_tungstenite::accept_hdr_async(
                 stream,
-                |_: &Request, mut response: Response| {
+                |request: &Request, mut response: Response| {
+                    assert_eq!(
+                        request.headers()["sec-websocket-protocol"],
+                        "fractal.client.pty.v0, fractal.cap.attach-test",
+                    );
                     response.headers_mut().insert(
                         "sec-websocket-protocol",
-                        "st3.client.pty.v0".parse().unwrap(),
+                        "fractal.client.pty.v0".parse().unwrap(),
                     );
                     Ok(response)
                 },

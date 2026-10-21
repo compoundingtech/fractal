@@ -4338,8 +4338,8 @@ mod wire_receiver_tests {
         let request = websocket_request(
             "ws://localhost/stream",
             None,
-            Some("secret"),
             None,
+            Some("secret"),
             "custom-subjects.v1, conversation-blocks.v1",
         )
         .unwrap();

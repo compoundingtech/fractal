@@ -2782,7 +2782,7 @@ mod wire_receiver_tests {
         assert_eq!(ERROR_VERSION, "st3.client.error.v0");
         assert_eq!(TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0");
         assert_eq!(RAW_TERMINAL_SUBPROTOCOL, "fractal.client.pty.v0");
-        let request = websocket_request("ws://localhost/stream", None, Some("secret"), None, "custom-subjects.v1, conversation-blocks.v1").unwrap();
+        let request = websocket_request("ws://localhost/stream", None, None, Some("secret"), "custom-subjects.v1, conversation-blocks.v1").unwrap();
         assert_eq!(request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             "fractal.client.terminal.v0, fractal.cap.secret");
     }
