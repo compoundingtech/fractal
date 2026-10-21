@@ -448,9 +448,9 @@ public struct MachineTransport: Codable, Sendable { public let `protocol`, statu
 public struct MachineResource: Codable, Sendable { public let id, kind, revision, updatedAt, hostID, name, state: String; public let fleetID: String?; public let capacity: MachineCapacity; public let occupancy: MachineOccupancy; public let projects, work: [String]; public let transports: [MachineTransport]; public let runtimeIDs: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", hostID = "host_id", name, state, fleetID = "fleet_id", capacity, occupancy, projects, work, transports, runtimeIDs = "runtime_ids", operational } }
 public struct DeviceResource: Codable, Sendable {
     public let id, kind, revision, updatedAt, sessionActor, state, expiresAt: String
-    public let personID, name: String?; public let scopes: [String]; public let operational: Operational?
+    public let personID, name: String?; public let scopes: [String]; public let push: PushRegistrationStatus?; public let operational: Operational?
     public let principal: AssistantPrincipal?; public let senderClass: AssistantSenderClass?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
-    enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", personID = "person_id", name, sessionActor = "session_actor", state, scopes, expiresAt = "expires_at", operational, principal, senderClass = "sender_class", grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
+    enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", personID = "person_id", name, sessionActor = "session_actor", state, scopes, expiresAt = "expires_at", push, operational, principal, senderClass = "sender_class", grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
 }
 public struct OperationResource: Codable, Sendable { public let id, kind, revision, updatedAt, component, severity, state, summary: String; public let targets: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", component, severity, state, summary, targets, operational } }
 public struct HistoryResource: Codable, Sendable { public let id, kind, revision, updatedAt, eventType, occurredAt, summary: String; public let storeIndex: UInt64; public let targets: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", eventType = "event_type", occurredAt = "occurred_at", storeIndex = "store_index", summary, targets, operational } }
@@ -776,6 +776,162 @@ public struct TerminalResizeParameters: Codable, Sendable { public var terminalI
 public struct TerminalAttachment: Codable, Sendable { public let attachmentID: String; public let terminalID: String; public let runtimeIncarnation: String; public let ownerHostID: String; public let streamURL: String; public let streamCapability: String?; public let state: String; public let expiresAt: String; public let reusable: Bool?; public let ttlS: UInt64?; public let retryHint: String?; enum CodingKeys: String, CodingKey { case attachmentID = "attachment_id", terminalID = "terminal_id", runtimeIncarnation = "runtime_incarnation", ownerHostID = "owner_host_id", streamURL = "stream_url", streamCapability = "stream_capability", state, expiresAt = "expires_at", reusable, ttlS = "ttl_s", retryHint = "retry_hint" } }
 public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let arrangementRevision: String?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", arrangementRevision = "arrangement_revision" } }
 
+public typealias ClientDiagnosticUuid = String
+public typealias ClientDiagnosticMilliseconds = UInt64
+
+public enum ClientDiagnosticSeverity: String, Codable, Sendable { case info, warning, error, fatal }
+public enum ClientDiagnosticCaptureSource: String, Codable, Sendable { case js, nativeMarker = "native-marker", metrickit }
+public enum ClientDiagnosticOccurrenceTimeBasis: String, Codable, Sendable { case exact, metricIntervalEnd = "metric-interval-end" }
+public enum ClientDiagnosticLaunchIdBasis: String, Codable, Sendable { case process, metricInterval = "metric-interval" }
+public enum ClientDiagnosticPlatform: String, Codable, Sendable { case ios }
+public enum ClientDiagnosticBreadcrumb: String, Codable, Sendable {
+    case nativeStart = "native-start", jsStart = "js-start", rootMounted = "root-mounted"
+    case foreground, background, previousLaunchUnclean = "previous-launch-unclean"
+}
+public enum ClientDiagnosticJsErrorName: String, Codable, Sendable {
+    case error = "Error", typeError = "TypeError", rangeError = "RangeError"
+    case referenceError = "ReferenceError", syntaxError = "SyntaxError", unknownError = "UnknownError"
+}
+public enum ClientDiagnosticJsModule: String, Codable, Sendable { case app, reactNative = "react-native", unknown }
+public enum ClientDiagnosticNativeBinary: String, Codable, Sendable { case app, system, unknown }
+
+public struct ClientDiagnosticJsFrame: Codable, Sendable, Equatable {
+    public let module: ClientDiagnosticJsModule
+    public let line, column: UInt32
+    public init(module: ClientDiagnosticJsModule, line: UInt32, column: UInt32) {
+        self.module = module; self.line = line; self.column = column
+    }
+}
+
+public struct ClientDiagnosticNativeFrame: Codable, Sendable, Equatable {
+    public let binary: ClientDiagnosticNativeBinary
+    public let offset: String
+    public init(binary: ClientDiagnosticNativeBinary, offset: String) {
+        self.binary = binary; self.offset = offset
+    }
+}
+
+/// Bounded structured diagnostics, never arbitrary messages, symbols or raw dumps.
+public enum ClientDiagnosticPayload: Codable, Sendable, Equatable {
+    case launch(breadcrumb: ClientDiagnosticBreadcrumb, inferred: Bool)
+    case jsError(name: ClientDiagnosticJsErrorName, fatal: Bool, frames: [ClientDiagnosticJsFrame])
+    case nativeCrash(exceptionType: UInt32?, signal: UInt32?, frames: [ClientDiagnosticNativeFrame])
+    case hang(durationMS: ClientDiagnosticMilliseconds, frames: [ClientDiagnosticNativeFrame])
+
+    private enum Kind: String, Codable { case launch, jsError = "js-error", nativeCrash = "native-crash", hang }
+    private enum CodingKeys: String, CodingKey {
+        case kind, breadcrumb, inferred, name, fatal, frames, signal
+        case exceptionType = "exception_type", durationMS = "duration_ms"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .launch:
+            self = .launch(
+                breadcrumb: try container.decode(ClientDiagnosticBreadcrumb.self, forKey: .breadcrumb),
+                inferred: try container.decode(Bool.self, forKey: .inferred)
+            )
+        case .jsError:
+            self = .jsError(
+                name: try container.decode(ClientDiagnosticJsErrorName.self, forKey: .name),
+                fatal: try container.decode(Bool.self, forKey: .fatal),
+                frames: try container.decode([ClientDiagnosticJsFrame].self, forKey: .frames)
+            )
+        case .nativeCrash:
+            self = .nativeCrash(
+                exceptionType: try container.decode(UInt32?.self, forKey: .exceptionType),
+                signal: try container.decode(UInt32?.self, forKey: .signal),
+                frames: try container.decode([ClientDiagnosticNativeFrame].self, forKey: .frames)
+            )
+        case .hang:
+            self = .hang(
+                durationMS: try container.decode(ClientDiagnosticMilliseconds.self, forKey: .durationMS),
+                frames: try container.decode([ClientDiagnosticNativeFrame].self, forKey: .frames)
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .launch(breadcrumb, inferred):
+            try container.encode(Kind.launch, forKey: .kind)
+            try container.encode(breadcrumb, forKey: .breadcrumb)
+            try container.encode(inferred, forKey: .inferred)
+        case let .jsError(name, fatal, frames):
+            try container.encode(Kind.jsError, forKey: .kind)
+            try container.encode(name, forKey: .name)
+            try container.encode(fatal, forKey: .fatal)
+            try container.encode(frames, forKey: .frames)
+        case let .nativeCrash(exceptionType, signal, frames):
+            try container.encode(Kind.nativeCrash, forKey: .kind)
+            try container.encode(exceptionType, forKey: .exceptionType)
+            try container.encode(signal, forKey: .signal)
+            try container.encode(frames, forKey: .frames)
+        case let .hang(durationMS, frames):
+            try container.encode(Kind.hang, forKey: .kind)
+            try container.encode(durationMS, forKey: .durationMS)
+            try container.encode(frames, forKey: .frames)
+        }
+    }
+}
+
+public struct ClientDiagnosticEvent: Codable, Sendable, Equatable {
+    public let eventID, launchID: ClientDiagnosticUuid
+    public let launchIDBasis: ClientDiagnosticLaunchIdBasis
+    public let sequence: UInt32
+    public let occurredAtUnixMS, capturedAtUnixMS: ClientDiagnosticMilliseconds
+    public let occurrenceTimeBasis: ClientDiagnosticOccurrenceTimeBasis
+    public let appVersion, nativeBuild, runtimeVersion, updateID, osVersion: String
+    public let platform: ClientDiagnosticPlatform
+    public let severity: ClientDiagnosticSeverity
+    public let captureSource: ClientDiagnosticCaptureSource
+    public let payload: ClientDiagnosticPayload
+
+    public init(
+        eventID: ClientDiagnosticUuid, launchID: ClientDiagnosticUuid,
+        launchIDBasis: ClientDiagnosticLaunchIdBasis, sequence: UInt32,
+        occurredAtUnixMS: ClientDiagnosticMilliseconds,
+        occurrenceTimeBasis: ClientDiagnosticOccurrenceTimeBasis,
+        capturedAtUnixMS: ClientDiagnosticMilliseconds,
+        appVersion: String, nativeBuild: String, runtimeVersion: String, updateID: String,
+        platform: ClientDiagnosticPlatform = .ios, osVersion: String,
+        severity: ClientDiagnosticSeverity, captureSource: ClientDiagnosticCaptureSource,
+        payload: ClientDiagnosticPayload
+    ) {
+        self.eventID = eventID; self.launchID = launchID; self.launchIDBasis = launchIDBasis
+        self.sequence = sequence; self.occurredAtUnixMS = occurredAtUnixMS
+        self.occurrenceTimeBasis = occurrenceTimeBasis; self.capturedAtUnixMS = capturedAtUnixMS
+        self.appVersion = appVersion; self.nativeBuild = nativeBuild
+        self.runtimeVersion = runtimeVersion; self.updateID = updateID; self.platform = platform
+        self.osVersion = osVersion; self.severity = severity; self.captureSource = captureSource
+        self.payload = payload
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case eventID = "event_id", launchID = "launch_id", launchIDBasis = "launch_id_basis", sequence
+        case occurredAtUnixMS = "occurred_at_unix_ms", occurrenceTimeBasis = "occurrence_time_basis"
+        case capturedAtUnixMS = "captured_at_unix_ms", appVersion = "app_version"
+        case nativeBuild = "native_build", runtimeVersion = "runtime_version", updateID = "update_id"
+        case platform, osVersion = "os_version", severity, captureSource = "capture_source", payload
+    }
+}
+
+/// Version 1, 1–32 events, at most 128 KiB of serialized JSON.
+public struct ClientDiagnosticsBatch: Codable, Sendable, Equatable {
+    public let version: UInt32
+    public let events: [ClientDiagnosticEvent]
+    public init(events: [ClientDiagnosticEvent]) { self.version = 1; self.events = events }
+}
+
+/// Acknowledgement means durable ingestion, including already-ingested duplicates.
+public struct ClientDiagnosticsAck: Codable, Sendable, Equatable {
+    public let acknowledgedEventIDs: [ClientDiagnosticUuid]
+    public init(acknowledgedEventIDs: [ClientDiagnosticUuid]) { self.acknowledgedEventIDs = acknowledgedEventIDs }
+    enum CodingKeys: String, CodingKey { case acknowledgedEventIDs = "acknowledged_event_ids" }
+}
+
 public enum PairingBegin: Codable, Sendable {
     case person(PersonPairingBegin), assistant(AssistantPairingBegin)
     public init(from decoder: Decoder) throws {
@@ -859,6 +1015,21 @@ public struct AssistantPageRequest: Codable, Sendable, Equatable {
     public init(cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
     enum CodingKeys: String, CodingKey { case cursor, limit, maxResponseBytes = "max_response_bytes" }
 }
+public struct AssistantAgentDetailRequest: Codable, Sendable, Equatable {
+    public let agentID: String; public let maxResponseBytes: Int?
+    public init(agentID: String, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case agentID = "agent_id", maxResponseBytes = "max_response_bytes" }
+}
+public struct AssistantConversationTimelineRequest: Codable, Sendable, Equatable {
+    public let agentID: String; public let sessionID, cursor: String?; public let limit, maxResponseBytes: Int?
+    public init(agentID: String, sessionID: String? = nil, cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.sessionID = sessionID; self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case agentID = "agent_id", sessionID = "session_id", cursor, limit, maxResponseBytes = "max_response_bytes" }
+}
+public struct AssistantConversationSearchRequest: Codable, Sendable, Equatable {
+    public let text: String; public let agentID, cursor: String?; public let limit, maxResponseBytes: Int?
+    public init(text: String, agentID: String? = nil, cursor: String? = nil, limit: Int? = nil, maxResponseBytes: Int? = nil) { self.text = text; self.agentID = agentID; self.cursor = cursor; self.limit = limit; self.maxResponseBytes = maxResponseBytes }
+    enum CodingKeys: String, CodingKey { case text, agentID = "agent_id", cursor, limit, maxResponseBytes = "max_response_bytes" }
+}
 public struct AssistantConversationContentRequest: Codable, Sendable, Equatable {
     public let agentID, sessionID, reference, revision: String; public let start, end: UInt64; public let maxResponseBytes: Int?
     public init(agentID: String, sessionID: String, reference: String, revision: String, start: UInt64, end: UInt64, maxResponseBytes: Int? = nil) { self.agentID = agentID; self.sessionID = sessionID; self.reference = reference; self.revision = revision; self.start = start; self.end = end; self.maxResponseBytes = maxResponseBytes }
@@ -884,7 +1055,7 @@ public enum AssistantContentRequest: Codable, Sendable, Equatable {
         switch self { case .conversation(let value): try value.encode(to: encoder); case .terminal(let value): try value.encode(to: encoder) }
     }
 }
-public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content" }
+public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content", conversations, conversationDetail = "conversation-detail", conversationTimeline = "conversation-timeline", conversationSearch = "conversation-search" }
 public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt }
 /// Signed by the pinned attestor (Ed25519) over UTF-8 `st3.scg-read.v1\n` + canonical JSON of this payload.
 public struct ScgReadAuthorizationPayload: Codable, Sendable, Equatable {
@@ -1186,4 +1357,21 @@ public enum ObservationSample: Codable, Sendable {
     public func encode(to encoder: Encoder) throws {
         switch self {case .latency(let value): try value.encode(to: encoder); case .liveShare(let value): try value.encode(to: encoder)}
     }
+}
+
+public enum PushEnvironment: String, Codable, Sendable { case development, production }
+public struct PushRegistration: Codable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    public let token: String
+    public let environment: PushEnvironment
+    public let bundleID, appVersion: String
+    public init(token: String, environment: PushEnvironment, bundleID: String, appVersion: String) { self.token = token; self.environment = environment; self.bundleID = bundleID; self.appVersion = appVersion }
+    public var description: String { "PushRegistration([REDACTED])" }
+    public var debugDescription: String { description }
+    enum CodingKeys: String, CodingKey { case token, environment, bundleID = "bundle_id", appVersion = "app_version" }
+}
+public struct PushRegistrationStatus: Codable, Sendable { public let registered: Bool; public let environment: PushEnvironment? }
+public struct PushRegistrationResponse: Codable, Sendable {
+    public let apiVersion, requestID: String
+    public let value: PushRegistrationStatus
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", requestID = "request_id", value }
 }

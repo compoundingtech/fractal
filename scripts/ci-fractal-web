@@ -150,6 +150,8 @@ exclusive_lanes() {
     lane "UI kit Storybook and module graph" kit_storybook
   fi
   if first_shard; then
+    # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.
+    lane "App replay browser e2e" node apps/fractal-web/scripts/replay-e2e.mjs
     lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts
   fi
   if [ "${KIT_INPUTS:-true}" = true ]; then

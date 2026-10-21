@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { WorldDefinition } from '../kit/world.ts'
 import { ciFailingFix } from './ciFailingFix.ts'
 import { empty } from './empty.ts'
@@ -53,3 +54,5 @@ export const worldDefinitions: readonly WorldDefinition[] = [
   huge,
   unicode,
 ]
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

@@ -3,6 +3,7 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use st3::AgentMessagesStore;
 use st3::CoordinationStore;
 use st3::MissionsStore;
 use st3::LimitsStore;
@@ -694,6 +695,13 @@ fn leave_confirmation(
     {
         return Ok(Some(peer.peer.clone()));
     }
+    leave_receipt_confirmation(removed)
+}
+
+/// Only the worker's authenticated receipt ACK permits post-leave cleanup.
+fn leave_receipt_confirmation(
+    removed: Option<&st3::config::FleetRemoval>,
+) -> Result<Option<String>> {
     match removed {
         Some(removal) if removal.code == "member-left" => Ok(Some(removal.reported_by.clone())),
         Some(removal) => anyhow::bail!(
@@ -738,13 +746,19 @@ async fn wait_for_leave_confirmation(
     state_dir: &Path,
     stage: &str,
     seconds: u64,
+    require_leave_receipt: bool,
 ) -> Result<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
     loop {
         let status: ReplicationStatus = client.get("/v1/replication/status").await?;
         let file = st3::config::FleetFile::load(state_dir)?;
         let removed = file.as_ref().and_then(|file| file.removed.as_ref());
-        if let Some(member) = leave_confirmation(&status, removed)? {
+        let confirmation = if require_leave_receipt {
+            leave_receipt_confirmation(removed)?
+        } else {
+            leave_confirmation(&status, removed)?
+        };
+        if let Some(member) = confirmation {
             return Ok(member);
         }
         anyhow::ensure!(
@@ -801,6 +815,7 @@ async fn fleet_leave(
             &config.state_dir,
             "before writing the leave",
             wait_seconds,
+            false,
         )
         .await?;
         let claim: ClaimRecord = client
@@ -817,6 +832,7 @@ async fn fleet_leave(
                 &config.state_dir,
                 "after writing the leave",
                 wait_seconds,
+                true,
             )
             .await?,
         );
@@ -3800,8 +3816,8 @@ enum MessageCommand {
     /// Send one durable normalized message to an agent.
     ///
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
-    /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `st work handoff` for work, and `--kind silent` for anything
-    /// else, which wakes nobody and reaches the recipient at its next turn. Status goes to
+    /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `st work handoff` for work, and `--kind silent` (or `--fyi`) for
+    /// anything else, which wakes nobody and reaches the recipient at its next turn. Status goes to
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
     /// People have no inbox: a send or reply to a person fails. To reach a person, print in
     /// the chat.
@@ -3927,19 +3943,28 @@ struct MessageWakeArgs {
     /// Wake the recipient (default), or hold unread mail for its next real turn.
     #[arg(long, value_parser = ["silent", "wake"], default_value = "wake")]
     kind: String,
+    /// FYI: the same as `--kind silent`. Stored and readable, it wakes nobody; the recipient
+    /// sees it with its next real turn. A daemon that does not know silent wakes as before.
+    #[arg(long, conflicts_with = "kind")]
+    fyi: bool,
 }
 
 impl Default for MessageWakeArgs {
     fn default() -> Self {
         Self {
             kind: "wake".into(),
+            fyi: false,
         }
     }
 }
 
 impl MessageWakeArgs {
+    fn silent(&self) -> bool {
+        self.fyi || self.kind == "silent"
+    }
+
     fn tags(&self) -> impl Iterator<Item = String> {
-        (self.kind == "silent")
+        self.silent()
             .then(|| st3::silent::SILENT_TAG.to_owned())
             .into_iter()
     }
@@ -4357,6 +4382,10 @@ fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) 
 }
 
 fn main() -> ExitCode {
+    // Before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
+    use st_build_stamp::{CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL};
+    st_drivers::version::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
+    stui::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
     cli_output::finish(cli_main())
 }
 
@@ -6031,6 +6060,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = st3::maintenance::divergence_check_interval(
         std::env::var(st3::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
@@ -6114,6 +6144,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     st3::api::start_agent_roster(&state);
+    // Pairing-secret expiry cleanup runs even with no attention readers or publications.
+    st3::api::start_push_registration_cleanup(&state);
     // Nor does an attention window fold every person's attention.
     st3::api::start_attention_list(&state);
     // Nor does a missions window fold the missions it shows.
@@ -8797,12 +8829,19 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     } else {
         "/v1/usage"
     };
-    let report: Value = client
+    let mut report: Value = client
         .get(&format!("{path}?since_ms={since}&until_ms={until}"))
         .await?;
     if json_output || args.messages_only {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
+    }
+    // Coordination cost beside spend. A daemon without the count read shows spend alone.
+    if let Ok(counts) = client
+        .get::<Value>(&format!("/v1/usage/messages?since_ms={since}&until_ms={until}"))
+        .await
+    {
+        report["coordination"] = counts;
     }
     print!("{}", render_usage_report(&report, args.hours, args.by));
     Ok(())
@@ -9066,6 +9105,28 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             "UNPRICED  {} tokens on models without a price",
             total[6]
         );
+    }
+    if let Some(counts) = report.get("coordination").filter(|counts| counts.is_object()) {
+        let _ = write!(
+            output,
+            "MESSAGES  {} agent to agent ({} silent)",
+            counts["agent_to_agent"].as_u64().unwrap_or(0),
+            counts["silent"].as_u64().unwrap_or(0)
+        );
+        // Older daemons count messages but not merged pull requests.
+        if let Some(merged) = counts["merged_pull_requests"].as_u64() {
+            let _ = write!(output, " · {merged} merged PRs · ");
+            match counts["agent_to_agent_per_merged_pull_request"].as_f64() {
+                Some(ratio) => {
+                    let _ = write!(output, "{ratio:.1} per merged PR");
+                }
+                None if counts["complete"].as_bool() != Some(true) => {
+                    output.push_str("per merged PR unknown until message history is counted")
+                }
+                None => output.push_str("per merged PR unknown with none merged"),
+            }
+        }
+        output.push('\n');
     }
     if let Some(estimate) = report.get("agent_messages") {
         output.push_str("\nAGENT MESSAGES · daily estimate · UTC · API-equivalent\n");
@@ -13184,7 +13245,7 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
-    if args.wake.kind == "wake" && args.tags.iter().any(|tag| tag == st3::silent::SILENT_TAG) {
+    if !args.wake.silent() && args.tags.iter().any(|tag| tag == st3::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
     for tag in args.wake.tags() {
@@ -18103,7 +18164,10 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
 async fn import_retired_identities(store: Arc<Store>) {
     loop {
         let worker = store.clone();
-        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || worker.import_retired_identities_paced(std::thread::sleep))).await;
+        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || {
+            worker.import_retired_identities_paced(std::thread::sleep)?;
+            worker.import_retired_claim_facts_paced(std::thread::sleep)
+        })).await;
         match result {
             Ok(Ok(())) => return,
             error => {
@@ -18146,6 +18210,28 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
                 eprintln!("st3: coordination count bootstrap failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Count the retained sends for the usage estimate in bounded pages, one writer turn each, so
+/// neither opening the store nor the first usage read rebuilds every send. A usage read that
+/// arrives before the last page completes the rest itself.
+async fn backfill_agent_message_days(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            st3::task_cpu::profiled_blocking("maintenance.agent_message_days", || {
+                page_store.advance_agent_message_days()
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
+            error => {
+                eprintln!("st3: agent message usage backfill failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }

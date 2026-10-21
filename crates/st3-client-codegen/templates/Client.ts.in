@@ -3,13 +3,15 @@
 // Clients that omit that token retain the legacy message-list shape and paging contract.
 import { API_VERSION } from './Models.generated.ts';
 import type {
-    ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes,
     Arrangement, ArrangementId, ArrangementPage,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
+    AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
 } from './Models.generated.ts';
 
@@ -157,11 +159,17 @@ function defaultTerminalSocket(url: string, protocols: string[], headers: Record
 export class ClientError extends Error {
     public readonly response: ErrorEnvelope;
     public readonly status: number;
+    public readonly retryAfterMs?: number;
 
-    constructor(response: ErrorEnvelope, status: number) {
+    constructor(response: ErrorEnvelope, status: number, retryAfter?: string | null) {
         super(response.message);
         this.response = response;
         this.status = status;
+        if (retryAfter) {
+            const seconds = /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : undefined;
+            const delay = seconds === undefined ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
+            if (Number.isFinite(delay)) this.retryAfterMs = Math.max(0, delay);
+        }
         this.name = 'ClientError';
     }
 }
@@ -311,9 +319,10 @@ export class St3Client {
             throw new Error('Unexpected st client API response');
         }
         if (!response.ok || 'error_version' in payload) {
-            throw new ClientError(payload as ErrorEnvelope, response.status);
+            throw new ClientError(payload as ErrorEnvelope, response.status, response.headers.get('Retry-After'));
         }
-        if ((path !== '/v1/client/observations' && !('snapshot' in payload)) || !('value' in payload)) {
+        const localCommand = path === '/v1/client/observations' || path === '/v1/client/push-registration';
+        if ((!localCommand && !('snapshot' in payload)) || !('value' in payload)) {
             throw new Error('Incomplete st client API response');
         }
         return payload as EnvelopeOf<T>;
@@ -391,9 +400,23 @@ export class St3Client {
         return this.request<ActionResult>('POST', '/v1/client/actions', request, undefined, undefined, options);
     }
 
+    /** Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable, including duplicates. Requires write.client-diagnostics. */
+    diagnosticsSubmit(batch: ClientDiagnosticsBatch): Promise<EnvelopeOf<ClientDiagnosticsAck>> {
+        return this.request<ClientDiagnosticsAck>('POST', '/v1/client/diagnostics', batch);
+    }
+
     /** Local diagnostic acceptance, without a snapshot fence or durable action receipt. */
     async observationsReport(report: ObservationReport, requestOptions: RequestOptions = {}): Promise<ObservationResponse> {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
+    }
+
+    /** Replace this paired device's local-only registration, without a graph receipt. */
+    async pushRegister(registration: PushRegistration, requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
+        return this.request('POST', '/v1/client/push-registration', registration, undefined, undefined, requestOptions);
+    }
+
+    async pushUnregister(requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
+        return this.request('DELETE', '/v1/client/push-registration', undefined, undefined, undefined, requestOptions);
     }
 
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {

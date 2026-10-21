@@ -32,7 +32,7 @@ pub const MISSION_PHASES: &[&str] = &[
     "retired",
 ];
 
-const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
+pub const METADATA_FIELDS: &[&str] = &["cursor", "limit", "max_response_bytes"];
 const SUMMARY_FIELDS: &[&str] = &["max_response_bytes"];
 const CONVERSATION_FIELDS: &[&str] = &[
     "agent_id", "session_id", "reference", "revision", "start", "end", "max_response_bytes",
@@ -98,7 +98,7 @@ pub fn allow(
     Ok(())
 }
 
-fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
+pub fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, ApiError> {
     parameters
         .get(name)
         .map(String::as_str)
@@ -106,7 +106,7 @@ fn required<'a>(parameters: &'a BTreeMap<String, String>, name: &str) -> Result<
         .ok_or_else(|| validation(format!("query parameter `{name}` is required")))
 }
 
-fn budget_exceeded(message: impl Into<String>) -> ApiError {
+pub fn budget_exceeded(message: impl Into<String>) -> ApiError {
     ApiError {
         status: StatusCode::PAYLOAD_TOO_LARGE,
         code: "response-budget-exceeded".into(),
@@ -244,11 +244,17 @@ fn attention_request(item: &Value) -> &Value {
         .unwrap_or(&item["update"])
 }
 
+/// The same disclosed association drives exact attention targeting and row projection.
+pub fn attention_agent_id(item: &Value) -> Option<&str> {
+    [item["conversation_id"].as_str(), item["requester_id"].as_str()]
+        .into_iter().flatten().find(|agent| agent.starts_with("agent/"))
+        .filter(|agent| identifier_allowed(agent))
+}
+
 /// Translate one published native attention row; metadata never copies source prose.
 pub fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
     let episode = ident(item["episode"].as_str()).unwrap_or_default();
-    let agent = [item["conversation_id"].as_str(), item["requester_id"].as_str()]
-        .into_iter().flatten().find(|agent| agent.starts_with("agent/"));
+    let agent = attention_agent_id(item);
     let mut row = json!({
         "id": client_attention_id(
             item["source_id"].as_str().ok_or_else(|| anyhow::anyhow!("attention source id absent"))?,
@@ -371,7 +377,7 @@ pub fn offset(parameters: &BTreeMap<String, String>, name: &str) -> Result<usize
 /// is opened only if it fits the response budget, so no larger body is ever read. The
 /// range must lie on character boundaries inside the text and fit the budget; it is never
 /// widened, split or continued automatically. `next_range` names the next equal range.
-async fn conversation(
+pub async fn conversation(
     state: &AppState,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,

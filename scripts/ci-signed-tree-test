@@ -63,7 +63,9 @@ class SignedTree(unittest.TestCase):
     def run_job(self, head, number=1, base_changes=None, **env):
         """Run the script in a fresh clone of the repository at main, the way the workflow's checkout of the base branch is."""
         checkout = self.f.root / f'base-checkout-{len(list(self.f.root.glob("base-checkout-*")))}'
-        subprocess.run(['git', 'clone', '-q', str(self.f.repo), str(checkout)], check=True, capture_output=True)
+        # --no-tags: actions/checkout fetches no tags at its default depth, so an evidence tag is here only if the job fetched it.
+        subprocess.run(['git', 'clone', '-q', '--no-tags', str(self.f.repo), str(checkout)], check=True, capture_output=True)
+        self.last_checkout = checkout
         summary, output = self.f.root / 'summary', self.f.root / 'output'
         summary.write_text('')
         output.write_text('')
@@ -98,6 +100,56 @@ class SignedTree(unittest.TestCase):
         self.note(head, tree, inputs={'lane_definition_sha256': digest}, seconds=5)  # dated later: two passes with equal dates are ordered by ref iteration
         fields = self.run_job(head)
         self.assertEqual((fields['decision'], fields['reason'], fields['lanes']), ('ok', 'satisfied', 'unit:ok'))
+
+    def test_only_the_head_trees_own_notes_are_fetched(self):
+        other_head, other_tree = self.pull_request({'src.txt': 'elsewhere\n'}, number=2)
+        self.note(other_head, other_tree)
+        head, tree = self.pull_request({'src.txt': 'mine\n'}, number=1)
+        mine = self.note(head, tree)
+        self.assertEqual(self.run_job(head)['lanes'], 'unit:wrong_definition')  # found (a note without the lane digest), not no_record
+        fetched = subprocess.run(['git', '-C', str(self.last_checkout), 'for-each-ref', '--format=%(refname)', 'refs/notes/'], capture_output=True, text=True).stdout.split()
+        self.assertEqual(fetched, [f'refs/notes/evidence/{tree}/{mine}'])
+
+    def test_records_filed_only_as_tags_are_fetched_by_their_tree_and_their_input_key(self):
+        doc = json.loads(two_check_policy('shadow'))
+        doc['checks']['unit']['inputs'] = ['src.txt']
+        self.set_policy(json.dumps(doc))
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'unit declares inputs')
+        self.f.layout = 'tag'
+        other_head, other_tree = self.pull_request({'src.txt': 'elsewhere\n'}, number=3)
+        self.note(other_head, other_tree)
+        head, tree = self.pull_request({'src.txt': 'mine\n'}, number=1)
+        key = support.evidence_verify.project(str(self.f.repo), tree, ['src.txt'])
+        mine = self.note(head, tree, inputs={'source_inputs': key})
+        self.assertEqual(self.run_job(head)['lanes'], 'unit:wrong_definition')  # found, not no_record
+        listed = lambda: subprocess.run(['git', '-C', str(self.last_checkout), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/', 'refs/notes/'],
+                                        capture_output=True, text=True).stdout.split()
+        self.assertEqual(listed(), [f'refs/tags/evidence/{tree}/{mine}'])
+        self.f.git('update-ref', f'refs/tags/evidence/input/unit/{key}/{mine}', mine)
+        later, later_tree = self.pull_request({'src.txt': 'mine\n', 'other.txt': 'two\n'}, number=2)  # another tree, the same declared inputs
+        self.assertNotEqual(later_tree, tree)
+        self.assertEqual(self.run_job(later, number=2)['lanes'], 'unit:wrong_definition')
+        self.assertEqual(listed(), [f'refs/tags/evidence/input/unit/{key}/{mine}'])
+
+    def test_a_record_reachable_only_through_the_input_index_is_found(self):
+        """The job projects the PULL REQUEST HEAD (not whatever FETCH_HEAD is after the notes fetch) to fetch the input-keyed refs."""
+        doc = json.loads(two_check_policy('shadow'))
+        doc['checks']['unit']['inputs'] = ['src.txt']
+        self.set_policy(json.dumps(doc))
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'unit declares inputs')
+        old_head, old_tree = self.pull_request({'src.txt': 'same\n', 'other.txt': 'one\n'}, number=1)
+        key = support.evidence_verify.project(str(self.f.repo), old_tree, ['src.txt'])
+        record = self.note(old_head, old_tree, inputs={'source_inputs': key})
+        self.f.git('update-ref', f'refs/notes/evidence-input/unit/{key}/{record}', record)
+        head, tree = self.pull_request({'src.txt': 'same\n', 'other.txt': 'two\n'}, number=2)  # another tree, the same declared inputs
+        self.assertNotEqual(tree, old_tree)
+        # No record under the head's own tree: it is found only through refs/notes/evidence-input/unit/<key>/, which the job must fetch.
+        fields = self.run_job(head, number=2)
+        self.assertEqual(fields['lanes'], 'unit:wrong_definition')  # found (the note lacks the lane digest), not no_record
+        fetched = subprocess.run(['git', '-C', str(self.last_checkout), 'for-each-ref', '--format=%(refname)', 'refs/notes/'], capture_output=True, text=True).stdout.split()
+        self.assertEqual(fetched, [f'refs/notes/evidence-input/unit/{key}/{record}'])
 
     def test_a_bad_note_is_reported_with_its_reason_and_a_reject_mode_is_still_only_reported(self):
         head, tree = self.pull_request({'src.txt': 'three\n'})

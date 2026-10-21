@@ -516,6 +516,16 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation})).await
     }
+    /// Follow an agent's or a session's conversation showing at most `limit` of its newest
+    /// entries in the first frame; the server caps the request to its page ceiling.
+    pub async fn subscribe_conversation_with_limit(
+        &mut self,
+        id: &str,
+        conversation: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation, "limit":limit})).await
+    }
     pub async fn unsubscribe(&mut self, id: &str) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"unsubscribe", "id":id}))
             .await
@@ -666,6 +676,9 @@ pub enum CollectionEvent {
         items: Vec<TimelineEntry>,
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
+        /// On a replacement with older history: the timeline cursor for the entries just
+        /// before this frame's oldest entry. Absent on deltas and when nothing is older.
+        older_cursor: Option<String>,
         /// The conversation header (contract §3) when this frame carries one.
         header: Option<serde_json::Value>,
     },
@@ -727,6 +740,7 @@ impl CollectionEvent {
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
                 has_more: field(&frame, "has_more")?,
+                older_cursor: field(&frame, "older_cursor")?,
                 header: frame.get("header").cloned(),
                 id,
             }),
@@ -2315,6 +2329,37 @@ impl Client {
     ) -> Result<Envelope<AssistantAgentPage>, ClientError> {
         self.assistant_read("agents", params, proof).await
     }
+    pub async fn assistant_conversations(
+        &self,
+        params: &AssistantPageRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversations", params, proof).await
+    }
+    pub async fn assistant_conversation_detail(
+        &self,
+        params: &AssistantAgentDetailRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-detail", params, proof)
+            .await
+    }
+    pub async fn assistant_conversation_timeline(
+        &self,
+        params: &AssistantConversationTimelineRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-timeline", params, proof)
+            .await
+    }
+    pub async fn assistant_conversation_search(
+        &self,
+        params: &AssistantConversationSearchRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("conversation-search", params, proof)
+            .await
+    }
     pub async fn assistant_conversation_content(
         &self,
         params: &AssistantConversationContentRequest,
@@ -2958,12 +3003,35 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    /// Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable,
+    /// including duplicates. Requires `write.client-diagnostics`.
+    pub async fn diagnostics_submit(
+        &self,
+        batch: &ClientDiagnosticsBatch,
+    ) -> Result<Envelope<ClientDiagnosticsAck>, ClientError> {
+        self.post("/v1/client/diagnostics", batch).await
+    }
     /// Local diagnostic acceptance; retry the identical disjoint intervals and report ID.
     pub async fn observations_report(
         &self,
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Replace this paired device's local-only push registration. No graph receipt.
+    pub async fn push_register(
+        &self,
+        registration: &PushRegistration,
+    ) -> Result<PushRegistrationResponse, ClientError> {
+        self.post("/v1/client/push-registration", registration)
+            .await
+    }
+
+    /// Remove this paired device's local-only push registration.
+    pub async fn push_unregister(&self) -> Result<PushRegistrationResponse, ClientError> {
+        self.request(Method::DELETE, "/v1/client/push-registration", None)
+            .await
     }
 
     pub async fn pairing_begin(
@@ -4561,6 +4629,27 @@ mod tests {
         );
         assert!(!api(ErrorCode::Forbidden, "no").outcome_unknown());
         assert_eq!(api(ErrorCode::Forbidden, "no").applied(), None);
+    }
+
+    #[test]
+    fn push_request_debug_never_contains_secret_fields() {
+        let registration = PushRegistration {
+            token: "abcdef0123456789".into(),
+            environment: PushEnvironment::Development,
+            bundle_id: "example.push".into(),
+            app_version: "1.0".into(),
+        };
+        let debug = format!("{registration:?}");
+        assert!(!debug.contains(&registration.token));
+        assert!(debug.contains("[REDACTED]"));
+        let safe = PushRegistrationStatus {
+            registered: false,
+            environment: None,
+        };
+        assert_eq!(
+            serde_json::to_value(safe).unwrap(),
+            serde_json::json!({"registered":false})
+        );
     }
 
     #[test]

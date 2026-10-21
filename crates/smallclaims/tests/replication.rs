@@ -169,10 +169,12 @@ fn the_admission_retry_query_seeks_by_index_and_never_scans_a_replica_table() {
     let path = directory.path().join("claims.sqlite3");
     drop(Store::open(&path, "ada-laptop", Arc::new(Plain)).unwrap());
     let connection = rusqlite::Connection::open(&path).unwrap();
-    for retry_hash_mismatches in [false, true] {
+    for (retry_hash_mismatches, retry_subject_references) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let sql = format!(
             "EXPLAIN QUERY PLAN {}",
-            smallclaims::store::admission_retry_query(retry_hash_mismatches)
+            smallclaims::store::admission_retry_query(retry_hash_mismatches, retry_subject_references)
         );
         let mut statement = connection.prepare(&sql).unwrap();
         let plan = statement

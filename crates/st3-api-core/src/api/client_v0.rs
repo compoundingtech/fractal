@@ -197,6 +197,7 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
+    "write.client-diagnostics",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -335,6 +336,8 @@ pub struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub pairing_grant: Option<String>,
+    /// Local-only push registrations belong to the member that issued this exact pairing.
+    pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
     pub assistant_write: Option<crate::store::assistant_write::AssistantWriteAuthorization>,
     pub transport: &'static str,
@@ -342,6 +345,8 @@ pub struct ClientSession {
     pub local_peer: bool,
     pub custom_forms: bool,
     pub conversation_blocks: bool,
+    /// Internal assistant projection option, never negotiated by native clients.
+    pub assistant_content_handles: bool,
     pub messages_paging: bool,
     pub scopes: std::collections::BTreeSet<String>,
 }
@@ -353,12 +358,14 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport,
             local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
@@ -391,12 +398,14 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+                pairing_issued_here: false,
             grant_expires_at: None,
                 assistant_write: None,
                 transport: "unix",
                 local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
+                assistant_content_handles: false,
                 messages_paging: false,
                 scopes: ["read.projections", "terminal.read"]
                     .into_iter()
@@ -410,12 +419,14 @@ impl ClientSession {
             actor: person.into(),
             authority_actor: person.into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport: "unix",
             local_peer: false,
             custom_forms,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
         })
@@ -426,12 +437,14 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
             transport: "fabric-loopback",
             local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
+            assistant_content_handles: false,
             messages_paging: false,
             scopes: std::collections::BTreeSet::new(),
         }
@@ -456,7 +469,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         .map(|scope| {
             json!({
                 "id": scope,
-                "version": 0,
+                "version": if *scope == "write.client-diagnostics" { 1 } else { 0 },
                 "state": if session.allows(scope) { "granted" } else { "ungranted" }
             })
         })
@@ -494,6 +507,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"assistant.grants.v1", "version":1,
         "state":if assistant::trusted_issuer(state, session).is_ok() {"granted"} else {"ungranted"}}));
@@ -630,6 +644,11 @@ pub fn authenticate(
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     session.conversation_blocks = conversation_blocks;
     session.messages_paging = messages_paging;
+    if request.method() == axum::http::Method::POST
+        && request.uri().path() == "/v1/client/diagnostics"
+    {
+        require_scope(&session, "write.client-diagnostics")?;
+    }
     if request.method() == axum::http::Method::GET {
         let scope = if request
             .uri()
@@ -680,12 +699,14 @@ pub fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,
         transport,
         local_peer: false,
         custom_forms,
         conversation_blocks: false,
+        assistant_content_handles: false,
         messages_paging: false,
         scopes,
     })
@@ -1593,6 +1614,8 @@ pub fn device_resources(
     // Pairing and revocation are fenced by the graph snapshot above. Expiration is
     // live state: its clock must advance even when no claim advances that snapshot.
     let at = client_now_ms();
+    let push = state.store.push_registration_statuses(person, at as u64)
+        .map_err(|_| ApiError::internal("local push registration status is unavailable"))?;
     let mut resources = paired
         .into_iter()
         .map(|(device_id, (completed, revoked))| {
@@ -1610,7 +1633,7 @@ pub fn device_resources(
             } else {
                 "active"
             };
-            json!({
+            let mut resource = json!({
                 "id": device_id,
                 "kind": "device",
                 "revision": selected.id,
@@ -1626,7 +1649,18 @@ pub fn device_resources(
                     "actionable": state_name == "active",
                     "reasons": if state_name == "active" { Vec::<&str>::new() } else { vec![state_name] }
                 }
-            })
+            });
+            if completed.origin == state.node {
+                resource["push"] = if state_name == "active" {
+                    push.get(&device_id).map_or_else(
+                        || json!({"registered":false}),
+                        |status| json!(status),
+                    )
+                } else {
+                    json!({"registered":false})
+                };
+            }
+            resource
         })
         .collect::<Vec<_>>();
     resources.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
@@ -1782,6 +1816,16 @@ pub fn key_grant_label(body: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+pub fn session_message_content(session: &ClientSession, session_id: &str, claim: &ClaimRecord) -> Value {
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    let mut body = json!({"media_type":"text/plain", "text":fields.get("content").and_then(Value::as_str).unwrap_or_default()});
+    if session.assistant_content_handles {
+        body["blocks"] = json!([{"kind":"raw_text", "source_type":"content", "payload":{"body_ref":true},
+            "continuation":{"ref":conversation_blocks::message_reference(session_id, &claim.id)}}]);
+    }
+    body
+}
+
 pub fn session_message_body(state: &AppState, claim: &ClaimRecord) -> Value {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     let mut body = json!({
@@ -1890,6 +1934,7 @@ fn offset_continuation_header(
 pub fn native_session_messages(
     state: &AppState,
     snapshot: &ClientSnapshot,
+    session: &ClientSession,
     session_id: &str,
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Vec<Value>, ApiError> {
@@ -1914,7 +1959,7 @@ pub fn native_session_messages(
             let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
             let base = claim.store_index.saturating_mul(4);
             items.push(json!({"id":format!("timeline-entry/{}/{}-message", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base, "revision":1, "timestamp":stamp, "role":role, "type":"message", "final":true, "body":session_message_body(state, &claim)}));
-            items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":{"media_type":"text/plain","text":fields.get("content").and_then(Value::as_str).unwrap_or_default()}}));
+            items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
         items.sort_by(timeline_order);
     }
@@ -1982,7 +2027,7 @@ pub fn native_timeline_page(
 ) -> Result<Json<Value>, ApiError> {
     let order = native_timeline_order(managed);
     let graph = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session_id, managed)?
+        native_session_messages(state, snapshot, session, session_id, managed)?
     } else {
         Vec::new()
     };
@@ -2023,7 +2068,7 @@ pub fn native_timeline_page(
     Ok(Json(page_value))
 }
 
-fn native_timeline_order(
+pub fn native_timeline_order(
     managed: Option<&super::ManagedSessionOwner>,
 ) -> crate::external_sessions::TimelineOrder {
     if managed.is_some() {
@@ -2178,7 +2223,7 @@ pub fn native_slice_page_at_generation(
         limit + 1
     };
     let messages = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
-        native_session_messages(state, snapshot, session_id, managed)?
+        native_session_messages(state, snapshot, session, session_id, managed)?
     } else {
         Vec::new()
     };
@@ -2367,6 +2412,11 @@ pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
+/// A stored page's position for one entry; the stored projection sorts by it alone.
+pub fn stored_timeline_position(item: &Value) -> u64 {
+    item["sequence"].as_u64().unwrap_or(u64::MAX)
+}
+
 pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
     item["role"] = json!("system");
@@ -3383,10 +3433,7 @@ pub fn timeline_first_page(
             items.push(json!({
                 "id": entry_id(&claim, "content"), "sequence": base_sequence + 1,
                 "revision": 1, "timestamp": timestamp, "role": role, "type": "content",
-                "final": true, "body": {
-                    "media_type": "text/plain",
-                    "text": fields.get("content").and_then(Value::as_str).unwrap_or_default()
-                }
+                "final": true, "body": session_message_content(session, &session_id, &claim)
             }));
         }
     }
@@ -3430,7 +3477,7 @@ pub fn timeline_first_page(
         });
         items.extend([query_notice, prefix_notice].into_iter().flatten());
     }
-    items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
+    items.sort_by_key(stored_timeline_position);
     let header = conversation_page_header(state, session, &session_id, &items, false);
     // A conversation opens at its newest bounded window. The cursor walks toward older
     // windows, while each individual page remains chronological for straightforward rendering.

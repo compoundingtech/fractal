@@ -50,8 +50,8 @@ with tempfile.TemporaryDirectory() as tmp:
                      "ST_PERF_SLOT_HELD": "legacy-stale"}
         marked = start(inherited, command=[sys.executable, "-c",
             "import os; "
-            "assert os.environ['FRACTAL_PERF_SLOT_HELD'] == str(os.getppid()); "
-            "assert os.environ['ST_PERF_SLOT_HELD'] == str(os.getppid())"])
+            "assert os.environ['FRACTAL_PERF_SLOT_HELD'] == open('/proc/%d/stat' % os.getppid()).read().rsplit(')', 1)[1].split()[1]; "
+            "assert os.environ['ST_PERF_SLOT_HELD'] == open('/proc/%d/stat' % os.getppid()).read().rsplit(')', 1)[1].split()[1]"])
         assert marked.wait(10) == 0, marked.stderr.read()
         assert "perf slot free" in status() and not holder.exists()
 
@@ -130,6 +130,25 @@ with tempfile.TemporaryDirectory() as tmp:
         stopped.send_signal(number)
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
+
+    # The watchdog is protected from TERM itself, but must not pass SIG_IGN
+    # through exec to its command. A shell cannot install a TERM cleanup trap
+    # when that signal was ignored at shell entry. Check the actual receipt,
+    # not just eventual death/KILL and slot release.
+    for mode, expected in (("timeout", 124), ("wrapper-term", 143)):
+        ready = root / (mode + ".ready")
+        cleanup = root / (mode + ".cleanup")
+        script = ('trap \'printf cleaned > "$2"; exit 0\' TERM; '
+                  'printf ready > "$1"; while :; do sleep 0.05; done')
+        options = ("--timeout", "1s") if mode == "timeout" else ()
+        stopped = start(env, *options,
+                        command=["bash", "-c", script, "fixture", str(ready), str(cleanup)])
+        until(ready.exists, mode + " command installed its TERM trap")
+        if mode == "wrapper-term":
+            stopped.send_signal(signal.SIGTERM)
+        assert stopped.wait(10) == expected, stopped.stderr.read()
+        assert cleanup.read_text() == "cleaned", mode + " must allow graceful TERM cleanup"
+        assert "perf slot free" in status() and not holder.exists()
 
     # A run past its timeout is stopped, even one that ignores SIGTERM, and the slot frees.
     started = time.time()

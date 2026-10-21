@@ -283,7 +283,7 @@ async fn assistant_final_delivery_denials_leave_durable_receipts() {
         let mut headers=HeaderMap::new();
         headers.insert(HEADER,fixture.header(&payload,&fixture.attestor).parse().unwrap());
         let context = response_body::Context {
-            state: fixture.state.clone(), client_request: true, observation_report: false,
+            state: fixture.state.clone(), client_request: true, local_only_response: false,
             request_id: "request/test".into(), client_snapshot: None, server: None, roster: false,
         };
         let (Extension(mut receipt),_,Json(value))=read_inner(State(fixture.state.clone()),
@@ -360,7 +360,158 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
             .find_map(|block|block["continuation"]["ref"].as_str())?;
         Some((reference.to_owned(),item["revision"].to_string()))
     }).expect("the long native answer has a content reference");
+    let session = fixture.session();
+    let granted = latest(&fixture.state, session.pairing_grant.as_deref().unwrap(), GRANTED).unwrap().unwrap();
+    let policy = effective(&fixture.state, &granted).unwrap();
+    let binding = credential_digest(&serde_json::to_string(&(
+        fields(&policy).unwrap()["grant_id"].as_str().unwrap(),
+        fields(&policy).unwrap()["policy_revision"].as_u64().unwrap_or(0),
+    )).unwrap());
+    let reference = super::super::reads::conversation_reads::bind_reference(&reference, &binding).unwrap();
     (session_id,reference,revision)
+}
+
+#[tokio::test]
+async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_native_content() {
+    let mut fixture = fixture(SCOPES, true).await;
+    let text = format!("boundedneedle {}", "word ".repeat(1900));
+    content_source(&mut fixture, &text);
+    let mut handle = None;
+    for (route, query) in [
+        ("conversations", "?max_response_bytes=16384"),
+        ("conversation-detail", "?agent_id=agent%2Freads-codex&max_response_bytes=16384"),
+        ("conversation-timeline", "?agent_id=agent%2Freads-codex&limit=1&max_response_bytes=16384"),
+        ("conversation-search", "?text=boundedneedle&agent_id=agent%2Freads-codex&limit=1&max_response_bytes=16384"),
+    ] {
+        let payload = fixture.payload(route, query);
+        let header = fixture.header(&payload, &fixture.attestor);
+        let (status, value, bytes) = fixture.request(&format!("/v1/client/assistant/{route}{query}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::OK, "{route}: {value}");
+        assert!(bytes <= MAX_RESPONSE_BYTES);
+        if route == "conversations" {
+            handle = value["value"]["items"].as_array().unwrap().iter()
+                .find_map(|item| item["read"].as_object().cloned());
+        }
+    }
+    let handle = handle.expect("discovery returns a complete native content read handle");
+    let query = format!("?{}&max_response_bytes=16384", handle.iter().map(|(key, value)| {
+        let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
+        format!("{key}={}", urlencoding::encode(&value))
+    }).collect::<Vec<_>>().join("&"));
+    let payload = fixture.payload("conversation-content", &query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, value, bytes) = fixture.request(&format!("/v1/client/assistant/conversation-content{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= MAX_RESPONSE_BYTES);
+    assert!(text.starts_with(value["value"]["text"].as_str().unwrap()));
+
+    let denied = self::fixture(&SCOPES[..4], true).await;
+    for route in ["conversations", "conversation-detail", "conversation-timeline", "conversation-search"] {
+        let payload = denied.payload(route, "");
+        let header = denied.header(&payload, &denied.attestor);
+        let (status, value, _) = denied.request(&format!("/v1/client/assistant/{route}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {value}");
+    }
+}
+
+#[tokio::test]
+async fn discovery_authenticates_payload_before_snapshot_or_handle_disclosure() {
+    let mut fixture = fixture(SCOPES, true).await;
+    content_source(&mut fixture, &format!("PRIVATE discovery source {}", "word ".repeat(1900)));
+    fixture.state.store.append_claim(&ClaimInput {
+        subject:"agent/zzz-discovery".into(), kind:"runtime.observed".into(),
+        actor:Some("agent/zzz-discovery".into()),
+        fields:serde_json::from_value(json!({"status":"running","runtime_id":"discovery-runtime",
+            "incarnation_id":"discovery-incarnation"})).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let query = "?limit=1&max_response_bytes=16384";
+    let payload = fixture.payload("conversations", query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, first, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["value"]["items"][0]["read"].is_object(), "{first}");
+    let issued = first["value"]["page"]["next_cursor"].as_str().unwrap().to_owned();
+    let (wrapper, encoded) = issued.rsplit_once(':').unwrap();
+    let cursor = decode_client_cursor(encoded).unwrap();
+    let mut attacks = Vec::new();
+    for field in ["snapshot", "keyset", "limit", "expiry-past", "expiry-future", "collection"] {
+        let mut forged = cursor.clone();
+        match field {
+            "snapshot" => {
+                forged.snapshot.id = "snapshot/ATTACKER-SNAPSHOT".into();
+                forged.snapshot.store_index = 0;
+            }
+            "keyset" => forged.after_key = Some((0, "agent/ATTACKER-KEYSET".into())),
+            "limit" => forged.limit = 2,
+            "expiry-past" => forged.expires_at_unix_ms = 0,
+            "expiry-future" => forged.expires_at_unix_ms = u128::MAX,
+            "collection" => forged.collection = "assistant.conversations:foreign-grant-policy".into(),
+            _ => unreachable!(),
+        }
+        let encoded = encode_client_cursor(&forged).unwrap();
+        attacks.push(format!("{wrapper}:{encoded}"));
+        // Removing the wrapper must not restore the old unauthenticated admission path.
+        attacks.push(encoded);
+    }
+    for cursor in &attacks {
+        let query = format!("?cursor={}&max_response_bytes=16384", urlencoding::encode(cursor));
+        let payload = fixture.payload("conversations", &query);
+        let header = fixture.header(&payload, &fixture.attestor);
+        let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+        let encoded = value.to_string();
+        for forbidden in ["PRIVATE discovery source", "ATTACKER-SNAPSHOT", "ATTACKER-KEYSET", "agent/reads-codex", "conversation-content:"] {
+            assert!(!encoded.contains(forbidden), "{value}");
+        }
+    }
+    // Re-pair on the same daemon, then transplant both the visible grant collection
+    // and wrapper namespace. The original signature must not authorize the new grant.
+    let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
+        "device_name":"discovery-second","assistant_id":PRINCIPAL,"scopes":SCOPES,
+        "disclosure_consent":true,"consent_evidence":"discovery-isolation"})).unwrap();
+    let Json(challenge) = begin(fixture.state.clone(), ClientSession::local(Some(OWNER)).unwrap(), request).await.unwrap();
+    let key = signing_key();
+    let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"code":challenge["code"],
+        "device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.public_key().as_ref())})).unwrap();
+    let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+    let Json(paired) = complete(&fixture.state, id, &request, "fabric-loopback").await.unwrap().unwrap();
+    fixture.credential = paired["credential"].as_str().unwrap().into();
+    fixture.grant = paired["grant"]["id"].as_str().unwrap().into();
+    let Json(grant) = pin(State(fixture.state.clone()), Extension(ClientSession::local(Some(OWNER)).unwrap()),
+        AxumPath(fixture.grant.clone()), Json(fixture.trust_request())).await.unwrap();
+    fixture.revision = grant["policy_revision"].as_u64().unwrap();
+    let payload = fixture.payload("conversations", query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, second, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_cursor = second["value"]["page"]["next_cursor"].as_str().unwrap();
+    let (second_wrapper, second_encoded) = second_cursor.rsplit_once(':').unwrap();
+    let second_payload = decode_client_cursor(second_encoded).unwrap();
+    let (_, original_signature) = wrapper.rsplit_once(':').unwrap();
+    let (second_namespace, _) = second_wrapper.rsplit_once(':').unwrap();
+    let mut transplanted = cursor;
+    transplanted.collection = second_payload.collection;
+    attacks.push(format!("{second_namespace}:{original_signature}:{}", encode_client_cursor(&transplanted).unwrap()));
+    attacks.push(issued);
+    for cursor in attacks {
+        let query = format!("?cursor={}&max_response_bytes=16384", urlencoding::encode(&cursor));
+        let payload = fixture.payload("conversations", &query);
+        let header = fixture.header(&payload, &fixture.attestor);
+        let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{value}");
+        assert!(value.get("value").is_none(), "{value}");
+        let encoded = value.to_string();
+        for forbidden in ["PRIVATE discovery source", "ATTACKER-SNAPSHOT", "ATTACKER-KEYSET", "agent/reads-codex", "conversation-content:"] {
+            assert!(!encoded.contains(forbidden), "{value}");
+        }
+    }
+    let query = format!("?cursor={}&max_response_bytes=16384", urlencoding::encode(second_cursor));
+    let payload = fixture.payload("conversations", &query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversations{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
 }
 
 #[tokio::test]

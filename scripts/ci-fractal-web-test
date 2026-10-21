@@ -70,6 +70,8 @@ web_inputs = (
     "megarepo.kdl",
     "megarepo.lock",
     "flake.lock",
+    "scripts/ci-web-shell",
+    "scripts/ci-web-shell-test",
 )
 non_web_inputs = (
     "crates/st3-client/src/lib.rs",
@@ -266,6 +268,15 @@ assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
 assert "needs.genie-freshness.result == 'success'" in execution
 assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
 assert "nix develop .#web -c" in (root / "scripts/ci-web-shell").read_text(), "a missing shell cache falls back to evaluating the flake"
+assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in execution
+assert execution.index("kernel.apparmor_restrict_unprivileged_userns=0") < execution.index("bash scripts/ci-web-shell run bash scripts/ci-fractal-web")
+assert workflow.count("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0") == 1, "only the Buck TypeScript execution job changes host namespace policy"
+# The strict Nix sandbox fails the installer on runners that forbid unprivileged user namespaces
+# (every daily lane failed at Install Nix on 10-20): only a job that lifts the restriction may keep it.
+for generated in sorted((root / ".github/workflows").glob("*.yml")):
+    for name, job in re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", generated.read_text(), re.MULTILINE | re.DOTALL):
+        if "sandbox-fallback = false" in job:
+            assert "kernel.apparmor_restrict_unprivileged_userns=0" in job, f"{generated.name} {name}: strict Nix sandbox without enabling user namespaces"
 assert "actions/cache/restore@" in execution
 # Execution only restores: PR-scoped shell copies consume repository quota but
 # cannot warm merge groups. Protected-main upkeep remains the sole shell writer.
@@ -280,6 +291,34 @@ assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait fo
 settings = (root / ".github/repo-settings.json").read_text()
 assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"
 print("passed: generated jobs are unfiltered, hosted, bounded and fail closed")
+
+client = blocks["typescript-client"]
+assert "nix develop '.#web' -c pnpm install --frozen-lockfile" in client
+assert "nix develop '.#web' -c bash scripts/ci-typescript-client" in client
+assert "corepack enable" not in client, "Nix owns the client job's pnpm toolchain"
+print("passed: client install and checks use the same Nix web toolchain")
+
+# The shared store renderer emits product views recursively; every workspace endpoint must exist.
+for package in ("st3-client", "st3-views"):
+    package_path = f"clients/typescript/{package}"
+    source = (root / package_path / "BUCK").read_text()
+    trees = {}
+    for body in re.findall(r"(?ms)^package_view\(\n(.*?)^\)", source):
+        name = re.search(r'    name = "([^"]+)",', body).group(1)
+        trees[name] = body
+    identity = package_path.replace("/", "_").replace("-", "_")
+    for name, prefix in (("package_tree", "view"), ("product_package_tree", "product_view")):
+        assert name in trees, f"{package_path} lacks {name}"
+        assert re.search(rf'dependency_view = "//buck2/dependencies:{prefix}_{identity}_[0-9a-f]+"', trees[name])
+        assert 'strip_project_references = True' in trees[name]
+        assert 'runtime = "//:package_tree_runtime"' in trees[name]
+        assert 'runtime_entry = "package-tree.ts"' in trees[name]
+    files = [re.search(r"(?ms)    files = \{\n(.*?)^    \},", trees[name]).group(1)
+             for name in ("package_tree", "product_package_tree")]
+    assert files[0] == files[1], f"{package_path} product tree changes its own declared files"
+    typechecks = re.findall(r"(?ms)^tsgo_typecheck\(\n(.*?)^\)", source)
+    assert typechecks and all('package_tree = ":package_tree"' in body for body in typechecks)
+print("passed: ordinary and product package trees match their dependency views and own inputs")
 
 freshness = blocks["genie-freshness"]
 assert "scripts/ci-genie-freshness" in freshness
@@ -312,6 +351,7 @@ for required in (False, True):
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
         for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook and module graph", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
+        assert result.stdout.count("App replay browser e2e") == 1, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
         print(f"passed: kit lanes {'run' if required else 'skip explicitly'}")
@@ -321,7 +361,7 @@ for required in (False, True):
 fake_lane = r"""lane() {
   printf '%s\n' "$1"
   case "$1" in
-    "UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
+    "App replay browser e2e"|"UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
       [ "${TEST_STREAMS_ACTIVE:-0}" -eq 0 ] || { echo "exclusive kit lane overlapped test streams" >&2; return 17; } ;;
   esac
   case "$1" in
@@ -358,6 +398,7 @@ for shard, app, kit, build, index, expected in (
         for name in ("App unit tests", "Scenario tests", "Buck typecheck", "UI kit typecheck"):
             assert (name in result.stdout) == (shard == 0), (name, result.stdout)
         assert ("UI kit context isolation controls" in result.stdout) == (shard == 0 and not app and not index), result.stdout
+        assert result.stdout.count("App replay browser e2e") == int(shard == 0 and not (app or build or index)), result.stdout
         assert ("SDK frame CPU budgets" in result.stdout) == (shard == 0 and not (app or build or index)), result.stdout
         assert ("UI kit Storybook and module graph" in result.stdout) == (not app and not index), result.stdout
         assert ("UI kit strict plays" in result.stdout) == (not app and not build and not index), result.stdout
@@ -441,6 +482,8 @@ print("passed: merge-group shards preserve receipts and the semantic gate valida
 graph_check = root / "scripts/ci-fractal-web-kit-graph"
 detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
 assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
+roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "apps/fractal-web/packages/st3-sdk/src/effect/resourceDecode.ts"]
+assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/st3-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"

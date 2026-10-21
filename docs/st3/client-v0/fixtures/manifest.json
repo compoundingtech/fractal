@@ -19,6 +19,8 @@
     { "file": "terminal-end.json", "definition": "ActionRequest" },
 
     { "file": "pairing.json", "definition": "Envelope" },
+    { "file": "push-registration.json", "definition": "PushRegistration" },
+    { "file": "push-registration-response.json", "definition": "PushRegistrationResponse" },
     { "file": "assistant-pairing-begin.json", "definition": "PairingBegin" },
     { "file": "assistant-pairing-challenge.json", "definition": "Envelope" },
     { "file": "assistant-pairing.json", "definition": "Envelope" },

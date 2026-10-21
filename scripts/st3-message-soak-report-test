@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 
 report="$(dirname "$0")/st3-message-soak-report"
 base='2026-09-24T00:00:00Z monitor-started evidence_format=2
