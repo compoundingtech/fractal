@@ -11,13 +11,16 @@ import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
 export const ompDetailsSource = (): DataSource => {
   const rawDeclarations = Atom.make<Feed<Native.AgentDeclaration>>(ompDeclarationsNotReported)
   const declarations = Atom.make<Feed<NativeDeclarations>>(ompDeclarationsNotReported)
+  const usagePeriod = Atom.make<Feed<Native.UsagePeriod>>(observed({ value: decodeUnknownSync(UsagePeriod)(ompUsagePeriodWire) }))
   return {
     ...fixtureSource({ world: { now: ompNow, agents: [decodeUnknownSync(Agent)(ompAgentWire)], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }),
     nativeDetails: {
-      usagePeriod: Atom.make<Feed<Native.UsagePeriod>>(observed({ value: decodeUnknownSync(UsagePeriod)(ompUsagePeriodWire) })),
+      usagePeriod: () => usagePeriod,
       rawDeclarations: () => rawDeclarations,
       declarations: () => declarations,
+      // The fixture world is fixed: a re-read observes the same period.
       retry: () => undefined,
+      refresh: () => undefined,
     } satisfies NativeDetailsSource,
   }
 }

@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { FractalClient } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
 import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
-import { DateTime } from 'effect'
+import { DateTime, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it, vi } from 'vitest'
@@ -17,16 +17,16 @@ import { observed, type DataSource, type Feed } from '../data/source.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { guardedSessionTiming, useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
 
-const nativeRow = (incarnation: string) => openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Session title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } }))
+const nativeRow = (incarnation: string) => openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example-details', kind: 'agent', name: 'Session title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } }))
 const emptySource = (): DataSource => fixtureSource({ world: { now: 10000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
 
 describe('native Details mounted hook with real getter adapters', () => {
   it('retains earliest and rejected start memory across new guard atoms, scoped to source/agent/session/incarnation', () => {
-    const session = (start: number, incarnation = 'first', id = 'session/example', owner = 'agent/example') => Native.decodeUnknownSync(Native.Session)({ id, kind: 'session', owner_id: owner, runtime_incarnation: incarnation, revision: '1', started_at: new Date(start).toISOString(), updated_at: '1970-01-01T00:00:09Z', state: 'running', timeline_cursor: 'cursor/0' })
+    const session = (start: number, incarnation = 'first', id = 'session/example', owner = 'agent/example-details') => Native.decodeUnknownSync(Native.Session)({ id, kind: 'session', owner_id: owner, runtime_incarnation: incarnation, revision: '1', started_at: new Date(start).toISOString(), updated_at: '1970-01-01T00:00:09Z', state: 'running', timeline_cursor: 'cursor/0' })
     const source = emptySource()
     const input = Atom.make<Feed<Native.Session>>(observed({ value: session(1000) }))
     const registry = AtomRegistry.make()
-    const mount = (owner = source, agentRef = 'agent/example') => {
+    const mount = (owner = source, agentRef = 'agent/example-details') => {
       const atom = guardedSessionTiming({ input, source: owner, agentRef })
       return { atom, release: registry.mount(atom) }
     }
@@ -56,8 +56,8 @@ describe('native Details mounted hook with real getter adapters', () => {
       expect(registry.get(mounted.atom)._tag).toBe('Observed')
       registry.set(input, observed({ value: session(4000, 'third', 'session/unrelated'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
       expect(registry.get(mounted.atom)._tag).toBe('Observed')
-      const otherAgent = mount(source, 'agent/other')
-      registry.set(input, observed({ value: session(4000, 'third', 'session/example', 'agent/other'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
+      const otherAgent = mount(source, 'agent/example-other')
+      registry.set(input, observed({ value: session(4000, 'third', 'session/example', 'agent/example-other'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
       expect(registry.get(otherAgent.atom)._tag).toBe('Observed')
       otherAgent.release()
     } finally { mounted.release(); registry.dispose() }
@@ -74,16 +74,16 @@ describe('native Details mounted hook with real getter adapters', () => {
     const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
       const url = new URL(String(input))
       if (url.pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
-      if (url.pathname.includes('/agent-queues/')) return Response.json({ ...recording.cases.agent.payload, value: { kind: 'agent-queue', agent_id: 'agent/example', current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] } })
+      if (url.pathname.includes('/agent-queues/')) return Response.json({ ...recording.cases.agent.payload, value: { kind: 'agent-queue', agent_id: 'agent/example-details', current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] } })
       if (!url.pathname.includes('/sessions/')) throw new TypeError('Unexpected native request')
       sessionReads++
       return Response.json({ ...recording.cases.agent.payload, snapshot: { ...recording.cases.agent.payload.snapshot, created_at: snapshotAt },
-        value: { id: 'session/first', kind: 'session', owner_id: 'agent/example', runtime_incarnation: 'first', revision: '1', started_at: startedAt, updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' } })
+        value: { id: 'session/first', kind: 'session', owner_id: 'agent/example-details', runtime_incarnation: 'first', revision: '1', started_at: startedAt, updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' } })
     } }
     const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [nativeRow('first')] }))
     const source: DataSource = { ...emptySource(), agents, subjectReads: gatewaySubjectReads({ options, registry }) }
     let last: NativeDetailsObservation | undefined
-    const Pane = () => { last = useNativeDetails({ agentRef: 'agent/example' }); return <div>{last.overview.durations?.map(item => <div key={item.label}>{item.value}<span>{item.detail}</span></div>)}</div> }
+    const Pane = () => { last = useNativeDetails({ agentRef: 'agent/example-details' }); return <div>{last.overview.durations?.map(item => <div key={item.label}>{item.value}<span>{item.detail}</span></div>)}</div> }
     try {
       await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><Pane /></DataSourceProvider>))
       await act(async () => { await vi.waitFor(() => expect(last?.overview.durations?.[0]?.detail).toContain('producer snapshot time')) })
@@ -119,7 +119,7 @@ describe('native Details mounted hook with real getter adapters', () => {
     const root = createRoot(host)
     const requests: URL[] = []
     let holdGetters = false
-    const selectedPaths = ['/v1/client/usage', '/v1/client/agent-declarations/agent%2Fexample', '/v1/client/sessions/second', '/v1/client/agent-queues/agent%2Fexample']
+    const selectedPaths = ['/v1/client/usage', '/v1/client/agent-declarations/agent%2Fexample-details', '/v1/client/sessions/second', '/v1/client/agent-queues/agent%2Fexample-details']
     const blocked = new Map<string, { readonly signal: AbortSignal; readonly cancellation: Promise<void> }>()
     const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
@@ -137,12 +137,12 @@ describe('native Details mounted hook with real getter adapters', () => {
         return promise
       }
       if (url.pathname.endsWith('/usage')) value = { since_ms: 1000, until_ms: 5000, rows: [] }
-      else if (url.pathname.includes('/agent-declarations/')) value = { id: 'agent/example', revision: '1', revisions: ['1'], kdl: '', tree: { name: 'agent', children: [] } }
-      else if (url.pathname.includes('/agent-queues/')) value = { kind: 'agent-queue', agent_id: 'agent/example', current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] }
+      else if (url.pathname.includes('/agent-declarations/')) value = { id: 'agent/example-details', revision: '1', revisions: ['1'], kdl: '', tree: { name: 'agent', children: [] } }
+      else if (url.pathname.includes('/agent-queues/')) value = { kind: 'agent-queue', agent_id: 'agent/example-details', current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] }
       else if (url.pathname.includes('/sessions/')) {
         // The SDK strips "session/" for routing; the DTO retains the canonical ref.
         const incarnation = decodeURIComponent(url.pathname.split('/').at(-1)!)
-        value = { id: `session/${incarnation}`, kind: 'session', owner_id: 'agent/example', runtime_incarnation: incarnation, revision: '1', started_at: '1970-01-01T00:00:01Z', updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' }
+        value = { id: `session/${incarnation}`, kind: 'session', owner_id: 'agent/example-details', runtime_incarnation: incarnation, revision: '1', started_at: '1970-01-01T00:00:01Z', updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' }
       }
       else throw new TypeError('Unexpected native request')
       return Response.json({ ...recording.cases.agent.payload, value })
@@ -154,7 +154,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       nativeDetails: gatewayNativeDetails({ options, registry, discovery: client, now: () => 10000 }),
     }
     let last: NativeDetailsObservation | undefined
-    const Pane = () => { last = useNativeDetails({ agentRef: 'agent/example' }); return <div>{last.overview.title}</div> }
+    const Pane = () => { last = useNativeDetails({ agentRef: 'agent/example-details' }); return <div>{last.overview.title}</div> }
     try {
       expect(requests).toHaveLength(0)
       await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><Pane /></DataSourceProvider>))
@@ -182,9 +182,9 @@ describe('native Details mounted hook with real getter adapters', () => {
       holdGetters = true
       await act(async () => {
         registry.refresh(source.subjectReads.session.feed('session/second'))
-        registry.refresh(source.nativeDetails!.usagePeriod)
-        registry.refresh(source.nativeDetails!.rawDeclarations({ agentRef: 'agent/example', revision: '1' }))
-        registry.refresh(source.subjectReads.agentQueue.feed('agent/example'))
+        registry.refresh(source.nativeDetails!.usagePeriod('agent/example-details'))
+        registry.refresh(source.nativeDetails!.rawDeclarations({ agentRef: 'agent/example-details', revision: '1' }))
+        registry.refresh(source.subjectReads.agentQueue.feed('agent/example-details'))
       })
       await act(async () => { await vi.waitFor(() => expect([...blocked.keys()].sort()).toEqual([...selectedPaths].sort())) })
       expect(blocked.size).toBe(selectedPaths.length)
@@ -195,6 +195,81 @@ describe('native Details mounted hook with real getter adapters', () => {
       await Promise.all([...blocked.values()].map(({ cancellation }) => cancellation))
       expect([...blocked.values()].every(({ signal }) => signal.aborted)).toBe(true)
       expect(requests.some(url => url.pathname.includes('root-detail') || url.pathname.includes('conversation'))).toBe(false)
+    } finally {
+      await act(async () => root.unmount())
+      registry.dispose()
+      host.remove()
+      vi.unstubAllGlobals()
+    }
+  })
+  it('retries each failed getter alone, refreshes spend on request, and reads spend fresh for each agent', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    const registry = AtomRegistry.make()
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    const reads: string[] = []
+    const failing = new Set(['/v1/client/usage', '/v1/client/sessions/first', '/v1/client/agent-queues/agent%2Fexample-details'])
+    const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
+      reads.push(url.pathname)
+      if (failing.has(url.pathname)) throw new TypeError('Connection lost')
+      let value: unknown
+      if (url.pathname.endsWith('/usage')) value = { since_ms: 1000, until_ms: 5000, rows: [] }
+      else if (url.pathname.includes('/agent-declarations/')) value = { id: decodeURIComponent(url.pathname.split('/').at(-1)!), revision: '1', revisions: ['1'], kdl: '', tree: { name: 'agent', children: [] } }
+      else if (url.pathname.includes('/agent-queues/')) value = { kind: 'agent-queue', agent_id: decodeURIComponent(url.pathname.split('/').at(-1)!), current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] }
+      else if (url.pathname.includes('/sessions/')) value = { id: 'session/first', kind: 'session', owner_id: 'agent/example-details', runtime_incarnation: 'first', revision: '1', started_at: '1970-01-01T00:00:01Z', updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' }
+      else throw new TypeError('Unexpected native request')
+      return Response.json({ ...recording.cases.agent.payload, value })
+    } }
+    const count = (path: string) => reads.filter(read => read === path).length
+    const client = new FractalClient(options)
+    const other = { ...nativeRow('first'), id: Native.decodeUnknownSync(Native.Id)('agent/example-other'), current_session_id: Option.none() }
+    const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [nativeRow('first'), other] }))
+    const source: DataSource = { ...emptySource(), mode: 'live', agents,
+      subjectReads: gatewaySubjectReads({ options, registry, discovery: client }),
+      nativeDetails: gatewayNativeDetails({ options, registry, discovery: client, now: () => 10000 }),
+    }
+    let last: NativeDetailsObservation | undefined
+    const Pane = ({ agentRef }: { readonly agentRef: string }) => { last = useNativeDetails({ agentRef }); return null }
+    const show = (agentRef: string | undefined) => act(async () => root.render(<DataSourceProvider source={source} registry={registry}>{agentRef === undefined ? null : <Pane agentRef={agentRef} />}</DataSourceProvider>))
+    const missions = () => last?.sections.find(section => section.title === 'Missions')
+    try {
+      await show('agent/example-details')
+      await act(async () => { await vi.waitFor(() => {
+        expect(last?.spendRead?.failure?.message).toBe("Couldn't load spend.")
+        expect(last?.sessionFailure?.message).toBe("Couldn't load session details.")
+        expect(missions()?.failure?.message).toBe("Couldn't load the agent queue.")
+      }) })
+      // Healthy sections keep their content beside the failures.
+      expect(last?.overview.title).toBe('Session title')
+      failing.clear()
+      const before = { usage: count('/v1/client/usage'), session: count('/v1/client/sessions/first'), queue: count('/v1/client/agent-queues/agent%2Fexample-details') }
+      // Each Try again re-reads only its own getter.
+      await act(async () => last?.sessionFailure?.onRetry())
+      await act(async () => { await vi.waitFor(() => expect(last?.sessionFailure).toBeUndefined()) })
+      expect([count('/v1/client/usage'), count('/v1/client/sessions/first'), count('/v1/client/agent-queues/agent%2Fexample-details')]).toEqual([before.usage, before.session + 1, before.queue])
+      await act(async () => missions()?.failure?.onRetry())
+      await act(async () => { await vi.waitFor(() => expect(missions()?.failure).toBeUndefined()) })
+      expect([count('/v1/client/usage'), count('/v1/client/agent-queues/agent%2Fexample-details')]).toEqual([before.usage, before.queue + 1])
+      await act(async () => last?.spendRead?.failure?.onRetry())
+      await act(async () => { await vi.waitFor(() => expect(last?.spendRead).toMatchObject({ updatedAt: 5000, refreshing: false })) })
+      expect(last?.spendRead?.failure).toBeUndefined()
+      expect(count('/v1/client/usage')).toBe(before.usage + 1)
+      // Refresh is exactly one more spend read.
+      await act(async () => last?.spendRead?.onRefresh())
+      await act(async () => { await vi.waitFor(() => expect(count('/v1/client/usage')).toBe(before.usage + 2)) })
+      await act(async () => { await vi.waitFor(() => expect(last?.spendRead?.refreshing).toBe(false)) })
+      // Switching agent reads that agent's spend once; hidden Details reads nothing more.
+      await show('agent/example-other')
+      await act(async () => { await vi.waitFor(() => expect(last?.spendRead?.refreshing).toBe(false)) })
+      expect(count('/v1/client/usage')).toBe(before.usage + 3)
+      await show(undefined)
+      const settled = Promise.withResolvers<void>()
+      setTimeout(settled.resolve, 50)
+      await settled.promise
+      expect(count('/v1/client/usage')).toBe(before.usage + 3)
     } finally {
       await act(async () => root.unmount())
       registry.dispose()

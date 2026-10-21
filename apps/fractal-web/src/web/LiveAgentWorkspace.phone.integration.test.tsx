@@ -48,7 +48,7 @@ beforeEach(async () => {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
-  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/example-reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 })
 afterEach(async () => {
@@ -78,14 +78,14 @@ it('opens, traps focus, closes with Escape and returns focus without remounting 
 it('closes the drawer when an agent is selected and supports its explicit close button', async () => {
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Expand sidebar"]')!
   await act(async () => { trigger.focus(); trigger.click() })
-  const row = host.querySelector<HTMLElement>('[role="row"][data-sidebar-tree-key="agent/reviewer"]')!
+  const row = host.querySelector<HTMLElement>('[role="row"][data-sidebar-tree-key="agent/example-reviewer"]')!
   expect(row).not.toBeNull()
   await act(async () => {
     row.focus()
     row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
     row.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
   })
-  expect(window.location.pathname).toBe('/w/agent/reviewer')
+  expect(window.location.pathname).toBe('/w/agent/example-reviewer')
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
   await act(async () => trigger.click())
@@ -147,7 +147,7 @@ it('keeps a labelled Terminal toggle in the phone tab row that stays described a
 
 it('toggles the terminal drawer from the phone tab row Terminal button and reports its pressed state', async () => {
   const withTerminal = { ...agent, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/metric-track')] }
-  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/example-reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
   await vi.waitFor(() => expect(phoneTerminal().hasAttribute('aria-disabled')).toBe(false))
   expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')

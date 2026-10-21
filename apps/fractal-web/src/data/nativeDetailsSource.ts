@@ -7,14 +7,19 @@ import { observed, unavailable, waiting, type Feed } from './source.ts'
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
 
 export interface NativeDetailsSource {
-  /** One shared bounded period poll, not one request per roster row. */
-  readonly usagePeriod: Atom.Atom<Feed<Native.UsagePeriod>>
+  /**
+   * The bounded spend period, read once per mounted Details agent: no timer re-reads it, hidden
+   * Details holds no demand, and each open or agent switch starts one fresh read.
+   */
+  readonly usagePeriod: (agentRef: string) => Atom.Atom<Feed<Native.UsagePeriod>>
   /** Latest redacted declaration; revision keys the agent observation, not the independent declaration history. */
   readonly rawDeclarations: (query: { readonly agentRef: string; readonly revision: string }) => Atom.Atom<Feed<Native.AgentDeclaration>>
   /** Public-safe categories mapped from the same raw getter, never a second read. */
   readonly declarations: (query: { readonly agentRef: string; readonly revision: string }) => Atom.Atom<Feed<NativeDeclarations>>
   /** Refreshes the getter after read or projection failure so the new value is re-projected; refused reads stay refused. */
   readonly retry: (atom: Atom.Atom<Feed<unknown>>) => void
+  /** One requested re-read of a settled getter, healthy or failed; refused and unsupported reads stay as they are. */
+  readonly refresh: (atom: Atom.Atom<Feed<unknown>>) => void
 }
 const failure = (error: unknown): Feed<never> => unavailable({
   reason: error instanceof ClientError && error.status === 403 ? 'ungranted'
@@ -22,14 +27,15 @@ const failure = (error: unknown): Feed<never> => unavailable({
   detail: 'These session details could not be loaded.',
 })
 
-/** Reuse the source registry, SDK codecs and getter-poll lifecycle used by SubjectReads. */
+/** Reuse the source registry, SDK codecs and getter lifecycle used by SubjectReads. */
 export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
   readonly options: ClientOptions
   readonly discovery: FractalClient
   readonly registry: AtomRegistry.AtomRegistry
   readonly now: () => number
 }): NativeDetailsSource => {
-  const reader = <T>(read: (client: FractalClient) => Promise<T>): Atom.Atom<Feed<T>> => {
+  /** `polled` re-reads every 15 seconds while mounted; otherwise the getter reads once per mount or refresh. */
+  const reader = <T>(read: (client: FractalClient) => Promise<T>, { polled }: { readonly polled: boolean }): Atom.Atom<Feed<T>> => {
     let retained: T | undefined
     return Atom.make((get): Feed<T> => {
       const readOnce = Effect.tryPromise({
@@ -53,17 +59,18 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
             ? error : { _tag: 'Observed', value: retained, freshness: 'stale', error: { reason: error.reason, detail: error.detail } }
         },
       }))
-      const fiber = Effect.runFork(Stream.fromEffectSchedule(readOnce, Schedule.spaced('15 seconds'))
+      const fiber = Effect.runFork((polled ? Stream.fromEffectSchedule(readOnce, Schedule.spaced('15 seconds')) : Stream.fromEffect(readOnce))
         .pipe(Stream.runForEach(value => Effect.sync(() => get.setSelf(value)))))
       get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
       return retained === undefined ? waiting : observed({ value: retained, freshness: 'stale' })
     })
   }
-  const usagePeriod = reader(async client => {
+  // Keyed by the visible agent so each Details open or agent switch reads once; the period is not polled.
+  const usagePeriod = Atom.family((_agentRef: string) => reader(async client => {
     const until_ms = now()
     const response = await client.usagePeriod({ since_ms: Math.max(0, until_ms - 604_800_000), until_ms })
     return Native.decodeUnknownSync(Native.UsagePeriod)(response.value)
-  })
+  }, { polled: false }))
   const rawDeclarations = Atom.family((key: string) => reader(async client => {
     const [agentRef, revision] = key.split('\n')
     if (agentRef === undefined || revision === undefined) throw new TypeError('Invalid declaration query')
@@ -71,7 +78,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
     const declaration = Native.decodeUnknownSync(Native.AgentDeclaration)(response.value)
     if (declaration.id !== agentRef) throw new TypeError('Mismatched declaration observation')
     return declaration
-  }))
+  }, { polled: true }))
   const sourceOf = new WeakMap<Atom.Atom<Feed<unknown>>, Atom.Atom<Feed<unknown>>>()
   const declarations = Atom.family((key: string) => {
     const raw = rawDeclarations(key)
@@ -83,6 +90,11 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
     sourceOf.set(projected, raw)
     return projected
   })
+  const settled = (atom: Atom.Atom<Feed<unknown>>): boolean => {
+    const state = registry.get(atom)
+    return (state._tag === 'Unavailable' && state.reason === 'failed') ||
+      (state._tag === 'Observed' && (state.freshness === 'live' || state.error?.reason === 'failed'))
+  }
   return { usagePeriod,
     rawDeclarations: ({ agentRef, revision }) => rawDeclarations(`${agentRef}\n${revision}`),
     declarations: ({ agentRef, revision }) => declarations(`${agentRef}\n${revision}`),
@@ -93,5 +105,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
       if ((state._tag === 'Unavailable' && state.reason === 'failed') ||
         (state._tag === 'Observed' && state.error?.reason === 'failed')) registry.refresh(target)
     },
+    // An in-flight read (waiting, or retained without an error) is not restarted.
+    refresh: atom => { if (settled(atom)) registry.refresh(sourceOf.get(atom) ?? atom) },
   }
 }

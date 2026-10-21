@@ -50,7 +50,7 @@ export const guardedSessionTiming = ({ input, source, agentRef }: { readonly inp
   })
 }
 
-/** Mount only with the Details surface: atom lifetimes release every selected getter demand. */
+/** Mount only with the Details surface: atom lifetimes release every selected getter demand, and spend reads once per mount or agent. */
 export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): NativeDetailsObservation => {
   const source = useDataSource()
   const registry = React.useContext(RegistryContext)
@@ -62,7 +62,9 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
   const sessionAtom: Atom.Atom<Feed<Native.Session>> = sessionRef === undefined ? notReported : source.subjectReads.session.feed(sessionRef)
   const timingSessionAtom = React.useMemo(() => guardedSessionTiming({ input: sessionAtom, source, agentRef }), [sessionAtom, source, agentRef])
   const session = useAtomValue(timingSessionAtom)
-  const periodAtom: Atom.Atom<Feed<Native.UsagePeriod>> = source.nativeDetails?.usagePeriod ?? notReported
+  // The same subscribed getter, before timing guards, so only a failed read offers Try again.
+  const sessionRead = useAtomValue(sessionAtom)
+  const periodAtom: Atom.Atom<Feed<Native.UsagePeriod>> = source.nativeDetails?.usagePeriod(agentRef) ?? notReported
   const period = useAtomValue(periodAtom)
   const declarationAtom: Atom.Atom<Feed<NativeDeclarations>> = selected === undefined ? notReported : source.nativeDetails?.declarations({ agentRef, revision: selected.revision }) ?? notReported
   const declarations = useAtomValue(declarationAtom)
@@ -72,20 +74,27 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
   const subjects = useSubjectList()
   const needsMe = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' && agent.value !== undefined
     ? agent.value.status === 'waiting' || subjects.some(subject => subject.ref === agentRef && subject.attention === true) : undefined
+  // Each recovery re-reads only its own getter, and only after that getter failed.
+  const retryFailed = (atom: Atom.Atom<Feed<unknown>>) => {
+    const feed = registry.get(atom)
+    if ((feed._tag === 'Unavailable' && feed.reason === 'failed' && feed.retryable !== false) ||
+      (feed._tag === 'Observed' && feed.error?.reason === 'failed')) registry.refresh(atom)
+  }
+  const reads = {
+    refreshUsage: () => source.nativeDetails?.refresh(periodAtom),
+    retrySession: () => retryFailed(sessionAtom),
+    retryQueue: () => retryFailed(queueAtom),
+  }
+  // The pane-level Retry still recovers every failed getter; a section's Try again recovers only its own.
   const onRetry = () => {
-    const retrySubject = (atom: Atom.Atom<Feed<unknown>>) => {
-      const feed = registry.get(atom)
-      if ((feed._tag === 'Unavailable' && feed.reason === 'failed') ||
-        (feed._tag === 'Observed' && feed.error?.reason === 'failed')) registry.refresh(atom)
-    }
-    retrySubject(sessionAtom)
-    retrySubject(queueAtom)
+    reads.retrySession()
+    reads.retryQueue()
     source.nativeDetails?.retry(periodAtom)
     source.nativeDetails?.retry(declarationAtom)
     if ((row._tag === 'Unavailable' && row.reason === 'failed') ||
       (row._tag === 'Observed' && row.freshness === 'stale')) source.reconnect?.()
   }
-  const observation = projectNativeDetails({ agentRef, agent, row, session, period, declarations, missions, queue, needsMe, now, onRetry })
+  const observation = projectNativeDetails({ agentRef, agent, row, session, sessionRead, period, declarations, missions, queue, needsMe, now, onRetry, reads })
   useClockDeadline(observation.nextChangeAt)
   return observation
 }

@@ -40,7 +40,7 @@ const known = <A>(value: A): TraceFact<A> => ({ _tag: 'Known', value, source: 's
 const missing = { _tag: 'Unknown', reason: 'no-provider' } as const
 const overview: DetailsOverview = { title: 'Synthetic seat', status: 'Working', machine: 'Synthetic host', harness: 'omp', model: undefined, since: undefined, age: '5m', durations: [{ label: 'Managed session elapsed · wall time', value: '3m' }] }
 const trace = (): TraceSeries => ({
-  agentId: 'agent/synthetic', nativeSessionId: known('00000000-0000-4000-8000-000000000001'),
+  agentId: 'agent/example-synthetic', nativeSessionId: known('00000000-0000-4000-8000-000000000001'),
   meters: {
     context: { reportedPercent: known(6.1206), usedTokens: known(61_206), windowTokens: known(1_000_000), compactions: missing, lastCompactionMs: missing },
     spend: {

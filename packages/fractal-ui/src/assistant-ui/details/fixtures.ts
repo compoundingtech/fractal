@@ -30,8 +30,8 @@ export const detailsDuration = (ms: number): string => {
   if (ms < day) return `${Math.floor(ms / hour)}h ${String(Math.floor((ms % hour) / minute)).padStart(2, '0')}m`
   return `${Math.floor(ms / day)}d ${String(Math.floor((ms % day) / hour)).padStart(2, '0')}h`
 }
-const root = fixtureSidebarRows.get('agent/sample')!
-const idleRoot = fixtureSidebarRows.get('agent/source-archive')!
+const root = fixtureSidebarRows.get('agent/example-sample')!
+const idleRoot = fixtureSidebarRows.get('agent/example-source-archive')!
 const emptyItems: readonly DetailsResource[] = []
 const item = (uri: string, label: string, detail: string, glyph: string, card: TasteResource = { kind: 'file', label, detail, fileCount: unknown, files: [] }): DetailsResource => ({ uri, glyph, card })
 const busyItems: Readonly<Record<DetailsSectionName, DetailsValue<readonly DetailsResource[]>>> = {

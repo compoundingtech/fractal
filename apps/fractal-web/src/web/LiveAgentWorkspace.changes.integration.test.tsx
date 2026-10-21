@@ -33,7 +33,7 @@ vi.mock('./capturedChanges.ts', async importOriginal => {
 
 const agents = [
   ['agent/changes-a', 'Changes A', 'build-1', '/work/thread-changes'],
-  ['agent/changes-peer', 'Changes peer', 'build-1', '/work/thread-changes'],
+  ['agent/example-changes-peer', 'Changes peer', 'build-1', '/work/thread-changes'],
   ['agent/changes-b', 'Changes B', 'build-2', '/work/thread-changes'],
 ].map(([id, name, host, workspace]) => decodeUnknownSync(Agent)({
   kind: 'agent', id, name, host_id: `host/${host}`, workspace,
@@ -223,7 +223,7 @@ describe('live captured Changes dock', () => {
     // Another agent's inspector is another mount.
     await act(async () => inspectorTab('Changes').click())
     expect(inspectorSeparators()).toEqual(['Resize Changes'])
-    await selectAgent('agent/changes-peer')
+    await selectAgent('agent/example-changes-peer')
     // Selecting a thread closes the inspector; the next explicit opening is a fresh mount.
     expect(inspectorSeparators()).toEqual([])
     await act(async () => toggle().click())
@@ -268,7 +268,7 @@ describe('live captured Changes dock', () => {
     await key('End')
     expect(panelWidth()).toBe(720)
 
-    await selectAgent('agent/changes-peer')
+    await selectAgent('agent/example-changes-peer')
     await openChanges()
     expect(panelWidth()).toBe(720)
 

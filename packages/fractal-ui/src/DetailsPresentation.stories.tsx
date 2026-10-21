@@ -320,7 +320,7 @@ const inspectorHosts=[
   {id:'retained',state:'partial',empty:'E3'},
   {id:'failed',state:'error',empty:'E2'},
 ] as const
-const inspectorLayout=group([{uri:'details:agent/worker-1',view:'details'},{uri:'changes:agent/worker-1'}])
+const inspectorLayout=group([{uri:'details:agent/example-worker-1',view:'details'},{uri:'changes:agent/example-worker-1'}])
 function InspectorHost({host,scheme,width}:{readonly host:(typeof inspectorHosts)[number];readonly scheme:Args['scheme'];readonly width:number}){
   const [intent,setIntent]=React.useState<DetailsLayoutIntent>({hiddenSections:[]})
   const input=host.id==='unreported'?detailsStoryInputs('partial',detailsTraceFixtures.unknown):detailsStoryInputs(host.state)
@@ -730,13 +730,13 @@ function ProductionPhoneInspector({ scheme }: Args) {
   const [registry] = React.useState(() => AtomRegistry.make())
   const [source] = React.useState(() => fixtureSource({ world: {
     now: 10_000, agents: [decodeUnknownSync(Agent)({
-      kind: 'agent', id: 'agent/phone-details', name: 'Phone Details seat', host_id: 'host/example', runtime_ids: [],
+      kind: 'agent', id: 'agent/example-phone-details', name: 'Phone Details seat', host_id: 'host/example', runtime_ids: [],
       reachability: 'reachable', state: 'running', revision: '1', incarnation_id: 'first', updated_at: '1970-01-01T00:00:04.000Z',
     })], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }))
   React.useEffect(() => () => registry.dispose(), [registry])
   return <DataSourceProvider source={source} registry={registry}>
-    <ProductionPhoneSheet scheme={scheme}>{close => <AgentDetailsPanel agentRef="agent/phone-details" width="fill" scheme={scheme} onClose={close} onOpen={() => undefined} />}</ProductionPhoneSheet>
+    <ProductionPhoneSheet scheme={scheme}>{close => <AgentDetailsPanel agentRef="agent/example-phone-details" width="fill" scheme={scheme} onClose={close} onOpen={() => undefined} />}</ProductionPhoneSheet>
   </DataSourceProvider>
 }
 export const ProductionPhoneDetails: Story = {
@@ -803,21 +803,27 @@ const ompLines:Record<OmpSupplementState,{readonly line:string;readonly summary:
   reported:{line:'[data-details-accounting-note]',summary:accountingNoteSummary,why:'Why? Agent and total spend',reasons:[spendWindowReason]},
   retained:{line:'[data-details-supplement]',summary:'Subagent activity may be out of date (last updated just now).',why:'Why? Subagent activity',reasons:["The latest update couldn't be loaded, so earlier activity is shown."]},
 }
-/** The kit's omp seat over the production fixture source, with its priced session as the native Details read. */
-function ompStorySource():DataSource{
+/**
+ * The kit's omp seat over the production fixture source, with its priced session as the native Details read.
+ * `unavailable` also fails two reads: spend keeps its last figures beside Try again, and the agent queue has its own Try again.
+ */
+function ompStorySource(state:OmpSupplementState):DataSource{
   const rawDeclarations=Atom.make<Feed<Native.AgentDeclaration>>(ompDeclarationsNotReported),declarations=Atom.make<Feed<NativeDeclarations>>(ompDeclarationsNotReported)
+  const period=decodeUnknownSync(UsagePeriod)(ompUsagePeriodWire),failed=state==='unavailable'
+  const usagePeriod=Atom.make<Feed<Native.UsagePeriod>>(failed?{_tag:'Observed',value:period,freshness:'stale',error:{reason:'failed',detail:'These session details could not be loaded.'}}:{_tag:'Observed',value:period,freshness:'live'})
   return {
-    ...fixtureSource({world:{now:ompNow,agents:[decodeUnknownSync(Agent)(ompAgentWire)],missions:[],attention:[],events:[],conversations:{},terminals:{},envelopes:{},usage:{_tag:'undeclared'}}}),
+    ...fixtureSource({world:{now:ompNow,agents:[decodeUnknownSync(Agent)(ompAgentWire)],missions:[],attention:[],events:[],conversations:{},terminals:{},envelopes:{},usage:{_tag:'undeclared'}},
+      ...(failed?{overrides:{subjectReads:{agentQueue:{[ompAgentRef]:{_tag:'Unavailable',reason:'failed',detail:'The agent queue could not be loaded.'}}}}}:{})}),
     nativeDetails:{
-      usagePeriod:Atom.make<Feed<Native.UsagePeriod>>({_tag:'Observed',value:decodeUnknownSync(UsagePeriod)(ompUsagePeriodWire),freshness:'live'}),
-      rawDeclarations:()=>rawDeclarations,declarations:()=>declarations,retry:()=>undefined,
+      // A fixed world: Refresh and Try again observe the same period.
+      usagePeriod:()=>usagePeriod,rawDeclarations:()=>rawDeclarations,declarations:()=>declarations,retry:()=>undefined,refresh:()=>undefined,
     } satisfies NativeDetailsSource,
   }
 }
 /** The real inspector over an omp-driven seat; its subagent activity flows through the composition's feed seam. */
 function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:boolean;readonly state:OmpSupplementState}){
   const [registry]=React.useState(()=>AtomRegistry.make())
-  const [source]=React.useState(ompStorySource)
+  const [source]=React.useState(()=>ompStorySource(state))
   React.useEffect(()=>()=>registry.dispose(),[registry])
   if(narrow)return <DataSourceProvider source={source} registry={registry}>
     <ProductionPhoneSheet scheme={scheme}>{close=><AgentDetailsPanel agentRef={ompAgentRef} width="fill" scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>}</ProductionPhoneSheet>
@@ -891,6 +897,21 @@ function assertOmpLine(panel:HTMLElement,narrow:boolean,state:OmpSupplementState
   }
   requireContract(failures.length===0,`${ompShape}: ${failures.join('; ')}`)
 }
+const ompReadShape='Production OMP Details does not date spend with Refresh, or a failed read lacks its own Try again'
+/** Spend is dated with a Refresh; `unavailable` fails spend and the agent queue, each with its own exact sentence and Try again. */
+function assertOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplementState){
+  const spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]'),missions=panel.querySelector<HTMLElement>('section[aria-label$="Missions"]'),failures:string[]=[]
+  const failed=(root:HTMLElement|null)=>root?[...root.querySelectorAll<HTMLElement>('[data-details-read-failure]')].map(line=>`${line.querySelector('[role="status"]')?.textContent}|${line.querySelector('button')?.textContent}`):[]
+  const updated=spend?.querySelector('[data-details-spend-updated]')?.textContent??''
+  if(!/^Updated \S/.test(updated))failures.push(`spend dated "${updated}"`)
+  const refresh=spend?within(spend).queryAllByRole('button',{name:'Refresh'}):[]
+  if(state==='unavailable'){
+    if(failed(spend).join()!=="Couldn't load spend.|Try again"||refresh.length!==0)failures.push(`spend "${failed(spend).join()}" with ${refresh.length} Refresh`)
+    if(failed(missions).join()!=="Couldn't load the agent queue.|Try again")failures.push(`queue "${failed(missions).join()}"`)
+  }else if(refresh.length!==1||failed(panel).length!==0)failures.push(`${refresh.length} Refresh with ${failed(panel).length} failures`)
+  for(const action of panel.querySelectorAll<HTMLElement>('[data-details-read-action]')){const box=action.getBoundingClientRect();if((box.height>=43.5&&box.width>=43.5)!==narrow)failures.push(`${action.textContent} ${box.width.toFixed(1)}×${box.height.toFixed(1)} on ${narrow?'phone':'desktop'}`)}
+  requireContract(failures.length===0,`${ompReadShape}: ${failures.join('; ')}`)
+}
 function ompPlay(narrow:boolean,state:OmpSupplementState){
   return async({canvasElement}:{canvasElement:HTMLElement})=>{
     const doc=canvasElement.ownerDocument,expected=ompLines[state]
@@ -903,6 +924,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     }
     await waitFor(()=>{assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state)})
     await checkOmpAccounting(panel,narrow,state)
+    assertOmpReads(panel,narrow,state)
     // The pre-fix shape: a second paragraph painted beside the summary.
     const line=exposedLines(panel,expected.line)[0]!,summary=line.querySelector<HTMLElement>('[data-details-supplement-summary],[data-details-accounting-summary]')!
     const painted=summary.cloneNode(true) as HTMLElement;summary.after(painted)
@@ -947,7 +969,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
   }
 }
-const ompContractFixture={parameters:{scenario:{_tag:'contract-fixture',reason:'Controlled OMP loading, unavailable, reported and retained supplements pin exact accounting summaries, 99% attribution, unknown main-session period, last-7-days subagents and absence of epoch dates, with phone/desktop Why? geometry. Catalog details slices do not supply these supplemental feeds or their accounting facts.'}}} satisfies Story
+const ompContractFixture={parameters:{scenario:{_tag:'contract-fixture',reason:'Controlled OMP loading, unavailable, reported and retained supplements pin exact accounting summaries, 99% attribution, unknown main-session period, last-7-days subagents and absence of epoch dates, with phone/desktop Why? geometry, dated spend with Refresh, and failed spend and agent-queue reads with their own Try again. Catalog details slices do not supply these supplemental feeds, read failures or their accounting facts.'}}} satisfies Story
 // The kit gate runs each story at 440/1440 and dark/light; the inspector keeps its phone or desktop width.
 export const ProductionPhoneSubagentLoading:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="loading"/>,play:ompPlay(true,'loading')}
 export const ProductionPhoneSubagentUnavailable:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="unavailable"/>,play:ompPlay(true,'unavailable')}

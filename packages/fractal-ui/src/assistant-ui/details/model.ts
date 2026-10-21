@@ -49,4 +49,25 @@ export interface DetailsSection {
   readonly unavailableReason?: string
   /** First acquisition is pending, distinct from an unavailable or unreported result. */
   readonly pending?: boolean
+  /** This section's own read failed and can be tried again; other sections keep their content. */
+  readonly failure?: DetailsReadFailure
+}
+/** A failed host read with its own recovery; refused reads are not failures and offer no retry. */
+export interface DetailsReadFailure {
+  /** One plain sentence, e.g. `Couldn't load spend.` */
+  readonly message: string
+  /** Re-runs only the read that failed. */
+  readonly onRetry: () => void
+}
+/**
+ * Spend is read when Details opens and on request, never on a timer: the pane shows when it was
+ * last read so an old figure looks old, plus a Refresh action.
+ */
+export interface DetailsSpendRead {
+  /** When the shown spend was read; absent until a read settles. */
+  readonly updatedAt?: number
+  /** A requested read is in flight; the shown figures are the previous read. */
+  readonly refreshing: boolean
+  readonly onRefresh: () => void
+  readonly failure?: DetailsReadFailure
 }

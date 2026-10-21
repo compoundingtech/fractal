@@ -4,19 +4,20 @@ import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createProjections } from './projections.ts'
 import { observed, unavailable, type Feed } from './source.ts'
-import { nativeDetailsRoot, nativeDetailsTiming, projectNativeDetails } from './nativeDetails.ts'
+import { nativeDetailsRoot, nativeDetailsTiming, projectNativeDetails, type NativeDetailsObservation } from './nativeDetails.ts'
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
 import { contextOccupancy } from './contextOccupancy.ts'
 
-const row = openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Real seat', state: 'running', reachability: 'local', runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z', incarnation_id: 'inc/current', current_session_id: 'session/current', driver: 'omp', workspace: '/private/checkout', checkout: { repository: '/private/repo', branch: 'private-branch', base: 'main' },
+const row = openAgent(Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example-details', kind: 'agent', name: 'Real seat', state: 'running', reachability: 'local', runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z', incarnation_id: 'inc/current', current_session_id: 'session/current', driver: 'omp', workspace: '/private/checkout', checkout: { repository: '/private/repo', branch: 'private-branch', base: 'main' },
   usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 500, output_tokens: 500, cached_tokens: 0, total_tokens: 99999999, context: { used_tokens: 61206, window_tokens: 1000000, used_percent: 6.1206, observed_at_unix_ms: 4000, model: 'actual-model', compactions: 2, last_compaction_ms: 3000 } },
   todo: { accepted_at: '1970-01-01T00:00:04Z', claim_id: 'claim/todo', stale: false, snapshot: { harness: 'omp', incarnation_id: 'inc/current', session_id: 'native/root', observed_at: '1970-01-01T00:00:04Z', source_op: 'todo/write', phases: [], totals: { blocked: 0, completed: 0, in_progress: 0, pending: 0 }, truncated: false } },
 }))
 const usageRow = { agent: row.id, native_session_id: 'native/root', model: 'first-model', input_tokens: 10, output_tokens: 20, cached_tokens: 3, cache_write_tokens: 4, cache_write_1h_tokens: 0, total_tokens: 37, cost_microusd: 1200000, reported_cost_microusd: 0, unpriced_tokens: 0 }
-const period = Native.decodeUnknownSync(Native.UsagePeriod)({ since_ms: 1000, until_ms: 5000, rows: [usageRow, { ...usageRow, model: 'second-model', account: 'second-account', total_tokens: 63, cost_microusd: 2300000 }, { ...usageRow, agent: 'agent/other', cost_microusd: 99000000 }] })
+const period = Native.decodeUnknownSync(Native.UsagePeriod)({ since_ms: 1000, until_ms: 5000, rows: [usageRow, { ...usageRow, model: 'second-model', account: 'second-account', total_tokens: 63, cost_microusd: 2300000 }, { ...usageRow, agent: 'agent/example-other', cost_microusd: 99000000 }] })
 const session = Native.decodeUnknownSync(Native.Session)({ id: 'session/current', kind: 'session', owner_id: row.id, runtime_incarnation: 'inc/current', started_at: '1970-01-01T00:00:01Z', ended_at: '1970-01-01T00:00:03Z', updated_at: '1970-01-01T00:00:03Z', revision: '1', state: 'completed', timeline_cursor: 'cursor/0' })
 const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
-const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, sessionFeed, selectedQueue, selectedDeclarations = missing, needsMe }: { readonly selected?: DecodedAgent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly sessionFeed?: Feed<Native.Session>; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly selectedDeclarations?: Feed<NativeDeclarations>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: sessionFeed ?? observed({ value: selectedSession }), declarations: selectedDeclarations, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
+const reads = { refreshUsage: () => undefined, retrySession: () => undefined, retryQueue: () => undefined }
+const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, sessionFeed, selectedQueue, selectedDeclarations = missing, needsMe }: { readonly selected?: DecodedAgent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly sessionFeed?: Feed<Native.Session>; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly selectedDeclarations?: Feed<NativeDeclarations>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: sessionFeed ?? observed({ value: selectedSession }), declarations: selectedDeclarations, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined, reads })
 
 describe('fixture-free native Details projection', () => {
   it('retains future states without guessing unknown aggregation totals or context', () => {
@@ -52,7 +53,7 @@ describe('fixture-free native Details projection', () => {
       expect(project({ selected: idle, selectedPeriod })).toMatchObject({ state: 'partial', overview: { activity: 'idle' } })
       expect(project({ selected: working, selectedPeriod })).toMatchObject({ state: 'partial', overview: { activity: 'working' } })
     }
-    const unreported = projectNativeDetails({ agentRef: row.id, row: observed({ value: row }), agent: observed({ value: undefined }), period: missing, session: missing, declarations: missing, missions: missing, now: 10000, onRetry: () => undefined })
+    const unreported = projectNativeDetails({ agentRef: row.id, row: observed({ value: row }), agent: observed({ value: undefined }), period: missing, session: missing, declarations: missing, missions: missing, now: 10000, onRetry: () => undefined, reads })
     expect(unreported.state).toBe('partial')
     expect(unreported.overview.activity).toBeUndefined()
   })
@@ -142,7 +143,7 @@ describe('fixture-free native Details projection', () => {
     const terminals = sections.find(section => section.title === 'Terminals')?.items
     expect(terminals?._tag === 'Known' ? terminals.value.map(item => item.uri) : []).toEqual(['terminal/example'])
     expect(JSON.stringify(sections.find(section => section.title === 'Missions'))).toContain('1 ready, 0 waiting')
-    expect(project({ selectedQueue: observed({ value: { ...queue, agent_id: Native.decodeUnknownSync(Native.Id)('agent/other') } }) }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
+    expect(project({ selectedQueue: observed({ value: { ...queue, agent_id: Native.decodeUnknownSync(Native.Id)('agent/example-other') } }) }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
     expect(project({ selectedQueue: { _tag: 'Observed', freshness: 'live', value: queue, error: { reason: 'ungranted', detail: 'Revoked' } } }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
     expect(project({ needsMe: false }).sections.find(section => section.title === 'Attention')?.items._tag).toBe('Known')
     expect(project().sections.find(section => section.title === 'Attention')?.items._tag).toBe('Unknown')
@@ -174,11 +175,60 @@ describe('fixture-free native Details projection', () => {
     expect(project({ selectedPeriod: observed({ value: { ...zero, rows: [{ ...zero.rows[0]!, unpriced_tokens: 5 }] } }) }).trace.meters.spend.mainUsdCoverage).toEqual({ _tag: 'Unavailable', reason: 'not-covered' })
   })
   it('maps selected native refusal to non-retryable sync causes and preserves real codes', () => {
-    const refused = (feed: Feed<never>) => projectNativeDetails({ agentRef: row.id, row: feed, agent: feed, period: missing, session: missing, declarations: missing, missions: missing, now: 10000, onRetry: () => undefined }).syncStatus
+    const refused = (feed: Feed<never>) => projectNativeDetails({ agentRef: row.id, row: feed, agent: feed, period: missing, session: missing, declarations: missing, missions: missing, now: 10000, onRetry: () => undefined, reads }).syncStatus
     expect(refused(unavailable({ reason: 'ungranted', detail: 'read.projections denied' }))).toEqual({ _tag: 'Failed', cause: { _tag: 'Server', code: 'forbidden', message: 'read.projections denied' } })
     expect(refused(unavailable({ reason: 'unsupported', detail: 'No agents family' }))).toEqual({ _tag: 'Failed', cause: { _tag: 'Server', code: 'unsupported', message: 'No agents family' } })
     expect(refused(unavailable({ reason: 'failed', detail: 'Gateway restarted', code: 'internal' }))).toEqual({ _tag: 'Failed', cause: { _tag: 'Server', code: 'internal', message: 'Gateway restarted' } })
     expect(refused(unavailable({ reason: 'failed', detail: 'Lost' }))).toEqual({ _tag: 'Failed', cause: { _tag: 'Unknown' } })
+  })
+  it('dates spend with Refresh and gives each failed getter its own Try again, never for refused reads', () => {
+    const calls: string[] = []
+    const own = { refreshUsage: () => { calls.push('usage') }, retrySession: () => { calls.push('session') }, retryQueue: () => { calls.push('queue') } }
+    const view = ({ selectedPeriod = observed({ value: period }), selectedSession = observed({ value: session }), sessionRead, queue }: { readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Feed<Native.Session>; readonly sessionRead?: Feed<Native.Session>; readonly queue?: Feed<Native.AgentQueue> }) => projectNativeDetails({
+      agentRef: row.id, row: observed({ value: row }), agent: observed({ value: createProjections().fleetFromAgents([row]).agents[0] }), period: selectedPeriod, session: selectedSession,
+      ...(sessionRead === undefined ? {} : { sessionRead }), ...(queue === undefined ? {} : { queue }), declarations: missing, missions: missing, now: 10000, onRetry: () => { calls.push('pane') }, reads: own,
+    })
+    const missions = (result: NativeDetailsObservation) => result.sections.find(section => section.title === 'Missions')
+    // Healthy: dated by the end of the period read, with Refresh and no failures.
+    const healthy = view({})
+    expect(healthy.spendRead).toMatchObject({ updatedAt: 5000, refreshing: false })
+    expect(healthy.spendRead?.failure).toBeUndefined()
+    expect(healthy.sessionFailure).toBeUndefined()
+    healthy.spendRead?.onRefresh()
+    expect(calls).toEqual(['usage'])
+    // In flight: the previous figures stay, marked as refreshing.
+    expect(view({ selectedPeriod: { ...observed({ value: period }), freshness: 'stale' } }).spendRead).toMatchObject({ updatedAt: 5000, refreshing: true })
+    expect(view({ selectedPeriod: { _tag: 'Waiting' } }).spendRead).toMatchObject({ refreshing: true })
+    // Each failure names itself and retries only its own getter; healthy sections keep their content.
+    const failed = unavailable({ reason: 'failed', detail: 'Lost' })
+    const broken = view({ selectedPeriod: failed, selectedSession: failed, queue: failed })
+    expect(broken.spendRead?.failure?.message).toBe("Couldn't load spend.")
+    expect(broken.sessionFailure?.message).toBe("Couldn't load session details.")
+    expect(missions(broken)?.failure?.message).toBe("Couldn't load the agent queue.")
+    calls.length = 0
+    broken.spendRead?.failure?.onRetry()
+    expect(calls).toEqual(['usage'])
+    broken.sessionFailure?.onRetry()
+    expect(calls).toEqual(['usage', 'session'])
+    missions(broken)?.failure?.onRetry()
+    expect(calls).toEqual(['usage', 'session', 'queue'])
+    expect(broken.overview.title).toBe(row.name)
+    expect(broken.sections.find(section => section.title === 'Terminals')?.items._tag).toBe('Known')
+    // A failed refresh keeps the last figures, still dated, beside its Try again.
+    const retained = view({ selectedPeriod: { ...observed({ value: period }), freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } })
+    expect(retained.spendRead).toMatchObject({ updatedAt: 5000, failure: { message: "Couldn't load spend." } })
+    expect(retained.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
+    // Forbidden and non-retryable reads offer neither Try again nor Refresh.
+    const forbidden = unavailable({ reason: 'ungranted', detail: 'read.usage denied' })
+    const refused = view({ selectedPeriod: forbidden, selectedSession: forbidden, queue: forbidden })
+    expect(refused.spendRead).toBeUndefined()
+    expect(refused.sessionFailure).toBeUndefined()
+    expect(missions(refused)?.failure).toBeUndefined()
+    expect(missions(refused)?.unavailableReason).toBe('Access to these details is not granted.')
+    expect(missions(view({ queue: unavailable({ reason: 'failed', detail: 'Bad request', retryable: false }) }))?.failure).toBeUndefined()
+    // A session timing guard's rejection is not a failed read.
+    expect(view({ selectedSession: failed, sessionRead: observed({ value: session }) }).sessionFailure).toBeUndefined()
+    expect(calls).toEqual(['usage', 'session', 'queue'])
   })
   it('retains stale period values without exporting a stale native root to supplements', () => {
     const result = project({ selectedPeriod: { _tag: 'Observed', value: period, freshness: 'stale', error: { reason: 'failed', detail: 'Read failed' } } })
@@ -220,7 +270,7 @@ describe('fixture-free native Details projection', () => {
     expect(pendingPeriod.nativeSessionId).toBeUndefined()
     expect(project().nativeRootPending).toBe(false)
     expect(project({ selectedPeriod: missing }).nativeRootPending).toBe(false)
-    const pendingRow = projectNativeDetails({ agentRef: row.id, agent: { _tag: 'Waiting' }, row: { _tag: 'Waiting' }, session: { _tag: 'Waiting' }, period: { _tag: 'Waiting' }, declarations: missing, missions: missing, now: 10000, onRetry: () => {} })
+    const pendingRow = projectNativeDetails({ agentRef: row.id, agent: { _tag: 'Waiting' }, row: { _tag: 'Waiting' }, session: { _tag: 'Waiting' }, period: { _tag: 'Waiting' }, declarations: missing, missions: missing, now: 10000, onRetry: () => {}, reads })
     expect(pendingRow.nativeRootPending).toBe(true)
     expect(pendingRow.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(true)
   })
@@ -253,7 +303,7 @@ describe('fixture-free native Details projection', () => {
     projections.fleetFromAgents([row])
     const next = { ...row, incarnation_id: Option.some('inc/next') }
     const agent = projections.fleetFromAgents([next]).agents[0]
-    const result = projectNativeDetails({ agentRef: row.id, row: observed({ value: next }), agent: observed({ value: agent }), period: observed({ value: period }), session: observed({ value: session }), declarations: missing, missions: observed({ value: [] }), now: 10000, onRetry: () => undefined })
+    const result = projectNativeDetails({ agentRef: row.id, row: observed({ value: next }), agent: observed({ value: agent }), period: observed({ value: period }), session: observed({ value: session }), declarations: missing, missions: observed({ value: [] }), now: 10000, onRetry: () => undefined, reads })
     expect(result.trace.meters.context.reportedPercent._tag).toBe('Unknown')
     expect(result.trace.meters.context.compactions._tag).toBe('Unknown')
     expect(project().overview.model).toBe('actual-model')
@@ -264,7 +314,7 @@ describe('fixture-free native Details projection', () => {
     expect(nativeDetailsTiming({ row, session, now: 20000 })).toEqual({ elapsedMs: 2000, sessionAgeMs: 19000 })
     expect(nativeDetailsTiming({ row, session: { ...session, state: 'running', ended_at: Option.none() }, now: 20000 })).toEqual({ elapsedMs: 19000, sessionAgeMs: 19000 })
     expect(nativeDetailsTiming({ row, session: { ...session, ended_at: Option.none() }, now: 20000 })).toEqual({ sessionAgeMs: 19000 })
-    expect(nativeDetailsTiming({ row, session: { ...session, owner_id: 'agent/other' }, now: 10000 })).toEqual({})
+    expect(nativeDetailsTiming({ row, session: { ...session, owner_id: 'agent/example-other' }, now: 10000 })).toEqual({})
     expect(nativeDetailsTiming({ row, session: { ...session, runtime_incarnation: Option.some('inc/old') }, now: 10000 })).toEqual({})
     const result = project({ selected: { ...row, todo: Option.none(), since: Option.some(DateTime.makeUnsafe(7000)) } })
     expect(result.nativeSessionId).toBeUndefined()
@@ -295,11 +345,11 @@ describe('fixture-free native Details projection', () => {
     const usage = Option.getOrThrow(row.usage)
     const { model: _model, ...contextWithoutModel } = usage.context!
     const selected = { ...row, usage: Option.some({ ...usage, context: contextWithoutModel }) }
-    const result = projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: observed({ value: period }), session: observed({ value: session }), declarations: declared, missions: observed({ value: [] }), now: 10000, onRetry: () => undefined })
+    const result = projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: observed({ value: period }), session: observed({ value: session }), declarations: declared, missions: observed({ value: [] }), now: 10000, onRetry: () => undefined, reads })
     expect(result.overview.model).toBeUndefined()
     const bindings = result.sections.find(item => item.title === 'Declared bindings')?.items
     expect(bindings?._tag === 'Known' ? bindings.value.map(item => [item.uri, item.card.label]) : []).toEqual([['details:binding/0', 'Declared workspace'], ['details:binding/model', 'Declared model']])
-    const stale = projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: undefined }), period: missing, session: missing, declarations: { ...declared, value: { ...declared.value, agentRef: 'agent/other' } }, missions: missing, now: 10000, onRetry: () => undefined })
+    const stale = projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: undefined }), period: missing, session: missing, declarations: { ...declared, value: { ...declared.value, agentRef: 'agent/example-other' } }, missions: missing, now: 10000, onRetry: () => undefined, reads })
     expect(stale.sections.find(item => item.title === 'Declared bindings')?.items._tag).toBe('Unknown')
   })
   it('validates normalized declarations without emitting env, argv, paths or raw KDL', () => {
@@ -312,7 +362,7 @@ describe('fixture-free native Details projection', () => {
   it('schedules main duration text at seconds then minutes and wakes future observation fences', () => {
     const projectAt = (now: number) => projectNativeDetails({
       agentRef: row.id, row: observed({ value: row }), agent: observed({ value: createProjections().fleetFromAgents([row]).agents[0] }),
-      period: observed({ value: period }), session: observed({ value: session }), declarations: missing, missions: observed({ value: [] }), now, onRetry: () => undefined,
+      period: observed({ value: period }), session: observed({ value: session }), declarations: missing, missions: observed({ value: [] }), now, onRetry: () => undefined, reads,
     })
     expect(projectAt(1500).nextChangeAt).toBe(2000)
     expect(projectAt(10_000).nextChangeAt).toBe(11_000)

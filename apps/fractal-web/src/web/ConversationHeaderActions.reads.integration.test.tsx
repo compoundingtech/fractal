@@ -53,7 +53,7 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals(); vi.useRealTimers() })
 it('adds no serial HTTP requests to a seat switch while Resources is closed', async () => {
-  await show('agent/example')
+  await show('agent/example-details')
   await settle()
   await show('agent/other')
   await settle()
@@ -63,7 +63,7 @@ it('adds no serial HTTP requests to a seat switch while Resources is closed', as
 })
 it('keeps the authoritative poll alive for 60 seconds after closing, then releases it', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-  await show('agent/example')
+  await show('agent/example-details')
   await click('Resources')
   await click('Close resources')
   requests.length = 0
@@ -85,7 +85,7 @@ it('reopens within the TTL with the retained Observed value and no second read',
     return observed({ value: { items: [], nextCursor: null } })
   })
   const retainedSource = { ...source, resources: { ...source.resources, byAgent: () => resource } }
-  const atom = retainedResourceAtoms(retainedSource).resources('agent/negative-control')
+  const atom = retainedResourceAtoms(retainedSource).resources('agent/example-negative-control')
   let release = registry.mount(atom)
   const first = registry.get(atom)
   expect(first._tag).toBe('Observed')
@@ -97,14 +97,14 @@ it('reopens within the TTL with the retained Observed value and no second read',
   release()
 })
 it('prefetches on explicit focus while keeping the sheet closed', async () => {
-  await show('agent/example')
+  await show('agent/example-details')
   await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Resources"]')!.focus())
   await settle()
   expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
   expect(requests).toEqual(['/v1/client/capabilities', '/v1/client/resources'])
 })
 it('shows the agent Todos as the first Resources section, naming a missing snapshot', async () => {
-  await show('agent/example')
+  await show('agent/example-details')
   await click('Resources')
   const sections = [...document.querySelectorAll('aside[aria-label="Agent resources"] section[aria-label]')]
   expect(sections.map(section => section.getAttribute('aria-label'))).toEqual(['To-dos', 'Agent queue', 'Observed resources'])

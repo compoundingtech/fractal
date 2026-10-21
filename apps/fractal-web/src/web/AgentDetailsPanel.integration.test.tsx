@@ -16,6 +16,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed } from '../data/source.ts'
 import type { Feed } from '../data/source.ts'
 import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
+import { gatewaySubjectReads } from '../data/subjectReadPort.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
 import { ompDetailsSource } from './ompDetailsFixtures.ts'
@@ -24,7 +25,7 @@ import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const row = openAgent(decodeUnknownSync(Agent)({
-  kind: 'agent', id: 'agent/synthetic', name: 'Synthetic Details seat', host_id: 'host/synthetic', runtime_ids: [],
+  kind: 'agent', id: 'agent/example-synthetic', name: 'Synthetic Details seat', host_id: 'host/synthetic', runtime_ids: [],
   reachability: 'reachable', state: 'running', revision: '1', incarnation_id: 'first', updated_at: '1970-01-01T00:00:04.000Z',
   usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: { used_tokens: 61_206, window_tokens: 1_000_000, used_percent: 6.1206, observed_at_unix_ms: 3000, model: 'synthetic-reported-model' } },
 }))
@@ -48,7 +49,7 @@ beforeEach(async () => {
   document.body.append(host)
   root = createRoot(host)
   onClose.mockClear()
-  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef="agent/synthetic" width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef="agent/example-synthetic" width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
 })
 afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals() })
 
@@ -148,6 +149,48 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(declarationReads).toBe(2)
     expect(registry.get(declaration)).toMatchObject({ _tag: 'Observed', value: { bindings: [{ kind: 'workspace', count: 1 }] } })
   })
+  it('dates spend with Refresh and recovers failed spend and queue reads with their own Try again', async () => {
+    const reads: string[] = []
+    const failing = new Set(['/v1/client/usage', '/v1/client/agent-queues/agent%2Fexample-synthetic'])
+    const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
+      reads.push(url.pathname)
+      if (failing.has(url.pathname)) throw new TypeError('Connection lost')
+      let value: unknown
+      if (url.pathname.endsWith('/usage')) value = { since_ms: 1000, until_ms: 5000, rows: [] }
+      else if (url.pathname.includes('/agent-declarations/')) value = { id: row.id, revision: '1', revisions: ['1'], kdl: '', tree: { name: 'agent', children: [] } }
+      else if (url.pathname.includes('/agent-queues/')) value = { kind: 'agent-queue', agent_id: row.id, current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] }
+      else throw new TypeError(`Unexpected native request: ${url.pathname}`)
+      return Response.json({ ...recording.cases.agent.payload, value })
+    } }
+    const count = (path: string) => reads.filter(read => read === path).length
+    const client = new FractalClient(options)
+    const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents,
+      subjectReads: gatewaySubjectReads({ options, registry, discovery: client }),
+      nativeDetails: gatewayNativeDetails({ options, registry, discovery: client, now: () => 10_000 }),
+    }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef={row.id} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
+    const spend = () => within(host).getByRole('region', { name: 'Spend' })
+    const missions = () => within(host).getByRole('region', { name: 'Missions' })
+    await act(async () => { await vi.waitFor(() => {
+      expect(spend().textContent).toContain("Couldn't load spend.")
+      expect(missions().textContent).toContain("Couldn't load the agent queue.")
+    }) })
+    // Healthy facts stay beside both failures; neither offers Refresh while failed.
+    expect(host.textContent).toContain('Synthetic Details seat')
+    expect(within(spend()).queryByRole('button', { name: 'Refresh' })).toBeNull()
+    failing.clear()
+    const queueReads = count('/v1/client/agent-queues/agent%2Fexample-synthetic'), spendReads = count('/v1/client/usage')
+    await act(async () => within(missions()).getByRole('button', { name: 'Try again' }).click())
+    await act(async () => { await vi.waitFor(() => expect(host.textContent).not.toContain("Couldn't load the agent queue.")) })
+    expect([count('/v1/client/agent-queues/agent%2Fexample-synthetic'), count('/v1/client/usage')]).toEqual([queueReads + 1, spendReads])
+    await act(async () => within(spend()).getByRole('button', { name: 'Try again' }).click())
+    await act(async () => { await vi.waitFor(() => expect(spend().querySelector('[data-details-spend-updated]')?.textContent).toMatch(/^Updated \S/)) })
+    expect(count('/v1/client/usage')).toBe(spendReads + 1)
+    await act(async () => within(spend()).getByRole('button', { name: 'Refresh' }).click())
+    await act(async () => { await vi.waitFor(() => expect(count('/v1/client/usage')).toBe(spendReads + 2)) })
+  })
   it('reads through the app source registry and closes through the host', async () => {
     await act(async () => registry.set(agents, observed({ value: [{ ...row, name: 'Updated Details seat' }] })))
     expect(host.textContent).toContain('Updated Details seat')
@@ -157,7 +200,7 @@ describe('native observations mounted on the production kit Details pane', () =>
   })
   it('leaves the phone sheet its own close while keeping both tabs selectable', async () => {
     const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
-    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef="agent/synthetic" width="fill" scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef="agent/example-synthetic" width="fill" scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
     expect(within(host).queryByRole('button', { name: /close/i })).toBeNull()
     expect(within(host).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
     await act(async () => within(host).getByRole('tab', { name: 'Changes' }).click())

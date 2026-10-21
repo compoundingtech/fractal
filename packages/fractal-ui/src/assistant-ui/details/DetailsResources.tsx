@@ -14,6 +14,7 @@ import type { TraceSeries, TraceSubagent } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
 import { DetailsAvailabilityState, DetailsUnavailable, DetailsUnreportedSections, DetailsWhy, MissingDetailsValue } from './DetailsUnavailable'
+import { DetailsReadFailureLine } from './DetailsReadState'
 import { detailsReasonText, traceFactReason, traceReasonText } from './trace-reasons'
 import { traceCoverageState } from './trace-series'
 
@@ -54,14 +55,14 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
     .filter(section => !hidden.has(section.title))
   const hasSubagentEvidence = hasObservedSubagents || hasNoTracedSubagents || trace.subagentCount._tag === 'Known'
   const unreported = empty === 'E3' && state !== 'new'
-    ? candidates.filter(section => !section.pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
+    ? candidates.filter(section => !section.pending && section.failure === undefined && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
     : []
   // Pane-level loading keeps the settled footprint: the unreported-sections tail is reserved, unpainted and inert, so recovery never grows the slot.
   const reserveUnreported = state === 'loading'
   const sections = candidates
-    // First reads stay pending, never masquerading as settled unavailable data.
-    .filter(section => section.pending === true || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
-    .filter(section => section.pending === true || visible(section.items, empty) || (section.title === 'Subagents' && hasSubagentEvidence))
+    // First reads stay pending, never masquerading as settled unavailable data; a failed read keeps its own Try again.
+    .filter(section => section.pending === true || section.failure !== undefined || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
+    .filter(section => section.pending === true || section.failure !== undefined || visible(section.items, empty) || (section.title === 'Subagents' && hasSubagentEvidence))
   return <div data-details-state={state} data-details-form={form} data-details-empty={empty} {...stylex.props(styles.root, callerStyles)}>
     {sections.map(section => {
       const isCollapsed = collapsed[section.title] === true
@@ -69,6 +70,10 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
       const count = section.title === 'Subagents' ? trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : undefined
         : section.items._tag === 'Known' && section.items.value.length > 0 ? section.items.value.length : undefined
       const pending = state === 'loading' || section.pending === true
+      if (!pending && section.failure !== undefined && section.items._tag === 'Unknown') return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="failed" {...stylex.props(styles.section)}>
+        <div {...stylex.props(styles.header)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span></div>
+        <div {...stylex.props(styles.body)}><DetailsReadFailureLine failure={section.failure} /></div>
+      </section>
       if (!pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)) return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="unavailable" {...stylex.props(styles.section)}>
         <div {...stylex.props(styles.header, narrow && styles.headerWrap)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.metaLine)}>{section.title}</span><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></div>
       </section>
@@ -83,6 +88,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
           </AriaButton>
         </div>
         {!isCollapsed && <div {...stylex.props(styles.body)}>
+          {!pending && section.failure !== undefined && <DetailsReadFailureLine failure={section.failure} />}
           <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />
         </div>}
       </section>

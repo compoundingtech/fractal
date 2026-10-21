@@ -132,6 +132,9 @@ try {
         await page.getByRole('button', { name: 'Agent details', exact: true }).click()
         await page.getByRole('complementary', { name: 'Agent inspector', exact: true }).waitFor()
         await page.screenshot({ path: `${out}/app-${scheme}-390-details.png` })
+        const detailsSheet = page.getByRole('dialog', { name: 'Agent details', exact: true })
+        await detailsSheet.getByRole('button', { name: 'Close agent details', exact: true }).click()
+        await detailsSheet.waitFor({ state: 'hidden' })
         await page.getByRole('button', { name: 'Conversation menu', exact: true }).click()
         for (const label of ['Resources', 'View KDL', 'Show all system events']) {
           const item = page.getByRole(label === 'Show all system events' ? 'menuitemcheckbox' : 'menuitem', { name: label === 'Resources' ? /^Resources/ : label, exact: label !== 'Resources' })

@@ -13,11 +13,12 @@ const usage = (context?: UsageSummaryEncoded['context']) => ({ _tag: 'Known' as 
   ...(context === undefined ? {} : { context }),
 }) })
 const reading = { used_tokens: 61_206, window_tokens: 1_000_000, used_percent: 6.1206, observed_at_unix_ms: 3000, model: 'observed-model', compactions: 2 }
-const native = openAgent(decodeUnknownSync(NativeAgent)({ kind: 'agent', id: 'agent/example', name: 'Example', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1', updated_at: '1970-01-01T00:00:04.000Z', incarnation_id: 'first', usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: reading } }))
+const native = openAgent(decodeUnknownSync(NativeAgent)({ kind: 'agent', id: 'agent/example-details', name: 'Example', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', revision: '1', updated_at: '1970-01-01T00:00:04.000Z', incarnation_id: 'first', usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 100, output_tokens: 200, cached_tokens: 300, total_tokens: 480_035_214, context: reading } }))
 const occupancy = (agent: Agent) => contextOccupancy({ usage: agent.usage, now: 10_000, observedAfter: agent.contextObservedAfter })
 const details = (row: typeof native, agent: Agent) => {
   const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
-  return projectNativeDetails({ agentRef: native.id, row: observed({ value: row }), agent: observed({ value: agent }), period: missing, session: missing, declarations: missing, missions: missing, now: 10_000, onRetry: () => undefined })
+  const reads = { refreshUsage: () => undefined, retrySession: () => undefined, retryQueue: () => undefined }
+  return projectNativeDetails({ agentRef: native.id, row: observed({ value: row }), agent: observed({ value: agent }), period: missing, session: missing, declarations: missing, missions: missing, now: 10_000, onRetry: () => undefined, reads })
 }
 
 describe('reported context occupancy', () => {

@@ -5,7 +5,7 @@ import type { TraceAccumulationWindow, TraceCoverage, TraceFact, TraceSubagent }
  * production inspector takes the OMP subagent-activity branch end to end. Plain wire rows and feed states only:
  * the app's integration test and the kit's production Details stories each decode them into their own data source.
  */
-export const ompAgentRef = 'agent/omp-details'
+export const ompAgentRef = 'agent/example-omp-details'
 export const ompSessionId = 'omp-session/root'
 export const ompSubagent = { sessionId: 'omp-session/reviewer', label: 'Reviewer', model: 'example-model' } as const
 /** The fixture world's clock. */

@@ -41,7 +41,7 @@ const retainedWindow=known({_tag:'Interval',fromMs:sessionTraceFixture.windowSta
 const attributedCoverage={_tag:'Partial',attributedFraction:sessionTraceFixture.coverage.includedRequests/sessionTraceFixture.coverage.totalRequests} as const
 /** Sanitized captured numeric samples; not a claim of complete live-session coverage. */
 export const fullTraceFixture: TraceSeries = {
-  agentId: 'agent/worker-1', nativeSessionId: known(main.session.id),
+  agentId: 'agent/example-worker-1', nativeSessionId: known(main.session.id),
   coverage:{_tag:'Partial',attributedFraction:sessionTraceFixture.coverage.includedRequests/sessionTraceFixture.coverage.totalRequests},
   subagentCount:known(children.length),
   subagentsWindow:retainedWindow,
@@ -57,7 +57,7 @@ export const fullTraceFixture: TraceSeries = {
 
 /** Captured st totals have no child dimension; neither self nor inclusive scope is proven. */
 export const partialTraceFixture: TraceSeries = {
-  agentId: 'agent/worker-1', nativeSessionId: known('session-example', 'st'),
+  agentId: 'agent/example-worker-1', nativeSessionId: known('session-example', 'st'),
   coverage:{_tag:'Unavailable',reason:'no-provider'},
   subagentCount:unknown,
   subagentsWindow:unknown,
@@ -70,7 +70,7 @@ export const partialTraceFixture: TraceSeries = {
 
 /** Missing provider facts are omitted; unavailable sections explain the missing evidence. */
 export const unknownTraceFixture: TraceSeries = {
-  agentId: 'agent/worker-1', nativeSessionId: unknown,
+  agentId: 'agent/example-worker-1', nativeSessionId: unknown,
   coverage:{_tag:'Unavailable',reason:'no-provider'},
   subagentCount:unknown,
   subagentsWindow:unknown,

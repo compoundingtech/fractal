@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Checkbox, Dialog, DialogTrigger, Heading, Popover, ProgressBar, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import { DetailsResources, DetailsLabelContext } from './DetailsResources'
-import type { DetailsState, DetailsOverview, DetailsSection } from './model'
+import type { DetailsState, DetailsOverview, DetailsSection, DetailsReadFailure, DetailsSpendRead } from './model'
 import { DetailsCharts, DetailsChartsPending, hasDetailsChartData, pendingShapeFromTrace, type DetailsPendingShape } from './DetailsCharts'
 import { contextOccupancy, type TraceSeries } from './trace-series'
 import { PaneSyncStatus } from '../st3-views/PaneSyncStatus'
@@ -13,6 +13,7 @@ import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
 import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry } from '../composition-tokens.stylex'
 import { DetailsInlineReason } from './DetailsUnavailable'
+import { DetailsReadFailureLine, DetailsSpendReadLine } from './DetailsReadState'
 import { detailsReasonText } from './trace-reasons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
@@ -59,8 +60,12 @@ export interface DetailsPaneProps {
   pendingOverview?:DetailsOverview;pendingTrace?:TraceSeries;
   /** Hosts keep content unchanged while controlling the independent transport observation. */
   syncStatus?:SyncStatus;hasPriorContent?:boolean;observedAt?:number;
+  /** Spend's on-request read: when it was read, Refresh, and its own Try again. Absent paints neither. */
+  spendRead?:DetailsSpendRead;
+  /** The session read failed; Overview keeps its other facts and offers Try again for that read only. */
+  sessionFailure?:DetailsReadFailure;
 }
-export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry,onClose,closeFocusTarget,opening,overview,sections,trace,now,pendingOverview:providedPendingOverview,pendingTrace:providedPendingTrace,pendingShape:suppliedPendingShape,syncStatus:providedSyncStatus,hasPriorContent:providedHasPriorContent,observedAt=now}:DetailsPaneProps) {
+export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry,onClose,closeFocusTarget,opening,overview,sections,trace,now,pendingOverview:providedPendingOverview,pendingTrace:providedPendingTrace,pendingShape:suppliedPendingShape,syncStatus:providedSyncStatus,hasPriorContent:providedHasPriorContent,observedAt=now,spendRead,sessionFailure}:DetailsPaneProps) {
   const syncStatus:SyncStatus=providedSyncStatus??(state==='error'?{_tag:'Failed',cause:{_tag:'Unknown'}}:state==='loading'?{_tag:'Connecting',attempt:1,since:now}:{_tag:'Live',since:now})
   const hasPriorContent=providedHasPriorContent??(state!=='loading'&&state!=='error'&&state!=='new')
   const noPriorFailure=syncStatus._tag==='Failed'&&!hasPriorContent
@@ -205,11 +210,14 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
           return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue value={duration.value} detail={duration.detail}/>}</>}</div>
         })}
         {(pending?pendingTimingMissing:timingMissing)&&<p data-details-overview-line data-details-timing-missing aria-hidden={pending||undefined} {...stylex.props(line,styles.timingMissing)}>{pending?<span inert {...stylex.props(styles.pendingText)}>Timing isn't available for this session.</span>:"Timing isn't available for this session."}</p>}
+        {!pending&&sessionFailure!==undefined&&<DetailsReadFailureLine failure={sessionFailure}/>}
       </div>
     </Section>
-    {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
+    {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!(title==='Spend'&&spendRead?.failure!==undefined)&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
       ?<DetailsChartsPending context={variants.context} spend={variants.spend} empty={variants.empty} section={title==='Context'?'context':'spend'} shape={pendingShape}/>
-      :<DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section={title==='Context'?'context':'spend'} empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/>}</Section>)}
+      :title==='Spend'&&spendRead!==undefined
+        ?<div data-details-spend-body {...stylex.props(styles.readStack)}><DetailsSpendReadLine read={spendRead}/><DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section="spend" empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/></div>
+        :<DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section={title==='Context'?'context':'spend'} empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/>}</Section>)}
     <DetailsResources state={contentState} sections={sections} trace={pending?pendingTrace:trace} now={now} form={variants.resources} empty={variants.empty} onOpen={onOpen} hiddenSections={intent.hiddenSections}/>
     </div>
     {noPriorFailure&&syncStatus._tag==='Failed'&&<div data-details-error {...stylex.props(styles.errorBlock)}>
@@ -260,6 +268,7 @@ const styles=stylex.create({
   value:{display:'flex',margin:s.zero,minWidth:0,overflow:'hidden',whiteSpace:'normal',overflowWrap:'normal'},
   orientation:{margin:s.zero,paddingInline:s.zero,paddingBlock:s.sm,color:tx.fgSoft,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   timingMissing:{margin:s.zero},
+  readStack:{display:'flex',flexDirection:'column',gap:s.xs,minWidth:0},
   errorBlock:{position:'absolute',inset:s.zero,boxSizing:'border-box',display:'flex',flexDirection:'column',alignItems:'flex-start',gap:s.sm,padding:s.md,overflowY:'auto',overflowX:'hidden'},
   errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   errorHeading:{margin:s.zero,color:tx.fg,fontSize:t.metaSize,lineHeight:t.metaLeading,fontWeight:t.weightSemibold},
