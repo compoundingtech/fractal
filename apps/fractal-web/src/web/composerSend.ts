@@ -1,4 +1,4 @@
-import type { ConversationRuntimeOptions } from '@smalltalk/fractal-ui/assistant-ui'
+import type { ConversationRuntimeOptions } from '@fractal/ui/assistant-ui'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import type { AttachmentSendRequest, DataSource, Grants } from '../data/source.ts'
 
@@ -12,6 +12,7 @@ const sendFailureDetails: Readonly<Record<Extract<SendState, { _tag: 'Failed' }>
     failed: 'The message could not be sent. Check your connection and retry.',
     'stale-fence': 'The conversation changed before this message could be sent. Retry to use its current state.',
     'snapshot-unavailable': 'The conversation could not be loaded for sending. Nothing was sent. Retry when it is available.',
+    unconfirmed: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
   }
 
 /** Send diagnostics are not display copy, including for unclassified failure reasons. */
@@ -37,6 +38,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const dispatch = async (content: string, attachments: AttachmentSendRequest['parameters']['attachments'], retryKey?: string) => {
     if (source.attachments === undefined || grants.messageSend !== 'granted') return
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     const request = {
       api_version: 'st3.client.v0', type: 'message.send', id: `action/${crypto.randomUUID()}`,
       parameters: { to: agentRef, content, tags: [], attachments },
@@ -50,7 +52,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
         ? { ...request, _tag: 'Send' }
         : { ...request, _tag: 'Resend', idempotencyKey: retryKey })
       // Retryable send failures belong to the outbox row, not the next draft's availability.
-      if (result._tag === 'Refused' && result.reason !== 'failed'
+      if (result._tag === 'Refused' && result.reason !== 'failed' && result.reason !== 'unconfirmed'
         && result.reason !== 'stale-fence' && result.reason !== 'snapshot-unavailable') onRefused({ reason: result.reason })
       confirmed = result._tag === 'Success' && result.value.status === 'completed'
     } finally {
@@ -65,11 +67,13 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
         if (disabledReason !== undefined) return
         await dispatch(message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'), [])
       },
-      // Deliberately no onCancel: runtime.signal is not a send-cancel contract.
+      // Deliberately no onCancel: runtime.signal is not a send-cancel contract. The pane wires Stop to the agent's interrupt.
     },
     retry: async (item) => {
-      if (item._tag !== 'Text' || item.sendState?._tag !== 'Failed' || !item.id.startsWith('pending/')) return
+      if (item._tag !== 'Text' || (item.sendState?._tag !== 'Failed' && item.sendState?._tag !== 'Unconfirmed')
+        || !item.id.startsWith('pending/')) return
       // pending/<key> is the source-owned outbox identity, not a text/time dedupe heuristic.
+      // The source resends the key's recorded action id and parameters; these only route it.
       const attachments: AttachmentSendRequest['parameters']['attachments'][number][] = []
       for (const attachment of item.attachments) {
         const mediaType = attachment.mediaType

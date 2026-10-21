@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AttachmentPort } from '../data/source.ts'
 import { composerSendBinding, sendFailureDetail } from './composerSend.ts'
-import { ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { createComposerDraftSession, createLocalComposerDraftStore } from './composerDrafts.ts'
 import { createComposerDraftAdapter } from './composerDraftAdapter.ts'
 
@@ -84,6 +84,18 @@ describe('composer send contract', () => {
     expect(send.mock.calls.every(([request]) => !('fence' in request))).toBe(true)
     expect(binding.runtime.onCancel).toBeUndefined()
     expect(onRefused).not.toHaveBeenCalled()
+  })
+
+  it('keeps an unconfirmed send on its outbox row and resends its key from that row', async () => {
+    const send = vi.fn<AttachmentPort['send']>().mockResolvedValue({ _tag: 'Refused', reason: 'unconfirmed', detail: 'st could not confirm the send in time' })
+    const onRefused = vi.fn()
+    const binding = composerSendBinding({ source: { attachments: { capabilities: vi.fn(), upload: vi.fn(), chunk: vi.fn(), send } }, agentRef: seat, grants, readable: true, items: [], onRefused })
+    await binding.runtime.onNew(message)
+    // Unconfirmed belongs to the row; it never disables the next draft.
+    expect(onRefused).not.toHaveBeenCalled()
+    await binding.retry({ _tag: 'Text', id: 'pending/unconfirmed-key', role: 'user', text: 'hello', attachments: [], streaming: false, at: new Date(0).toISOString(), sendState: { _tag: 'Unconfirmed', detail: 'st could not confirm the send in time' } })
+    expect(send.mock.calls[1]![0]).toMatchObject({ _tag: 'Resend', idempotencyKey: 'unconfirmed-key' })
+    expect(sendFailureDetail('unconfirmed')).toBe('st may have taken this message and has not confirmed it yet. Sending it again is safe.')
   })
 
   it('disables absent ports and actual refusals instead of inventing a capability or fence', async () => {

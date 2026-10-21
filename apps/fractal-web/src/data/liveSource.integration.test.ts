@@ -8,7 +8,7 @@ import type {
   Runtime,
   Snapshot,
   TerminalScreen,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import type { AttachmentSendRequest, MessageSendAction } from './source.ts'
 import { Effect, Layer } from 'effect'
 import * as Option from 'effect/Option'
@@ -28,6 +28,13 @@ const snapshot: Snapshot = {
   store_index: 1,
 }
 
+/** st's action digest: the whole request but its fence, with object keys in a stable order. */
+const actionDigest = ({ fence: _fence, ...request }: { readonly fence?: unknown }): string =>
+  JSON.stringify(request, (_key, value: unknown) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+      : value)
+
 const agent: Agent = {
   id: 'agent/example',
   kind: 'agent',
@@ -45,6 +52,7 @@ class Gateway {
   readonly commands: CollectionCommand[] = []
   readonly sentFollowSubscribes: Array<{ readonly id: string; readonly key: string }> = []
   readonly runtimeReads: string[] = []
+  readonly httpPaths: string[] = []
   readonly terminalActions: ActionOf<'terminal.attach'>[] = []
   readonly terminalRequests: Array<'read' | 'attach'> = []
   terminalReplacement = ''
@@ -69,8 +77,12 @@ class Gateway {
   rejectSend = false
   currentSnapshot: Snapshot | undefined = snapshot
   staleSendFence = false
+  /** Take the send, then answer st's 503 `message-send-unconfirmed` instead of its result. */
+  unconfirmSend = false
   capabilityReads = 0
   readonly messageActions: MessageSendAction[] = []
+  /** st's durable answer per idempotency key, with the digest of the request that earned it. */
+  private readonly sendReceipts = new Map<string, { readonly digest: string; readonly value: unknown }>()
   /** Resolves once the gateway has derived the send action's message identity. */
   readonly nextAction = (count = 1) =>
     this.readyActions.has(count)
@@ -82,6 +94,7 @@ class Gateway {
 
   readonly fetch: typeof fetch = async (input, init) => {
     const path = new URL(String(input)).pathname
+    this.httpPaths.push(path)
     let value: unknown
     if (path === '/v1/client/capabilities') {
       this.capabilityReads += 1
@@ -163,6 +176,15 @@ class Gateway {
         }
         await this.sendGate
         if (this.transportFailure) throw new TypeError('Gateway disconnected')
+        // A repeated key gets its first durable answer only for the identical request.
+        const receipt = this.sendReceipts.get(action.idempotency_key)
+        if (receipt !== undefined && receipt.digest !== actionDigest(action)) return Response.json({
+          api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+          code: 'idempotency-conflict', message: 'the idempotency key was already used for a different action',
+          retryable: false, request_id: 'request/idempotency-conflict', details: {},
+        }, { status: 409 })
+        if (receipt !== undefined)
+          return Response.json({ api_version: 'st3.client.v0', snapshot: this.currentSnapshot, value: receipt.value })
         if (this.staleSendFence) return Response.json({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
           code: 'stale-fence', message: 'The observed snapshot belongs to an old gateway store.',
@@ -198,6 +220,14 @@ class Gateway {
           affected_ids: [messageId],
           snapshot_id: snapshot.id,
         }
+        this.sendReceipts.set(action.idempotency_key, { digest: actionDigest(action), value })
+        // The send completes, but st could not confirm it within its deadline.
+        if (this.unconfirmSend) return Response.json({
+          api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+          code: 'message-send-unconfirmed', message: 'st could not confirm the send in time',
+          retryable: false, request_id: 'request/send-unconfirmed',
+          details: { applied: 'unknown', action_id: action.id, idempotency_key: action.idempotency_key },
+        }, { status: 503 })
       } else if (action.type === 'terminal.attach') {
         this.terminalActions.push(action)
         this.terminalRequests.push('attach')
@@ -384,6 +414,51 @@ const withGateway = (
     )
     yield* test(live, gateway)
   }).pipe(Effect.scoped)
+
+describe('session inventory independence', () => {
+  it.live('reads selected threads before the roster and reconnects without listing sessions', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      yield* Effect.promise(() => live.ready)
+      const releaseRoster = live.registry.mount(live.source.agents)
+      const releaseInterest = live.registry.mount(live.source.conversationInterest!(agent.id))
+      const releaseThread = live.registry.mount(live.source.conversation(agent.id))
+      yield* settle
+      expect(live.registry.get(live.source.agents)._tag).toBe('Waiting')
+      gateway.mailEcho()
+      yield* settle
+      expect(live.registry.get(live.source.conversation(agent.id))).toMatchObject({
+        _tag: 'Observed', value: { items: [{ _tag: 'Text', text: 'hello' }] },
+      })
+      releaseThread()
+      releaseInterest()
+      const next = 'agent/selected-without-roster'
+      const releaseNextInterest = live.registry.mount(live.source.conversationInterest!(next))
+      const releaseNext = live.registry.mount(live.source.conversation(next))
+      yield* settle
+      gateway.send({
+        kind: 'conversation', id: gateway.subscription('conversation').id,
+        collection: 'conversation', session_id: 'session/selected', replace: true, has_more: false, items: [],
+      })
+      yield* settle
+      expect(live.registry.get(live.source.conversation(next))).toMatchObject({ _tag: 'Observed' })
+      live.suspendSockets()
+      yield* settle
+      live.resumeSockets()
+      yield* settle
+      expect(gateway.subscription('conversation')).toMatchObject({ conversation: next })
+      gateway.send({
+        kind: 'conversation', id: gateway.subscription('conversation').id,
+        collection: 'conversation', session_id: 'session/reconnected', replace: true, has_more: false, items: [],
+      })
+      yield* settle
+      expect(live.registry.get(live.source.conversation(next))).toMatchObject({ _tag: 'Observed' })
+      expect(gateway.httpPaths.filter(path => path === '/v1/client/sessions')).toEqual([])
+      releaseNext()
+      releaseNextInterest()
+      releaseRoster()
+    })),
+  )
+})
 
 
 describe('connection loss detection', () => {
@@ -690,6 +765,32 @@ describe('live feed sync sidecars', () => {
         })
         yield* settle
         expect(live.registry.get(sync.agents).sync.status._tag).toBe('Failed')
+      }),
+    ),
+  )
+  it.live('explicit roster Retry reacquires a failed follow and leaves a healthy follow alone', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.agents)
+        yield* settle
+        const first = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(first)
+        gateway.send({ kind: 'error', id: first, collection: 'agents', code: 'unavailable', message: 'Roster temporarily unavailable', retryable: false })
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
+        expect(live.source.retryAgents).toBeTypeOf('function')
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).not.toBe(first)
+        gateway.fleet([agent])
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Observed', freshness: 'live', value: [{ id: agent.id }] })
+        const recovered = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(recovered)
       }),
     ),
   )
@@ -1346,6 +1447,57 @@ describe('optimistic conversation sends', () => {
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
         })
+      }),
+    ),
+  )
+
+  it.live('keeps an unconfirmed send Unconfirmed and resends the identical action, not a rebuilt one', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.conversationInterest!(agent.id))
+        const conversation = live.source.conversation(agent.id)
+        live.registry.mount(conversation)
+        yield* settle
+        const blob = `blob/${'a'.repeat(64)}`
+        gateway.unconfirmSend = true
+        const unconfirmed = yield* Effect.promise(() => live.source.attachments!.send({
+          ...request, parameters: { ...request.parameters, attachments: [{ blob, media_type: 'image/png', name: null }] },
+        }))
+        expect(unconfirmed).toMatchObject({
+          _tag: 'Refused', reason: 'unconfirmed',
+          error: { code: 'message-send-unconfirmed', details: { applied: 'unknown' } },
+        })
+        const first = gateway.messageActions[0]!
+        expect(live.registry.get(conversation)).toMatchObject({
+          _tag: 'Observed', value: { items: [{
+            _tag: 'Text', id: `pending/${first.idempotency_key}`, text: 'hello',
+            sendState: { _tag: 'Unconfirmed', detail: 'st could not confirm the send in time' },
+          }] },
+        })
+        gateway.unconfirmSend = false
+        // A retry rebuilt from the row: a fresh action id, and the view model drops the null name.
+        const rebuilt = {
+          ...request, id: 'action/rebuilt-retry',
+          parameters: { ...request.parameters, attachments: [{ blob, media_type: 'image/png' as const }] },
+        }
+        const retried = yield* Effect.promise(() => live.source.attachments!.send({
+          ...rebuilt, _tag: 'Resend', idempotencyKey: first.idempotency_key,
+        }))
+        expect(retried).toMatchObject({ _tag: 'Success', value: { status: 'completed' } })
+        const second = gateway.messageActions[1]!
+        expect(second.id).toBe(first.id)
+        expect(second.idempotency_key).toBe(first.idempotency_key)
+        expect(second.parameters).toStrictEqual(first.parameters)
+        expect(live.registry.get(conversation)).toMatchObject({
+          _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
+        })
+        // st refuses the rebuilt request itself: the same key with a different action.
+        const conflict = yield* Effect.promise(() => gateway.fetch('http://gateway.example/v1/client/actions', {
+          method: 'POST',
+          body: JSON.stringify({ ...first, id: rebuilt.id, parameters: rebuilt.parameters }),
+        }))
+        expect(conflict.status).toBe(409)
+        expect(yield* Effect.promise(() => conflict.json())).toMatchObject({ code: 'idempotency-conflict' })
       }),
     ),
   )

@@ -26,6 +26,15 @@ const account = (input: unknown) => {
 }
 
 describe('native usage.period quota presentation', () => {
+  it('accepts both wire version names but rejects unknown or conflicting versions', () => {
+    for (const api_version of ['st3.client.v0', 'fractal.client.v0']) {
+      expect(projectNativeQuota({ ...envelope(), api_version }, NOW)).toMatchObject({ _tag: 'ok' })
+    }
+    for (const api_version of ['fractal.client.v1', 'smalltalk.client.v0', ['st3.client.v0', 'fractal.client.v0']]) {
+      expect(projectNativeQuota({ ...envelope(), api_version }, NOW))
+        .toMatchObject({ _tag: 'failed', failure: { kind: 'incompatible' } })
+    }
+  })
   it('preserves native percentages including reported zero, identity and original measurement', () => {
     const row = account(envelope())
     expect(row.accountId).toBe(reading.account_ref)
@@ -52,7 +61,7 @@ describe('native usage.period quota presentation', () => {
         credits: { budget_microusd: 200_000_000, used_microusd: 154_000_000, unpriced_tokens: 0,
           period_start_ms: Date.parse('2026-10-01T00:00:00Z') } },
     ]
-    const stranger = { ...reading, account: 'claude/stranger', account_ref: undefined }
+    const { account_ref: _omit, ...rest } = reading; const stranger = { ...rest, account: 'claude/stranger' }
     const input = envelope([reading, stranger])
     const native = projectNativeQuota({ ...input, value: { ...input.value, accounts: declared } }, NOW)
     if (native._tag !== 'ok') throw new Error(native.failure.reason)

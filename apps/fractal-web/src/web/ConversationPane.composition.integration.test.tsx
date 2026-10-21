@@ -6,62 +6,75 @@
  * rendered transcript reproduces the Storybook-reference structure on real components.
  */
 import * as React from 'react'
+import { useAui } from '@assistant-ui/react'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import { Markdown, type WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
-import type * as Kit from '@smalltalk/fractal-ui/assistant-ui'
+import { Markdown, type WorkLogCall } from '@fractal/ui/assistant-ui'
+import type * as Kit from '@fractal/ui/assistant-ui'
 import type * as KitRuntime from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import type * as KitTranscript from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type * as KitComposer from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
-import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/fractal-ui/assistant-ui'
+import type { ConversationRuntimeOptions, TranscriptTurn } from '@fractal/ui/assistant-ui'
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
+import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
+  clockListeners: new Set<() => void>(),
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
   composerProps: [] as React.ComponentProps<typeof Kit.EmbraceComposer>[],
+  setDraft: undefined as ((text: string) => void) | undefined,
+  sendable: false,
+  agentControls: undefined as { readonly control: () => Promise<never>; readonly interrupt: (agent: string) => Promise<{ readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }> } | undefined,
 }))
 
 vi.mock('../data/react.tsx', async () => {
   // Vitest hoists this factory before static imports are initialized.
   const Atom = await import('effect/reactivity/Atom')
+  const React = await import('react')
   const agents = Atom.make({ _tag: 'Observed' as const, freshness: 'live' as const, value: [] })
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined }),
+  useConnection: () => ({ _tag: 'Live' }),
+  // A sendable view exposes attachments; the composer stays disabled otherwise.
+  useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},
-  useNow: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useNow: () => React.useSyncExternalStore(listener => {
+    source.clockListeners.add(listener)
+    return () => { source.clockListeners.delete(listener) }
+  }, () => source.now),
+  useNowSnapshot: () => source.now,
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
+  useAttention: () => ({ _tag: 'Waiting' }),
   })
 })
 
 // Tap the input seams but keep the real kit/runtime rendering and effects.
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', async importOriginal => {
   const kit = await importOriginal<typeof KitRuntime>()
+  const DraftProbe = () => {
+    const aui = useAui()
+    source.setDraft = text => aui.composer().setText(text)
+    return null
+  }
   return {
     ...kit,
     EmbraceRuntimeProvider: (props: React.ComponentProps<typeof Kit.EmbraceRuntimeProvider>) => {
       source.runtimeItems.push(props.options.messages ?? [])
-      return <kit.EmbraceRuntimeProvider {...props} />
+      return <kit.EmbraceRuntimeProvider {...props}><DraftProbe />{props.children}</kit.EmbraceRuntimeProvider>
     },
   }
 })
@@ -89,6 +102,10 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx', 
 
 import { ConversationPane } from './ConversationPane.tsx'
 import { WorkspaceBody } from './LiveAgentWorkspace.tsx'
+import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
+import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
+import { workLogTurnFromItems } from '../../../../packages/fractal-ui/src/assistant-ui/taste/work-log.ts'
+import type { ConversationItem as KitItem, TextItem as KitText } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 /** The recorded scenario page: every item kind the gate replays, in delivery order. */
@@ -106,10 +123,13 @@ const container = document.createElement('div')
 
 beforeEach(() => {
   source.now = 1000
+  source.clockListeners.clear()
   source.runtimeItems = []
   source.transcriptTurns = []
   source.scrollToBottomKeys = []
   source.composerProps = []
+  source.sendable = false
+  source.agentControls = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
@@ -133,15 +153,79 @@ afterEach(async () => {
 
 const opened: WorkLogCall[] = []
 
-const mount = async (ux?: UxTelemetry) => {
+const clock = {
+  now: () => source.now,
+  subscribe: (listener: () => void) => {
+    source.clockListeners.add(listener)
+    return () => { source.clockListeners.delete(listener) }
+  },
+}
+const mount = async (ux?: UxTelemetry, strictMode = false) => {
   await act(async () => {
-    root!.render(<ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} />)
+    const pane = <HumanClockProvider clock={clock}><ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} /></HumanClockProvider>
+    root!.render(strictMode ? <React.StrictMode>{pane}</React.StrictMode> : pane)
   })
 }
 
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('waits for actual source adoption without painting stranded rows or replacing the composer', async () => {
+    source.feed = { _tag: 'Waiting' }
+    // Focus and caret retention need an enabled composer once the conversation loads.
+    source.sendable = true
+    source.sync = { status: { _tag: 'Requested', since: 990 }, observedAt: 990 }
+    await mount()
+    expect(container.querySelector('[data-testid="transcript-placeholder"]')?.textContent).toBe('')
+    const strandedPaints: Element[] = []
+    const observer = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) if (node instanceof Element) {
+        if (node.matches('[data-testid="transcript-stranded"]')) strandedPaints.push(node)
+        strandedPaints.push(...node.querySelectorAll('[data-testid="transcript-stranded"]'))
+      }
+    })
+    observer.observe(container, { childList: true, subtree: true })
+    const loadingInput = container.querySelector('textarea')
+    await act(async () => { source.setDraft!('Retain this unsent draft') })
+    loadingInput!.setSelectionRange(7, 11)
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: true, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 1000 }, observedAt: 1000 }
+    try { await mount() } finally { observer.disconnect() }
+    expect(strandedPaints).toHaveLength(0)
+    const readyInput = container.querySelector('textarea')
+    expect(readyInput).toBe(loadingInput)
+    expect(readyInput?.value).toBe('Retain this unsent draft')
+    expect(readyInput?.selectionStart).toBe(7)
+    expect(readyInput?.selectionEnd).toBe(11)
+    expect(container.querySelector('[data-testid="transcript-placeholder"]')).toBeNull()
+    expect(container.querySelector('[data-testid="history-boundary"]')).not.toBeNull()
+    readyInput?.focus()
+    source.feed = { ...source.feed, value: { ...source.feed.value, items: [...scenario] } }
+    await mount()
+    expect(container.querySelector('textarea')).toBe(readyInput)
+    expect(document.activeElement).toBe(readyInput)
+    expect(readyInput?.selectionStart).toBe(7)
+    expect(readyInput?.selectionEnd).toBe(11)
+  })
+
+  it.each([false, true])('groups all eleven reasoning entries of a work log into one disclosure (tool between=%s)', async separated => {
+    const reasoning: ConversationItem[] = Array.from({ length: 11 }, (_, index) => ({
+      _tag: 'Reasoning', id: `thought-${index}`, text: `Thought number ${index + 1}.`, streaming: false, at: at(index + 1),
+    }))
+    const items = separated ? [...reasoning.slice(0, 5), scenario[1]!, ...reasoning.slice(5)] : reasoning
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, ...items, scenario[3]!], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!.click() })
+    const disclosures = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="thinking-entry"] button')]
+    expect(disclosures).toHaveLength(1)
+    expect(disclosures.every(button => button.getAttribute('aria-expanded') === 'false')).toBe(true)
+    expect(text()).not.toContain('Thought number 1.')
+    for (const button of disclosures) await act(async () => { button.click() })
+    expect([...container.querySelectorAll('[data-testid="thinking-entry"] [data-conversation-entry-id]')].map(element => element.textContent))
+      .toEqual(reasoning.map(item => item._tag === 'Reasoning' ? item.text : ''))
+  })
+
   it('insets the composer dock so its focus outline stays inside the viewport', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await mount()
@@ -301,6 +385,8 @@ describe('ConversationPane composition activation', () => {
     expect(source.composerProps.length).toBeGreaterThan(0)
     expect(source.composerProps.every(props => props.readingColumn === true)).toBe(true)
     expect(source.composerProps.every(props => props.placeholder === undefined)).toBe(true)
+    expect(source.composerProps.every(props => props.conversationLabel === 'Example Agent')).toBe(true)
+    expect(container.querySelector('form')?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
   })
 
   it('keeps the source-owned scroll command stable through settlement, echo and Retry until a new Send', async () => {
@@ -338,6 +424,51 @@ describe('ConversationPane composition activation', () => {
     expect(source.scrollToBottomKeys.at(-1)).toBe(third.id)
     const changes = source.scrollToBottomKeys.filter((key, index, keys) => index === 0 || key !== keys[index - 1])
     expect(changes).toEqual([undefined, first.id, second.id, third.id])
+  })
+
+  it('updates clock labels without re-rendering the runtime or composer', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Requested', since: 0 }, observedAt: 0 }
+    await mount()
+    const runtimeRenders = source.runtimeItems.length
+    const composerRenders = source.composerProps.length
+    const transcriptRenders = source.transcriptTurns.length
+    for (let second = 1; second <= 10; second += 1) {
+      await act(async () => {
+        source.now += 1000
+        source.clockListeners.forEach(listener => listener())
+      })
+    }
+    expect(source.transcriptTurns).toHaveLength(transcriptRenders)
+    expect(source.runtimeItems).toHaveLength(runtimeRenders)
+    expect(source.composerProps).toHaveLength(composerRenders)
+    expect(text()).toContain('Loading conversation is taking longer than expected · 11s')
+  })
+
+  it('advances contextual running and transcript-header elapsed leaves without rendering the transcript', async () => {
+    source.now = Date.parse(at(0)) + 1000
+    const running: ConversationItem = { _tag: 'Status', id: 'run-status', status: 'running', at: at(1) }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, running], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: source.now }, observedAt: source.now }
+    await mount()
+    const transcriptRenders = source.transcriptTurns.length
+    const runtimeRenders = source.runtimeItems.length
+    const composerRenders = source.composerProps.length
+    const activity = container.querySelector('[data-testid="live-activity-label"]')!
+    const header = container.querySelector('[data-testid="run-elapsed"]')!
+    expect(activity.textContent).toBe('Working · 1s')
+    expect(header.textContent).toBe('Running · 1s')
+    for (const [elapsed, label] of [[2000, '2s'], [60_000, '1m']] as const) {
+      await act(async () => {
+        source.now = Date.parse(at(0)) + elapsed
+        source.clockListeners.forEach(listener => listener())
+      })
+      expect(activity.textContent).toBe(`Working · ${label}`)
+      expect(header.textContent).toBe(`Running · ${label}`)
+    }
+    expect(source.transcriptTurns).toHaveLength(transcriptRenders)
+    expect(source.runtimeItems).toHaveLength(runtimeRenders)
+    expect(source.composerProps).toHaveLength(composerRenders)
   })
 
   it('keeps runtime items and transcript turns stable for sixty idle clock, sync and no-op frame updates', async () => {
@@ -675,5 +806,190 @@ describe('ConversationPane composition activation', () => {
     await mount()
     expect(container.querySelector('[data-testid="agent-message"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="user-message"]')).toBeNull()
+  })
+
+  it('stops the running turn from the composer through the agent interrupt, and shows a refusal beside Stop', async () => {
+    let answer: (result: { readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }) => void = () => {}
+    const interrupt = vi.fn((_agent: string) => new Promise<{ readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }>(resolve => { answer = resolve }))
+    source.agentControls = { control: () => Promise.reject(new Error('not used')), interrupt }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    const stop = () => container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')
+    expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    expect(stop()?.getAttribute('aria-keyshortcuts')).toBe('Escape')
+    await act(async () => { stop()!.click() })
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
+    expect(stop()?.getAttribute('aria-label')).toBe('Stopping run')
+    expect(stop()?.getAttribute('aria-disabled')).toBe('true')
+    expect(stop()?.disabled).toBe(false)
+    await act(async () => { answer({ _tag: 'Refused', detail: 'That agent has no terminal to stop its turn through.' }) })
+    expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')?.textContent).toBe('That agent has no terminal to stop its turn through.')
+    // The run ends: Stop and the refusal leave with it.
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'cancelled', at: at(3) }], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(stop()).toBeNull()
+    expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')).toBeNull()
+  })
+
+  it.each([
+    { sendGranted: true, strictMode: false, moveFocus: false },
+    { sendGranted: false, strictMode: false, moveFocus: false },
+    { sendGranted: true, strictMode: true, moveFocus: false },
+    { sendGranted: false, strictMode: true, moveFocus: false },
+    { sendGranted: true, strictMode: false, moveFocus: true },
+    { sendGranted: false, strictMode: false, moveFocus: true },
+    { sendGranted: true, strictMode: true, moveFocus: true },
+    { sendGranted: false, strictMode: true, moveFocus: true },
+  ])('keeps pending Stop inert and preserves focus ownership (send granted: $sendGranted, Strict Mode: $strictMode, focus moved: $moveFocus)', async ({ sendGranted, strictMode, moveFocus }) => {
+    const answer = Promise.withResolvers<{ readonly _tag: 'Sent' }>()
+    const interrupt = vi.fn((_agent: string) => answer.promise)
+    source.agentControls = { control: () => Promise.reject(new Error('not used')), interrupt }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    source.sendable = sendGranted
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount(undefined, strictMode)
+    const stop = container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')!
+    const message = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!
+    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer, Example Agent"]')!
+    expect(message.disabled).toBe(!sendGranted)
+    stop.focus()
+    expect(document.activeElement).toBe(stop)
+    // Use Stop's announced keyboard shortcut, including two presses before React commits.
+    await act(async () => {
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
+    expect(stop.getAttribute('aria-disabled')).toBe('true')
+    expect(stop.disabled).toBe(false)
+    expect(document.activeElement).toBe(stop)
+    await act(async () => {
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      stop.click()
+      answer.resolve({ _tag: 'Sent' })
+    })
+    expect(interrupt).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(stop)
+    const history = container.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
+    if (moveFocus) {
+      history.focus()
+      expect(document.activeElement).toBe(history)
+    }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'cancelled', at: at(3) }], hasOlder: false, observation: { empty: false } } }
+    await mount(undefined, strictMode)
+    expect(container.querySelector('[data-testid="run-stop"]')).toBeNull()
+    expect(document.activeElement).toBe(moveFocus ? history : sendGranted ? message : composer)
+    expect(message.disabled).toBe(!sendGranted)
+  })
+
+  it('keeps a stop refusal to the run it answered and drops a late answer for an older run', async () => {
+    type Answer = { readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }
+    const answers: ((result: Answer) => void)[] = []
+    const interrupt = vi.fn((_agent: string) => { const pending = Promise.withResolvers<Answer>(); answers.push(pending.resolve); return pending.promise })
+    source.agentControls = { control: () => Promise.reject(new Error('not used')), interrupt }
+    const prompt = (id: string): ConversationItem => ({ _tag: 'Text', id, role: 'user', text: `Run ${id}.`, attachments: [], streaming: false, at: at(0) })
+    const firstRun = [prompt('p1'), { _tag: 'Status', id: 'run-1', status: 'running', at: at(2) }] as const satisfies readonly ConversationItem[]
+    const firstEnded = [prompt('p1'), { _tag: 'Status', id: 'run-1', status: 'completed', at: at(3) }] as const satisfies readonly ConversationItem[]
+    const secondRun = [...firstEnded, prompt('p2'), { _tag: 'Status', id: 'run-2', status: 'running', at: at(5) }] as const satisfies readonly ConversationItem[]
+    const show = async (items: readonly ConversationItem[]) => {
+      source.feed = { _tag: 'Observed', freshness: 'live', value: { items, hasOlder: false, observation: { empty: false } } }
+      await mount()
+    }
+    const stop = () => container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')
+    const refusal = () => container.querySelector('[data-testid="composer-footer"] [role="status"]')
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await show(firstRun)
+    await act(async () => { stop()!.click() })
+    await act(async () => { answers[0]!({ _tag: 'Refused', detail: 'First run refused.' }) })
+    expect(refusal()?.textContent).toBe('First run refused.')
+    // That run ends and the next starts: the old refusal does not carry over.
+    await show(firstEnded)
+    await show(secondRun)
+    expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    expect(refusal()).toBeNull()
+    // A Stop pressed in a run whose answer only arrives after the next run started belongs to that older run and is dropped.
+    await show(firstRun)
+    await act(async () => { stop()!.click() })
+    await show(firstEnded)
+    await show(secondRun)
+    await act(async () => { answers[1]!({ _tag: 'Refused', detail: 'Late answer for the first run.' }) })
+    expect(refusal()).toBeNull()
+    expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    // Overlap: run A's Stop is still pending when run B starts; B's Stop is refused, then A's answer lands. B's reason stays.
+    const thirdRun = [prompt('p3'), { _tag: 'Status', id: 'run-3', status: 'running', at: at(7) }] as const satisfies readonly ConversationItem[]
+    const thirdEnded = [prompt('p3'), { _tag: 'Status', id: 'run-3', status: 'completed', at: at(8) }] as const satisfies readonly ConversationItem[]
+    const fourthRun = [...thirdEnded, prompt('p4'), { _tag: 'Status', id: 'run-4', status: 'running', at: at(9) }] as const satisfies readonly ConversationItem[]
+    await show(thirdRun)
+    await act(async () => { stop()!.click() })
+    await show(thirdEnded)
+    await show(fourthRun)
+    await act(async () => { stop()!.click() })
+    await act(async () => { answers[3]!({ _tag: 'Refused', detail: 'Run B refused.' }) })
+    expect(refusal()?.textContent).toBe('Run B refused.')
+    await act(async () => { answers[2]!({ _tag: 'Refused', detail: 'Late answer for run A.' }) })
+    expect(refusal()?.textContent).toBe('Run B refused.')
+    expect(interrupt).toHaveBeenCalledTimes(4)
+  })
+
+  it('offers no Stop when the connection cannot interrupt agents', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(container.querySelector('[data-testid="run-stop"]')).toBeNull()
+  })
+})
+
+describe('Transcript under a host that filters adapter entries', () => {
+  // The kit StrandedItem story's shape: the host keeps every entry in its turns but withholds some
+  // from the runtime adapter, so those ids are never adopted and must render their fallback.
+  const at0 = '2026-10-08T12:00:00.000Z'
+  const entry = (id: string, role: 'user' | 'assistant', body: string): KitText => ({ _tag: 'Text', id, role, text: body, attachments: [], streaming: false, at: at0 })
+  const prompt = { ...entry('stranded/prompt', 'user', 'Summarize the retained rows.'), role: 'user' as const }
+  const items: readonly KitItem[] = [entry('stranded/lost-answer', 'assistant', 'This answer never reached the runtime.'), { _tag: 'UnknownEvent', id: 'stranded/lost-event', eventType: 'opaque', data: {}, at: at0 }, entry('stranded/answer', 'assistant', 'A later answer stays in order.')]
+  const appended: readonly KitItem[] = [{ _tag: 'Notice', id: 'stranded/lost-notice', kind: 'event', text: 'An appended entry the runtime drops.', at: at0 }, entry('stranded/late-answer', 'assistant', 'The appended answer follows it.')]
+  const secondPrompt = { ...entry('stranded/lost-prompt', 'user', 'A prompt the runtime never adopted.'), role: 'user' as const }
+  const secondItems: readonly KitItem[] = [entry('stranded/second-answer', 'assistant', 'Its answer still renders after it.')]
+  const drop = new Set(['stranded/lost-answer', 'stranded/lost-event', 'stranded/lost-notice', 'stranded/lost-prompt'])
+  const settled = (turnItems: readonly KitItem[]) => workLogTurnFromItems(turnItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
+  const turnsFor = (withAppended: boolean): readonly TranscriptTurn[] => {
+    const firstItems = withAppended ? [...items, ...appended] : items
+    return [
+      { id: 'stranded', prompt, items: firstItems, work: settled(firstItems) },
+      { id: 'stranded-second', prompt: secondPrompt, items: secondItems, work: settled(secondItems) },
+    ]
+  }
+  const render = async (turns: readonly TranscriptTurn[]) => {
+    const messages = turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt]), ...turn.items]).filter(item => !drop.has(item.id))
+    await act(async () => {
+      root!.render(<EmbraceRuntimeProvider options={{ messages, isRunning: false, onNew: async () => {} }}>
+        <Transcript title="Row projection" turns={turns} sync={{ _tag: 'Live', since: 1000 }} now={1000} observedAt={1000} />
+      </EmbraceRuntimeProvider>)
+    })
+    // The external store publishes adopted messages a task after adoption.
+    await act(async () => { await Promise.resolve() })
+  }
+  const order = (turn: Element) => Array.from(turn.querySelectorAll('[data-item-id]'), element => element.getAttribute('data-item-id'))
+  const strandedIds = () => Array.from(container.querySelectorAll('[data-testid="transcript-stranded"]'), element => element.getAttribute('data-item-id'))
+
+  it('shows dropped entries as fallbacks, keeps later valid answers, and keeps a turn whose prompt was dropped', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await render(turnsFor(false))
+      expect(strandedIds()).toEqual(['stranded/lost-answer', 'stranded/lost-event', 'stranded/lost-prompt'])
+      const [first, second] = container.querySelectorAll('[data-testid="transcript-turn"]')
+      expect(order(first!)).toEqual(['stranded/prompt', 'stranded/lost-answer', 'stranded/lost-event', 'stranded/answer'])
+      expect(order(second!)).toEqual(['stranded/lost-prompt', 'stranded/second-answer'])
+      expect(text()).toContain('A later answer stays in order.')
+      expect(text()).toContain('Its answer still renders after it.')
+      await render(turnsFor(true))
+      expect(strandedIds()).toEqual(['stranded/lost-answer', 'stranded/lost-event', 'stranded/lost-notice', 'stranded/lost-prompt'])
+      const turns = container.querySelectorAll('[data-testid="transcript-turn"]')
+      expect(turns).toHaveLength(2)
+      expect(turns[0]).toBe(first)
+      expect(turns[1]).toBe(second)
+      expect(order(first!)).toEqual(['stranded/prompt', 'stranded/lost-answer', 'stranded/lost-event', 'stranded/answer', 'stranded/lost-notice', 'stranded/late-answer'])
+      expect(text()).toContain('The appended answer follows it.')
+    } finally { warn.mockRestore() }
   })
 })

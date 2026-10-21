@@ -1,10 +1,16 @@
-import { Agent, AgentId, Resource, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
+import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { expect, test } from 'vitest'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 import { createProjections, fleetFromAgents, terminalSubjectForAgent } from './projections.ts'
 
-const decodeRosterResource = decodeUnknownSync(Resource)
+/** The live roster path: the SDK keeps a row with open leaves or reports it undecodable. */
+const decodeRosterResource = (raw: unknown) => {
+  const { value } = decodeResourceRow(raw)
+  if (value === undefined) throw new TypeError('Expected a decodable roster row')
+  return value
+}
 
 test.each([
   { state: 'running', harness_state: 'idle', blocked_on: null, fault: null, activity: 'idle' },
@@ -22,10 +28,17 @@ test.each([
     fault: 'runtime exited',
     activity: 'errored',
   },
+  {
+    state: 'down',
+    harness_state: 'indeterminate',
+    blocked_on: null,
+    fault: null,
+    activity: 'errored',
+  },
 ] as const)(
   'observed harness activity respects human blocking and failure ($activity)',
   ({ activity, ...observation }) => {
-    const row = decodeUnknownSync(
+    const row = openAgent(decodeUnknownSync(
       Agent,
       'strict',
     )({
@@ -38,12 +51,12 @@ test.each([
       revision: '1',
       updated_at: '2026-10-04T12:00:00.000Z',
       ...observation,
-    } satisfies AgentEncoded)
+    } satisfies AgentEncoded))
     expect(fleetFromAgents([row]).agents[0]?.activity).toBe(activity)
   },
 )
 
-const row = decodeUnknownSync(
+const row = openAgent(decodeUnknownSync(
   Agent,
   'strict',
 )({
@@ -59,7 +72,7 @@ const row = decodeUnknownSync(
   fault: null,
   revision: '1',
   updated_at: '2026-10-04T12:00:00.000Z',
-} satisfies AgentEncoded)
+} satisfies AgentEncoded))
 
 test.each([
   ['agent/example', 'terminal/example'],
@@ -140,7 +153,7 @@ test('roster lifecycle tolerance preserves forward-compatible fields and enum ca
     future_field: { detail: 'Additional server evidence' },
   })
   if (decoded.kind !== 'agent') throw new TypeError('Expected an agent roster row')
-  expect(decoded.state).toEqual({ _tag: 'Unknown', raw: 'future-state' })
+  expect(decoded.state).toEqual({ _tag: 'Unrecognized', raw: 'future-state' })
   expect(fleetFromAgents([decoded]).agents[0])
     .toMatchObject({ ref: 'agent/lifecycle', lifecycle: { _tag: 'Unknown' } })
 })
@@ -161,7 +174,7 @@ test('incremental roster lifecycle changes invalidate the retained sidebar row',
 
 test('incremental fleet projection retains unchanged rows, hosts and collection identity', () => {
   const project = createProjections()
-  const second: Agent = { ...row, id: 'agent/second', name: 'Second' }
+  const second: DecodedAgent = { ...row, id: 'agent/second', name: 'Second' }
   const first = project.fleetFromAgents([row, second])
   expect(project.fleetFromAgents([row, second])).toBe(first)
   expect(
@@ -201,7 +214,7 @@ test('mission joins retain unrelated mission views and update only linked attent
 
 test('subject identities follow only their row and attention membership', () => {
   const project = createProjections()
-  const second: Agent = { ...row, id: 'agent/second', name: 'Second' }
+  const second: DecodedAgent = { ...row, id: 'agent/second', name: 'Second' }
   const fleet = project.fleetFromAgents([row, second])
   const first = project.subjectList({ fleet, attention: [] })
   expect(project.subjectList({ fleet, attention: [] })).toBe(first)
@@ -212,7 +225,7 @@ test('subject identities follow only their row and attention membership', () => 
   expect(changed[0]).toBe(first[0])
   expect(changed[1]).toBe(first[1])
   expect(changed[2]).not.toBe(first[2])
-  const card = { ...fixtureAttention[0]!, source_id: row.id, state: 'open' as const }
+  const card = { ...fixtureAttention[0]!, source_id: row.id, state: 'open' as const, attention_kind: 'person-step', actions: ['work.done' as const] }
   const attentive = project.subjectList({ fleet, attention: [card] })
   expect(attentive[0]).toMatchObject({ attention: true })
   expect(attentive[1]).toBe(first[1])
@@ -226,9 +239,9 @@ test('agent roster preserves usage scope, requested checkout, workspace and huma
   const usage = {
     total_tokens: 123, input_tokens: 80, output_tokens: 43, cached_tokens: 20,
     cache_write_tokens: 5, cost: 0.12, currency: 'USD', incarnation_count: 2,
-    aggregation: 'cumulative-per-incarnation-else-response-deltas' as const,
+    aggregation: 'rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas' as const,
   }
-  const observed = decodeUnknownSync(Agent, 'strict')({
+  const observed = openAgent(decodeUnknownSync(Agent, 'strict')({
     kind: 'agent', id: 'agent/facts', name: 'Facts', runtime_ids: [],
     reachability: 'reachable', state: 'running', revision: '1',
     updated_at: '2026-10-04T12:00:00.000Z',
@@ -236,7 +249,7 @@ test('agent roster preserves usage scope, requested checkout, workspace and huma
     workspace: '/work/feature', blocked_on: 'human', ask: 'permission',
     last_activity_at: '2026-10-04T11:59:00.000Z',
     since: '2026-10-04T11:00:00.000Z',
-  } satisfies AgentEncoded)
+  } satisfies AgentEncoded))
   expect(fleetFromAgents([observed]).agents[0]).toMatchObject({
     usage: { _tag: 'Known', value: usage },
     checkout: { _tag: 'Known', value: { repository: 'owner/repo', base: 'main', branch: 'feature' } },
@@ -256,12 +269,12 @@ test('omitted st roster facts remain Unknown, including session timestamps', () 
 })
 
 test('usage without cost remains known token evidence without fabricated spend', () => {
-  const observed = decodeUnknownSync(Agent, 'strict')({
+  const observed = openAgent(decodeUnknownSync(Agent, 'strict')({
     kind: 'agent', id: 'agent/tokens', name: 'Tokens', runtime_ids: [],
     reachability: 'reachable', state: 'running', revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
     usage: { total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0,
-      incarnation_count: 1, aggregation: 'cumulative-per-incarnation-else-response-deltas' },
-  } satisfies AgentEncoded)
+      incarnation_count: 1, aggregation: 'rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas' },
+  } satisfies AgentEncoded))
   const projected = fleetFromAgents([observed]).agents[0]!
   expect(projected.usage._tag).toBe('Known')
   if (projected.usage._tag === 'Known') {
@@ -273,7 +286,7 @@ test('usage without cost remains known token evidence without fabricated spend',
 
 test('roster fact changes update the row while structurally equal usage and checkout retain identity', () => {
   const usage = { total_tokens: 10, input_tokens: 8, output_tokens: 2, cached_tokens: 0,
-    incarnation_count: 1, aggregation: 'cumulative-per-incarnation-else-response-deltas' as const }
+    incarnation_count: 1, aggregation: 'rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas' as const }
   const wire = {
     kind: 'agent' as const, id: 'agent/facts', name: 'Facts', runtime_ids: [],
     reachability: 'reachable' as const, state: 'running' as const, revision: '1',
@@ -281,12 +294,13 @@ test('roster fact changes update the row while structurally equal usage and chec
     usage, checkout: { repository: 'owner/repo', base: 'main', branch: 'feature' },
   } satisfies AgentEncoded
   const project = createProjections()
-  const first = project.fleetFromAgents([decodeUnknownSync(Agent, 'strict')(wire)])
-  expect(project.fleetFromAgents([decodeUnknownSync(Agent, 'strict')({ ...wire, revision: '2' })])).toBe(first)
-  expect(project.fleetFromAgents([decodeUnknownSync(Agent, 'strict')({
+  const decodeOpen = (encoded: AgentEncoded) => openAgent(decodeUnknownSync(Agent, 'strict')(encoded))
+  const first = project.fleetFromAgents([decodeOpen(wire)])
+  expect(project.fleetFromAgents([decodeOpen({ ...wire, revision: '2' })])).toBe(first)
+  expect(project.fleetFromAgents([decodeOpen({
     ...wire, usage: { ...usage, total_tokens: 11 },
   })]).agents[0]).not.toBe(first.agents[0])
-  expect(project.fleetFromAgents([decodeUnknownSync(Agent, 'strict')({
+  expect(project.fleetFromAgents([decodeOpen({
     ...wire, checkout: { ...wire.checkout, branch: 'changed' },
   })]).agents[0]?.checkout).toEqual({ _tag: 'Known', value: { ...wire.checkout, branch: 'changed' } })
 })

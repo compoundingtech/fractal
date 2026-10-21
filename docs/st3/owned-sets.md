@@ -25,7 +25,9 @@ st apply --set garden seats.kdl missions.kdl schedules.kdl \
 Remove `--dry-run` to publish. A dry run prints blockers and exits with failure when any
 are present. Add `--check` to execute gates during the preview, with `--workspace DIR` and
 `--input NAME=VALUE` as needed; gate answers appear on stderr. Publication checks for broken
-exec gates by default; `--no-gate-check` skips them.
+mission and step exec gates by default; `--no-gate-check` skips them. Loop `until` scripts
+are listed as "not checked, they run after each round", including in dry-run checks.
+Per-round step scripts still preflight; runtime `until` evaluation remains at each round boundary.
 
 All source flags are required together with `--set`. Without `--set`, publish plain files
 with `st apply seats.kdl missions.kdl schedules.kdl --as person/operator`.

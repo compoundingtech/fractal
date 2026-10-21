@@ -9,6 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 CARGO = os.environ.get('CI_TOOLCHAIN_TEST_CARGO') or shutil.which('cargo')
+BASH = shutil.which('bash') or '/bin/bash'
 
 
 class CargoToolOrder(unittest.TestCase):
@@ -43,7 +44,7 @@ class CargoToolOrder(unittest.TestCase):
 
     def run_probe(self, setup=True, args=('argument with spaces', '--probe')):
         setup_command = 'source "$1" || exit $?; shift; ' if setup else 'shift; '
-        return subprocess.run(['/bin/bash', '-c', setup_command + 'exec "$CI_TEST_CARGO" ci-tool-order "$@"',
+        return subprocess.run([BASH, '-c', setup_command + 'exec "$CI_TEST_CARGO" ci-tool-order "$@"',
                                'probe', str(ROOT / 'scripts/ci-cargo-tools-env'), *args],
                               cwd=self.root, env=self.env, capture_output=True, text=True)
 

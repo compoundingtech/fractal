@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { Feed } from './feed.ts';
+import { test } from 'node:test';
+import { Feed, OPEN_WAIT_MS } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
 import { fakeClient } from './fakeFeed.mjs';
 
@@ -181,9 +182,9 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   const frames = [], issues = [];
   const follow = feed.followConversation('agent/example/worker', { onEntries: frame => frames.push(frame), onIssue: issue => issues.push(issue) });
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'subscribe', id: 'conversation', collection: 'conversation', conversation: 'agent/example/worker' });
-  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: true, items: [{ id: 'entry/1' }], has_more: true });
+  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: true, items: [{ id: 'entry/1' }], has_more: true, older_cursor: 'before-entry-1' });
   sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: false, items: [{ id: 'entry/2' }] });
-  assert.deepEqual(frames.map(frame => [frame.replace, frame.items.map(item => item.id), frame.hasMore]), [[true, ['entry/1'], true], [false, ['entry/2'], false]]);
+  assert.deepEqual(frames.map(frame => [frame.replace, frame.items.map(item => item.id), frame.hasMore, frame.olderCursor]), [[true, ['entry/1'], true, 'before-entry-1'], [false, ['entry/2'], false, undefined]]);
   sockets[0].frame({ kind: 'error', id: 'conversation', collection: 'conversation', code: 'remote-unavailable', message: 'owner host/two is temporarily unavailable' });
   assert.equal(issues.at(-1), 'two cannot be reached right now · trying again');
   // An ended subscription is asked for again after the backoff.
@@ -376,3 +377,28 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   assert.deepEqual(sockets[1].sent.at(-1), { kind: 'unsubscribe', id: 'arrangements' });
   feed.close();
 }
+
+// ---- A socket that never opens is a failed try, not a wait without end: the feed says reconnecting and tries again.
+test('a collections socket that never opens is given up on and tried again', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
+  let opens = 0;
+  const late = [];
+  const client = { collectionStream: () => { opens++; return new Promise(resolve => late.push(resolve)); } };
+  const states = [];
+  const feed = new Feed(client, { onWindow() {}, onConnection: (state, issue) => states.push([state, issue]) }, new ForegroundGate('active'), () => 'action/test', [1000]);
+  await Promise.resolve();
+  assert.equal(opens, 1);
+  assert.deepEqual(states.at(-1), ['connecting', undefined]);
+  t.mock.timers.tick(OPEN_WAIT_MS);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(states.at(-1), ['reconnecting', 'st did not answer'], 'a hung open ends in a retry cycle');
+  t.mock.timers.tick(1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opens, 2, 'and it tries again by itself');
+  // The first socket opening after it was given up on is closed, not adopted.
+  let closed = false;
+  late[0]({ close() { closed = true; }, subscribe() {}, unsubscribe() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, true);
+  feed.close();
+});

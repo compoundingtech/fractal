@@ -14,21 +14,18 @@
  * are computed from these atoms, so fixture and live adapters share the same contract.
  */
 import type {
-  Agent as AgentRow,
   Attention,
   Mission,
   TerminalScreen,
   AgentCheckout,
-  UsageSummary,
   ActionResult,
   AttachmentInputEncoded,
   BlobChunk,
   BlobUpload,
   ConversationSearch,
-} from '@smalltalk/st3-client/schema'
-import type { ErrorEnvelope } from '@smalltalk/st3-client'
-import type { MessageSendInput } from '@st3/sdk/effect'
-import type { ConnectionState } from '@st3/sdk/effect'
+} from '@fractal/client/schema'
+import type { ErrorEnvelope } from '@fractal/client'
+import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
 
@@ -40,6 +37,10 @@ import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
+import type { AgentControlPort } from '../agents/agent-control-port.ts'
+import type { PromptAnswerPort } from '../conversation/alerts/prompt-answer-port.ts'
+import type { AlertActionPort } from '../conversation/alerts/alert-action-port.ts'
+import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
@@ -110,7 +111,8 @@ export interface Agent {
   readonly status: string
   readonly state?: string
   readonly description?: string
-  readonly usage: Known<UsageSummary>
+  /** Known only with a recognized aggregation; dependent figures are never derived otherwise. */
+  readonly usage: Known<DecodedUsageSummary>
   /** Requested checkout, not confirmation of a successful checkout. */
   readonly checkout: Known<AgentCheckout>
   readonly workspace: Known<string>
@@ -130,6 +132,18 @@ export interface Fleet {
   readonly hosts: readonly Host[]
   readonly agents: readonly Agent[]
 }
+
+/**
+ * SDK decode evidence for the latest roster observation. `decodeStale`: every row in the latest
+ * frame failed to decode, so the observed rows are the retained last-good roster.
+ */
+export interface RosterDecode {
+  readonly undecodable: readonly Undecodable[]
+  readonly decodeStale: boolean
+}
+
+/** A roster whose latest frame decoded completely. */
+export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false }
 
 /** The loaded conversation window; older history is a boundary, not an available fetch operation. */
 export interface ConversationPage {
@@ -162,7 +176,8 @@ export type ConversationPortResult<T> =
   | { readonly _tag: 'Success'; readonly value: T }
   | {
       readonly _tag: 'Refused'
-      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable'
+      /** `unconfirmed`: st said `applied: "unknown"`; the identical request may still complete. */
+      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed'
       readonly detail: string
       /** Preserve the daemon's complete refusal, including its retry policy. */
       readonly error?: ErrorEnvelope
@@ -193,7 +208,9 @@ type MessageSendFields = Omit<MessageSendInput, 'parameters' | 'idempotency_key'
  * A first send (`Send`) never carries a caller-owned key: the data layer generates one
  * and paints the optimistic row synchronously. `Resend` is an explicit retry of an
  * uncertain send with its original key; its authoritative identity is reconciled
- * before any optimistic row can duplicate mail the stream already shows.
+ * before any optimistic row can duplicate mail the stream already shows. st deduplicates
+ * a key by its whole request except the fence, so a Resend repeats the original action
+ * id and parameters; a source that recorded the key's first send substitutes them.
  */
 export type AttachmentSendRequest =
   | ({ readonly _tag: 'Send' } & MessageSendFields)
@@ -251,7 +268,11 @@ export interface DataSource {
   readonly network?: Atom.Atom<NetworkReachability>
   /** One explicit reconnect attempt, bypassing the current countdown. */
   readonly reconnect?: () => void
-  readonly agents: Atom.Atom<Feed<readonly AgentRow[]>>
+  readonly agents: Atom.Atom<Feed<readonly DecodedAgent[]>>
+  /** Rows the SDK could not decode for the agents feed; absent sources decode every row. */
+  readonly rosterDecode?: Atom.Atom<RosterDecode>
+  /** Explicit recovery for a failed or ended roster follow; a healthy follow is untouched. */
+  readonly retryAgents?: () => void
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
@@ -269,8 +290,16 @@ export interface DataSource {
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
   readonly retryTerminal?: (terminalRef: string) => void
+  /** Restart, suspend, retire, start, resume or interrupt a seat (`agent.*`, Esc to its terminal). */
+  readonly agentControls?: AgentControlPort
+  /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
+  readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. */
   readonly terminalResize?: TerminalResizePort
+  /** Answers to native harness prompts (`prompt.respond`), one submission each. */
+  readonly prompts?: PromptAnswerPort
+  /** Answers to asks and review gates (`work.done`, `review.*`), one submission each. */
+  readonly alertActions?: AlertActionPort
   /** Retained owner scrollback, with its own independently granted availability. */
   readonly terminalHistory?: TerminalHistoryFactory
   /** Ordered input sessions bound to one terminal incarnation; absent when the source cannot type. */
@@ -287,7 +316,7 @@ export interface DataSource {
   readonly sync?: {
     /** Protocol-decoded observations, not merely an open socket. */
     readonly gateway: Atom.Atom<FeedSyncObservation>
-    readonly agents: Atom.Atom<FeedSync<readonly AgentRow[]>>
+    readonly agents: Atom.Atom<FeedSync<readonly DecodedAgent[]>>
     readonly missions: Atom.Atom<FeedSync<readonly Mission[]>>
     readonly attention: Atom.Atom<FeedSync<readonly Attention[]>>
     readonly conversation: (agentRef: string) => Atom.Atom<FeedSync<ConversationPage>>

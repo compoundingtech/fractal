@@ -1,7 +1,5 @@
 # st eval audit
 
-Status: reviewed on 2026-09-08.
-
 This table records the purpose and the prompt boundary for every st eval.
 
 | Eval | Audit result |
@@ -20,8 +18,6 @@ This table records the purpose and the prompt boundary for every st eval.
 | `ghost-bug` | Keep. It proves a multi-agent investigation with graph products. |
 | `license-mit` | Keep. It proves delegated implementation and verification. |
 | `local-file-refresh` | Keep. It proves explicit local file observation. |
-| `loop-best-of-n` | Retired. Best-of-N is composed from explicit mission steps and a gated selector. |
-| `loop-for-each` | Retired. Collections are composed from explicit mission steps or queues. |
 | `loop-until-green` | Keep. It proves the supported sequential-until loop reaches a gate and terminates. |
 | `mission-document-lift` | Keep. It proves immutable mission documents. |
 | `mission-inputs` | Keep. It proves text and resource inputs. |

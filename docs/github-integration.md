@@ -1,8 +1,8 @@
 # GitHub integration
 
-Smalltalk can observe a repository and start finite review and triage missions for new pull requests and issues. A durable seat serves those runs; a curator groups what needs a person before it reaches Home.
+Fractal can observe a repository and start finite review and triage missions for new pull requests and issues. A durable seat serves those runs; a curator groups what needs a person before it reaches Now.
 
-Use the worker and workspace from [getting started](getting-started.md), and a repository you are allowed to inspect. Install [GitHub CLI](https://cli.github.com/), then log in as the OS user who runs the daemon:
+Use the worker and workspace from [missions in practice](missions-in-practice.md#declare-a-worker-seat), and a repository you are allowed to inspect. Install [GitHub CLI](https://cli.github.com/), then log in as the OS user who runs the daemon:
 
 ```sh
 gh auth login
@@ -77,6 +77,18 @@ complete cached body and pagination link after a 304. Response status and rate-l
 remain available to the caller. Credential invalidation changes future authentication;
 it does not retry any of these HTTP requests.
 
+Repository pull-request GraphQL reads start with 20 open pulls per cursor page and preserve
+the existing nested review, check and merge-queue selections. GitHub's “Something went wrong
+while executing your query” refusal retries the same cursor with half as many pulls, down to
+one. Each successful continuation page doubles the next page's size toward 20, but never
+back to or above a size already refused during that observation. Each new observation starts
+at 20 with no remembered refusal ceiling. Debug logs record each page size; retry warnings record the
+failed and reduced sizes. Other failures, or an execution refusal at one pull, fail the
+observation without caching any partial result. The complete listing remains bounded at
+1,000 open pulls regardless of page size. An observation also permits at most 200 GraphQL
+calls, including retries, identity-resolution requests, and empty pages with advancing cursors. Exceeding either bound or
+receiving a non-advancing continuation cursor fails rather than silently truncating facts.
+
 ## Main Performance failure messages
 
 A direct message subscription on `main_performance_failures` adds that field to an existing
@@ -99,15 +111,28 @@ client must publish as itself; another actor cannot subscribe the recipient. The
 is limited to `main_performance_failures`, and an existing registration can only be re-registered
 by its original author with the same spec. This path cannot create an observer, start a mission, batch
 delivery or publish unrelated top-level runtime declarations. Publish only this subscription;
-leave existing declarations and owned sets intact. This narrow field reads workflow-run metadata for
-`perf.yml`, branch `main`, event `push`, then verifies the workflow name `Performance`, path
-`.github/workflows/perf.yml`, status `completed` and conclusion `failure`. Other events, branches,
-workflows, successes, cancellations and timeouts produce no P0 delivery. It fetches no logs or
-artifacts and never dispatches a workflow.
+leave existing declarations and owned sets intact. This narrow field reports two sources:
+
+- a `perf.yml` run on branch `main` with event `push`, workflow name `Performance`, path
+  `.github/workflows/perf.yml`, status `completed` and conclusion `failure`. Once Performance runs
+  only by manual dispatch, with its load jobs in the daily long lanes, this source no longer fires; it
+  stays so recorded history stays valid.
+- a daily long-lanes run (`daily-long.yml`, see [CI operations](ci.md#daily-long-lanes)) on branch
+  `main` with event `schedule` or `workflow_dispatch`, workflow name `Daily long lanes`, path
+  `.github/workflows/daily-long.yml`, status `completed` and conclusion `failure`, in which at least
+  one job whose name starts with `daily-perf-` (`daily-perf-cost`, `daily-perf-load`,
+  `daily-perf-load-hog`, `daily-perf-load-hog-macos`) concluded `failure`. The field reads that run
+  attempt's jobs to decide. A daily run red only in other lanes, such as `daily-tests`, produces no
+  P0 delivery here; it still reaches the daily lanes' `Daily long-lane run failed` issue.
+
+Other events, branches, workflows, successes, cancellations and timeouts produce no P0 delivery.
+It fetches no logs or artifacts and never dispatches a workflow.
 
 Each message has a P0 title and tag, and JSON content with `priority`, `repository`, `run_id`,
 `run_attempt`, `head_sha`, `workflow`, `workflow_path`, `url` and the selected status/event/branch.
-One message names one failed run attempt. The first successful snapshot for each recipient and
+A daily run's message names its failed perf lanes in the title (`P0: main daily-perf-load failed:
+acme/garden run 123/1`) and in `failed_jobs`; a Performance run's title says `main Performance
+failed` and its content has no `failed_jobs`. One message names one failed run attempt. The first successful snapshot for each recipient and
 repository establishes a baseline without sending old failures, including when the first listing
 is empty. Later attempts and heads have separate delivery keys;
 metadata edits, repeated reads, restarts and replacement subscriptions to the same recipient do
@@ -117,8 +142,13 @@ re-baselines the current listing and suppresses failures first observed during t
 Baseline and delivery receipts are graph resources committed atomically with the observation and message, using existing checkpoint rules.
 
 This field uses the observer's normal schedule and conditional HTTP cache, including paginated
-304 reuse. It reads at most ten pages of 100 runs and fails rather than silently truncates a larger
-listing. The shared repository observation must succeed, including any other selected fields;
+304 reuse. It reads at most ten pages of 100 runs from each workflow and fails rather than silently
+truncates a larger listing. It reads the jobs (one page of at most 100, failing beyond that) of only
+the ten newest failed daily runs: the daily lanes fail at most a few times a day, so a new failure is
+always among them, and older ones were already delivered or baselined. An observation therefore
+makes at most 2 run listings of ten pages each plus 10 jobs reads, and usually 2 listing requests plus
+one jobs read for each of the (at most ten) newest failed daily runs, each a conditional request that
+GitHub answers with 304 when nothing changed. The shared repository observation must succeed, including any other selected fields;
 an existing GraphQL or authentication failure prevents delivery. Deploy supporting daemon source
 before registration, then check the observer's successful field observation and message receipts.
 An installed subscription alone does not prove healthy delivery. Upgrade participating readers
@@ -231,7 +261,7 @@ st missions cancel mission-run/garden/github-intake/main \
   --reason 'Finished the intake trial.' --as person/ada
 ```
 
-## Put a curator in front of Home
+## Put a curator in front of Now
 
 Route incoming events and grouped review findings to an agent responsible for deciding what matters. The curator asks the person only for concrete decisions, actionable failures, or requested feedback. Raw PR activity and successful routine checks belong in agent conversations and mission results, not as a pile of person requests.
 
@@ -248,6 +278,6 @@ gh pr checks "$garden_pr"
 gh pr merge "$garden_pr" --auto
 ```
 
-For `compoundingtech/smalltalk`, `linux-gate`, `isolation-vm`, and `genie-freshness` are required; [CI operations](ci.md) explains its queue. `--auto` requests landing when GitHub's requirements pass; it is not a substitute for review or proof that a PR has already merged.
+For `compoundingtech/smalltalk`, `linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries` are required; [CI operations](ci.md) explains its queue. `--auto` requests landing when GitHub's requirements pass; it is not a substitute for review or proof that a PR has already merged.
 
 See [repository intake examples](../examples/st3/github-intake.kdl), [review/triage examples](../examples/st3/github-intake-work.kdl), and [subscriptions](st3/resource-subscriptions.md) for larger setups and cleanup.

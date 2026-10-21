@@ -23,11 +23,17 @@ use crate::replication::InventoryCheckpoint;
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
-/// A trim commits a chunk once it has run this long, so it never holds the writer for long
-/// however slow a row is to record or delete, and writes queued behind it wait about this long.
-/// The commit then writes and syncs the pages the chunk changed, which on a busy disk costs more
-/// than the chunk itself, so this is well under the writer's 100 ms target.
+/// Stop starting new trim steps after this much work. A single step or COMMIT may take longer;
+/// this is not a hard bound on writer hold or foreground request latency.
 pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
+
+// Releasing a writer loan alone does not reserve any disk time: a quiet foreground queue
+// lets a large trim reacquire it immediately, continuously rewriting table/index/WAL pages.
+// Rest outside the loan for at least 100 ms and four times the preceding writer hold
+// (including COMMIT), capped at five seconds per rest. In the uncapped regime this reserves
+// four times the acquired-loan work for other traffic. A slow statement can still exceed the
+// chunk budget; this pacing is not a hard statement or request-latency bound.
+pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +102,7 @@ pub fn keep_only_tombstones_tx(
     claims: &[ClaimTombstone],
 ) -> Result<()> {
     transaction.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS adopted_envelopes(
+        /* sqlite-large-value: allow-for-now lv-h41059b0e7a62 owner=smallclaims::store::checkpoint_trim TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE IF NOT EXISTS adopted_envelopes(
              writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
              PRIMARY KEY (writer, sequence, envelope_hash));
          CREATE TEMP TABLE IF NOT EXISTS adopted_claims(id TEXT PRIMARY KEY);
@@ -105,24 +111,24 @@ pub fn keep_only_tombstones_tx(
     )?;
     {
         let mut insert = transaction.prepare_cached(
-            "INSERT OR IGNORE INTO temp.adopted_envelopes(writer, sequence, envelope_hash)
+            /* sqlite-large-value: allow-for-now lv-h606a2ea2c17e owner=smallclaims::store::checkpoint_trim TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO temp.adopted_envelopes(writer, sequence, envelope_hash)
              VALUES (?1, ?2, ?3)",
         )?;
         for envelope in envelopes {
-            insert.execute(params![
+            insert.execute(/* sqlite-large-value: allow-for-now lv-h602112ce8703 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![
                 envelope.writer,
                 envelope.sequence,
                 envelope.envelope_hash
             ])?;
         }
         let mut insert = transaction
-            .prepare_cached("INSERT OR IGNORE INTO temp.adopted_claims(id) VALUES (?1)")?;
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf56d2d99513a owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO temp.adopted_claims(id) VALUES (?1)")?;
         for claim in claims {
-            insert.execute([&claim.id])?;
+            insert.execute(/* sqlite-large-value: allow-for-now lv-ha5bb9a6450df owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&claim.id])?;
         }
     }
     transaction.execute_batch(
-        "DELETE FROM checkpoint_envelopes WHERE NOT EXISTS (
+        /* sqlite-large-value: allow-for-now lv-hb829e6623715 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM checkpoint_envelopes WHERE NOT EXISTS (
              SELECT 1 FROM temp.adopted_envelopes AS adopted
              WHERE adopted.writer=checkpoint_envelopes.writer
                AND adopted.sequence=checkpoint_envelopes.sequence
@@ -148,7 +154,74 @@ pub enum Application {
     Manifest(CheckpointManifestNeed),
 }
 
+/// Tombstones a trim reads at most this many at a time.
+const TOMBSTONE_READ_PAGE: usize = 256;
+
+/// The tombstones a trim records: a manifest's in memory, or this node's own staged plan.
+trait Tombstones {
+    fn counts(&self) -> (usize, usize);
+    fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>>;
+    fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>>;
+    fn slices(&self) -> Option<(&[EnvelopeTombstone], &[ClaimTombstone])> {
+        None
+    }
+}
+
+impl Tombstones for (&[EnvelopeTombstone], &[ClaimTombstone]) {
+    fn counts(&self) -> (usize, usize) {
+        (self.0.len(), self.1.len())
+    }
+
+    fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>> {
+        Ok(self.0.iter().skip(after).take(limit).cloned().collect())
+    }
+
+    fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>> {
+        Ok(self.1.iter().skip(after).take(limit).cloned().collect())
+    }
+
+    fn slices(&self) -> Option<(&[EnvelopeTombstone], &[ClaimTombstone])> {
+        Some((self.0, self.1))
+    }
+}
+
+impl Tombstones for (&super::checkpoint_staging::StagedSet, &super::checkpoint_staging::StagedPlan) {
+    fn counts(&self) -> (usize, usize) {
+        (self.1.dropped_envelopes, self.1.dropped_claims)
+    }
+
+    fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>> {
+        self.0.dropped_envelopes(after, limit)
+    }
+
+    fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>> {
+        self.0.dropped_claims(after, limit)
+    }
+}
+
 impl Store {
+    /// Set the minimum chunk rest. Tests only; zero disables both the floor and multiplier.
+    pub fn set_trim_pause(&self, pause: std::time::Duration) {
+        self.trim_pause_micros.store(
+            u64::try_from(pause.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+    }
+
+    fn trim_pause_duration(&self, held: std::time::Duration) -> std::time::Duration {
+        let micros = self.trim_pause_micros.load(Ordering::Acquire);
+        if micros == 0 {
+            return std::time::Duration::ZERO;
+        }
+        held.saturating_mul(4)
+            .max(std::time::Duration::from_micros(micros))
+            .min(std::time::Duration::from_secs(5))
+    }
+
+    fn pause_trim_chunk(&self, held: std::time::Duration) {
+        std::thread::sleep(self.trim_pause_duration(held));
+    }
+
     /// Arm a fault in the next trim. Tests only.
     pub fn set_trim_fault(&self, fault: Option<TrimFault>) {
         *self
@@ -187,11 +260,11 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner);
         match *fault {
             Some(TrimFault::TouchGraph) => {
-                transaction.execute("UPDATE projection_digest_generation SET value=value+1", [])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-ha9cdb844c613 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_digest_generation SET value=value+1", [])?;
             }
             Some(TrimFault::ChangeGraph) => {
                 transaction.execute(
-                    "INSERT INTO desired(subject, kind, revision, claim_id, body)
+                    /* sqlite-large-value: allow-for-now lv-hef95e4dbb508 owner=smallclaims::store::checkpoint_trim TODO=prepare-body-and-predecessor-values */ "INSERT INTO desired(subject, kind, revision, claim_id, body)
                      SELECT 'custom/trim-fault/changed', 'custom', '1', id, '{}'
                      FROM claims LIMIT 1",
                     [],
@@ -253,6 +326,7 @@ impl Store {
     pub fn apply_stable_checkpoints(
         &self,
         claims: &[CheckpointClaim],
+        scratch: &Path,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<Option<CheckpointManifestNeed>> {
         self.runtime.checkpoint_preflight()?;
@@ -279,40 +353,29 @@ impl Store {
             }) => {
                 let _completion = super::checkpoint_completion::Completion::outer();
                 let cut = certificate.terms.cut_unix_ms;
-                let verified = |plan: &super::checkpoint::DropPlan| {
-                    plan.sealed_digest == certificate.terms.sealed_digest
-                        && plan.drop_digest == certificate.terms.drop_digest
-                };
-                // Each complete capture and plan is one `trim.capture_plan` span; a second read
-                // after a torn one is a second span.
-                let capture_plan = || -> Result<super::checkpoint::DropPlan> {
+                // The staged plan this node verified, when its store-index cut still holds: the
+                // file's identity fixes the epoch, rules and executable, so a repair, a late
+                // envelope or a rules change since makes it capture and plan again. A plan that
+                // differs from the certificate every participant verified is never trimmed.
+                let (staged, plan) = {
                     let _span = crate::profile::span("trim.capture_plan");
-                    let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
-                    let plan = self.runtime.plan_checkpoint_drops(&sealed);
-                    drop(sealed);
-                    Ok(plan)
+                    let staged = self.checkpoint_staged_set(cut, Some(seal_rowid), scratch)?;
+                    let plan = self.plan_staged_checkpoint(&staged)?;
+                    (staged, plan)
                 };
-                let mut plan = capture_plan()?;
-                if !verified(&plan) {
-                    // The set is read in pages, each its own snapshot, so a write between two
-                    // pages (a repair changing a record's state) could tear one read. A torn read
-                    // must not send the node to adopt a peer's manifest: read once more first.
-                    plan = capture_plan()?;
-                }
-                if verified(&plan) {
-                    self.trim_checkpoint(
-                        &checkpoint,
-                        cut,
-                        &plan.drop_digest,
-                        &plan.envelopes,
-                        &plan.claims,
-                        false,
-                        actions,
-                    )?;
+                if plan.sealed_digest == certificate.terms.sealed_digest
+                    && plan.drop_digest == certificate.terms.drop_digest
+                {
+                    self.trim_staged_checkpoint(&checkpoint, &staged, &plan, actions)?;
+                    staged.remove()?;
                     return Ok(None);
                 }
+                staged.remove()?;
                 // Its own rows no longer give the drop it verified, so it adopts the manifest
-                // from a peer like a node that did not take part.
+                // from a peer like a node that did not take part. Tombstones a trim interrupted
+                // while recording go first: nothing reads them until the trim finishes, and
+                // they must not outlive the plan they came from.
+                self.forget_recording_tombstones(&checkpoint)?;
                 self.set_checkpoint_state(&checkpoint, cut, "plan-changed")?;
                 self.checkpoint_diagnostic(
                     "checkpoint-trim-plan-changed",
@@ -353,7 +416,7 @@ impl Store {
                  WHERE state='trimmed' AND drop_digest IS NOT NULL
                  ORDER BY cut_unix_ms DESC LIMIT 1",
             )?
-            .query_row([], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h138e37a621ed owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [], |row| {
                 Ok(InventoryCheckpoint {
                     id: row.get(0)?,
                     cut_unix_ms: u128::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
@@ -379,7 +442,7 @@ impl Store {
     /// The source may have learned a newer certificate without applying it yet; its recorded
     /// tombstones still belong to the older certified manifest. This never replaces existing
     /// checkpoint state, and verifies the manifest through the same certificate path as sync.
-    pub fn restore_checkpoint_history(
+    pub /* sqlite-large-value-flow: allow-for-now flow-h3436182aecc1 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn restore_checkpoint_history(
         &self,
         manifest: &CheckpointManifest,
     ) -> Result<Vec<CheckpointAction>, St3Error> {
@@ -503,11 +566,65 @@ impl Store {
         self.runtime.checkpoint_preflight()?;
         let forgotten = {
             let connection = self.connection.write();
-            connection.execute("DELETE FROM checkpoint_envelopes", [])?
-                + connection.execute("DELETE FROM checkpoint_claims", [])?
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h5875e9ada089 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM checkpoint_envelopes", [])?
+                + connection.execute(/* sqlite-large-value: allow-for-now lv-h093f16c5a2a5 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM checkpoint_claims", [])?
         };
         self.replica_rows_changed();
         Ok(forgotten)
+    }
+
+    /// Delete the tombstones of `checkpoint` while it is `recording`, in chunks of
+    /// `TRIM_CHUNK_BUDGET`, and return how many. Each chunk checks the state again, so a
+    /// checkpoint whose trim went on records nothing lost. Nothing has been deleted for them yet,
+    /// and sealed sets never read them, so forgetting them changes no inventory or plan.
+    pub fn forget_recording_tombstones(&self, checkpoint: &str) -> Result<usize> {
+        self.runtime.checkpoint_preflight()?;
+        let mut forgotten = 0;
+        loop {
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
+            let transaction = connection.transaction()?;
+            let recording: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE id=?1 AND state='recording')",
+                [checkpoint],
+                |row| row.get(0),
+            )?;
+            if !recording {
+                return Ok(forgotten);
+            }
+            let started = std::time::Instant::now();
+            let mut deleted = 0;
+            // A trim records after every earlier checkpoint's tombstones, so a recording
+            // checkpoint's tombstones are the newest rows of each table: walk down from the
+            // newest by rowid, with no scan for the checkpoint's name.
+            'tables: for table in ["checkpoint_envelopes", "checkpoint_claims"] {
+                while started.elapsed() < TRIM_CHUNK_BUDGET {
+                    let newest = transaction
+                        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h527d45a1ba30 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ &format!(
+                            "SELECT rowid, checkpoint FROM {table} ORDER BY rowid DESC LIMIT 1"
+                        ))?
+                        .query_row(/* sqlite-large-value: allow-for-now lv-h556d5f52a3a9 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                        .optional()?;
+                    match newest {
+                        Some((rowid, name)) if name == checkpoint => {
+                            transaction
+                                .execute(&format!(/* sqlite-large-value: allow-for-now lv-hb9e8af7e99a4 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE rowid=?1"), [rowid])?;
+                            deleted += 1;
+                        }
+                        _ => continue 'tables,
+                    }
+                }
+                break;
+            }
+            transaction.commit()?;
+            let held = held_since.elapsed();
+            drop(connection);
+            forgotten += deleted;
+            if deleted == 0 {
+                return Ok(forgotten);
+            }
+            self.pause_trim_chunk(held);
+        }
     }
 
     pub fn set_checkpoint_state(
@@ -520,7 +637,7 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h4852c7521fdc owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET state=excluded.state,
                  updated_at_unix_ms=excluded.updated_at_unix_ms",
@@ -572,11 +689,34 @@ impl Store {
         exact: bool,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
+        self.trim_checkpoint_from(checkpoint, cut_unix_ms, drop_digest, &(envelopes, claims), exact, actions)
+    }
+
+    /// `trim_checkpoint` from this node's own staged plan, read a page at a time.
+    pub fn trim_staged_checkpoint(
+        &self,
+        checkpoint: &str,
+        staged: &super::checkpoint_staging::StagedSet,
+        plan: &super::checkpoint_staging::StagedPlan,
+        actions: &mut Vec<CheckpointAction>,
+    ) -> Result<()> {
+        self.trim_checkpoint_from(checkpoint, plan.cut_unix_ms, &plan.drop_digest, &(staged, plan), false, actions)
+    }
+
+    /* sqlite-large-value-flow: allow-for-now flow-h39d714b2bc13 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn trim_checkpoint_from(
+        &self,
+        checkpoint: &str,
+        cut_unix_ms: u128,
+        drop_digest: &str,
+        tombstones: &dyn Tombstones,
+        exact: bool,
+        actions: &mut Vec<CheckpointAction>,
+    ) -> Result<()> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         let mark = |transaction: &Transaction<'_>, state: &str| -> Result<()> {
             transaction.execute(
-                "INSERT INTO checkpoints(
+                /* sqlite-large-value: allow-for-now lv-h1a537769038f owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(
                      id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
                  VALUES (?1, ?2, ?6, ?3, ?4, ?5)
                  ON CONFLICT(id) DO UPDATE SET state=excluded.state,
@@ -586,7 +726,7 @@ impl Store {
                     checkpoint,
                     i64::try_from(cut_unix_ms)?,
                     drop_digest,
-                    json!({"envelopes": envelopes.len(), "claims": claims.len()}).to_string(),
+                    json!({"envelopes": tombstones.counts().0, "claims": tombstones.counts().1}).to_string(),
                     i64::try_from(now_ms())?,
                     state
                 ],
@@ -597,6 +737,9 @@ impl Store {
         let record = crate::profile::span("trim.record");
         if exact {
             // Adoption replaces every other tombstone, so it stays one transaction.
+            let (envelopes, claims) = tombstones
+                .slices()
+                .ok_or_else(|| anyhow::anyhow!("an exact trim needs its manifest in memory"))?;
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             keep_only_tombstones_tx(&transaction, envelopes, claims)?;
@@ -610,30 +753,45 @@ impl Store {
                 mark(&transaction, "recording")?;
                 transaction.commit()?;
             }
-            // Recording again changes nothing, so a restart records what is missing.
+            // Recording again changes nothing, so a restart records what is missing. The
+            // tombstones are read a page at a time, outside the writer.
+            let (envelope_count, claim_count) = tombstones.counts();
             let (mut envelope, mut claim, mut chunks) = (0, 0, 0);
-            while envelope < envelopes.len() || claim < claims.len() {
-                let mut connection = self.connection.write();
+            let mut envelope_page: std::collections::VecDeque<EnvelopeTombstone> = Default::default();
+            let mut claim_page: std::collections::VecDeque<ClaimTombstone> = Default::default();
+            while envelope < envelope_count || claim < claim_count {
+                if envelope < envelope_count && envelope_page.is_empty() {
+                    envelope_page.extend(tombstones.envelope_page(envelope, TOMBSTONE_READ_PAGE)?);
+                } else if envelope >= envelope_count && claim_page.is_empty() {
+                    claim_page.extend(tombstones.claim_page(claim, TOMBSTONE_READ_PAGE)?);
+                }
+                anyhow::ensure!(
+                    !envelope_page.is_empty() || !claim_page.is_empty(),
+                    "the tombstones of {checkpoint} ended before their count"
+                );
+                let mut connection = self.connection.write_background();
+                let held_since = std::time::Instant::now();
                 let transaction = connection.transaction()?;
                 let started = std::time::Instant::now();
                 while started.elapsed() < TRIM_CHUNK_BUDGET
-                    && (envelope < envelopes.len() || claim < claims.len())
+                    && (!envelope_page.is_empty() || (envelope >= envelope_count && !claim_page.is_empty()))
                 {
-                    if envelope < envelopes.len() {
-                        let next = &envelopes[envelope..envelope + 1];
-                        record_checkpoint_tombstones_tx(&transaction, checkpoint, next, &[])?;
+                    if let Some(next) = envelope_page.pop_front() {
+                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[next], &[])?;
                         envelope += 1;
-                    } else {
-                        let next = &claims[claim..claim + 1];
-                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], next)?;
+                    } else if let Some(next) = claim_page.pop_front() {
+                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], &[next])?;
                         claim += 1;
                     }
                     self.pause_for_trim_row_cost();
                 }
+
                 transaction.commit()?;
+                let held = held_since.elapsed();
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
+                self.pause_trim_chunk(held);
             }
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
@@ -648,11 +806,19 @@ impl Store {
 
     /// Delete every row a tombstone stands for, in chunks, then mark the checkpoint trimmed.
     /// Running it again after a crash deletes only what is left. A chunk deletes one envelope at
-    /// a time and commits once it has run for `TRIM_CHUNK_BUDGET`, so it holds the writer for
-    /// tens of milliseconds however slow a row is to delete, and the writes queued behind it run
-    /// before the next chunk takes the writer again. Each chunk checks, inside its own
+    /// a time and stops starting new steps after `TRIM_CHUNK_BUDGET`. Chunks use background
+    /// writer admission and rest outside the loan between commits. Each chunk checks, inside its own
     /// transaction, that the graph did not change; the proof showed it cannot.
-    pub fn finish_trim(&self, checkpoint: &str, actions: &mut Vec<CheckpointAction>) -> Result<()> {
+    pub /* sqlite-large-value-flow: allow-for-now flow-h3f9bf57da525 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim(&self, checkpoint: &str, actions: &mut Vec<CheckpointAction>) -> Result<()> {
+        self.finish_trim_paced(checkpoint, actions, std::thread::sleep)
+    }
+
+    /* sqlite-large-value-flow: allow-for-now flow-h4f2952c50e14 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ fn finish_trim_paced(
+        &self,
+        checkpoint: &str,
+        actions: &mut Vec<CheckpointAction>,
+        mut pause: impl FnMut(std::time::Duration),
+    ) -> Result<()> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         let mut chunks = 0;
@@ -661,7 +827,8 @@ impl Store {
         let mut cursor = TrimCursor::default();
         let delete = crate::profile::span("trim.delete");
         loop {
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             #[cfg(test)]
@@ -678,17 +845,16 @@ impl Store {
             // Deleting claims touches no graph table, so the generation stays. Only if it moved
             // are the digests themselves compared, before and after, in this transaction.
             let generation = projection_digest::generation(&transaction)?;
-            transaction.execute_batch("SAVEPOINT trim_chunk")?;
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4ccfc8269d7a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "SAVEPOINT trim_chunk")?;
             let mut envelopes = Vec::new();
             let mut claims = Vec::new();
             let mut steps = 0;
             // Only an empty lookup proves exhaustion. Even if transaction setup spent the
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
             while steps < most && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET) {
-                let (envelope, envelope_claims) = next_trim_rows(&transaction, &mut cursor)?;
-                if envelope.is_none() && envelope_claims.is_empty() {
+                let Some((envelope, envelope_claims)) = next_trim_rows(&transaction, &mut cursor)? else {
                     break;
-                }
+                };
                 delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)?;
                 self.pause_for_trim_row_cost();
                 envelopes.extend(envelope);
@@ -703,12 +869,12 @@ impl Store {
                 false
             } else {
                 let after = graph_digest(&transaction)?;
-                transaction.execute_batch("ROLLBACK TO trim_chunk")?;
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcad476fc11b6 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "ROLLBACK TO trim_chunk")?;
                 let before = graph_digest(&transaction)?;
                 delete_dropped_rows_tx(&transaction, &envelopes, &claims)?;
                 before != after || graph_digest(&transaction)? != before
             };
-            transaction.execute_batch("RELEASE trim_chunk")?;
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4f653c779b09 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "RELEASE trim_chunk")?;
             if changed {
                 transaction.rollback()?;
                 drop(connection);
@@ -727,12 +893,18 @@ impl Store {
                 return Ok(());
             }
             transaction.commit()?;
+            let held = held_since.elapsed();
             drop(connection);
-            self.replica_rows_changed();
+            // A cursor-only chunk inspected already-absent rows. All chunks that actually
+            // delete keep the original invalidation; this does not coalesce mutations.
+            if !envelopes.is_empty() || !claims.is_empty() {
+                self.replica_rows_changed();
+            }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
+            pause(self.trim_pause_duration(held));
         }
         drop(delete);
         self.stop_for_trim_fault(TrimFault::BeforeFinish)?;
@@ -741,13 +913,13 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute(
-                "UPDATE checkpoints SET state='trimmed', updated_at_unix_ms=?2 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-ha26d7ebb680b owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='trimmed', updated_at_unix_ms=?2 WHERE id=?1",
                 params![checkpoint, i64::try_from(now_ms())?],
             )?;
             // Every snapshot and page cursor taken before the trim expires, since the claims
             // they read may be gone.
             transaction.execute(
-                "UPDATE sqlite_sequence SET seq=seq+1 WHERE name='claims'",
+                /* sqlite-large-value: allow-for-now lv-h247fda7620dc owner=smallclaims::store::checkpoint_trim TODO=prepare-body-and-predecessor-values */ "UPDATE sqlite_sequence SET seq=seq+1 WHERE name='claims'",
                 [],
             )?;
             transaction.commit()?;
@@ -765,8 +937,7 @@ impl Store {
 /// How far the sweep of rows earlier trims left behind has gone: `after:CLAIM_ID`, or `done`.
 pub const TRIMMED_CLAIM_ROWS_SWEPT: &str = "checkpoint_trimmed_claim_rows_swept";
 
-/// How long one sweep transaction deletes before it commits. Its commit then writes and syncs
-/// the pages it changed, so this is well under the writer's 100 ms target.
+/// How long one sweep starts new steps before it commits. A step or COMMIT may take longer.
 pub const SWEEP_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 
 impl Store {
@@ -789,7 +960,8 @@ impl Store {
             .to_owned();
         let mut rows = 0;
         loop {
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
             let mut finished = false;
@@ -798,7 +970,7 @@ impl Store {
             while started.elapsed() < SWEEP_CHUNK_BUDGET {
                 let Some(id) = transaction
                     .prepare_cached("SELECT id FROM checkpoint_claims WHERE id > ?1 ORDER BY id LIMIT 1")?
-                    .query_row([&after], |row| row.get::<_, String>(0))
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hed1f38ebe50a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&after], |row| row.get::<_, String>(0))
                     .optional()?
                 else {
                     finished = true;
@@ -807,7 +979,7 @@ impl Store {
                 // A claim held in two envelopes can be both kept and tombstoned.
                 let held: bool = transaction
                     .prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
-                    .query_row([&id], |row| row.get(0))?;
+                    .query_row(/* sqlite-large-value: allow-for-now lv-hef37db70f7d0 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&id], |row| row.get(0))?;
                 if !held {
                     rows += super::principals::forget_claim_tx(&transaction, &id)?;
                 }
@@ -815,15 +987,17 @@ impl Store {
             }
             let progress = if finished { "done".to_owned() } else { format!("after:{after}") };
             transaction.execute(
-                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                /* sqlite-large-value: allow-for-now lv-h74f80d64ae6a owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![TRIMMED_CLAIM_ROWS_SWEPT, progress],
             )?;
             transaction.commit()?;
+            let held = held_since.elapsed();
             drop(connection);
             if finished {
                 return Ok(rows);
             }
+            self.pause_trim_chunk(held);
         }
     }
 }
@@ -837,13 +1011,14 @@ struct TrimCursor {
     claim: String,
 }
 
-/// The next envelope a tombstone stands for that this node still holds, with its claims. Once
-/// none is left, the next claim whose envelope is already gone, left by an older build's trim or
-/// a crash between chunks of another checkpoint. Nothing when the trim is done.
+/// Inspect one indexed tombstone, advancing even when its row is already gone. An empty pair
+/// means progress, not exhaustion; only None proves that both ordered scans have ended.
+/// Keeping the existence probe outside the ordered seek prevents LIMIT 1 from scanning an
+/// arbitrarily long run of already-trimmed tombstones while holding the writer.
 fn next_trim_rows(
     transaction: &Transaction<'_>,
     cursor: &mut TrimCursor,
-) -> Result<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)> {
+) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
     if !cursor.envelopes_done {
         let envelope = transaction
             .prepare_cached(
@@ -852,15 +1027,11 @@ fn next_trim_rows(
                  FROM checkpoint_envelopes AS tombstone
                  WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
                        > (?1, ?2, ?3)
-                   AND EXISTS (
-                     SELECT 1 FROM replica_envelopes AS held
-                     WHERE held.writer=tombstone.writer AND held.sequence=tombstone.sequence
-                       AND held.envelope_hash=tombstone.envelope_hash)
                  ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
                  LIMIT 1",
             )?
             .query_row(
-                params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
+                /* sqlite-large-value: allow-for-now lv-h75e67f417bdf owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
                 |row| {
                     Ok(EnvelopeTombstone {
                         writer: row.get(0)?,
@@ -877,6 +1048,13 @@ fn next_trim_rows(
                 i64::try_from(envelope.sequence)?,
                 envelope.envelope_hash.clone(),
             );
+            let held: bool = transaction.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM replica_envelopes
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
+            )?.query_row(/* sqlite-large-value: allow-for-now lv-h3f0f377d0d3b owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash], |row| row.get(0))?;
+            if !held {
+                return Ok(Some((None, Vec::new())));
+            }
             let claims = transaction
                 .prepare_cached(
                     "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
@@ -889,7 +1067,7 @@ fn next_trim_rows(
                     |row| Ok(deletable_claim(row.get(0)?, row.get(1)?)),
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            return Ok((Some(envelope), claims));
+            return Ok(Some((Some(envelope), claims)));
         }
         cursor.envelopes_done = true;
     }
@@ -897,19 +1075,20 @@ fn next_trim_rows(
         .prepare_cached(
             "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
              WHERE tombstone.id > ?1
-               AND EXISTS (SELECT 1 FROM claims WHERE claims.id=tombstone.id)
              ORDER BY tombstone.id LIMIT 1",
         )?
-        .query_row([&cursor.claim], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
             Ok(deletable_claim(row.get(0)?, row.get(1)?))
         })
         .optional()?;
     Ok(match claim {
         Some(claim) => {
             cursor.claim = claim.id.clone();
-            (None, vec![claim])
+            let held: bool = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h12c2aa291add owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get(0))?;
+            Some((None, if held { vec![claim] } else { Vec::new() }))
         }
-        None => (None, Vec::new()),
+        None => None,
     })
 }
 
@@ -934,3 +1113,5 @@ fn deletable_claim(id: String, operation_id: Option<String>) -> ClaimTombstone {
 mod capture_lifetime_tests;
 #[cfg(test)]
 mod phase_span_tests;
+#[cfg(test)]
+mod pacing_tests;

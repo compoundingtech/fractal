@@ -1,8 +1,8 @@
-import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type St3Client, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/st3-client';
-import type { InventoryName } from '@smalltalk/st3-views';
+import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import type { InventoryName } from '@fractal/views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
 import type { HeartbeatSocketFactory } from './collectionSocket';
-import type { ConversationHeader, HeaderField } from '@smalltalk/st3-views';
+import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
 
 // The app holds three windows on one collections socket. It needs no work window: missions carry
@@ -45,7 +45,7 @@ export type ArrangementsHandlers = {
   onIssue: (issue: string) => void;
 };
 
-export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasMore: boolean; sessionId?: string; header?: ConversationHeader };
+export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasMore: boolean; sessionId?: string; olderCursor?: string; header?: ConversationHeader };
 export type ConversationHandlers = {
   /** `replace` carries the newest page; otherwise the entries changed since the last frame. */
   onEntries: (frame: ConversationFrame) => void;
@@ -56,9 +56,11 @@ export type ConversationHandlers = {
   onQualityError?: (code?: string) => void;
 };
 
-type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
+type Client = Pick<FractalClient, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
 // Three missed eight-second protocol heartbeats bound a blackholed connection.
 export const HEARTBEAT_WAIT_MS = 24_000;
+/** How long opening the collections socket may take before it counts as a failed try (a half-dead route can hang for minutes). */
+export const OPEN_WAIT_MS = 15_000;
 type Follow = { close(): void };
 
 function errorCode(error: unknown): string | undefined {
@@ -281,7 +283,9 @@ export class Feed {
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
-      const opened = await this.client.collectionStream({
+      let waiting: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('st did not answer')), OPEN_WAIT_MS); });
+      const attempt = this.client.collectionStream({
         ...(this.socket ? { socket: (url, protocols, headers) => {
           const socket = this.socket!(url, protocols, headers);
           socket.onping = () => { if (!stale()) this.heard(); };
@@ -290,6 +294,11 @@ export class Feed {
         onFrame: frame => { if (!stale()) { const received = performance.now(); this.heard(); this.frame(frame, received); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
+      let opened: Awaited<typeof attempt>;
+      try { opened = await Promise.race([attempt, timeout]); }
+      // A socket that opens after its try was given up on is closed, never used.
+      catch (error) { void attempt.then(late => late.close(), () => {}); throw error; }
+      finally { clearTimeout(waiting); }
       if (stale()) { opened.close(); return; }
       this.stream = opened;
       this.heard();
@@ -408,7 +417,7 @@ export class Feed {
         this.conversation.failures = 0;
         this.conversation.handlers.onIssue('');
         this.handlers.onConversationFrame?.(frame.items.length, frame.replace);
-        this.conversation.handlers.onEntries({ replace: frame.replace, items: frame.items, hasMore: !!frame.has_more, sessionId: frame.session_id, header: conversationHeader(frame) });
+        this.conversation.handlers.onEntries({ replace: frame.replace, items: frame.items, hasMore: !!frame.has_more, sessionId: frame.session_id, olderCursor: frame.older_cursor, header: conversationHeader(frame) });
       }
     } else if (frame.kind === 'error') {
       if (id === TERMINAL) this.terminal?.failed(frame.code, frame.message);

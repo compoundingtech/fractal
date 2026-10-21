@@ -79,7 +79,7 @@ def main():
    r=run.execute("Install native Claude without host auth","mkdir -p ~/.local/bin ~/plain-work; install -m755 ~/smalltalk-install/claude-native ~/.local/bin/claude; ~/.local/bin/claude --version")
    if not run.check("native-claude",r["exit"]==0,"actual Claude binary copied; no credentials/settings copied"): return 1
    r=run.execute("Setup without any provider seat",shlex.join([run.st,"setup","--person","ada","--node","studio","--yes","--harness","none","--service","true"]))
-   if not run.check("plain-setup",r["exit"]==0,"configured actual daemon without creating an expert/provider seat"): return 1
+   if not run.check("plain-setup",r["exit"]==0,"configured actual daemon without creating an assistant/provider seat"): return 1
    run.st="/home/ada/.local/bin/st"
    r=run.cli("Install actual bundled user plugin","claude-channel","install","--no-policy")
    if not run.check("actual-plugin-install",r["exit"]==0,"candidate installer, no machine policy"): return 1

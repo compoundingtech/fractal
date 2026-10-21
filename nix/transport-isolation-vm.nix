@@ -2,7 +2,7 @@
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
-#   ST_ISOLATION_ARCHIVE    nextest archive of st2's integration test binary and the st2 binary
+#   ST_ISOLATION_ARCHIVE    workspace archive containing st2's integration test binary and the st2 binary
 #   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; the test binary's compiled-in
 #                           st2 path lies below it, so the archive is extracted at the same path.
 #                           nextest also requires the workspace manifest there.
@@ -24,7 +24,7 @@ let
       --extract-to "$1" \
       --extract-overwrite \
       --no-tests=fail \
-      -E 'package(=st2) and binary(=integration) and (test(/^transport_isolation::/) or test(/^nomad_survival::managed_agent_color_contract_crosses_systemd_scope$/))'
+      -E 'package(=fractal-legacy-runner) and binary(=integration) and (test(/^transport_isolation::/) or test(/^nomad_survival::managed_agent_color_contract_crosses_systemd_scope$/))'
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -34,7 +34,9 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {
     virtualisation.cores = 4;
     virtualisation.memorySize = 2048;
-    virtualisation.diskSize = 4096;
+    # The workspace archive is copied here and expands to the complete prebuilt test inventory.
+    # The former 4 GiB disk held the small legacy archive, but cannot hold both new inputs.
+    virtualisation.diskSize = 16384;
     users.users.${user} = {
       isNormalUser = true;
       inherit uid;
@@ -52,9 +54,12 @@ pkgs.testers.runNixOSTest {
     import shlex
     import time
 
-    archive = os.environ["ST_ISOLATION_ARCHIVE"]
-    workspace = os.environ["ST_ISOLATION_WORKSPACE"]
-    build_workspace = os.environ["ST_ISOLATION_BUILD_WORKSPACE"]
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    archive = (os.environ["FRACTAL_ISOLATION_ARCHIVE"] if "FRACTAL_ISOLATION_ARCHIVE" in os.environ else os.environ["ST_ISOLATION_ARCHIVE"])
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    workspace = (os.environ["FRACTAL_ISOLATION_WORKSPACE"] if "FRACTAL_ISOLATION_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_WORKSPACE"])
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    build_workspace = (os.environ["FRACTAL_ISOLATION_BUILD_WORKSPACE"] if "FRACTAL_ISOLATION_BUILD_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_BUILD_WORKSPACE"])
 
     started = time.monotonic()
     machine.wait_for_unit("multi-user.target")
@@ -79,7 +84,8 @@ pkgs.testers.runNixOSTest {
     print(output)
     assert re.search(r"\b3 tests run: 3 passed\b", output), "all three systemd-scope cases must run and pass"
 
-    with open(os.environ["ST_ISOLATION_TIMINGS"], "w") as timings:
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:
         json.dump({"boot_seconds": round(boot_seconds, 1), "test_seconds": round(test_seconds, 1)}, timings)
   '';
 }

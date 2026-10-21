@@ -1,13 +1,13 @@
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import type { ActionResult } from '@smalltalk/st3-client/schema'
-import * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, appliedAnswer, type FractalClient } from '@fractal/client'
+import type { ActionResult } from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema'
 
 import { conversationPortFailure, hasConversationCapability } from './conversationPort.ts'
 import type { AttachmentPort, ConversationPortResult, MessageSendAction } from './source.ts'
 
 /** Upload, chunk reads and sending use the same gateway client, never a synthetic delivery. */
 export const gatewayAttachments = (
-  client: St3Client,
+  client: FractalClient,
   snapshot: () => Promise<ConversationPortResult<string>>,
 ): AttachmentPort => ({
   capabilities: async () => {
@@ -68,7 +68,7 @@ export const gatewayAttachments = (
  * senders derive the message identity from that key, so it must be single-sourced.
  */
 export const gatewayMessageSend =
-  (client: St3Client) =>
+  (client: FractalClient) =>
   async (request: MessageSendAction): Promise<ConversationPortResult<ActionResult>> => {
     let attachments: readonly Native.AttachmentInput[]
     // Validate the actual generated action contract (including max four PNG/JPEG/GIF/WebP references).
@@ -101,6 +101,11 @@ export const gatewayMessageSend =
     } catch (cause) {
       if (cause instanceof ClientError && cause.response.code === 'stale-fence') {
         return { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
+      }
+      // st could not confirm the send in time, and it may still complete: only the identical
+      // request (same id, key and parameters) is safe to send again.
+      if (cause instanceof ClientError && appliedAnswer(cause) === 'unknown') {
+        return { _tag: 'Refused', reason: 'unconfirmed', detail: cause.response.message, error: cause.response }
       }
       return conversationPortFailure(cause)
     }
