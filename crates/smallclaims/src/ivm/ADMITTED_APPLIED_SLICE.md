@@ -499,3 +499,86 @@ adoption remain deferred. Original strict/growth/crash controls and bounds are
 unchanged: the 128-statement strict page has zero headroom and eight growth
 pages remain adverse over that ceiling. No previous work or crash receipt
 qualifies the mirrored path, and oracle bounds are not pre-copy certification.
+
+## Two-consumer journal post-commit process death (fixture only)
+
+An appended parent/child pair targets only process death AFTER the production
+journal prune has committed and after a fresh durable phase marker. It uses
+`process::exit(78)` with the Store still live, skipping Rust destructors and
+any explicit Store close or checkpoint. The child explicitly flushes its stdout
+marker. This is not SIGKILL, power loss, death during COMMIT or an uncommitted
+crash. It makes no claim that SQLite performed no automatic checkpoint; the
+point is reopening without the fixture's normal Store destruction path.
+
+The parent validates A=16/B=32 using original images and native-derived output,
+then owns the full retention snapshot and both complete physical consumer
+states. It independently derives the expected pinned and advanced states and
+the final empty journal before dropping the original Store. No parent reader,
+writer guard or connection survives into the child. A narrow private reopen
+adapter uses the unchanged external-manifest identity gate and replaces only
+the pure local operator registry. The follower namespace is supplied from the
+parent's original value, never discovered from SQL. No schema, start, bootstrap,
+readiness, manifest or process-gate bypass is added. This is still the fixture's
+limited same-file lifetime check, not production incarnation authority.
+
+The child commits actual production prune16 then0 while A stays16 and B32,
+returns its physical writer loans, syncs a fresh per-parent phase file and its
+directory, prints and flushes the marker, then exits78. That code was unused in
+the pinned fixture. The parent checks the distinct code, exact stdout line and
+bounded matching phase file BEFORE opening any Store. The child's ordinary
+no-env return cannot establish death; only the parent asserts these boundaries.
+No hook, observer, fault callback, sleep, retry loop or timing assertion is used.
+
+After reopening, the full independently expected original17..32 payloads and
+row/byte counters, all32 immutable images/native/lifetime fields and BOTH owned
+consumer states must match. A remains current-source unavailable; B's current
+getter matches native32. Another zero prune must preserve the slow pin. A then
+consumes the original retained references, its complete state must equal the
+before-derived advanced oracle, both current getters match native32, and the
+final16+0 drain leaves the independently derived state intact. Equal-image/
+reference helpers are not weakened or used after journal-only pruning.
+
+Both new names are UNRUN at source authoring. The mutation map lists intended
+discriminators by source reasoning only: no mutations have been run or proved
+to fail. The fixed two-consumer scenario is not an arbitrary-registry minimum
+proof. Uncommitted process death with two consumers, image reclamation, whole-
+prune work/hold/CPU, source authority/lifetime/restore, failed-cleanup containment
+and production adoption remain deferred. All earlier prefixes, helpers, strict/
+growth/crash controls and limits are unchanged. The landed strict128-statement
+page has zero headroom and eight growth pages remain adverse. Skipped merge-
+group perf-cost is not a new cost pass, and old receipts do not qualify this path.
+
+The first hosted post-commit parent reached its exit78 gate but failed the exact
+stdout-line assertion on all three attempts; phase-file and reopen assertions
+were not reached. The child now explicitly starts its marker on a new line so
+libtest's progress prefix cannot share that line. The exact-line assertion stays
+unchanged and includes captured stdout/stderr on failure. The failed log did
+not retain the child's captured output, so progress-prefix framing is a source-
+based explanation, not an observed byte transcript. No gate or limit is relaxed,
+and the first failed control does not qualify the reopen or recovery behavior.
+
+## Signature-schema composition accounting
+
+The signature-candidate schema exposed the existing per-table foreign-key metadata
+probe again: final signature head e1844d574 measured 135 statements, 6,844 VM
+steps, 691 fullscan steps, one sort and zero autoindex rows in the unchanged
+whole-page control, exceeding its 128-statement ceiling on all hosted attempts.
+The same failure reproduced locally before the correction.
+
+Capture now keeps the complete bounded schema inventory but invokes the actual
+foreign-key PRAGMA only for tables whose schema SQL could contain REFERENCES.
+SQLite requires that ASCII keyword for both column and table foreign keys;
+case folding preserves mixed-case declarations. Comments, quoted identifiers,
+string literals and missing SQL conservatively use the real PRAGMA. No metadata
+is cached across cuts. The 256-table and 128-FK-column limits, complete inbound
+and outbound refusal, final schema check and atomic metadata acceptance stay.
+
+The corrected whole-page control measures 84 statements, 6,897 VM steps, 744
+fullscan steps, one sort and zero autoindex rows, including physical reader/writer
+return. All 22 admitted/applied slice controls and 19 prepared-page controls pass.
+A new positive-work regression adds 128 unrelated FK-free tables: metadata
+statements stay at seven, VM work grows from 1,008 to 8,560 and fullscan steps
+from 90 to 730. The keyword false-positive and mixed-case/quoted-target controls
+retain genuine incoming-FK refusal. This reduces unnecessary PRAGMA calls;
+schema bytes and VM work still depend on inventory, and no general metadata
+work bound or production activation is qualified by these fixtures.

@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 pub mod holds;
 mod intervals;
+pub mod wal;
 pub use intervals::{IntervalSeries, MinuteSummary, histogram_upper_ms, histogram_lower_ms};
 
 /// The windows every series keeps: name, slot width and slot count.
@@ -214,14 +215,23 @@ pub enum StoreWork {
     WriteTransaction,
     /// The single writer held by one batch or one lent write.
     WriterHold,
+    /// Waiting for the replication snapshot's build lock, which one build holds at a time.
+    SnapshotBuildWait,
+    /// Reading the envelope inventory for a replication snapshot.
+    SnapshotInventory,
+    /// Hashing a replication snapshot's inventory, graph and projection digests.
+    SnapshotDigest,
 }
 
 impl StoreWork {
-    pub const ALL: [StoreWork; 4] = [
+    pub const ALL: [StoreWork; 7] = [
         StoreWork::Statement,
         StoreWork::ReadTransaction,
         StoreWork::WriteTransaction,
         StoreWork::WriterHold,
+        StoreWork::SnapshotBuildWait,
+        StoreWork::SnapshotInventory,
+        StoreWork::SnapshotDigest,
     ];
 
     pub fn name(self) -> &'static str {
@@ -230,6 +240,9 @@ impl StoreWork {
             StoreWork::ReadTransaction => "read-transaction",
             StoreWork::WriteTransaction => "write-transaction",
             StoreWork::WriterHold => "writer-hold",
+            StoreWork::SnapshotBuildWait => "snapshot-build-wait",
+            StoreWork::SnapshotInventory => "snapshot-inventory",
+            StoreWork::SnapshotDigest => "snapshot-digest",
         }
     }
 }
@@ -240,14 +253,14 @@ struct StoreSeries {
     series: Series,
 }
 
-static STORE: [Mutex<StoreSeries>; 4] = [const {
+static STORE: [Mutex<StoreSeries>; StoreWork::ALL.len()] = [const {
     Mutex::new(StoreSeries {
         target: None,
         series: Series {
             rings: [Vec::new(), Vec::new(), Vec::new()],
         },
     })
-}; 4];
+}; StoreWork::ALL.len()];
 
 fn store(kind: StoreWork) -> &'static Mutex<StoreSeries> {
     &STORE[StoreWork::ALL.iter().position(|k| *k == kind).unwrap_or(0)]
@@ -279,10 +292,55 @@ pub fn store_series(kind: StoreWork) -> Series {
         .clone()
 }
 
+/// Windows owned by one physical claim store. The process windows remain available for
+/// aggregate diagnostics, but a shard's samples must never be interpreted as another
+/// store's objective or hide its stalled writer.
+pub struct StoreHealth {
+    series: [Mutex<Series>; 4],
+    pub(crate) holds: holds::Ledger,
+}
+
+impl Default for StoreHealth {
+    fn default() -> Self {
+        Self {
+            series: std::array::from_fn(|_| Mutex::new(Series::default())),
+            holds: holds::Ledger::default(),
+        }
+    }
+}
+
+impl StoreHealth {
+    fn series(&self, kind: StoreWork) -> &Mutex<Series> {
+        &self.series[StoreWork::ALL.iter().position(|work| *work == kind).unwrap()]
+    }
+
+    /// Record in both the process aggregate and this store, using the same objective result.
+    pub fn record(&self, kind: StoreWork, duration: Duration) -> bool {
+        let over = record_store(kind, duration);
+        self.series(kind)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(Instant::now(), duration, over);
+        over
+    }
+
+    pub fn series_snapshot(&self, kind: StoreWork) -> Series {
+        self.series(kind)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn holds_report(&self) -> Value {
+        self.holds.report()
+    }
+}
+
 /// Records how long it lives in `kind` when dropped.
 pub struct Timer {
     kind: StoreWork,
     started: Instant,
+    store: Option<std::sync::Arc<StoreHealth>>,
 }
 
 impl Timer {
@@ -290,13 +348,23 @@ impl Timer {
         Self {
             kind,
             started: Instant::now(),
+            store: None,
         }
+    }
+
+    pub fn start_in(kind: StoreWork, store: std::sync::Arc<StoreHealth>) -> Self {
+        Self { kind, started: Instant::now(), store: Some(store) }
     }
 }
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        record_store(self.kind, self.started.elapsed());
+        let duration = self.started.elapsed();
+        if let Some(store) = &self.store {
+            store.record(self.kind, duration);
+        } else {
+            record_store(self.kind, duration);
+        }
     }
 }
 

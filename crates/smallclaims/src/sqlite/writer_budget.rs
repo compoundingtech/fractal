@@ -120,7 +120,7 @@ impl WriterConnection {
         committed_index: Arc<AtomicU64>,
         policy: OwnedHandlerPolicy,
     ) -> Result<Self> {
-        Self::new_inner(connection, committed_index, None, Some(policy))
+        Self::new_inner(connection, committed_index, None, Some(policy), None)
     }
 
     pub fn invalidate_handler_policy(&self) {
@@ -262,7 +262,7 @@ impl WriterGuard<'_> {
         let rollback = if self.is_autocommit() {
             Ok(())
         } else {
-            self.execute_batch("ROLLBACK")
+            self.execute_batch(/* sqlite-large-value: allow-for-now lv-ha90b8b085026 owner=smallclaims::sqlite::writer_budget TODO=trace-statement-and-value-representation */ "ROLLBACK")
         };
         let restored = policy.install(self);
         if restored.is_err() {

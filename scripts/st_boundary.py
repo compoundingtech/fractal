@@ -5,29 +5,36 @@ import re
 import sqlite3
 from pathlib import Path
 
-IMPORT = re.compile(r"\b(?:r#)?st2\s*::|\bextern\s+crate\s+(?:r#)?st2\b")
+IMPORT = re.compile(r"\b(?:r#)?fractal_legacy_runner\s*::|\bextern\s+crate\s+(?:r#)?fractal_legacy_runner\b")
 LEGACY = re.compile("st2", re.IGNORECASE)
+# Legacy install components include st2-tools and cache.st2, not random substrings
+# in temporary ancestors such as nix-shell.Cst2Ln.
+LEGACY_COMPONENT = re.compile(r"(?:.*[._-])?st2(?:[._-].*)?", re.IGNORECASE)
 # A stored value names st2 as its own token: a label, schema, path or program. Keys, signatures,
 # nonces and other base64 that st stores hold the letters st2 inside longer runs by chance.
 TOKEN = re.compile(r"(?<![a-z0-9])st2(?![a-z0-9])", re.IGNORECASE)
+
+
+def legacy_path(path):
+    return any(LEGACY_COMPONENT.fullmatch(component) for component in Path(path).parts)
 
 
 def isolated_path(bin_dir):
     """Keep inherited tools in hermetic fixtures without exposing the predecessor."""
     inherited = [
         entry for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry and not LEGACY.search(entry) and not shutil.which("st2", path=entry)
+        if entry and not legacy_path(entry) and not shutil.which("st2", path=entry)
     ]
     return os.pathsep.join([str(bin_dir), *inherited])
 
 
 def source_findings(root):
-    for crate in ("st3", "stui"):
+    for crate in ("fractal", "fractal-tui"):
         for path in sorted((root / "crates" / crate).rglob("*.rs")):
             source = path.read_text()
             for match in IMPORT.finditer(source):
                 number = source[:match.start()].count("\n") + 1
-                yield f"{path.relative_to(root)}:{number}: st2 import"
+                yield f"{path.relative_to(root)}:{number}: fractal_legacy_runner import"
 
 
 def dependency_findings(metadata):
@@ -35,7 +42,7 @@ def dependency_findings(metadata):
     # features and target/dev/build dependencies. Traverse neutral crates too: an alias or
     # indirect workspace dependency must not let st2 back into either current product.
     packages = {package["name"]: package for package in metadata["packages"]}
-    for product in ("st3",):
+    for product in ("fractal",):
         pending = [(product, [product])]
         seen = set()
         while pending:
@@ -45,8 +52,8 @@ def dependency_findings(metadata):
             seen.add(name)
             for dependency in packages.get(name, {}).get("dependencies", []):
                 target = dependency["name"]
-                if target == "st2":
-                    yield "st2 dependency: " + " -> ".join([*chain, target])
+                if target == "fractal-legacy-runner":
+                    yield "fractal-legacy-runner dependency: " + " -> ".join([*chain, target])
                 elif target in packages:
                     pending.append((target, [*chain, target]))
 
@@ -56,11 +63,11 @@ def launch_findings(argv, environment):
         name, _, _ = entry.partition("=")
         if name.startswith("ST2_"):
             yield f"legacy environment name: {name}"
-    # Reject any path component containing st2, not just an exact /st2/ component.
-    # Bare st2 is also a program. JSON plugin-disable keys are not paths/programs.
+    # Reject legacy install components and bare st2 programs. JSON plugin-disable
+    # keys are not paths/programs; incidental substrings in ancestors are not legacy.
     for text in (argv, *environment):
         for token in re.split(r"[\s\"'();|&`=:]+", text):
-            if token == "st2" or ("/" in token and LEGACY.search(token)):
+            if token == "st2" or ("/" in token and legacy_path(token)):
                 yield f"st2 program/path in launch: {token}"
 
 
