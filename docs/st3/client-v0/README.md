@@ -557,11 +557,12 @@ the server returns `validation-failed` rather than an incomplete AST or KDL docu
 The optional `agent_messages` field adds a **daily estimate**, also shown by `st usage` and
 the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
-Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
-backfilled atomically on the first usage-estimate request after upgrade, not during daemon
-startup. That first request can take longer; it never returns partially backfilled counts.
-Until then, daily counters are not maintained; the first request rebuilds them from every
-retained send. Once initialized, counts are maintained in each writer transaction. Full UTC
+Receipts and duplicate send claims add no messages. Bodies are never classified. After an
+upgrade, the daemon counts every retained send in the background, in pages of at most 500
+send claims, each its own writer turn, resuming from its cursor after a restart. Opening the
+store does no backfill. A usage-estimate request that arrives before the last page completes
+the rest atomically itself, so it can take longer; it never returns partially backfilled
+counts. Once initialized, counts are maintained in each writer transaction. Full UTC
 days use daily recipient counters; the first and last partial days use an indexed send-time
 range.
 An estimate inside an already-pinned read snapshot with an uninitialized cache folds that
