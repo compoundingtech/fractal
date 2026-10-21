@@ -61,6 +61,12 @@ when complete; per-claim projections cannot multiply the historical budget. `com
 Reads never advance bootstrap. The factory SLO timer divides each count by merges in the
 rolling day and publishes informational values; zero merges gives no ratio.
 
+Beside the counts, `merged_pull_requests` counts the pull requests this daemon observed merging in the
+period, from the `merged_at` of each `vcs.pull-request` observation, once per pull request; one
+merged in a repository the daemon does not observe is not counted. `agent_to_agent_per_merged_pull_request`
+divides the two, and is null while `complete` is false or nothing merged. `st usage` prints both on
+its `MESSAGES` line, so coordination cost shows beside spend.
+
 ## Count bootstrap
 
 A daemon that does not know the silent kind delivers a silent message as wake, and the CLI
