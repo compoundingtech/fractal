@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 // A fixture build with the strict policy's aliases and kept bases. Like Storybook's addon-a11y,
 // it reports an a11y result unless the a11y.manual global is set; `report` overrides that report.
-const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
+const iframe = (report, probes = []) => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
 <script>
   const listeners = new Map()
   const manual = new URLSearchParams(location.search).get('globals') === 'a11y.manual:!true'
@@ -29,6 +29,7 @@ const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixtu
           await new Promise(resolve => setTimeout(resolve, 2))
           window.dispatchEvent(new CustomEvent('kit-a11y-timing', { detail: { storyId: id, phase: 'end', at: performance.now() } }))
         }
+        for (const probe of ${JSON.stringify(probes)}) window.dispatchEvent(new CustomEvent('kit-filter-benchmark', { detail: probe }))
         emit('storyFinished', {
           storyId: id, status: ${JSON.stringify(report?.some(({ status }) => status === 'failed') ? 'error' : 'success')},
           reporters: ${report === undefined ? "manual ? [] : [{ type: 'a11y', status: 'passed' }]" : JSON.stringify(report)},
@@ -48,7 +49,7 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
 ]
 
-const runGate = async ({ env = {}, report, fixtureOverrides } = {}) => {
+const runGate = async ({ env = {}, report, probes, fixtureOverrides } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -60,7 +61,7 @@ const runGate = async ({ env = {}, report, fixtureOverrides } = {}) => {
         type: 'story', id, importPath: './Kit.stories.tsx', tags: ['dev'],
       }])),
     } }))
-    await writeFile(join(build, 'iframe.html'), iframe(report))
+    await writeFile(join(build, 'iframe.html'), iframe(report, probes))
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
     const args = fixtureOverrides === undefined
@@ -174,7 +175,7 @@ test('invalid options fail before any case runs', { timeout: 60000 }, async () =
   }
 })
 
-test('structured benchmark reports survive successful and failed case receipts', { timeout: 60000 }, async () => {
+test('structured benchmark events survive successful and failed case receipts', { timeout: 60000 }, async () => {
   const probes = [240, 440].flatMap(width => ['dark', 'light'].map(theme => ({
     width, theme, filterP90Milliseconds: 30, referenceP90Milliseconds: 20,
     pooledRatio: 1.5, busyControlRatio: 4.1, threshold: 3,
@@ -182,10 +183,8 @@ test('structured benchmark reports survive successful and failed case receipts',
   for (const status of ['passed', 'failed']) {
     const { code, receipt } = await runGate({
       env: { KIT_PLAY_SET: 'critical' },
-      report: [
-        { type: 'a11y', status, result: { violations: [] } },
-        { type: 'kit-filter-benchmark', status: 'passed', result: { probes } },
-      ],
+      report: [{ type: 'a11y', status, result: { violations: [] } }],
+      probes,
     })
     assert.equal(code, status === 'passed' ? 0 : 1)
     assert.ok(receipt.rows.every(row => JSON.stringify(row.filterBenchmark) === JSON.stringify(probes)))

@@ -7,6 +7,24 @@ import { spawnSync } from 'node:child_process'
 import { readinessTimings, summarizeTimings, costTable, notice } from './kit-play-timings.mjs'
 import { shardArtifactName, shardStories } from './kit-play-shards.mjs'
 import { fullCases } from './kit-play-commit-set.mjs'
+import { fileURLToPath } from 'node:url'
+import config from '../.storybook/main.ts'
+
+test('Storybook 10.6.1 a11y annotation path and accepted entry shapes stay pinned', async () => {
+  for (const name of ['storybook', '@storybook/addon-a11y']) {
+    const pkg = JSON.parse(await readFile(fileURLToPath(import.meta.resolve(`${name}/package.json`)), 'utf8'))
+    assert.equal(pkg.version, '10.6.1', 'Revalidate annotation replacement when updating Storybook')
+  }
+  const original = fileURLToPath(import.meta.resolve('@storybook/addon-a11y/preview'))
+  assert.ok(original.endsWith('/@storybook/addon-a11y/dist/preview.js'), 'Revalidate the addon preview entry path')
+  const wrapper = fileURLToPath(new URL('../.storybook/a11y-timing.mjs', import.meta.url))
+  assert.deepEqual(await config.previewAnnotations([original]), [wrapper])
+  const unrelated = { bare: 'unchanged', absolute: '' }
+  const result = await config.previewAnnotations([unrelated, { bare: '@storybook/addon-a11y/preview', absolute: original }])
+  assert.equal(result[0], unrelated)
+  assert.equal(result[1], wrapper)
+  await assert.rejects(config.previewAnnotations([]), /Missing pinned a11y preview annotation/)
+})
 
 const marks = { dom: 10, playing: 30, played: 70, completing: 75, a11yStart: 80, a11yEnd: 150, finished: 160, observed: 170 }
 test('readiness phases partition one document clock, including lifecycle overhead', () => {
@@ -61,6 +79,7 @@ test('publisher selects the newest attempt, handles no-kit lanes and writes the 
       await writeFile(join(path, 'lane-seconds'), String(lane))
       if (receipt) await writeFile(join(path, 'receipt.json'), JSON.stringify(receipt))
     }
+    await writeFile(join(artifacts, `kit-play-123-${sha}-shard-0-attempt-1`, 'receipt.json'), '{"rows":')
     const run = spawnSync(process.execPath, [new URL('./kit-play-cost.mjs', import.meta.url).pathname, artifacts], {
       encoding: 'utf8', env: { ...process.env, GITHUB_RUN_ID: '123', GITHUB_SHA: sha, GITHUB_RUN_ATTEMPT: '2', GITHUB_STEP_SUMMARY: summary },
     })
@@ -70,6 +89,12 @@ test('publisher selects the newest attempt, handles no-kit lanes and writes the 
     assert.match(table, /\| 1 \| 37.00 \| unavailable \| unavailable \| not run \|/)
     assert.doesNotMatch(table, /999/)
     assert.equal(run.stdout.trimEnd(), notice(table))
+    await writeFile(join(artifacts, `kit-play-123-${sha}-shard-0-attempt-2`, 'receipt.json'), '{"rows":')
+    const malformed = spawnSync(process.execPath, [new URL('./kit-play-cost.mjs', import.meta.url).pathname, artifacts], {
+      encoding: 'utf8', env: { ...process.env, GITHUB_RUN_ID: '123', GITHUB_SHA: sha, GITHUB_RUN_ATTEMPT: '2', GITHUB_STEP_SUMMARY: '' },
+    })
+    assert.notEqual(malformed.status, 0, 'A malformed newest receipt must not fall back to an older attempt')
+    assert.match(malformed.stderr, /SyntaxError/)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

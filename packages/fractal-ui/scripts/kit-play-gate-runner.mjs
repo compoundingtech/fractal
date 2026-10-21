@@ -171,9 +171,8 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         row.events = await page.evaluate(() => window.__dt10StrictEvents ?? []).catch(() => [])
       } finally {
         row.strict = guard.records
-        const finished = guard.records[0]?.finished ?? row.events?.filter(event => event.name === 'storyFinished') ?? []
-        const benchmark = finished.flatMap(event => event.payload.reporters ?? []).find(report => report.type === 'kit-filter-benchmark')
-        if (benchmark) row.filterBenchmark = benchmark.result.probes
+        const probes = await page.evaluate(() => window.__kitFilterBenchmark ?? []).catch(() => [])
+        if (probes.length) row.filterBenchmark = probes
         // Keep the original elapsed definition (before page.close) for comparison.
         row.elapsedSeconds = (performance.now() - caseStarted) / 1000
         const closeStarted = performance.now()

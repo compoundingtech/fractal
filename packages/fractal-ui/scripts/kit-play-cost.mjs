@@ -10,15 +10,20 @@ for (const name of await readdir(directory)) {
   if (!match || match[1] !== process.env.GITHUB_RUN_ID || match[2] !== process.env.GITHUB_SHA || Number(match[4]) > Number(process.env.GITHUB_RUN_ATTEMPT)) throw new Error('Cost artifact provenance mismatch')
   const shardIndex = Number(match[3]), attempt = Number(match[4])
   if (shards.has(shardIndex) && shards.get(shardIndex).attempt >= attempt) continue
+  shards.set(shardIndex, { name, shardIndex, attempt })
+}
+// Select attempts before opening any files: an obsolete receipt may be truncated.
+const costs = []
+for (const { name, shardIndex, attempt } of shards.values()) {
   const optional = async file => {
     try { return await readFile(join(directory, name, file), 'utf8') }
     catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   const receipt = await optional('receipt.json')
   const lane = await optional('lane-seconds')
-  shards.set(shardIndex, { shardIndex, attempt, laneSeconds: lane === undefined ? undefined : Number(lane), receipt: receipt === undefined ? undefined : JSON.parse(receipt) })
+  costs.push({ shardIndex, attempt, laneSeconds: lane === undefined ? undefined : Number(lane), receipt: receipt === undefined ? undefined : JSON.parse(receipt) })
 }
-const table = costTable([...shards.values()].sort((a, b) => a.shardIndex - b.shardIndex))
+const table = costTable(costs.sort((a, b) => a.shardIndex - b.shardIndex))
 if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, table)
 // Workflow-command notices become check-run annotations, readable without authenticated logs.
 console.log(notice(table))
