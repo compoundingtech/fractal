@@ -92,6 +92,7 @@ impl Daemon {
     // the daemon does. Aborting only the listener would leave those tasks alive.
     async fn start_isolated_app(&mut self, app: axum::Router) {
         let socket = self.socket.clone();
+        let store = self.store.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -101,7 +102,7 @@ impl Daemon {
                 .unwrap();
             runtime.block_on(async {
                 tokio::select! {
-                    result = fractal_daemon::api::serve_unix_bound(&socket, &socket, app) => {
+                    result = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store) => {
                         result.unwrap();
                     }
                     _ = stopped => {}
@@ -121,9 +122,10 @@ impl Daemon {
         let state = self.state();
         let socket = self.socket.clone();
         self.server = Some(tokio::spawn(async move {
+            let store = state.store.clone();
             let app = fractal_daemon::api::router(state);
             if native {
-                let _ = fractal_daemon::api::serve_unix_bound(&socket, &socket, app).await;
+                let _ = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await;
             } else {
                 let _ = fractal_daemon::api::serve_unix(&socket, app).await;
             }
