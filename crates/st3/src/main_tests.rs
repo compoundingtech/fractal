@@ -4854,6 +4854,42 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
 }
 
 #[test]
+fn fyi_is_the_silent_kind_on_send_and_reply() {
+    let parse = |extra: &[&str]| {
+        let mut args = vec!["st3", "conversations", "send", "agent/example/worker", "--from", "agent/example/peer", "--body", "Merged."];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args).map(|cli| match cli.command {
+            Command::Conversations {
+                command: MessageCommand::Send(send),
+            } => send.wake,
+            _ => panic!("send did not parse"),
+        })
+    };
+    let fyi = parse(&["--fyi"]).unwrap();
+    assert!(fyi.silent());
+    assert_eq!(fyi.tags().collect::<Vec<_>>(), [st3::silent::SILENT_TAG]);
+    assert_eq!(
+        parse(&["--kind", "silent"]).unwrap().tags().collect::<Vec<_>>(),
+        fyi.tags().collect::<Vec<_>>()
+    );
+    assert!(!parse(&[]).unwrap().silent());
+    // One way to choose: --fyi with an explicit kind is refused, even --kind silent.
+    assert!(parse(&["--fyi", "--kind", "wake"]).is_err());
+    assert!(parse(&["--fyi", "--kind", "silent"]).is_err());
+    let reply = Cli::try_parse_from([
+        "st3", "conversations", "reply", "message/example", "--from", "agent/example/peer", "--body", "Noted.", "--fyi",
+    ])
+    .unwrap();
+    let Command::Conversations {
+        command: MessageCommand::Reply(reply),
+    } = reply.command
+    else {
+        panic!("reply did not parse");
+    };
+    assert!(reply.wake.silent());
+}
+
+#[test]
 fn message_send_and_reply_accept_a_key_for_unconfirmed_retries() {
     let send = Cli::try_parse_from([
         "st3",

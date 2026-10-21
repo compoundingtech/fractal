@@ -10,6 +10,7 @@ st conversations reply message/ID -m "Thanks, noted." --kind silent --as agent/e
 st conversations send agent/example/builder -m "Which branch?" --kind wake --as agent/example/reviewer
 ```
 
+`--fyi` is the same as `--kind silent` on send and reply; it cannot be combined with `--kind`.
 The client API's `message.send` takes `kind: "silent" | "wake"`; omission means wake.
 There is no per-seat wake policy, question tag, question-thread inference or content classifier.
 A reply independently defaults to wake, including an answer to a silent message. To keep a
