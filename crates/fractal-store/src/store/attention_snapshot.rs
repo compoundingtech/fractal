@@ -681,14 +681,22 @@ impl Store {
             .into_iter()
             .filter(|desired| desired.kind == "agent")
         {
+            // Most agents have never been parked. Do not resolve their identities or
+            // declarations just to discover that there is no crash-loop decision.
+            let decisions =
+                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
+            if !decisions.iter().any(|decision| {
+                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
+                key.starts_with("runtime-crash-loop:") || key.starts_with("codex-crash-loop:")
+            }) {
+                continue;
+            }
             if !person_work::declaration_live(&connection, &desired.subject)? {
                 continue;
             }
             let Some(token) = self.selected_desired_token(&desired.subject)? else {
                 continue;
             };
-            let decisions =
-                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
             let decision = decisions.iter().find(|decision| {
                 let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
                 key == format!("runtime-crash-loop:{token}")
@@ -755,11 +763,23 @@ impl Store {
         }
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for desired in self
-            .desired_subjects()?
-            .into_iter()
-            .filter(|desired| desired.kind == "agent" && desired.member.is_some())
-        {
+        smallclaims::touched::note_read(|| "kind:intent.desired".into());
+        smallclaims::touched::note_read(|| "kind:runtime.observed".into());
+        smallclaims::touched::note_read(|| "kind:record.repaired".into());
+        // Only the absence matters: batch indexed probes instead of hydrating/sorting
+        // the latest observation and resolving identities for every running member.
+        let mut candidates = connection.prepare_cached(
+            "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+             FROM desired WHERE kind='agent' AND member IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM local_observations
+                   WHERE subject=desired.subject AND kind='runtime.observed')
+               AND NOT EXISTS(SELECT 1 FROM claims
+                   WHERE subject=desired.subject AND kind='runtime.observed'
+                     AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))
+             ORDER BY subject",
+        )?;
+        for desired in candidates.query_map([], desired_from_row)? {
+            let desired = desired?;
             if !person_work::declaration_live(&connection, &desired.subject)? {
                 continue;
             }
@@ -773,9 +793,6 @@ impl Store {
                 .accepted_at_unix_ms
                 .saturating_add(SEAT_NOT_STARTED_MS);
             if due > as_of
-                || self
-                    .latest_observation(&desired.subject, "runtime.observed")?
-                    .is_some()
                 || crate::suspension::current(self, &desired.subject)?.is_some()
             {
                 continue;

@@ -13,25 +13,34 @@ use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, g
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
     fn own_seat(_pid: u32) -> Option<String> {
-        Some("agent/own".into())
+        Some("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("api.sock");
     let server_socket = socket.clone();
+    let state = state(root.path());
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-own/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        state.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "bound-declare").unwrap();
     // Reaching the handler would succeed. The listener must reject the foreign actor first.
     let app = Router::new().route(
         "/v1/client/glasses/{id}",
         axum::routing::put(|| async { Json(json!({})) }),
     );
     let server = tokio::spawn(async move {
-        serve_unix_with_ancestor(&server_socket, None, app, true, own_seat).await
+        serve_unix_with_ancestor(&server_socket, None, app, Some(state.store), own_seat).await
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !socket.exists() {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let error = fractal_client::Client::unix_as(&socket, "person/alex")
+    let error = fractal_client::Client::unix_as(&socket, "person/other")
         .put_glass(
             "0194b2e0-1234-7000-8000-000000000001",
             &fractal_client::GlassPut {
@@ -66,6 +75,8 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
 
 #[tokio::test]
 async fn a_bound_harness_cannot_act_as_another_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
     for path in [
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
@@ -94,7 +105,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
                     json!({"actor": actor, "agent": "agent/worker"}).to_string(),
                 ))
                 .unwrap();
-            let error = match guard_bound_request(request, Some("agent/own")).await {
+            let error = match guard_bound_request(request, Some("agent/own"), &state.store).await {
                 Ok(_) => panic!("bound harness acted as {actor} at {path}"),
                 Err(error) => error,
             };
@@ -109,7 +120,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
             .header(client_v0::LOCAL_PERSON_HEADER, person)
             .body(Body::from("{}"))
             .unwrap();
-        let error = guard_bound_request(request, Some("agent/own"))
+        let error = guard_bound_request(request, Some("agent/own"), &state.store)
             .await
             .expect_err("a bound harness acted as another client-v0 actor");
         assert_eq!(error.code, "foreign-agent-actor", "{person}");
@@ -121,7 +132,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         .body(Body::from("{}"))
         .unwrap();
     assert!(
-        guard_bound_request(request, Some("agent/own"))
+        guard_bound_request(request, Some("agent/own"), &state.store)
             .await
             .is_ok()
     );
@@ -131,7 +142,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         .body(Body::from(json!({"actor": "agent/own"}).to_string()))
         .unwrap();
     assert!(
-        guard_bound_request(request, Some("agent/own"))
+        guard_bound_request(request, Some("agent/own"), &state.store)
             .await
             .is_ok()
     );
