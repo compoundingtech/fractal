@@ -269,6 +269,8 @@ export const RowActions: Story = {
     await userEvent.click(within(again).getByRole('menuitem', { name: 'Reported agent details' }))
     await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${parent.title}"]`)).not.toBeNull())
     await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+    // RAC moves focus after mounting the dialog; Escape must reach the dialog, not the body between overlays.
+    await waitFor(() => expect(within(document.body).getByRole('dialog', { name: `Reported details for ${parent.title}` })).toHaveFocus())
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
     const child = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(row => row.textContent?.includes(noSessionChild.title) && row.closest('[inert]') === null)!
@@ -297,6 +299,7 @@ export const RowActions: Story = {
       await userEvent.click(within(childMenu).getByRole('menuitem', { name: 'Reported agent details' }))
       await waitFor(() => expect(document.querySelector(`[role="dialog"][aria-label="Reported details for ${noSessionChild.title}"]`)).not.toBeNull())
       await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+      await waitFor(() => expect(within(document.body).getByRole('dialog', { name: `Reported details for ${noSessionChild.title}` })).toHaveFocus())
       await userEvent.keyboard('{Escape}')
       await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
     }
