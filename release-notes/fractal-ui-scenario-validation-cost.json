@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "summary": "Give all scenario-mode story validations an explicit 20-second timeout, preserving full forbidden-read checks while allowing measured SidebarTree jsdom render costs under merge-group load.",
+  "summary": "Allow 15 seconds for SidebarTree scenario-mode story validations, preserving full forbidden-read checks while covering the expanded fixtures' measured 7.1-second CI render cost.",
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No database or wire schema changes." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
-  "compatibility": { "status": "none", "detail": "No product behavior change. Story validation still commits and unmounts the complete tree; its timeout now covers the measured 596–1788-row SidebarTree render rather than sharing Vitest's 5-second default." },
+  "compatibility": { "status": "none", "detail": "No product behavior change. Story validation still commits and unmounts the complete tree. Only stories in SidebarTree.stories.tsx receive the file-scoped 15-second allowance; all other stories retain Vitest's 5-second default to expose regressions." },
   "downtime": { "status": "none", "detail": "None." },
   "manual": { "status": "none", "detail": "No manual step." },
   "recovery": { "status": "none", "detail": "Nothing to recover." }

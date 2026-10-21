@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 /// <reference types="vite/client" />
-import { scenarioModeValidationTimeoutMs, scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
+import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
 import { loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
 import { scenarioSections } from './scenario-transcript.story-harness'
@@ -427,6 +427,11 @@ const exemptions: string[] = []
 const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
 const sliceFiles = new Set<string>()
 
+// react-stately renders every row in jsdom (no layout); SidebarTree's observed
+// CI maximum is 7.1 s, so 15 s allows about 2x. Other stories take at most ~1.9 s;
+// a global increase would hide regressions outside this expanded-tree fixture.
+const sidebarTreeValidationTimeoutMs = 15_000
+
 for (const [path, module] of Object.entries(storyModules)) {
   const { default: storyMeta, ...exports } = module
   for (const [name, story] of Object.entries(exports)) {
@@ -462,7 +467,7 @@ for (const [path, module] of Object.entries(storyModules)) {
       expect(result._tag).toBe('Passed')
       for (const exemption of result.exemptions) process.stdout.write(`${id}: ${exemption._tag} — ${exemption.reason}\n`)
       expect(result.exemptions).toHaveLength(tag === 'slices' ? 0 : 1)
-    }, scenarioModeValidationTimeoutMs)
+    }, path === './assistant-ui/sidebar/SidebarTree.stories.tsx' ? sidebarTreeValidationTimeoutMs : undefined)
   }
 }
 
