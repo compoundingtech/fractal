@@ -237,6 +237,9 @@ impl WorkspaceRun {
 /// The recent completed Workspace CI runs as this process last read them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceCi {
+    /// The repository the runs belong to. A daemon keeps one repository's runs: the first
+    /// observer to read them.
+    pub repository: String,
     pub observed_at_unix_ms: u64,
     pub runs: Vec<WorkspaceRun>,
 }
@@ -306,7 +309,7 @@ pub async fn workspace_ci_runs(
     )
     .unwrap_or_default()
     .format("%Y-%m-%d");
-    let mut runs = Vec::new();
+    let mut listed = Vec::new();
     for filter in ["event=pull_request&status=success", "event=merge_group&status=completed"] {
         // Ten pages is GitHub's 1,000-result search bound. An overflow fails rather than truncates.
         let listing = super::github_listing_at_field(
@@ -314,15 +317,36 @@ pub async fn workspace_ci_runs(
             format!("{base}/actions/workflows/fleet.yml/runs?{filter}&created=%3E%3D{since}&per_page=100"),
             auth, cache_for, 10, false, Some("workflow_runs"),
         ).await?;
-        runs.extend(listing.values.iter().filter_map(|run| WorkspaceRun::from_run(repository, run)));
+        listed.extend(listing.values);
     }
+    let mut runs = workspace_runs(repository, &listed)?;
     runs.sort_by_key(|run| run.run_id);
     runs.dedup_by_key(|run| run.run_id);
-    Ok(WorkspaceCi { observed_at_unix_ms: now_unix_ms, runs })
+    Ok(WorkspaceCi { repository: repository.to_owned(), observed_at_unix_ms: now_unix_ms, runs })
+}
+
+/// The Workspace CI runs among `listed`. Runs listed but none of them Workspace CI's means the
+/// workflow's name or path changed: that fails, so the last runs age out to no-data with a
+/// warning instead of reading as an idle day.
+fn workspace_runs(repository: &str, listed: &[Value]) -> Result<Vec<WorkspaceRun>> {
+    let runs = listed.iter().filter_map(|run| WorkspaceRun::from_run(repository, run)).collect::<Vec<_>>();
+    anyhow::ensure!(
+        listed.is_empty() || !runs.is_empty(),
+        "fleet.yml listed {} completed runs, none named {WORKSPACE_WORKFLOW:?} at {WORKSPACE_WORKFLOW_PATH}",
+        listed.len()
+    );
+    Ok(runs)
+}
+
+/// Whether this daemon reads `repository`'s Workspace CI runs: it keeps one repository's, the
+/// first it read.
+fn reads_workspace_ci(kept: Option<&str>, repository: &str) -> bool {
+    kept.is_none_or(|kept| kept.eq_ignore_ascii_case(repository))
 }
 
 /// Read the recent Workspace CI runs and keep them for `workspace_ci`. A failed read keeps the
-/// last runs and never fails the observation: the objectives' windows age them out.
+/// last runs and never fails the observation: the objectives' windows age them out. One
+/// repository per daemon: once one observer's runs are kept, another repository's are not read.
 pub async fn observe_workspace_ci(
     client: &reqwest::Client,
     base: &str,
@@ -331,6 +355,11 @@ pub async fn observe_workspace_ci(
     cache_for: Duration,
     now_unix_ms: u64,
 ) {
+    let kept = workspace_ci().map(|ci| ci.repository);
+    if !reads_workspace_ci(kept.as_deref(), repository) {
+        tracing::warn!(repository, kept, "st slo keeps one repository's Workspace CI runs; not reading this one");
+        return;
+    }
     match workspace_ci_runs(client, base, repository, auth, cache_for, now_unix_ms).await {
         Ok(ci) => *workspace_ci_store().lock().unwrap_or_else(PoisonError::into_inner) = Some(ci),
         Err(error) => tracing::warn!(repository, error = %error, "could not read Workspace CI runs for st slo"),
@@ -466,6 +495,20 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_workflow_fails_the_read_and_one_repository_is_kept() {
+        assert!(workspace_runs("acme/garden", &[]).unwrap().is_empty(), "an idle day reads as no runs");
+        let mut renamed = workspace(1, "pull_request", "success", "2026-10-20T10:00:00Z", 9);
+        renamed["name"] = json!("Workspace checks");
+        let error = workspace_runs("acme/garden", &[renamed.clone()]).unwrap_err().to_string();
+        assert!(error.contains("none named \"Workspace CI\""), "{error}");
+        let kept = workspace(2, "pull_request", "success", "2026-10-20T10:00:00Z", 9);
+        assert_eq!(workspace_runs("acme/garden", &[renamed, kept]).unwrap().len(), 1);
+        assert!(reads_workspace_ci(None, "acme/garden"));
+        assert!(reads_workspace_ci(Some("acme/garden"), "ACME/garden"));
+        assert!(!reads_workspace_ci(Some("acme/garden"), "acme/orchard"));
+    }
+
+    #[test]
     fn series_take_the_runs_that_finished_inside_the_window() {
         let runs = [
             workspace(1, "pull_request", "success", "2026-10-20T09:00:00Z", 9),
@@ -477,6 +520,7 @@ mod tests {
             workspace(7, "merge_group", "cancelled", "2026-10-21T09:20:00Z", 1),
         ];
         let ci = WorkspaceCi {
+            repository: "acme/garden".to_owned(),
             observed_at_unix_ms: unix_ms("2026-10-21T09:30:00Z"),
             runs: runs.iter().filter_map(|run| WorkspaceRun::from_run("acme/garden", run)).collect(),
         };

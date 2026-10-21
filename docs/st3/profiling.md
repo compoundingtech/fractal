@@ -265,7 +265,11 @@ completed `merge_group` runs, each created since the start of the previous UTC d
 the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
 the member that runs that observer has them; every other member, and that one until its first
 read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
-fails the observation, and the windows age them out. Only run-level timestamps are read, no jobs:
+fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
+first observer that read them; another repository's observer does not read them and logs a warning.
+If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
+workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
+reading as an idle day. Only run-level timestamps are read, no jobs:
 
 - `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
   `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:

@@ -668,7 +668,7 @@ mod tests {
             .iter()
             .map(|run| crate::resource::github_workflows::WorkspaceRun::from_run("acme/garden", run).expect("a fixture run"))
             .collect();
-        let source = WorkspaceCi { observed_at_unix_ms: unix_ms(NOW), runs };
+        let source = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
         ci(crate::slo::targets(), Some(&source), unix_ms(NOW))
     }
 
