@@ -7,6 +7,7 @@ import type {
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes,
     Arrangement, ArrangementId, ArrangementPage,
+    HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
@@ -654,6 +655,7 @@ export class St3Client {
     async agentDeclarationGet(id: string, revision?: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentDeclaration>> { return this.get(`/v1/client/agent-declarations/${encodeURIComponent(routedId(id))}` + query({ revision, show_env_values: showEnvValues }), undefined, requestOptions); }
     async statusHistoryGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<StatusHistory>> { return this.get(`/v1/client/status-history/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async agentQueueGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentQueue>> { return this.get(`/v1/client/agent-queues/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async harnessInventoryGet(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessInventory>> { return this.get(`/v1/client/harness-inventory/${encodeURIComponent(routedId(id))}` + query({ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }), undefined, requestOptions); }
     async runtimesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/runtimes' + query(options), undefined, requestOptions); }
     async runtimesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/runtimes/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async observersList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/observers' + query(options), undefined, requestOptions); }

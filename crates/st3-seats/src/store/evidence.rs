@@ -62,7 +62,7 @@ impl EvidenceSeatsStore for Store {
             || !matches!(
                 input.kind.as_str(),
                 "harness.observed" | "harness.usage" | "harness.limits" | "harness.timeline"
-                    | "harness.todo.observed"
+                    | "harness.todo.observed" | "harness.inventory.observed"
             )
             || input.actor.as_deref() != Some(input.subject.as_str())
             || input.idempotency_key.is_none()

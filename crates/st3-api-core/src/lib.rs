@@ -18,6 +18,7 @@ pub mod api;
 pub mod claude_channel;
 pub mod creation;
 pub mod delivery_hold;
+pub mod file_inventory;
 pub mod gate_check;
 pub mod graph_watch_ivm;
 pub mod objectives;

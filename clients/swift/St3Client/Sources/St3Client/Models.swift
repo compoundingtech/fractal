@@ -97,6 +97,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case timelineHistoryIncomplete
     case conversationContentInvalidated
     case transcriptUnavailable
+    case inventoryUnavailable
     case blobTooLarge
     case unsupportedMediaType
     case blobContentMismatch
@@ -153,6 +154,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "transcript-unavailable": .transcriptUnavailable
         case "terminal-unavailable": .terminalUnavailable
         case "terminal-ended": .terminalEnded
+        case "inventory-unavailable": .inventoryUnavailable
         case "blob-too-large": .blobTooLarge
         case "unsupported-media-type": .unsupportedMediaType
         case "blob-content-mismatch": .blobContentMismatch
@@ -214,6 +216,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .transcriptUnavailable: "transcript-unavailable"
         case .terminalUnavailable: "terminal-unavailable"
         case .terminalEnded: "terminal-ended"
+        case .inventoryUnavailable: "inventory-unavailable"
         case .blobTooLarge: "blob-too-large"
         case .unsupportedMediaType: "unsupported-media-type"
         case .blobContentMismatch: "blob-content-mismatch"
@@ -1349,6 +1352,49 @@ public enum ObservationSample: Codable, Sendable {
     }
 }
 
+public struct HarnessInventoryQuery: Codable, Sendable {
+    public var ownerHostID: String
+    public var sessionID: String
+    public var nativeSessionID: String
+    public var runtimeIncarnation: String
+    public var collection: String
+    public var directory: String?
+    public var prefix: String?
+    public var limit: Int?
+    public var cursor: String?
+    public init(ownerHostID: String, sessionID: String, nativeSessionID: String, runtimeIncarnation: String, collection: String, directory: String? = nil, prefix: String? = nil, limit: Int? = nil, cursor: String? = nil) {
+        self.ownerHostID = ownerHostID; self.sessionID = sessionID; self.nativeSessionID = nativeSessionID
+        self.runtimeIncarnation = runtimeIncarnation; self.collection = collection
+        self.directory = directory; self.prefix = prefix; self.limit = limit; self.cursor = cursor
+    }
+    enum CodingKeys: String, CodingKey {
+        case ownerHostID = "owner_host_id", sessionID = "session_id", nativeSessionID = "native_session_id", runtimeIncarnation = "runtime_incarnation", collection, directory, prefix, limit, cursor
+    }
+}
+public struct HarnessInventoryItem: Codable, Sendable {
+    public let name: String
+    public let kind: String
+    public let source: String?
+}
+public struct HarnessInventory: Codable, Sendable {
+    public let kind: String
+    public let agentID: String
+    public let ownerHostID: String
+    public let sessionID: String
+    public let nativeSessionID: String?
+    public let runtimeIncarnation: String
+    public let collection: String
+    public let status: String
+    public let coverage: String
+    public let fullInventory: Bool
+    public let reason: String?
+    public let observedAt: String?
+    public let items: [HarnessInventoryItem]
+    public let page: PageInfo
+    enum CodingKeys: String, CodingKey {
+        case kind, agentID = "agent_id", ownerHostID = "owner_host_id", sessionID = "session_id", nativeSessionID = "native_session_id", runtimeIncarnation = "runtime_incarnation", collection, status, coverage, fullInventory = "full_inventory", reason, observedAt = "observed_at", items, page
+    }
+}
 public enum PushEnvironment: String, Codable, Sendable { case development, production }
 public struct PushRegistration: Codable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let token: String

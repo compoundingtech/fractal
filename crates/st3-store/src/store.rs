@@ -20102,7 +20102,7 @@ pub fn append_latest_observation_publication(
                 "harness.usage" => {
                     publish_due_usage_tx(transaction, &graph.origin, input, &local, now)?
                 }
-                "harness.todo.observed" | "workspace.observed" => Some(publish_latest_claim_tx(
+                "harness.todo.observed" | "harness.inventory.observed" | "workspace.observed" => Some(publish_latest_claim_tx(
                     transaction,
                     &graph.origin,
                     &input.subject,

@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, st3_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, st3_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v4.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v5.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1630,10 +1630,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v4, only seed 5
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v5, only seed 1597
 /// never reaches a trim; every other fixed seed must. This list is tied to the corpus because
 /// claim generation consumes the same RNG as the schedule.
-const NEVER_TRIMS: &[u64] = &[5];
+const NEVER_TRIMS: &[u64] = &[1597];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
@@ -1843,7 +1843,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v4.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v5.json"
         }))
         .unwrap(),
     )
