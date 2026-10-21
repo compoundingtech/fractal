@@ -47,15 +47,15 @@ with tempfile.TemporaryDirectory() as tmp:
     work, temp, cargo = base / 'checkout', base / 'temp', base / 'cargo-home'
     work.mkdir(); temp.mkdir(); cargo.mkdir()
     (work / 'src').mkdir()
-    agent = work / 'crates/agent-spec'
-    (agent / 'src').mkdir(parents=True)
-    shutil.copy(root / 'crates/fractal-drivers/build.rs', work / 'build.rs')
-    shutil.copy(root / 'crates/agent-spec/build.rs', agent / 'build.rs')
+    # The binary depends on the real stamp crate and on a library; only the stamp crate and the binary carry the revision.
+    stamp_crate, library = work / 'crates/fractal-build-stamp', work / 'crates/library'
+    shutil.copytree(root / 'crates/fractal-build-stamp', stamp_crate)
+    (library / 'src').mkdir(parents=True)
     (work / '.gitignore').write_text('/target/\n')
-    (work / 'Cargo.toml').write_text('[package]\nname="snapshot-fixture"\nversion="0.1.0"\nedition="2024"\n[dependencies]\nagent-spec={path="crates/agent-spec"}\n[workspace]\nmembers=["crates/agent-spec"]\n')
-    (agent / 'Cargo.toml').write_text('[package]\nname="agent-spec"\nversion="0.1.0"\nedition="2024"\n')
-    (agent / 'src/lib.rs').write_text('pub const REV: &str = env!("AGENT_SPEC_REVISION");\n')
-    (work / 'src/main.rs').write_text('fn main() { println!("{}|{}", env!("ST_BUILD_STAMP_LOCAL"), agent_spec::REV); }\n')
+    (work / 'Cargo.toml').write_text('[package]\nname="snapshot-fixture"\nversion="0.1.0"\nedition="2024"\n[dependencies]\nfractal-build-stamp={path="crates/fractal-build-stamp"}\nlibrary={path="crates/library"}\n[workspace]\nmembers=["crates/fractal-build-stamp","crates/library"]\n')
+    (library / 'Cargo.toml').write_text('[package]\nname="library"\nversion="0.1.0"\nedition="2024"\n')
+    (library / 'src/lib.rs').write_text('pub const SEPARATOR: &str = "|";\n')
+    (work / 'src/main.rs').write_text('fn main() { println!("{}{}{}", fractal_build_stamp::ST_BUILD_STAMP_LOCAL.unwrap(), library::SEPARATOR, fractal_build_stamp::AGENT_SPEC_REVISION); }\n')
     command('git', 'init', '-q', cwd=work)
     environment = {key: value for key, value in os.environ.items() if key not in ('RUSTC_WRAPPER', 'RUSTFLAGS', 'AGENT_SPEC_REVISION', 'CARGO_TARGET_DIR', 'CI_LOCAL_CACHES', 'CI_BUILD_SNAPSHOT_HIT', 'CI_NATIVE_SNAPSHOT', 'CI_SNAPSHOT_PIPELINE_FILE', 'CI_SNAPSHOT_PIPELINE', 'GITHUB_WORKFLOW_REF')}
     environment.update(CARGO_HOME=str(cargo), CARGO_INCREMENTAL='0', CARGO_ENCODED_RUSTFLAGS='')
@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory() as tmp:
         module.prepare()
         os.environ['AGENT_SPEC_REVISION'] = head
         _, cold = command('cargo', 'build', '--locked', '-vv', cwd=work, env=dict(os.environ))
-        assert 'Compiling snapshot-fixture' in cold and 'Compiling agent-spec' in cold
+        assert all(f'Compiling {crate}' in cold for crate in ('snapshot-fixture', 'fractal-build-stamp', 'library'))
         binary = work / 'target/debug/snapshot-fixture'
         stamp, revision = command(str(binary), cwd=base)[0].split('|')
         assert json.loads(stamp)['dirty'] is False and revision == head
@@ -135,7 +135,8 @@ with tempfile.TemporaryDirectory() as tmp:
         assert (temp / 'st-bench/generated-fixture').read_text() == 'store fixture'
         module.prepare()
         _, warm = command('cargo', 'build', '--locked', '-vv', cwd=work, env=dict(os.environ))
-        assert 'Fresh snapshot-fixture' in warm and 'Fresh agent-spec' in warm and 'Compiling ' not in warm, warm
+        assert all(f'Fresh {crate}' in warm for crate in ('snapshot-fixture', 'fractal-build-stamp', 'library'))
+        assert 'Compiling ' not in warm, warm
         assert command(str(binary), cwd=base)[0] == stamp + '|' + revision
         # Actual dirty and changed source must rebuild and retain their real identities.
         (work / 'src/main.rs').write_text((work / 'src/main.rs').read_text() + '// changed source\n')
@@ -152,7 +153,9 @@ with tempfile.TemporaryDirectory() as tmp:
         assert (work / 'src/main.rs').stat().st_mtime_ns == source_mtime
         module.prepare(); os.environ['AGENT_SPEC_REVISION'] = new_head
         _, changed = command('cargo', 'build', '--locked', '-vv', cwd=work, env=dict(os.environ))
-        assert 'Compiling snapshot-fixture' in changed and 'Compiling agent-spec' in changed
+        assert 'Compiling snapshot-fixture' in changed and 'Compiling fractal-build-stamp' in changed
+        # A new commit restamps only the binary: the library it depends on is not rebuilt.
+        assert 'Fresh library' in changed and 'Compiling library' not in changed, changed
         changed_stamp, changed_revision = command(str(binary), cwd=base)[0].split('|')
         assert json.loads(changed_stamp)['dirty'] is False and changed_revision == new_head
         assert 'cache-hit=true' in output.read_text() and 'cache HIT' in summary.read_text()

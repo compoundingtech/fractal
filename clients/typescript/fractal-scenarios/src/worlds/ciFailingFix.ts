@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { Attention, TimelineEntry, Work } from '@fractal/client'
 
 import { child, type FactoryContext } from '../kit/context.ts'
@@ -151,3 +152,5 @@ const build = (ctx: FactoryContext): Slices => {
 }
 
 export const ciFailingFix: WorldDefinition = adoptNarrativeRecording(syntheticCiFailingFix)
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

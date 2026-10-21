@@ -1247,12 +1247,19 @@ pub fn push_unrecognized(
         Some(kind) => format!("[unrecognized {driver} {what} `{kind}`]"),
         None => format!("[unrecognized {driver} {what} without a type]"),
     };
-    let role = value
-        .get("role")
-        .or_else(|| value.pointer("/message/role"))
-        .and_then(Value::as_str)
-        .map(|role| normalized_role(Some(role)))
-        .unwrap_or("system");
+    // A Claude record no renderer knows is Claude's own bookkeeping, never what the person or the
+    // model said: a request blob carries a `message.role` of `user`, and taking it would show a
+    // copy of the request (its reminders, its tools) as the person's words.
+    let role = if driver == "claude" {
+        "system"
+    } else {
+        value
+            .get("role")
+            .or_else(|| value.pointer("/message/role"))
+            .and_then(Value::as_str)
+            .map(|role| normalized_role(Some(role)))
+            .unwrap_or("system")
+    };
     push_native_block(
         items,
         sequence,
@@ -3886,6 +3893,24 @@ use super::*;
             .unwrap();
         assert_eq!(result["body"]["status"], "error");
         assert_unique_ids(&items);
+    }
+
+    #[test]
+    fn an_unknown_claude_record_with_a_user_message_is_not_the_persons_words() {
+        // Claude writes a request blob that carries the request's own `message.role` of `user`:
+        // it is Claude's bookkeeping, not something the person said (Nathan, 2026-10-21: it
+        // showed in the conversation as a line from him).
+        let mut items = Vec::new();
+        normalize_claude(
+            &json!({"type":"api-request-blob","sessionId":"s","hash":"h","message":{
+                "role":"user","content":[{"type":"text","text":"<system-reminder>x</system-reminder>"}]}}),
+            16,
+            &timestamp(0),
+            &mut items,
+        );
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|item| item["role"] == "system"), "{items:?}");
+        assert!(texts(&items)[0].starts_with("[unrecognized claude entry `api-request-blob`]"));
     }
 
     #[test]

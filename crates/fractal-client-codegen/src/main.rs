@@ -265,6 +265,16 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {{ self.get(&format!(\"/v1/client/documents/content?name={{}}\", percent_encode(name))).await }}"
             )?;
+        } else if id == "documents.list" {
+            writeln!(
+                out,
+                "    pub async fn documents_list(&self, prefix: Option<&str>, history: bool, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<DocumentsPage>, ClientError> {{ let mut query = Vec::new(); for (name, value) in [(\"prefix\", prefix), (\"cursor\", cursor)] {{ if let Some(value) = value {{ query.push(format!(\"{{name}}={{}}\", percent_encode(value))); }} }} if history {{ query.push(\"history=true\".to_owned()); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} let query = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/documents{{query}}\")).await }}"
+            )?;
+        } else if id == "document-references.get" {
+            writeln!(
+                out,
+                "    pub async fn document_references_get(&self, subject: &str) -> Result<Envelope<DocumentReferences>, ClientError> {{ self.get(&format!(\"/v1/client/document-references?subject={{}}\", percent_encode(subject))).await }}"
+            )?;
         } else if id == "conversation.search" {
             writeln!(
                 out,
@@ -299,6 +309,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
+        } else if id == "harness-inventory.get" {
+            writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -438,6 +450,16 @@ fn swift_operation_methods(
                 out,
                 "    public func documentGet(name: String) async throws -> Envelope<DocumentContent> {{ try await get(\"v1/client/documents/content\", query: [.init(name: \"name\", value: name)]) }}"
             )?;
+        } else if id == "documents.list" {
+            writeln!(
+                out,
+                "    public func documentsList(prefix: String? = nil, history: Bool = false, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<DocumentsPage> {{ var query: [URLQueryItem] = []; for (name, value) in [(\"prefix\", prefix), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if history {{ query.append(.init(name: \"history\", value: \"true\")) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/documents\", query: query) }}"
+            )?;
+        } else if id == "document-references.get" {
+            writeln!(
+                out,
+                "    public func documentReferencesGet(subject: String) async throws -> Envelope<DocumentReferences> {{ try await get(\"v1/client/document-references\", query: [.init(name: \"subject\", value: subject)]) }}"
+            )?;
         } else if id == "agent-workspace.get" {
             writeln!(
                 out,
@@ -469,6 +491,8 @@ fn swift_operation_methods(
                 out,
                 "    public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let version {{ query.append(.init(name: \"version\", value: String(version))) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/custom-subjects\", query: query) }}"
             )?;
+        } else if id == "harness-inventory.get" {
+            writeln!(out, "    public func harnessInventoryGet(id: String, options: HarnessInventoryQuery) async throws -> Envelope<HarnessInventory> {{ var query: [URLQueryItem] = [.init(name: \"owner_host_id\", value: options.ownerHostID), .init(name: \"session_id\", value: options.sessionID), .init(name: \"native_session_id\", value: options.nativeSessionID), .init(name: \"runtime_incarnation\", value: options.runtimeIncarnation), .init(name: \"collection\", value: options.collection)]; if let directory = options.directory {{ query.append(.init(name: \"directory\", value: directory)) }}; if let prefix = options.prefix {{ query.append(.init(name: \"prefix\", value: prefix)) }}; if let limit = options.limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let cursor = options.cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; return try await get(\"v1/client/harness-inventory/\\(id)\", query: query) }}")?;
         } else if id == "resources.list" {
             writeln!(
                 out,
@@ -527,17 +551,13 @@ fn struct_block<'a>(source: &'a str, declaration: &str) -> Result<&'a str> {
     Ok(&tail[..end])
 }
 
-fn schema_properties(definition: &Value) -> Option<&serde_json::Map<String, Value>> {
-    definition
-        .get("properties")
-        .and_then(Value::as_object)
-        .or_else(|| {
-            definition
-                .get("allOf")?
-                .as_array()?
-                .iter()
-                .find_map(|part| part.get("properties").and_then(Value::as_object))
-        })
+fn schema_properties(definition: &Value) -> impl Iterator<Item = &serde_json::Map<String, Value>> {
+    definition.get("properties").and_then(Value::as_object).into_iter().chain(
+        ["allOf", "oneOf"].into_iter().flat_map(move |key| {
+            definition.get(key).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|part| part.get("properties").and_then(Value::as_object))
+        }),
+    )
 }
 
 fn rust_field(name: &str) -> String {
@@ -600,8 +620,10 @@ fn validate_model(
         }
         return Ok(());
     }
-    let properties = schema_properties(model)
-        .with_context(|| format!("client schema `{definition}` has no properties"))?;
+    let mut properties = schema_properties(model).peekable();
+    if properties.peek().is_none() {
+        bail!("client schema `{definition}` has no properties");
+    }
     let rust_block = struct_block(rust, &format!("pub struct {rust_name} {{"))?;
     let swift_block = struct_block(swift, &format!("public struct {swift_name}:"))?;
     // Resource branches may narrow a header field such as `id` to its family reference;
@@ -612,7 +634,7 @@ fn validate_model(
             .any(|branch| branch["$ref"] == "#/$defs/ResourceHeader")
     }) && rust_block.contains("pub header: ResourceHeader,");
     let header = &schema["$defs"]["ResourceHeader"]["properties"];
-    for property in properties.keys().filter(|name| {
+    for property in properties.flat_map(|properties| properties.keys()).filter(|name| {
         name.as_str() != "kind" && !(header_backed && header.get(name.as_str()).is_some())
     }) {
         let rust_field = rust_field(property);
@@ -705,6 +727,10 @@ fn validate_surfaces(
         "AttentionBlocked",
         "AttentionTargetState",
         "DocumentContent",
+        "DocumentItem",
+        "DocumentsPage",
+        "DocumentReference",
+        "DocumentReferences",
         "MessageBody",
         "AgentDeclaration",
         "AgentWorkspace",
@@ -744,9 +770,17 @@ fn validate_surfaces(
         "TimelineEntry",
         "TimelinePage",
         "ConversationChanges",
+        "ClientDiagnosticJsFrame",
+        "ClientDiagnosticNativeFrame",
+        "ClientDiagnosticEvent",
+        "ClientDiagnosticsBatch",
+        "ClientDiagnosticsAck",
         "ObservationReport",
         "ObservationAccepted",
         "ObservationResponse",
+        "PushRegistration",
+        "PushRegistrationStatus",
+        "PushRegistrationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
@@ -801,7 +835,10 @@ fn validate_surfaces(
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for token in [
+        "pub async fn diagnostics_submit",
         "pub async fn observations_report",
+        "pub async fn push_register",
+        "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -814,11 +851,14 @@ fn validate_surfaces(
         }
     }
     for token in [
+        "func diagnosticsSubmit(",
         "func capabilities(",
         "func timeline(",
         "cursor: String?",
         "func events(",
         "func observationsReport(",
+        "func pushRegister(",
+        "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",
@@ -1401,11 +1441,23 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(name: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }}), undefined, requestOptions); }}"
             )?;
+        } else if id == "documents.list" {
+            writeln!(
+                out,
+                "    async {method}(options: {{ prefix?: string; history?: boolean; cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
+            )?;
+        } else if id == "document-references.get" {
+            writeln!(
+                out,
+                "    async {method}(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}"
+            )?;
         } else if id == "custom-subjects.list" {
             writeln!(
                 out,
                 "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
+        } else if id == "harness-inventory.get" {
+            writeln!(out, "    async {method}(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessInventory>> {{ return this.get(`{route}` + query({{ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }}), undefined, requestOptions); }}")?;
         } else if id == "resources.list" {
             writeln!(
                 out,
@@ -1708,5 +1760,16 @@ mod tests {
             std::fs::remove_file(&path)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn union_model_validation_covers_every_branch_field() {
+        let model = serde_json::json!({"oneOf": [
+            {"properties": {"registered": {"const": false}}},
+            {"properties": {"registered": {"const": true}, "environment": {"type": "string"}}}
+        ]});
+        let fields = schema_properties(&model).flat_map(|properties| properties.keys())
+            .map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
     }
 }

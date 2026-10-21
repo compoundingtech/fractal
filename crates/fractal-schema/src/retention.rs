@@ -240,13 +240,14 @@ mod tests {
     fn the_policy_keeps_every_kinds_storage() {
         for (kind, spec) in &crate::registry().claims {
             let before = match kind.as_str() {
+                "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => Retention::Local,
                 "harness.timeline" | "harness.telemetry" | "render.applied"
                 | "runtime.readiness-deadline-reached" | "sekret.called" | "sekret.exited"
                 | "sekret.refused" | "sekret.changed" => Retention::Local,
                 "runtime.action.requested" | "runtime.action.succeeded" | "runtime.action.failed"
                 | "runtime.action.deadline-reached" => Retention::SystemLocal,
                 "harness.observed" | "harness.usage" | "harness.todo.observed"
-                | "workspace.observed" => Retention::Latest,
+                | "harness.inventory.observed" | "workspace.observed" => Retention::Latest,
                 _ => Retention::Durable,
             };
             assert_eq!(spec.retention, before, "{kind}");

@@ -240,7 +240,7 @@ def layers(edges):
     return depth
 
 
-BINARY_SIDE_CRATES = ("fractal-tui", "fractal-conversation-ui")
+BINARY_SIDE_CRATES = ("fractal-tui", "fractal-conversation-ui", "fractal-build-stamp")
 
 
 def client_alias_findings(manifest_path, workspace_dependencies):

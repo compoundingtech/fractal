@@ -92,7 +92,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
 const meta = {
   title: 'Fractal UI/Sidebar/Show Menu',
   component: ShowMenuHarness,
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Host-owned React filter state exercises show-menu toggles and retained selections independently of catalog data." },
     layout: 'fullscreen',
     viewport: { options: {
       show1440: { name: 'Show desktop', styles: { width: '1440px', height: '900px' }, type: 'desktop' },

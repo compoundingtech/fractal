@@ -237,6 +237,8 @@ public actor FractalClient {
     public func setsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("sets", cursor: cursor, limit: limit, history: history) }
     public func setsGet(id: String) async throws -> Envelope<Resource> { try await resource("sets", id: id) }
     public func documentGet(name: String) async throws -> Envelope<DocumentContent> { try await get("v1/client/documents/content", query: [.init(name: "name", value: name)]) }
+    public func documentsList(prefix: String? = nil, history: Bool = false, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<DocumentsPage> { var query: [URLQueryItem] = []; for (name, value) in [("prefix", prefix), ("cursor", cursor)] { if let value { query.append(.init(name: name, value: value)) } }; if history { query.append(.init(name: "history", value: "true")) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/documents", query: query) }
+    public func documentReferencesGet(subject: String) async throws -> Envelope<DocumentReferences> { try await get("v1/client/document-references", query: [.init(name: "subject", value: subject)]) }
     public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> { try await get("v1/client/publication-definition", query: [.init(name: "subject", value: subject)]) }
     public func subjectDefinition(subject: String, showEnvValues: Bool = false) async throws -> Envelope<SubjectDefinition> { try await get("v1/client/subject-definition", query: [.init(name: "subject", value: subject), .init(name: "show_env_values", value: showEnvValues ? "true" : "false")]) }
     public func mailBacklogSummary() async throws -> Envelope<MailBacklog> { try await get("v1/client/mail-backlog") }
@@ -267,6 +269,7 @@ public actor FractalClient {
     public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> { try await get("v1/client/agent-workspaces/\(id)") }
     public func agentDeclarationGet(id: String, revision: String? = nil, showEnvValues: Bool = false) async throws -> Envelope<AgentDeclaration> { var query: [URLQueryItem] = [.init(name: "show_env_values", value: showEnvValues ? "true" : "false")]; if let revision { query.append(.init(name: "revision", value: revision)) }; return try await get("v1/client/agent-declarations/\(id)", query: query) }
     public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> { try await get("v1/client/status-history/\(id)") }
+    public func harnessInventoryGet(id: String, options: HarnessInventoryQuery) async throws -> Envelope<HarnessInventory> { var query: [URLQueryItem] = [.init(name: "owner_host_id", value: options.ownerHostID), .init(name: "session_id", value: options.sessionID), .init(name: "native_session_id", value: options.nativeSessionID), .init(name: "runtime_incarnation", value: options.runtimeIncarnation), .init(name: "collection", value: options.collection)]; if let directory = options.directory { query.append(.init(name: "directory", value: directory)) }; if let prefix = options.prefix { query.append(.init(name: "prefix", value: prefix)) }; if let limit = options.limit { query.append(.init(name: "limit", value: String(limit))) }; if let cursor = options.cursor { query.append(.init(name: "cursor", value: cursor)) }; return try await get("v1/client/harness-inventory/\(id)", query: query) }
     public func runtimesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("runtimes", cursor: cursor, limit: limit, history: history) }
     public func runtimesGet(id: String) async throws -> Envelope<Resource> { try await resource("runtimes", id: id) }
     public func observersList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("observers", cursor: cursor, limit: limit, history: history) }
@@ -354,8 +357,16 @@ public actor FractalClient {
     public func workRelease(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRelease(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workRenew(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRenew(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workRetry(id: String, idempotencyKey: String, fence: Fence, parameters: WorkRetryParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRetry(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    /// Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable, including duplicates. Requires write.client-diagnostics.
+    public func diagnosticsSubmit(_ batch: ClientDiagnosticsBatch) async throws -> Envelope<ClientDiagnosticsAck> {
+        try await post("v1/client/diagnostics", batch)
+    }
     /// Diagnostic local acceptance: no graph receipt or snapshot fence.
     public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+
+    /// Replace this paired device's local-only registration. No graph receipt.
+    public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }
+    public func pushUnregister() async throws -> PushRegistrationResponse { try await request("v1/client/push-registration", query: [], method: "DELETE", body: nil) }
 
     public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: fractalClientAPIVersion, deviceName: deviceName, personID: personID)) }
     public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }

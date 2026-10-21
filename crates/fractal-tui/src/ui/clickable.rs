@@ -40,6 +40,7 @@ impl Ui {
         let mut left = match hit {
             Hit::Answer(_) => "choose answer; Enter sends".into(),
             Hit::Alert(_, AlertTap::Answer(_)) => "answer this alert".into(),
+            Hit::Alert(_, AlertTap::Choose(..)) => "choose this answer".into(),
             Hit::Alert(_, AlertTap::Open) => "open this alert in Now".into(),
             Hit::Alert(_, AlertTap::Toggle) => "show or hide the alerts".into(),
             Hit::Voice => "start voice input".into(),
@@ -79,7 +80,7 @@ impl Ui {
             Hit::Field(_) => "focus field [Tab]".into(),
             Hit::Revoke(_) => "ask to revoke; y confirms".into(),
             Hit::Attach => "attach terminal [Ctrl+]]".into(),
-            Hit::Detach => "leave terminal [Ctrl+\\ or Ctrl+T twice]".into(),
+            Hit::Detach => "leave terminal [Ctrl+\\ c or Ctrl+T twice]".into(),
             Hit::GlassMenu => "spaces [Ctrl+G]".into(),
             Hit::PaletteSection(1) => "agents [Ctrl+2]".into(),
             Hit::PaletteSection(2) => "missions [Ctrl+3]".into(),

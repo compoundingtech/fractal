@@ -31,6 +31,7 @@ webPkgs.mkShell {
     webPkgs.corepack
     webPkgs.nodejs_24
     webPkgs.bun
+    webPkgs.watchman
     effectUtilsPackages.buck2
     effectUtilsPackages.genie
   ];
@@ -39,9 +40,19 @@ webPkgs.mkShell {
   PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";
   CHROMIUM_PATH = webPkgs.lib.optionalString webPkgs.stdenv.hostPlatform.isLinux "${webPkgs.chromium}/bin/chromium";
   shellHook = ''
-    mkdir -p repos .buck2
-    ln -sfn ${effect-utils} repos/effect-utils
+    mkdir -p .buck2
+    [ -e repos/effect-utils ] || echo 'repos/effect-utils is missing: run `mr apply` first' >&2
     ln -sfn ${buckRoot}/.buck2/rules .buck2/rules
     ln -sfn ${buckRoot}/.buck2/capabilities .buck2/capabilities
+    # Publish root-owned source inputs; pnpm must not mutate the canonical member.
+    node -e '
+      const { readFileSync } = require("node:fs");
+      const { spawnSync } = require("node:child_process");
+      const paths = JSON.parse(readFileSync("pnpm-source-inputs.json", "utf8")).sourceInputPaths;
+      const result = spawnSync(process.execPath, [
+        process.argv[1], "publish", process.cwd(), ".devenv/pnpm-source-inputs", ...paths,
+      ], { stdio: "inherit" });
+      process.exit(result.status ?? 1);
+    ' ${effect-utils}/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs
   '';
 }

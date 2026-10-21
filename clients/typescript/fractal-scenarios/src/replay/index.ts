@@ -13,6 +13,7 @@ import { timeContext } from '../kit/time.ts'
 import { foldSlice } from '../kit/fold.ts'
 import { SLICE_KINDS, type HttpCondition, type Selector, type SliceKind, type TimelineEvent, type WireResource } from '../kit/slice.ts'
 import type { World } from '../kit/world.ts'
+import { deliveryTasks } from './tasks.ts'
 
 export { manualClock, realClock, type Clock, type ManualClock } from '../clock.ts'
 
@@ -22,6 +23,12 @@ export interface Replay {
   readonly actions: ActionRequest[]
   readonly served: () => ReadonlySet<SliceKind>
   readonly close: () => void
+}
+
+/** A replay created by the kit, with task-delivery synchronization for tests. */
+export interface ReplayHandle extends Replay {
+  /** Waits for queued socket events, including replies queued by their handlers. Does not advance the clock. */
+  readonly flush: () => Promise<void>
 }
 
 type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string }
@@ -38,6 +45,7 @@ type Subscription = {
   incarnation?: string
   capability?: string
   ready: boolean
+  recorded?: boolean
   window?: { items: WireResource[]; has_more: boolean }
 }
 type Connection = { socket: CollectionSocket; open: boolean; closed: boolean; subscriptions: Map<string, Subscription>; legacy: boolean; recorded_socket_id?: string }
@@ -53,6 +61,18 @@ const collectionKind = (collection: string): SliceKind | undefined => {
   }
 }
 const equal = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
+/** JSON objects are unordered; recorded command arrays and all field values remain significant. */
+const equalCommand = (left: unknown, right: unknown): boolean => {
+  if (left === right) return true
+  if (Array.isArray(left)) {
+    return Array.isArray(right) && left.length === right.length &&
+      left.every((value: unknown, index: number) => equalCommand(value, right[index]))
+  }
+  if (!record(left) || !record(right) || Array.isArray(right)) return false
+  const keys = Object.keys(left)
+  return keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && equalCommand(left[key], right[key]))
+}
 const matches = (sub: Subscription, selector: Selector): boolean =>
   sub.collection === selector.collection &&
   (!('conversation' in selector) || sub.conversation === selector.conversation) &&
@@ -82,9 +102,10 @@ const requestMatches = (url: URL, when?: HttpCondition): boolean =>
   (when?.cursor === undefined || url.searchParams.has('cursor') === (when.cursor === 'present')) &&
   Object.entries(when?.query ?? {}).every(([key, value]) => url.searchParams.get(key) === value)
 
-/** Socket opens are clock tasks, not microtasks: manual-clock callers release them with advance(0). */
-export const createReplay = (world: World, { clock }: { readonly clock: Clock }): Replay => {
+/** Socket callbacks run as FIFO tasks independently of the scenario clock. */
+export const createReplay = (world: World, { clock }: { readonly clock: Clock }): ReplayHandle => {
   const consumed = new Set<SliceKind>()
+  const deliveries = deliveryTasks()
   const actions: ActionRequest[] = []
   const connections = new Set<Connection>()
   const pendingOpens = new Map<Connection, () => void>()
@@ -182,9 +203,15 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
   }
   const emit = (connection: Connection, frame: Record<string, unknown>) => {
     if (!connection.open || connection.closed) return
-    if (!connection.legacy) connection.socket.onmessage?.({ data: JSON.stringify(frame) })
-    else if (frame.kind === 'screen') connection.socket.onmessage?.({ data: JSON.stringify(envelope(frame.value)) })
-    else if (frame.kind === 'error') connection.socket.onmessage?.({ data: JSON.stringify(errorEnvelope(typeof frame.code === 'string' ? frame.code : 'terminal-unavailable', String(frame.message), frame.retryable === true)) })
+    const value = !connection.legacy ? frame
+      : frame.kind === 'screen' ? envelope(frame.value)
+      : frame.kind === 'error' ? errorEnvelope(typeof frame.code === 'string' ? frame.code : 'terminal-unavailable', String(frame.message), frame.retryable === true)
+      : undefined
+    if (value === undefined) return
+    const data = JSON.stringify(value)
+    deliveries.enqueue(() => {
+      if (!closed && connection.open && !connection.closed) connection.socket.onmessage?.({ data })
+    })
   }
   const refuse = (connection: Connection, sub: Subscription, code: string, retryable: boolean) => {
     emit(connection, { kind: 'error', id: sub.id, collection: sub.collection, code, message: code, retryable })
@@ -216,7 +243,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       emit(connection, { kind: 'snapshot', id: sub.id, collection: sub.collection, snapshot: fence(), ...window, order: window.items.map((item) => item.id) })
       return
     }
-    if (world.recording !== undefined) {
+    if (sub.recorded) {
       if (sub.collection === 'terminal') {
         const terminal = state('terminal').terminals.find((item) => item.terminal === sub.terminal)
         if (terminal === undefined) return refuse(connection, sub, 'not-found', false)
@@ -269,16 +296,16 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     connection.subscriptions.clear()
     connections.delete(connection)
     pendingOpens.delete(connection)
-    connection.socket.onclose?.({ code, reason })
+    deliveries.enqueue(() => connection.socket.onclose?.({ code, reason }), { preserveOnClear: true })
   }
   const dispatch = (kind: SliceKind, event: TimelineEvent) => {
-    if (world.recording !== undefined && kind !== 'sync') return
     switch (event._tag) {
       case 'thread-create': {
         const timeline = world.slices.conversation.timeline
         const previous = foldSlice({ ...world.slices.conversation, timeline: timeline.slice(0, timeline.indexOf(event)) }, event.at_ms)
           .state.threads.find((thread) => thread.agent === event.thread.agent)
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection !== 'conversation' || !(followsThread(sub, event.thread) || previous !== undefined && followsThread(sub, previous))) continue
           sub.threadAgent = event.thread.agent
           if (!sub.ready) first(connection, sub)
@@ -295,6 +322,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       }
       case 'terminal-create':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection !== 'terminal' || sub.terminal !== event.record.terminal) continue
           if (!sub.ready) first(connection, sub)
           else if (event.record.runtime.state === 'exited') refuse(connection, sub, 'terminal-ended', false)
@@ -307,18 +335,21 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         return
       case 'terminal-remove':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection === 'terminal' && sub.terminal === event.terminal) refuse(connection, sub, 'not-found', false)
         }
         return
       case 'thread-remove': {
         const previous = foldSlice(world.slices.conversation, event.at_ms - 1).state.threads.find((thread) => thread.agent === event.agent)
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (sub.collection === 'conversation' && (sub.threadAgent === event.agent || sub.conversation === event.agent || previous !== undefined && followsThread(sub, previous))) refuse(connection, sub, 'not-found', false)
         }
         return
       }
       case 'changes':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (!sub.ready || sub.collection === 'arrangements' || collectionKind(sub.collection) !== kind || sub.window === undefined) continue
           const previous = sub.window
           const next = windowOf(sub)
@@ -334,6 +365,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         const thread = state('conversation').threads.find((thread) => thread.agent === event.agent)
         if (thread === undefined) return
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (!sub.ready || sub.collection !== 'conversation' || !followsThread(sub, thread)) continue
           sub.threadState = 'present'
           emit(connection, { kind: 'conversation', id: sub.id, collection: 'conversation', session_id: thread.session_id,
@@ -344,6 +376,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       }
       case 'screen': case 'unavailable': case 'end': case 'incarnation':
         for (const connection of connections) for (const sub of connection.subscriptions.values()) {
+          if (sub.recorded) continue
           if (!sub.ready || sub.collection !== 'terminal' || sub.terminal !== event.terminal) continue
           if (event._tag === 'screen') {
             const terminal = state('terminal').terminals.find((terminal) => terminal.terminal === event.terminal)
@@ -359,12 +392,12 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       case 'open-hold': opensHeld = true; return
       case 'open-release':
         opensHeld = false
-        for (const open of pendingOpens.values()) schedule(clock.now(), open)
+        for (const open of pendingOpens.values()) open()
         pendingOpens.clear()
         return
       case 'close':
         blockedUntil = Infinity
-        for (const connection of [...connections]) finishConnection(connection, event.code, event.reason)
+        for (const connection of [...connections]) deliveries.enqueue(() => finishConnection(connection, event.code, event.reason))
         return
       case 'reopen': blockedUntil = clock.now() + event.after_ms; return
       case 'http-error': case 'http-raw': {
@@ -420,7 +453,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
   }
   const recordedFrame = (metadata: RecordedFrame): void => {
     for (const connection of connections) for (const sub of connection.subscriptions.values()) {
-      if (!sub.ready || !matches(sub, metadata.selector) ||
+      if (!sub.recorded || !sub.ready || !matches(sub, metadata.selector) ||
         world.recording?.socket_ids !== undefined && metadata.socket_id !== undefined && connection.recorded_socket_id !== metadata.socket_id ||
         metadata.subscription_id !== undefined && metadata.subscription_id !== sub.id) continue
       const identity = { id: sub.id, collection: sub.collection }
@@ -501,6 +534,8 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
           filters: { status: stringField(command, 'status'), actor: stringField(command, 'actor'), person: stringField(command, 'person'), subject: stringField(command, 'subject') },
           conversation: stringField(command, 'conversation'), terminal: stringField(command, 'terminal'),
           incarnation: stringField(command, 'incarnation'), capability: stringField(command, 'capability') }
+        sub.recorded = world.recording?.subscriptions?.some((entry) =>
+          entry.at_ms === offset() && entry.socket_id === connection.recorded_socket_id && equalCommand(entry.command, command)) ?? false
         connection.subscriptions.set(sub.id, sub)
         first(connection, sub)
       },
@@ -515,7 +550,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         return
       }
       if (opensHeld) {
-        pendingOpens.set(connection, open)
+        pendingOpens.set(connection, () => deliveries.enqueue(open))
         return
       }
       if (failedOpens > 0 || clock.now() < blockedUntil) {
@@ -534,7 +569,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         first(connection, sub)
       }
     }
-    schedule(clock.now(), open)
+    deliveries.enqueue(open)
     return connection.socket
   }
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -741,11 +776,13 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     const value = { kind: 'page', collection: route, filters, items: items.slice(start, start + limit), page: pageInfo(items.length, start + limit), ...(sync === undefined ? {} : { sync }) }
     return json(envelope(value))
   }
-  return { socket, fetch: fetchImpl, actions, served: () => new Set(consumed), close: () => {
+  return { socket, fetch: fetchImpl, actions, served: () => new Set(consumed), flush: deliveries.flush, close: () => {
     if (closed) return
     closed = true
     for (const cancel of cancellations) cancel()
     cancellations.clear()
+    deliveries.clear()
     for (const connection of [...connections]) finishConnection(connection, 1000, '')
+    deliveries.enqueue(deliveries.close)
   } }
 }

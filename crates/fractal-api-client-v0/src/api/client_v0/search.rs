@@ -906,9 +906,12 @@ mod tests {
             BTreeMap::new(), BTreeMap::new(),
         ).expect("an owner-resolution failure must not fail the search refresh");
         assert!(inventory.sources.is_empty());
-        assert_eq!(inventory.incomplete.len(), 1);
-        assert!(inventory.incomplete[0].starts_with(&format!("{session_id}: ")));
-        assert!(inventory.incomplete[0].contains("no such index"));
+        // The inventory also lists the host's own unmanaged agent processes (a /proc scan), and on a
+        // machine running Claude or Codex they fail the same way, so only this session's entry is counted.
+        let ours: Vec<_> = inventory.incomplete.iter()
+            .filter(|entry| entry.starts_with(&format!("{session_id}: "))).collect();
+        assert_eq!(ours.len(), 1, "{:?}", inventory.incomplete);
+        assert!(ours[0].contains("no such index"));
     }
 
     #[tokio::test]

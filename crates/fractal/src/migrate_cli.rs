@@ -68,6 +68,8 @@ struct Layout {
     home: PathBuf,
     profiles: Option<Vec<PathBuf>>,
     directories: [(PathBuf, PathBuf); 2],
+    // The whole product root moves, but daemon identity/locks may live in store/.
+    daemon_state: PathBuf,
     journal: PathBuf,
     lock: PathBuf,
 }
@@ -88,9 +90,29 @@ impl Layout {
         Ok(Self {
             home, profiles,
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
+            daemon_state: state.join("st3"),
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
         })
+    }
+
+    fn configure_state(&mut self, state: &Path) -> Result<()> {
+        ensure!(
+            !state.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                && (state.starts_with(&self.directories[1].0) || state.starts_with(&self.directories[1].1)),
+            "host migration requires configured state within the default XDG st3 or Fractal state root; configured state is {}",
+            state.display()
+        );
+        self.daemon_state = state.to_owned();
+        Ok(())
+    }
+
+    fn target_daemon_state(&self) -> PathBuf {
+        let (old, new) = &self.directories[1];
+        self.daemon_state.strip_prefix(old).map_or_else(
+            |_| self.daemon_state.clone(),
+            |suffix| new.join(suffix),
+        )
     }
 
     fn pairs(&self, services: &Services) -> Vec<(PathBuf, PathBuf)> {
@@ -156,13 +178,11 @@ trait Manager {
 pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Result<()> {
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
     ensure!(matches!(endpoint, Endpoint::Unix(_)), "host migration requires the local Unix API, not a remote endpoint");
-    let layout = Layout::discover()?;
+    let mut layout = Layout::discover()?;
     let mut config = Config::load_unvalidated(None)?;
+    layout.configure_state(&config.state_dir)?;
     config.apply_fleet_file()?;
     fractal_daemon::node_identity::resolve(&mut config)?;
-    let expected_state = &layout.directories[1].0;
-    ensure!(config.state_dir == *expected_state || config.state_dir == layout.directories[1].1,
-        "host migration only moves the default XDG st3 state directory; configured state is {}", config.state_dir.display());
     let mut manager = native::Native::new(endpoint.clone(), config.node.clone());
     let receipt = cutover(&layout, &mut manager, &config.node, &args).await?;
     if json {
@@ -409,7 +429,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     manager.idle().await?;
     let stopped_at = Instant::now();
     stop_legacy(manager, journal)?;
-    let state_lock = fractal_daemon::node_identity::lock_after_stop(&layout.directories[1].0).await
+    let state_lock = fractal_daemon::node_identity::lock_after_stop(&layout.daemon_state).await
         .context("legacy daemon still owns its state after service stop")?;
     if home_manager(&journal.services) {
         journal.config_fence = true;
@@ -447,7 +467,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
         publish_receipt(new)?;
     }
     // launchd opens StandardOutPath before exec, so its parent must already exist.
-    fs::create_dir_all(layout.directories[1].1.join("logs"))?;
+    fs::create_dir_all(layout.target_daemon_state().join("logs"))?;
     manager.reload()?;
     // Reserve bounded target start/protection/probe calls, including launchd's
     // enable + print + bootstrap + kickstart, inside the five-minute budget.

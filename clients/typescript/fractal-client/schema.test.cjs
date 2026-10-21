@@ -3,6 +3,50 @@ const assert = require('node:assert/strict');
 
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
+test('push registration schema bounds secret input and exposes only safe device status', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.PushRegistration, 'strict');
+    const request = { token: 'ab'.repeat(32), environment: 'development', bundle_id: 'example.push', app_version: '1.0' };
+    assert.deepEqual(Schema.encodeSync(Rich.PushRegistration)(decode(request)), request);
+    for (const invalid of ['', 'a', 'abc', 'zz', 'ab'.repeat(257)]) {
+        assert.throws(() => decode({ ...request, token: invalid }));
+    }
+    for (const patch of [{ environment: 'sandbox' }, { bundle_id: '' }, { bundle_id: 'invalid topic' }, { app_version: '' }, { app_version: '\n' }]) {
+        assert.throws(() => decode({ ...request, ...patch }));
+    }
+    const status = Rich.decodeUnknownSync(Rich.PushRegistrationStatus, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.PushRegistrationStatus)(status({ registered: false })), { registered: false });
+    const registered = { registered: true, environment: 'production' };
+    assert.deepEqual(Schema.encodeSync(Rich.PushRegistrationStatus)(status(registered)), registered);
+    assert.throws(() => status({ registered: true }));
+    assert.throws(() => status({ registered: false, environment: 'production' }));
+});
+
+
+test('diagnostic runtime versions match the server metadata grammar in both decode modes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        event_id: '00000000-0000-4000-8000-000000000001',
+        launch_id: '00000000-0000-4000-8000-000000000002',
+        launch_id_basis: 'process', sequence: 1,
+        occurred_at_unix_ms: 1, occurrence_time_basis: 'exact', captured_at_unix_ms: 1,
+        app_version: '0.1.0', native_build: '1', runtime_version: '0.1.0(1)',
+        update_id: 'embedded', platform: 'ios', os_version: '27.0',
+        severity: 'error', capture_source: 'js',
+        payload: { kind: 'js-error', name: 'TypeError', fatal: false, frames: [] },
+    };
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.ClientDiagnosticEvent, mode);
+        for (const runtime of ['0.1.0(1)', 'ios-42', 'v_1.0(build-2_3.4)', 'x'.repeat(128)]) {
+            const result = Schema.encodeSync(Rich.ClientDiagnosticEvent)(decode({ ...wire, runtime_version: runtime }));
+            assert.equal(result.runtime_version, runtime);
+        }
+        for (const runtime of ['', '(1)', '0.1.0()', '0.1.0(1)(2)', '0.1.0(1', '0.1.0(1))',
+            '-version', 'version(-1)', 'version/1', 'version(é)', 'version\n', 'version(1)\n', `${'x'.repeat(126)}(1)`]) {
+            assert.throws(() => decode({ ...wire, runtime_version: runtime }), `${mode}: ${runtime}`);
+        }
+    }
+});
 
 test('every wire version receiver accepts exactly the deployed and fractal names', async () => {
     const [{ Schema }, Rich] = await modules;
@@ -27,13 +71,13 @@ test('every wire version receiver accepts exactly the deployed and fractal names
             }
         }
     }
-    assert.equal(receivers, 13);
+    assert.equal(receivers, 14);
     assert.equal(Rich.API_VERSION, 'st3.client.v0');
     assert.equal(contract['x-st-integers'], 'json-safe');
     assert.equal(contract['x-fractal-integers'], undefined);
 });
 
-test('assistant senders decode timeline messages without becoming recipients or actors', async () => {
+test('assistant senders and reply recipients decode without widening actors or signers', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {
         id: 'timeline-entry/assistant-message', sequence: 1, revision: 1,
@@ -59,7 +103,19 @@ test('assistant senders decode timeline messages without becoming recipients or 
         for (const from of ['assistant/', 'assistant/with space', 'daemon/example']) {
             assert.throws(() => decode({ ...wire, body: { ...wire.body, from } }));
         }
-        assert.throws(() => decode({ ...wire, body: { ...wire.body, to: 'assistant/chatgpt' } }));
+        const reply = decode({
+            ...wire, role: 'assistant',
+            body: {
+                message_id: 'message/reply', reply_to: wire.body.message_id,
+                from: 'agent/example', to: 'assistant/chatgpt',
+            },
+        });
+        const encodedReply = Schema.encodeSync(Rich.TimelineEntry)(reply);
+        assert.equal(encodedReply.body.to, 'assistant/chatgpt');
+        assert.equal(encodedReply.body.reply_to, wire.body.message_id);
+        assert.throws(() => Rich.decodeUnknownSync(Rich.MessageProvenance, mode)({
+            verdict: 'unsigned', signer: 'assistant/chatgpt',
+        }));
         assert.throws(() => Rich.decodeUnknownSync(Rich.ParticipantRef, mode)('assistant/chatgpt'));
         assert.throws(() => Rich.decodeUnknownSync(Rich.ActorRef, mode)('assistant/chatgpt'));
     }

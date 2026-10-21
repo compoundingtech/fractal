@@ -975,9 +975,33 @@ fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
         "--reason",
         "the gates now find mold, read a complete listing and use the real budget",
     ]);
-    wait_for("the revised gates to pass", || {
-        daemon.run()["status"] == "completed"
-    });
+    // CI keeps only the panic message: on timeout, say where each step and gate stood.
+    let revised = Instant::now();
+    let deadline = revised + Duration::from_secs(60);
+    while daemon.run()["status"] != "completed" {
+        if Instant::now() >= deadline {
+            let run = daemon.run();
+            let steps = run["steps"].as_array().cloned().unwrap_or_default().iter()
+                .map(|step| format!("{} {}", step["step"], step["status"]))
+                .collect::<Vec<_>>();
+            let gates = daemon.gate_results().iter()
+                .map(|claim| format!(
+                    "{} {} check {} at {}",
+                    claim["body"]["fields"]["gate"],
+                    claim["body"]["fields"]["value"]["answer"],
+                    claim["body"]["fields"]["value"]["check"],
+                    claim["accepted_at_unix_ms"].as_u64().unwrap_or_default(),
+                ))
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting for the revised gates to pass (revised at {} ms)\nrun {}\nsteps {steps:#?}\ngate results {gates:#?}",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                    - revised.elapsed().as_millis(),
+                run["status"],
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let run = daemon.run();
     for step in run["steps"].as_array().unwrap() {
         assert_eq!(step["status"], "completed", "{step}");

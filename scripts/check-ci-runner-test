@@ -354,6 +354,7 @@ daily_blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", d
 assert required_priority not in daily_blocks['perf-cost'], 'optional cost must not join required PR priority'
 assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in daily_blocks['perf-cost']
 assert "namespace-features:github.run-id=" in daily_blocks['perf-cost'], 'prevent cross-run assignment'
+assert 'runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]' in daily_blocks['daily-macos-check'], 'the daily macOS check uses the hog run\'s Mac, pinned to its run'
 print('passed: release/merge precede PR checks, then optional/manual; reservations, shapes and affinity preserved')
 
 # Exercise the actual generated step predicates, including restoring ordinary behavior.

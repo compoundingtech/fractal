@@ -48,7 +48,8 @@ roughly ten-second blocked window cannot be missed; see `scripts/st3_events.py`)
 staged/delivered/read receipt. Two further restarts must deliver fresh startup mail once without
 replaying recovered mail. The missing-channel seat must restart automatically, continuing its
 native session. The uninitialized channel attaches during the recheck window and must keep its
-incarnation. Automatic recovery waits 10, 20 and 40 seconds after detection before each of three
+incarnation; a recovery request that its attachment overtook must settle as retained, with no
+restart. Automatic recovery waits 10, 20 and 40 seconds after detection before each of three
 restarts; a channel still missing after the third replacement parks the seat with a visible
 failure and holds mail until an operator restart or a new declaration. The fault controls live
 only in each isolated workspace.

@@ -37,6 +37,11 @@ mod terminal_projection_date_tests {
 mod mission_eval_reuse_tests {
 }
 
+mod subject_reference_readmission_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-hd729ec9593f5 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subject_reference_readmission_tests.rs");
+}
+
 mod run_capacity_tests {
     
 }
@@ -1889,7 +1894,7 @@ fn simple_replication_registers_unambiguous_event_operations() {
     );
 }
 
-fn rewrite_envelope(
+pub(super) fn rewrite_envelope(
     envelope: &ReplicaEnvelope,
     update: impl FnOnce(&mut ReplicaEnvelopePayload),
 ) -> ReplicaEnvelope {

@@ -4,21 +4,36 @@
 //!
 //! The stamp is a `CLI_BUILD_STAMP` JSON blob, the same env var + shape the rest
 //! of the fleet uses (TS `@overeng/utils/node/cli-version`; the otel-scrape Rust
-//! reader). It reaches this crate at compile time via `option_env!`:
+//! reader). The final binary bakes it at compile time (crates/fractal-build-stamp) and
+//! hands it here at startup through [`set_build_stamps`], so a new commit rebuilds
+//! only the binaries, not this library and everything above it:
 //!   - `CLI_BUILD_STAMP` — a release stamp from the archive builder, or a **NixStamp** the flake bakes from `self` (the flake
 //!     rev, so a hermetic build still knows its identity). Authoritative.
 //!   - `ST_BUILD_STAMP_LOCAL` — a **LocalStamp** `build.rs` derives from `git`
 //!     for a plain `cargo build`. A private, second env var so it can never
 //!     collide with / override the Nix stamp; the Nix stamp always wins.
 //!
+//! A process that sets none (a library's own tests) reports `<base>+dev`.
+//!
 //! st2 cannot depend on the private `effect-utils` helper crate (it ships as a
 //! self-contained public flake), so this reimplements the contract. The
 //! `machineVersion` grammar is kept byte-identical to that reader.
 
-/// NixStamp or clean release stamp baked by the package builder (`{type:"release"|"nix",...}`); authoritative when present.
-const NIX_STAMP: Option<&str> = option_env!("CLI_BUILD_STAMP");
-/// LocalStamp baked by `build.rs` from git (`{type:"local",...}`).
-const LOCAL_STAMP: Option<&str> = option_env!("ST_BUILD_STAMP_LOCAL");
+/// This binary's (NixStamp or release stamp, LocalStamp), set once by [`set_build_stamps`].
+static STAMPS: std::sync::OnceLock<(Option<&'static str>, Option<&'static str>)> =
+    std::sync::OnceLock::new();
+
+/// Record this binary's compile-time stamps: the NixStamp or clean release stamp the package builder baked
+/// (`{type:"release"|"nix",...}`, authoritative when present) and the LocalStamp `build.rs` baked from git
+/// (`{type:"local",...}`). Call first thing in `main`, before anything reads the version; a later call is ignored.
+pub fn set_build_stamps(nix: Option<&'static str>, local: Option<&'static str>) {
+    let _ = STAMPS.set((nix, local));
+}
+
+fn stamps() -> (Option<&'static str>, Option<&'static str>) {
+    STAMPS.get().copied().unwrap_or_default()
+}
+
 /// `baseVersion` from Cargo metadata.
 const BASE: &str = env!("CARGO_PKG_VERSION");
 
@@ -155,7 +170,8 @@ fn identity(base: &str, stamp: Option<&BuildStamp>) -> BuildIdentity {
 
 /// The authoritative identity for this binary, regardless of its build path.
 pub(crate) fn build_identity() -> BuildIdentity {
-    identity(BASE, resolve(NIX_STAMP, LOCAL_STAMP).as_ref())
+    let (nix, local) = stamps();
+    identity(BASE, resolve(nix, local).as_ref())
 }
 
 /// `<version>+<rev>[-dirty]` for a NixStamp. The flake's `rev` may already end in
@@ -195,9 +211,10 @@ pub fn machine_version() -> String {
 /// Full hashes are preferred; older stamps retain their short revision.
 pub fn build_commit() -> &'static str {
     static COMMIT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let raw = NIX_STAMP
+        let (nix, local) = stamps();
+        let raw = nix
             .filter(|raw| matches!(parse_stamp(raw), Some(BuildStamp::Nix { .. })))
-            .or(LOCAL_STAMP);
+            .or(local);
         let identity = build_identity();
         raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
             .and_then(|stamp| stamp.get("fullRev")?.as_str().map(str::to_owned))

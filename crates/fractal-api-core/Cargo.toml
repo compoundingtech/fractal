@@ -29,9 +29,9 @@ notify = "8"
 parking_lot = "0.12"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "4f703c7d7f9cbff5d713b1234d1db98223881bca" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
@@ -59,4 +59,5 @@ smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
 jsonschema = { version = "0.33", default-features = false }
 opentelemetry_sdk = { version = "0.30", features = ["testing"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
 proptest = "1"

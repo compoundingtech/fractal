@@ -22,7 +22,7 @@ function NarrowSheetStory({ scheme = 'dark', side = 'end' }: { scheme?: Scheme; 
     </NarrowSheet>}
   </main>
 }
-const meta = { title: 'Fractal UI/Narrow sheet', component: NarrowSheetStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', side: 'end' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, side: { options: ['start', 'end'], control: 'radio' } } } satisfies Meta<typeof NarrowSheetStory>
+const meta = { title: 'Fractal UI/Narrow sheet', component: NarrowSheetStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises sheet placement, dismissal and focus restoration without domain data." }, layout: 'fullscreen' }, args: { scheme: 'dark', side: 'end' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, side: { options: ['start', 'end'], control: 'radio' } } } satisfies Meta<typeof NarrowSheetStory>
 export default meta
 type Story = StoryObj<typeof meta>
 

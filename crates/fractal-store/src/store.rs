@@ -18,6 +18,7 @@ pub mod attention;
 pub mod delivery;
 pub mod evidence;
 pub mod missions;
+mod mission_projection_upgrade;
 pub mod seats;
 pub mod trace_principal;
 #[cfg(test)]
@@ -83,6 +84,7 @@ pub mod roster_controls;
 pub mod roster_fresh_proof_tests;
 pub mod step_labels;
 pub mod operation_audit;
+pub mod push_registrations;
 pub mod mission_provenance;
 pub mod agent_queue_values;
 pub mod backup_format;
@@ -659,7 +661,7 @@ pub struct AgentWorkQueue {
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h9a6f20929077 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6a0f08109ee2 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1186,6 +1188,18 @@ WHERE kind='harness.timeline';
 CREATE INDEX IF NOT EXISTS local_observations_roster_frontier_index
 ON local_observations(id, after_store_index)
 WHERE kind='harness.timeline' AND subject LIKE 'agent/%';
+-- Retry receipts survive local observation trimming. Device event IDs are unique
+-- across payload kinds; the device queue expires after seven days.
+CREATE TABLE IF NOT EXISTS client_diagnostic_receipts (
+    device TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    accepted_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY(device, event_id)
+);
+CREATE INDEX IF NOT EXISTS client_diagnostic_receipts_time_index
+ON client_diagnostic_receipts(accepted_at_unix_ms);
+CREATE INDEX IF NOT EXISTS client_diagnostic_receipts_device_time_index
+ON client_diagnostic_receipts(device, accepted_at_unix_ms);
 -- A mission capacity retry is scheduling state owned by this reconciler. Replicating every
 -- backoff attempt makes every peer reconcile even though only this node can retry it.
 CREATE TABLE IF NOT EXISTS local_subscription_mission_deferrals (
@@ -3749,6 +3763,66 @@ impl Store {
             )
             .map_err(|error| St3Error::new(error.code, error.message))?;
         self.append_claim_outcome(input)
+    }
+
+    /// Atomically ingest a sanitized client batch and its retry receipts. The writer
+    /// returns only after commit/fsync; rate admission and dedup share that transaction.
+    pub fn ingest_client_diagnostics(
+        &self,
+        device: &str,
+        inputs: &[ClaimInput],
+        accepted_at: u64,
+    ) -> Result<(), St3Error> {
+        for input in inputs {
+            validate_local_observation(input)?;
+        }
+        self.connection.batched(|transaction| {
+            const RECEIPT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hd8377ae3baea owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                "DELETE FROM client_diagnostic_receipts WHERE accepted_at_unix_ms < ?1",
+                [accepted_at.saturating_sub(RECEIPT_RETENTION_MS)],
+            ).map_err(internal)?;
+            let mut new = Vec::with_capacity(inputs.len());
+            let mut seen = BTreeSet::new();
+            for input in inputs {
+                let id = input.fields["event_id"].as_str()
+                    .ok_or_else(|| St3Error::new("internal", "a diagnostic has no event ID"))?;
+                if !seen.insert(id) {
+                    continue;
+                }
+                let exists = transaction.query_row(
+                    "SELECT 1 FROM client_diagnostic_receipts WHERE device=?1 AND event_id=?2",
+                    params![device, id],
+                    |_| Ok(()),
+                ).optional().map_err(internal)?.is_some();
+                if !exists {
+                    new.push((id, input));
+                }
+            }
+            let recent: u64 = transaction.query_row(
+                "SELECT COUNT(*) FROM client_diagnostic_receipts
+                 WHERE device=?1 AND accepted_at_unix_ms >= ?2",
+                params![device, accepted_at.saturating_sub(60_000)],
+                |row| row.get(0),
+            ).map_err(internal)?;
+            if recent + new.len() as u64 > 256 {
+                return Err(St3Error::new(
+                    "client-diagnostics-rate-limit",
+                    "a device may ingest at most 256 new diagnostics per minute",
+                ));
+            }
+            for (id, input) in new {
+                insert_local_observation_tx(transaction, &self.origin, input, u128::from(accepted_at))?;
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h3411e5a95aa3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+                    "INSERT INTO client_diagnostic_receipts(device,event_id,accepted_at_unix_ms)
+                     VALUES (?1,?2,?3)",
+                    params![device, id, accepted_at],
+                ).map_err(internal)?;
+            }
+            Ok(())
+        }).map_err(|error| St3Error::new("internal", error))?
     }
 
     /// Local observations written after `after`, oldest first. The records carry the
@@ -15244,8 +15318,12 @@ fn reconcile_carried_step_tx(
     // observation for this successor step.
     let later_step_claim = transaction
         .query_row(
-            "SELECT 1 FROM claims WHERE subject=?1 AND kind<>'step-run.carried' LIMIT 1",
-            [&claim.subject],
+            /* sqlite-large-value: allow-for-now lv-hfdfe47383131 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!("SELECT 1 FROM claims JOIN claims carried ON carried.id=?2
+                 WHERE claims.subject=?1 AND claims.kind IN
+                 ('step-run.state','step-run.retried','work.claimed','work.renewed',
+                  'work.progress','work.submitted','work.failed','work.released','work.extended')
+                 AND {} LIMIT 1", canonical::after_sql("claims", "carried")),
+            params![claim.subject, claim.id],
             |_| Ok(()),
         )
         .optional()
@@ -15272,14 +15350,17 @@ fn reconcile_carried_step_tx(
             .get(name)
             .filter(|_| matches!(status, "claimed" | "working" | "verifying" | "blocked"))
     };
+    let reason = mission_projection_upgrade::carried_reason(transaction, &claim.id)?;
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h49652782434a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
-                    blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE NULL END,
+            /* sqlite-large-value: allow-for-now lv-h3bfc21a711de owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
+                    blocked_reason=?9,
                     not_before_unix_ms=CASE WHEN status=?2 THEN not_before_unix_ms ELSE NULL END,
-                    lease_owner=?6, lease_incarnation=?7, lease_expires_at_unix_ms=?8,
-                    updated_at_unix_ms=?5
-                 WHERE subject=?1 AND status<>?2",
+                    lease_owner=CASE WHEN status<>?2 THEN ?6 ELSE lease_owner END,
+                    lease_incarnation=CASE WHEN status<>?2 THEN ?7 ELSE lease_incarnation END,
+                    lease_expires_at_unix_ms=CASE WHEN status<>?2 THEN ?8 ELSE lease_expires_at_unix_ms END,
+                    updated_at_unix_ms=CASE WHEN status<>?2 THEN ?5 ELSE updated_at_unix_ms END
+                 WHERE subject=?1 AND (status<>?2 OR blocked_reason IS NOT ?9)",
             params![
                 claim.subject,
                 status,
@@ -15291,6 +15372,7 @@ fn reconcile_carried_step_tx(
                 lease("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
                     .map(|expiry| expiry.to_string()),
+                reason,
             ],
         )
         .map_err(internal)?;
@@ -15505,6 +15587,9 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    if claim.kind == "step-run.carried" {
+        return reconcile_carried_step_tx(transaction, claim);
+    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }
@@ -20029,7 +20114,7 @@ pub fn append_latest_observation_publication(
                 "harness.usage" => {
                     publish_due_usage_tx(transaction, &graph.origin, input, &local, now)?
                 }
-                "harness.todo.observed" | "workspace.observed" => Some(publish_latest_claim_tx(
+                "harness.todo.observed" | "harness.inventory.observed" | "workspace.observed" => Some(publish_latest_claim_tx(
                     transaction,
                     &graph.origin,
                     &input.subject,

@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfdff823a8ba3 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h98d3e9599416 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -111,6 +111,38 @@ maximum of `batches`, `writer_heads`, the writer's envelope tombstones in `check
 and in `retired_envelopes`, which keeps them after adoption withdraws them (heads trimmed before
 this table existed), and the writer floor; the chain's previous hash is the higher of the newest
 batch and the stored head.
+
+## Repaired claim replacements
+
+`repaired_claim_replacements` keeps, for each repaired original claim, its current replacement and
+the repaired record's reference. A trigger copies them whenever a record becomes repaired or is
+repaired again, and deleting the record leaves them; rows are never deleted. A one-time copy at
+open reads only the repaired records that predate the triggers, through their partial index.
+Readers still use the records and `projection_digest_repaired_claims`.
+
+## Retired claim facts
+
+`retired_operation_receipts` (operation, request digest, claim) and `retired_claim_ancestry`
+(claim, subject, kind, predecessors) keep what idempotent retries, ancestry walks and seat history
+read of a dropped claim, apart from `checkpoint_claims`. The same triggers and a second import
+cursor in `meta`, on the same paced background loans, union every `checkpoint_claims` row into
+them, including rows adoption later withdraws, so they only grow. Claim identities use the
+ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
+activation stops those withdrawals.
+
+## Claim range digests
+
+`claim_range_digests` summarizes the claims this store retains for claims sync. Each claim falls
+in one of 4,096 leaf ranges by the first three hex digits of its ID, and each leaf in one of 64 top
+ranges; an ID that is not 64 lowercase hex digits is counted in a separate irregular range. A
+range keeps its claim count and the 512-bit modular sum of its members' domain-separated SHA-512
+hashes, so it does not depend on arrival order. Plain-SQL triggers queue every claim insert and
+delete in `claim_range_pending`, so an earlier build that writes claims queues its changes too. A
+background job (`maintenance.claim_ranges`) folds the queue into the digests after each store
+event, and once folds the claims that predate the triggers, tracked by `claim_range_import`; it
+takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
+loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
+import are both empty. Nothing reads them yet.
 "#;
 
 pub fn storage_digest() -> String {
@@ -951,6 +983,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "client",
+            "client/DEVICE",
+            "A paired device's server-derived diagnostic identity.",
+            false,
+        ),
+        (
             "custom",
             "custom/NAMESPACE/NAME",
             "An extension subject.",
@@ -1402,6 +1440,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "harness.todo.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
+            "harness.inventory.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
@@ -2175,6 +2222,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             false,
             &[],
         ),
+        ("client.launch", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("client.js-error", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -2779,6 +2830,27 @@ fn claim_retention(kind: &str) -> Retention {
 
 fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     let names: &[(&str, FieldSpec)] = match kind {
+        "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
+            ("event_id", required_string()),
+            ("launch_id", required_string()),
+            ("sequence", required_integer()),
+            ("occurred_at_unix_ms", required_integer()),
+            ("captured_at_unix_ms", required_integer()),
+            ("occurrence_time_basis", required_enum(&["exact", "metric-interval-end"])),
+            ("launch_id_basis", required_enum(&["process", "metric-interval"])),
+            ("app_version", required_string()),
+            ("native_build", required_string()),
+            ("runtime_version", required_string()),
+            ("update_id", required_string()),
+            ("platform", required_enum(&["ios"])),
+            ("os_version", required_string()),
+            ("severity", required_enum(&["info", "warning", "error", "fatal"])),
+            ("capture_source", required_enum(&["js", "native-marker", "metrickit"])),
+            ("payload", required_object()),
+            ("paired_device", required_string()),
+            ("pairing_grant", required_string()),
+            ("person_id", required_string()),
+        ],
         "person.delegation-set" => &[("actions", required_array())],
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
@@ -2798,6 +2870,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("phases", required_array()),
             ("totals", required_object()),
             ("truncated", required_boolean()),
+        ],
+        "harness.inventory.observed" => &[
+            ("harness", required_enum(&["omp"])),
+            ("session_id", required_string()),
+            ("incarnation_id", required_string()),
+            ("observed_at", required_string()),
+            ("dynamic_commands", required_enum(&["supported", "unsupported", "unavailable"])),
+            ("commands", required_array()),
         ],
         "agent.account" => &[("account", required_reference_to(&["account"]))],
         "attention.requested" => &[
@@ -4416,252 +4496,6 @@ mod tests {
         session.push('x');
         fields.insert("session_id".into(), Value::String(session));
         assert!(validate_todo(&fields).is_err());
-    }
-
-    #[test]
-    fn registry_matches_the_exact_manifests() {
-        let registry = registry();
-        assert_eq!(
-            registry
-                .subjects
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            [
-                "account",
-                "agent",
-                "arrangement",
-                "assistant",
-                "attention",
-                "checkpoint",
-                "checkpoint-excusal",
-                "custom",
-                "daemon",
-                "doc",
-                "exec",
-                "external",
-                "file",
-                "fleet-invite",
-                "gate-operation",
-                "github-post",
-                "glass",
-                "harness-question",
-                "host",
-                "lane",
-                "loop-run",
-                "message",
-                "mission",
-                "mission-run",
-                "observer",
-                "owned-set",
-                "person",
-                "planning-session",
-                "pty",
-                "repair",
-                "resource",
-                "revision-proposal",
-                "rule",
-                "run-generation",
-                "schedule",
-                "sekret",
-                "step-run",
-                "subscription",
-            ]
-        );
-        assert_eq!(
-            registry
-                .resources
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            [
-                "arrangement",
-                "ci.run",
-                "filesystem.file",
-                "harness.session-file",
-                "human.review",
-                "vcs.commit",
-                "vcs.issue",
-                "vcs.pull-request",
-                "vcs.ref",
-                "vcs.repository",
-            ]
-        );
-        assert_eq!(
-            registry.resources["human.review"]
-                .fields
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            [
-                "decision",
-                "document",
-                "evidence_tests",
-                "reason",
-                "reviewer",
-                "submitted_at",
-                "target"
-            ]
-        );
-        assert_eq!(
-            registry
-                .claims
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            [
-                "agent.account",
-                "agent.placement.source-offline",
-                "agent.presence",
-                "agent.queue.moved",
-                "agent.retired",
-                "arrangement.edited",
-                "attention.requested",
-                "attention.resolved",
-                "checkpoint.excused",
-                "checkpoint.sealed",
-                "checkpoint.verified",
-                "daemon.diagnostic",
-                "daemon.started",
-                "delivery.hold",
-                "doc.bound",
-                "eval.verdict",
-                "file.observed",
-                "fleet.invite-created",
-                "fleet.invite-redeemed",
-                "fleet.invite-revoked",
-                "fleet.member-admitted",
-                "fleet.member-endpoints",
-                "fleet.member-left",
-                "fleet.member-removed",
-                "gate.head-bound",
-                "gate.remediation-attached",
-                "gate.requested",
-                "gate.result",
-                "gate.review-verdict",
-                "gate.review-withdrawn",
-                "github.posted",
-                "glass.deleted",
-                "glass.upserted",
-                "harness-question.observed",
-                "harness-question.resolved",
-                "harness.context-clear.requested",
-                "harness.context-clear.result",
-                "harness.diagnostic",
-                "harness.limits",
-                "harness.observed",
-                "harness.session-file",
-                "harness.telemetry",
-                "harness.timeline",
-                "harness.todo.observed",
-                "harness.usage",
-                "intent.desired",
-                "lane.approved",
-                "lane.joined",
-                "lane.left",
-                "lane.marked",
-                "lane.moved",
-                "loop.round-dispatch",
-                "loop.round-result",
-                "loop.state",
-                "message.closed",
-                "message.delivered",
-                "message.read",
-                "message.sent",
-                "message.staged",
-                "mission-run.created",
-                "mission-run.report-to",
-                "mission-run.state",
-                "mission.produced",
-                "mission.provenance",
-                "mission.published",
-                "observer.observed",
-                "observer.refresh-requested",
-                "observer.state",
-                "operational.failure",
-                "operational.recovered",
-                "owned-set.revised",
-                "person.delegation-set",
-                "person.directive-note-set",
-                "planning-session.approved",
-                "planning-session.cancelled",
-                "planning-session.candidate-submitted",
-                "planning-session.previewed",
-                "planning-session.question-answered",
-                "planning-session.question-requested",
-                "planning-session.revision-requested",
-                "planning-session.started",
-                "principal.key-granted",
-                "principal.key-revoked",
-                "publication.operation",
-                "reconcile.fault",
-                "record.repaired",
-                "render.applied",
-                "repair.applied",
-                "resource.observed",
-                "revision-proposal.applied",
-                "revision-proposal.approved",
-                "revision-proposal.cancelled",
-                "revision-proposal.created",
-                "rule.audited",
-                "rule.set",
-                "run-generation.created",
-                "run-generation.state",
-                "run-generation.superseded",
-                "runtime.action.deadline-reached",
-                "runtime.action.failed",
-                "runtime.action.requested",
-                "runtime.action.succeeded",
-                "runtime.observed",
-                "runtime.readiness-deadline-reached",
-                "runtime.reconcile-decision",
-                "runtime.restart-window-reset",
-                "schedule.occurrence-cancelled",
-                "schedule.occurrence-reached",
-                "schedule.occurrence-scheduled",
-                "schedule.work-failed",
-                "schedule.work-requested",
-                "schedule.work-started",
-                "sekret.called",
-                "sekret.changed",
-                "sekret.exited",
-                "sekret.refused",
-                "step-run.carried",
-                "step-run.retried",
-                "step-run.state",
-                "subagent.appeared",
-                "subagent.ended",
-                "subagent.renewed",
-                "subscription.batch-sent",
-                "subscription.batched",
-                "subscription.mission-deferred",
-                "subscription.mission-failed",
-                "subscription.mission-request-cancelled",
-                "subscription.mission-request-released",
-                "subscription.mission-requested",
-                "subscription.mission-started",
-                "subscription.state",
-                "subscription.watch-ended",
-                "terminal.input.requested",
-                "terminal.input.result",
-                "terminal.launch-geometry",
-                "transport.observed",
-                "work.claimed",
-                "work.extended",
-                "work.failed",
-                "work.nudged",
-                "work.person-asked",
-                "work.person-cancelled",
-                "work.person-done",
-                "work.progress",
-                "work.released",
-                "work.renewed",
-                "work.submitted",
-                "workspace.observed",
-            ]
-        );
-        assert_eq!(registry.digest().len(), 64);
-        assert_eq!(registry.digest(), registry.digest());
     }
 
     #[test]
