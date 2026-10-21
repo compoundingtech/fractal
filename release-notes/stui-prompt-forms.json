@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Client only. Uses the answers the daemon already lists under prompt.respond; nothing an answer means or how it reaches the harness changes. Adds a shared prompt form (st3-views promptForm, st3-ui-model prompts) for web, tui and ios."
+    "detail": "Client only. Uses the answers the daemon already lists under prompt.respond; nothing an answer means or how it reaches the harness changes. Adds a shared prompt form (fractal-views promptForm, fractal-ui-model prompts) for web, tui and ios."
   },
   "downtime": {
     "status": "none",
