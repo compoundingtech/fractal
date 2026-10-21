@@ -52,15 +52,14 @@ describe('thread header seam', () => {
     expect(bound).not.toMatch(/Needs you/)
   })
   it.each([
-    ['waiting', 'Native waiting for tool response', false],
-    ['errored', 'Native tool execution errored', false],
-    ['working', 'Native working before connection loss', true],
-  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale) => {
+    ['waiting', 'Native waiting for tool response', false, 'Needs you'],
+    ['errored', 'Native tool execution errored', false, 'Stale observation'],
+    ['working', 'Native working before connection loss', true, 'Last verified · Working'],
+  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale, canonical) => {
     const row = sidebarRow({ agent: { ...agent, activity, status: reported }, stale })
     const output = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: row.status, statusLabel: row.statusLabel, statusSince: row.statusSince, freshness: row.freshness, now: 2000 }))
-    const expected = stale ? 'Last verified · Not observed' : 'Not observed'
-    expect(output).toContain(`aria-label="${expected}; Status boundary unavailable; ${row.freshness} observation"`)
-    expect(output).not.toMatch(/Needs you|aria-label="Stale observation;/)
+    expect(output).toContain(`aria-label="${canonical}; Status boundary unavailable; ${row.freshness} observation${stale ? '; last-observed snapshot' : ''}"`)
+    expect(output).not.toContain(reported)
   })
 })
 

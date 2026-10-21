@@ -78,12 +78,13 @@ mission "catalog" state="ready" {
         let socket = root.path().join("api.sock");
         let app = router(state.clone());
         let listener_socket = socket.clone();
+        let store = state.store.clone();
         let server = tokio::spawn(async move {
             serve_unix_with_ancestor(
                 &listener_socket,
                 None,
                 app,
-                true,
+                Some(store),
                 if bound { chooser } else { unbound },
             )
             .await

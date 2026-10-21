@@ -2,9 +2,11 @@
 //!
 //! An objective is a target with windows and an error budget: the daemon's latency targets, its
 //! store and CPU targets, the database's size and the paired phone's reported targets, all from
-//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`. A budget is an
+//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`, and CI's durations
+//! and counts, which `slo/targets.toml` declares and the Workspace CI runs a repository observer
+//! read feed, held in memory on the member that observes. A budget is an
 //! allowance that resets: each account's weekly and 5-hour limits, from the readings `st usage`
-//! shows. Nothing here measures anything. It reads those two sources and says, for each row, its
+//! shows. Nothing here measures anything. It reads those sources and says, for each row, its
 //! target, its current value, its window, what is left of its budget and what that means.
 //!
 //! Every row has the same fields, so a terminal, the phone and the web render one shape:
@@ -14,6 +16,7 @@
 
 use serde_json::{Value, json};
 
+use crate::resource::github_workflows::WorkspaceCi;
 use crate::store::AccountLimit;
 
 const WINDOWS: [&str; 3] = ["1m", "5m", "1h"];
@@ -59,6 +62,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
             }
         }
     }
+    rows.extend(ci(crate::slo::targets(), crate::resource::github_workflows::workspace_ci().as_ref(), now_unix_ms));
     for limit in limits {
         let name = limit.account_ref.as_deref().unwrap_or(&limit.account);
         let stale = now_unix_ms.saturating_sub(limit.measured_at_unix_ms) > stale_after_ms;
@@ -240,6 +244,120 @@ pub fn divergence(open: u64) -> Value {
             }
         ),
     })
+}
+
+/// A duration in minutes once it is a minute or more: CI's targets are minutes, not milliseconds.
+fn duration(target_ms: u64) -> String {
+    if target_ms < 60_000 {
+        return ms(target_ms as f64);
+    }
+    let minutes = target_ms as f64 / 60_000.0;
+    if minutes.fract() == 0.0 { format!("{minutes} min") } else { format!("{minutes:.1} min") }
+}
+
+/// The value at `percentile` of `samples`, nearest rank: the smallest sample that at least
+/// `percentile` in 100 are at or under.
+fn nearest_rank(samples: &[u64], percentile: u64) -> u64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = (percentile as usize * sorted.len()).div_ceil(100).max(1);
+    sorted[rank - 1]
+}
+
+/// What a series measures, said once its runs feed it.
+fn ci_measure(path: &str) -> &'static str {
+    use crate::resource::github_workflows::{CRITICAL_PATH_SERIES, MERGE_QUEUE_SERIES};
+    match path {
+        CRITICAL_PATH_SERIES => "Each sample is a pull request's successful Workspace CI run, from its start to its last update",
+        MERGE_QUEUE_SERIES => "Each sample is a merge group's successful Workspace CI run, from its creation, when the group entered the queue, to its last update, when it went green: the wait before GitHub creates the run and the merge after it are not counted",
+        _ => "",
+    }
+}
+
+/// CI's objectives: each percentile of a duration over the last day and each count over the last
+/// hour, from the Workspace CI runs `source` holds (None when this member reads none). A series
+/// nothing feeds, or one with no sample in its window, is no-data.
+fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: u64) -> Vec<Value> {
+    const DAY_MS: u64 = 86_400_000;
+    const HOUR_MS: u64 = 3_600_000;
+    let unobserved = |path: &str| match source {
+        Some(_) => format!("Nothing feeds {path} yet"),
+        None => format!("This member reads no Workspace CI runs for {path}: only the member that runs a repository observer with main_performance_failures does"),
+    };
+    let durations = targets.duration.iter().map(|target| {
+        let (p, within) = (target.percentile, duration(target.target_ms));
+        let goal = format!("Goal: {p} of every 100 finish within {within}, so {} in 100 may run over.", 100 - p);
+        let samples = source.and_then(|ci| ci.durations(&target.path, now_unix_ms.saturating_sub(DAY_MS), now_unix_ms));
+        let fed = samples.is_some();
+        let Some(samples) = samples.filter(|samples| !samples.is_empty()) else {
+            let (current, why) = match (source, fed) {
+                (Some(_), true) => ("no samples", format!("No sample of {} finished in the last day", target.path)),
+                (Some(_), false) => ("no source yet", unobserved(&target.path)),
+                (None, _) => ("not observed", unobserved(&target.path)),
+            };
+            return json!({
+                "id": target.id(), "kind": "objective", "about": target.about,
+                "target": format!("p{p} ≤ {within}"), "current": current, "window": "1d",
+                "remaining_percent": null, "status": "no-data",
+                "explain": format!("{}. {goal} {why}, so there is no budget to spend or save.", target.about),
+            });
+        };
+        let n = samples.len() as u64;
+        let over = samples.iter().filter(|sample| **sample > target.target_ms).count() as u64;
+        let share = over as f64 / n as f64;
+        let allowed = (100 - p) as f64 / 100.0;
+        let met = share <= allowed;
+        let remaining = clamp_percent(100.0 * (1.0 - share / allowed));
+        let value = duration(nearest_rank(&samples, p));
+        json!({
+            "id": target.id(), "kind": "objective", "about": target.about,
+            "target": format!("p{p} ≤ {within}"),
+            "current": format!("p{p} {value} over {}", plural(n, "run")),
+            "window": "1d", "remaining_percent": remaining,
+            "status": if met { "met" } else { "missed" },
+            "explain": format!(
+                "{}. {goal} In the last day {over} of {} ran over ({:.1}%), against an allowance of {}%, so {remaining:.0}% of the error budget is left. The p{p} is {value}. {}. {}",
+                target.about, plural(n, "run"), share * 100.0, 100 - p, ci_measure(&target.path),
+                if met { "The goal is met." } else { "The goal is missed in the last day." },
+            ),
+        })
+    });
+    let counts = targets.count.iter().map(|target| {
+        let max = target.max_per_hour;
+        let goal = format!("Goal: at most {max} an hour{}.", if max == 0 { ", so one spends the whole allowance" } else { "" });
+        let counted = source.and_then(|ci| ci.ejected_groups(&target.path, now_unix_ms.saturating_sub(HOUR_MS), now_unix_ms));
+        let Some((ejected, groups)) = counted.filter(|(_, groups)| *groups > 0) else {
+            let (current, why) = match (source, counted) {
+                (Some(_), Some(_)) => ("no samples", "No merge group finished in the last hour".to_owned()),
+                (Some(_), None) => ("no source yet", unobserved(&target.path)),
+                (None, _) => ("not observed", unobserved(&target.path)),
+            };
+            return json!({
+                "id": target.name, "kind": "objective", "about": target.about,
+                "target": format!("≤ {max} an hour"), "current": current, "window": "1h",
+                "remaining_percent": null, "status": "no-data",
+                "explain": format!("{}. {goal} {why}, so there is nothing to count.", target.about),
+            });
+        };
+        let met = ejected <= max;
+        let remaining = if max == 0 {
+            if met { 100.0 } else { 0.0 }
+        } else {
+            clamp_percent(100.0 * (1.0 - ejected as f64 / max as f64))
+        };
+        json!({
+            "id": target.name, "kind": "objective", "about": target.about,
+            "target": format!("≤ {max} an hour"), "current": format!("{ejected} in the last hour"),
+            "window": "1h", "remaining_percent": remaining,
+            "status": if met { "met" } else { "missed" },
+            "explain": format!(
+                "{}. {goal} In the last hour {ejected} of {} were ejected: their Workspace CI run failed. Tests nextest passed only on a retry are not counted yet. {}",
+                target.about, plural(groups, "merge group"),
+                if met { "The goal is met." } else { "The goal is missed in the last hour." },
+            ),
+        })
+    });
+    durations.chain(counts).collect()
 }
 
 /// A minimum share (a phone's live time over its foreground time). The budget is the allowed
@@ -482,12 +600,189 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "database"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "database", "merge-latency/p50", "flakes"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), rows.len(), "ids are unique");
+    }
+
+    #[test]
+    fn ci_objectives_are_declared_with_their_targets_and_no_data_until_fed() {
+        let rows = rows(&json!({"targets": []}), &[], 0, 0);
+        for (id, target, window) in [
+            ("merge-latency/p50", "p50 ≤ 10 min", "1d"),
+            ("merge-latency/p95", "p95 ≤ 10 min", "1d"),
+            ("ci-critical-path/p95", "p95 ≤ 13 min", "1d"),
+            ("flakes", "≤ 0 an hour", "1h"),
+        ] {
+            let row = by_id(&rows, id);
+            assert_eq!(
+                (row["kind"].as_str(), row["target"].as_str(), row["window"].as_str(), row["status"].as_str()),
+                (Some("objective"), Some(target), Some(window), Some("no-data")),
+                "{id}"
+            );
+            assert!(row["remaining_percent"].is_null(), "{id}");
+            // The same fields as every other row, and no others: the client's SloRow is closed.
+            let mut keys = row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["about", "current", "explain", "id", "kind", "remaining_percent", "status", "target", "window"],
+                "{id}"
+            );
+        }
+        assert!(by_id(&rows, "merge-latency/p95")["explain"].as_str().unwrap().contains("5 in 100 may run over"));
+        assert!(by_id(&rows, "flakes")["explain"].as_str().unwrap().contains("ci/flakes"));
+        // Objectives come before budgets.
+        let rows = super::rows(&json!({"targets": []}), &[limit("claude/abc", None, Some(1.0), Some(1.0))], 10_000_000, 3_600_000);
+        let first_budget = rows.iter().position(|row| row["kind"] == "budget").unwrap();
+        assert!(rows[..first_budget].iter().any(|row| row["id"] == "flakes"));
+    }
+
+    const NOW: &str = "2026-10-21T12:00:00Z";
+
+    fn unix_ms(at: &str) -> u64 {
+        chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() as u64
+    }
+
+    /// A completed Workspace CI run as GitHub's list-runs answer has it, finished `ago_minutes`
+    /// before `NOW` after running `minutes`; a merge group's run starts 30 seconds after GitHub
+    /// creates it, a pull request's at once.
+    fn ci_run(id: u64, event: &str, conclusion: &str, minutes: f64, ago_minutes: f64) -> Value {
+        let at = |ms: u64| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64).unwrap().to_rfc3339();
+        let updated = unix_ms(NOW) - (ago_minutes * 60_000.0) as u64;
+        let created = updated - (minutes * 60_000.0) as u64;
+        let started = if event == "merge_group" { created + 30_000 } else { created };
+        let branch = if event == "merge_group" { format!("gh-readonly-queue/main/pr-{id}-{}", "c".repeat(40)) } else { "feature".into() };
+        json!({"id": id, "name": "Workspace CI", "path": ".github/workflows/fleet.yml", "event": event,
+            "head_branch": branch, "status": "completed", "conclusion": conclusion,
+            "created_at": at(created), "run_started_at": at(started), "updated_at": at(updated),
+            "repository": {"full_name": "acme/garden"}})
+    }
+
+    fn ci_rows(runs: &[Value]) -> Vec<Value> {
+        let runs = runs
+            .iter()
+            .map(|run| crate::resource::github_workflows::WorkspaceRun::from_run("acme/garden", run).expect("a fixture run"))
+            .collect();
+        let source = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
+        ci(crate::slo::targets(), Some(&source), unix_ms(NOW))
+    }
+
+    #[test]
+    fn a_percentile_is_the_nearest_rank() {
+        let samples = (1..=20).collect::<Vec<u64>>();
+        assert_eq!(nearest_rank(&samples, 95), 19);
+        assert_eq!(nearest_rank(&samples, 50), 10);
+        assert_eq!(nearest_rank(&samples, 99), 20);
+        assert_eq!(nearest_rank(&[7], 95), 7);
+        assert_eq!(nearest_rank(&[3, 1, 2], 50), 2);
+    }
+
+    #[test]
+    fn the_critical_path_spends_its_budget_on_runs_over_the_target_in_the_last_day() {
+        // 39 pull request runs of 10 minutes and one of 15, all in the last day: 1 in 40 over
+        // 13 minutes is half of a p95's 5% allowance.
+        let mut runs = (1..40).map(|id| ci_run(id, "pull_request", "success", 10.0, id as f64 * 30.0)).collect::<Vec<_>>();
+        runs.push(ci_run(40, "pull_request", "success", 15.0, 60.0));
+        // Neither a failed run nor one that finished more than a day ago counts.
+        runs.push(ci_run(41, "pull_request", "failure", 30.0, 10.0));
+        runs.push(ci_run(42, "pull_request", "success", 30.0, 24.0 * 60.0 + 1.0));
+        let rows = ci_rows(&runs);
+        let row = by_id(&rows, "ci-critical-path/p95");
+        assert_eq!(
+            (row["status"].as_str(), row["current"].as_str(), row["remaining_percent"].as_f64(), row["window"].as_str()),
+            (Some("met"), Some("p95 10 min over 40 runs"), Some(50.0), Some("1d"))
+        );
+        let explain = row["explain"].as_str().unwrap();
+        assert!(explain.contains("1 of 40 runs ran over (2.5%)"), "{explain}");
+        assert!(explain.contains("from its start to its last update"), "{explain}");
+        // Two over in forty is 5%, the whole allowance; three is past it.
+        runs[0] = ci_run(1, "pull_request", "success", 14.0, 30.0);
+        let row = by_id(&ci_rows(&runs), "ci-critical-path/p95").clone();
+        assert_eq!((row["status"].as_str(), row["remaining_percent"].as_f64()), (Some("met"), Some(0.0)));
+        runs[1] = ci_run(2, "pull_request", "success", 14.0, 60.0);
+        let row = by_id(&ci_rows(&runs), "ci-critical-path/p95").clone();
+        assert_eq!((row["status"].as_str(), row["remaining_percent"].as_f64()), (Some("missed"), Some(0.0)));
+        assert!(row["explain"].as_str().unwrap().contains("missed"));
+        // Merge groups are not the critical path.
+        assert_eq!(by_id(&ci_rows(&runs), "merge-latency/p50")["status"], "no-data");
+    }
+
+    #[test]
+    fn merge_latency_is_each_green_merge_groups_run_from_creation_to_its_last_update() {
+        let runs = [
+            ci_run(1, "merge_group", "success", 6.0, 30.0),
+            ci_run(2, "merge_group", "success", 8.0, 90.0),
+            ci_run(3, "merge_group", "success", 12.0, 150.0),
+            // An ejected group has no latency; it counts as a flake instead.
+            ci_run(4, "merge_group", "failure", 40.0, 10.0),
+            ci_run(5, "pull_request", "success", 40.0, 10.0),
+        ];
+        let rows = ci_rows(&runs);
+        let p50 = by_id(&rows, "merge-latency/p50");
+        assert_eq!((p50["status"].as_str(), p50["current"].as_str()), (Some("met"), Some("p50 8 min over 3 runs")));
+        // One of three over is 33%, within a p50's 50% allowance: a third of it spent.
+        assert_eq!(p50["remaining_percent"].as_f64(), Some(33.3));
+        let p95 = by_id(&rows, "merge-latency/p95");
+        assert_eq!((p95["status"].as_str(), p95["current"].as_str()), (Some("missed"), Some("p95 12 min over 3 runs")));
+        assert_eq!(p95["remaining_percent"].as_f64(), Some(0.0));
+        assert!(p95["explain"].as_str().unwrap().contains("the merge after it are not counted"));
+    }
+
+    #[test]
+    fn flakes_count_ejected_merge_groups_in_the_last_hour() {
+        let green = ci_run(1, "merge_group", "success", 6.0, 20.0);
+        let rows = ci_rows(std::slice::from_ref(&green));
+        let flakes = by_id(&rows, "flakes");
+        assert_eq!(
+            (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64(), flakes["window"].as_str()),
+            (Some("met"), Some("0 in the last hour"), Some(100.0), Some("1h"))
+        );
+        assert!(flakes["explain"].as_str().unwrap().contains("nextest passed only on a retry are not counted yet"));
+        // One ejected group in the hour spends the whole allowance; one before the hour does not count.
+        let rows = ci_rows(&[green.clone(), ci_run(2, "merge_group", "failure", 4.0, 50.0), ci_run(3, "merge_group", "failure", 4.0, 61.0)]);
+        let flakes = by_id(&rows, "flakes");
+        assert_eq!(
+            (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64()),
+            (Some("missed"), Some("1 in the last hour"), Some(0.0))
+        );
+        assert!(flakes["explain"].as_str().unwrap().contains("1 of 2 merge groups were ejected"));
+        // No merge group in the hour is nothing to count.
+        let rows = ci_rows(&[ci_run(3, "merge_group", "failure", 4.0, 61.0)]);
+        assert_eq!((by_id(&rows, "flakes")["status"].as_str(), by_id(&rows, "flakes")["current"].as_str()), (Some("no-data"), Some("no samples")));
+    }
+
+    #[test]
+    fn ci_rows_without_samples_or_without_runs_are_no_data() {
+        let empty = ci_rows(&[]);
+        let unobserved = ci(crate::slo::targets(), None, unix_ms(NOW));
+        for id in ["merge-latency/p50", "merge-latency/p95", "ci-critical-path/p95", "flakes"] {
+            for (rows, current) in [(&empty, "no samples"), (&unobserved, "not observed")] {
+                let row = by_id(rows, id);
+                assert_eq!((row["status"].as_str(), row["current"].as_str()), (Some("no-data"), Some(current)), "{id}");
+                assert!(row["remaining_percent"].is_null(), "{id}");
+            }
+            assert!(by_id(&unobserved, id)["explain"].as_str().unwrap().contains("main_performance_failures"), "{id}");
+        }
+        // Every row keeps exactly the SloRow fields once fed.
+        let fed = ci_rows(&[ci_run(1, "merge_group", "success", 6.0, 20.0), ci_run(2, "pull_request", "success", 6.0, 20.0)]);
+        for row in &fed {
+            assert_ne!(row["status"], "no-data", "{row}");
+            let mut keys = row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(keys, ["about", "current", "explain", "id", "kind", "remaining_percent", "status", "target", "window"]);
+        }
+    }
+
+    #[test]
+    fn a_ci_duration_reads_in_minutes() {
+        assert_eq!(duration(600_000), "10 min");
+        assert_eq!(duration(780_000), "13 min");
+        assert_eq!(duration(90_000), "1.5 min");
+        assert_eq!(duration(1_500), "1500 ms");
     }
 }

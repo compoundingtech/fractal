@@ -102,6 +102,18 @@ export type SeatLifecycle =
   | { readonly _tag: 'Bounded' }
   | { readonly _tag: 'Unknown' }
 
+/** Native child observations are not independently fileable seats and carry no activity/usage facts. */
+export interface AgentSubagent {
+  readonly id: string
+  readonly driver: string
+  readonly description?: string
+  readonly session_id?: string
+  readonly started_at?: string
+  readonly subagent_type?: string
+  readonly work_id?: string
+  readonly lease_expires_at: string
+}
+
 /** One agent session as the fleet projection lists it, keyed by `ref` with its terminal ref beside it. */
 export interface Agent {
   readonly ref: string
@@ -133,6 +145,7 @@ export interface Agent {
   readonly lastActivityAt: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
+  readonly subagents?: readonly AgentSubagent[]
   readonly mission?: string
 }
 
