@@ -2,8 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
 import { requireOptionalNativeModule } from 'expo';
 import { AppState, Linking, Platform } from 'react-native';
-import type { Capabilities, ClientDiagnosticEvent, St3Client } from '../../clients/typescript/st3-client';
-import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
+import type { Capabilities, ClientDiagnosticEvent, FractalClient } from '../../clients/typescript/fractal-client';
+import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
 import StDiagnostics from './modules/st-diagnostics';
 import app from './app.json';
 import { DIAGNOSTICS_KEY, DiagnosticsQueue } from './diagnosticsQueue';
@@ -32,18 +32,18 @@ let pending: ClientDiagnosticEvent[] = [];
 let persisting = false;
 let draining: Promise<void> | undefined;
 let timer: ReturnType<typeof setTimeout> | undefined;
-let sender: St3Client | undefined;
+let sender: FractalClient | undefined;
 let generation = 0;
 let active = AppState.currentState === 'active';
 let connectionOwner: object | undefined;
 const breadcrumbs: ClientDiagnosticEvent[] = [];
 const boundaryInjections = new Set<() => void>();
-const grantedClients = new WeakMap<St3Client, boolean>();
-const deniedClients = new WeakSet<St3Client>();
+const grantedClients = new WeakMap<FractalClient, boolean>();
+const deniedClients = new WeakSet<FractalClient>();
 
 /** Cache only grants: a denial is re-discovered on the next foreground or
  * reconnect, so a later grant needs no app restart. */
-export const recordDiagnosticCapabilities = (client: St3Client, caps: Capabilities): void => {
+export const recordDiagnosticCapabilities = (client: FractalClient, caps: Capabilities): void => {
   if (caps.capabilities.some(capability => capability.id === 'write.client-diagnostics' && capability.state === 'granted')) grantedClients.set(client, true);
   else grantedClients.delete(client);
 };
@@ -133,7 +133,7 @@ export const drainNativeDiagnostics = (): Promise<void> => {
 
 /** Credential is only a readiness signal. The existing client retains its in-memory
  * Keychain-hydrated supplier; no credential/URL is copied into diagnostic storage. */
-export const connectDiagnostics = (owner: object, client: St3Client | null, url: string, credential: string | null, enabled: boolean): void => {
+export const connectDiagnostics = (owner: object, client: FractalClient | null, url: string, credential: string | null, enabled: boolean): void => {
   connectionOwner = owner;
   generation++;
   sender = enabled && url && credential && client ? client : undefined;

@@ -1,5 +1,5 @@
-import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@smalltalk/st3-client/schema'
-import { decodeResourceRow, openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { expect, test } from 'vitest'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'

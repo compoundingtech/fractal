@@ -180,10 +180,23 @@ export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.
         : ts.createSourceFile(file, text, languageVersion, true)
     }
   }
+  const resolutionCache = ts.createModuleResolutionCache(host.getCurrentDirectory(), file => file, compilerOptions)
+  const repository = normalized(path.resolve(import.meta.dirname, '../../..'))
+  host.resolveModuleNameLiterals = (literals, importer, redirectedReference, options, source) => literals.map(literal => {
+    const result = ts.resolveModuleName(literal.text, importer, options, host, resolutionCache,
+      redirectedReference, ts.getModeForUsageLocation(source, literal, options))
+    const resolved = result.resolvedModule
+    if (resolved === undefined) return result
+    const file = normalized(host.realpath?.(resolved.resolvedFileName) ?? resolved.resolvedFileName)
+    // Package aliases and pnpm symlinks can label repository source as external.
+    // TS then skips program.emit for it, although the runtime graph must follow it.
+    return within(file, repository) && !file.includes('/node_modules/')
+      ? { ...result, resolvedModule: { ...resolved, resolvedFileName: file, isExternalLibraryImport: false } }
+      : result
+  })
   const program = ts.createProgram([...rootNames], compilerOptions, host)
   const checker = program.getTypeChecker()
   const cache = new Map<string, RuntimeModule>()
-  const resolutionCache = ts.createModuleResolutionCache(host.getCurrentDirectory(), file => file, compilerOptions)
   const hasMarker = (file: string): boolean => {
     const source = program.getSourceFile(file)
     if (source === undefined) throw new Error(`Missing graph source: ${file}`)

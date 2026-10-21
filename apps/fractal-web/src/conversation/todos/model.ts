@@ -1,5 +1,5 @@
-import type { AgentTodo, HarnessPhase } from '@smalltalk/st3-client/schema'
-import type { DecodedAgent, Open } from '@st3/sdk/effect'
+import type { AgentTodo, HarnessPhase } from '@fractal/client/schema'
+import type { DecodedAgent, Open } from '@fractal/sdk/effect'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 
