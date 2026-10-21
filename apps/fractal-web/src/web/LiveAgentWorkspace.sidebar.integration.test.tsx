@@ -23,7 +23,7 @@ import type { ConnectionState } from '@fractal/sdk/effect'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const gateway = 'gateway.example.invalid'
-const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
+const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
@@ -90,7 +90,7 @@ it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-
     started_at: '2026-10-04T12:00:00Z', lease_expires_at: '2026-10-04T12:01:00Z',
   }
   const observation = openAgent(decodeUnknownSync(Agent)({
-    kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/build-1',
+    kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary',
     driver, runtime_ids: ['runtime/example-parent'], reachability: 'reachable', state: 'running',
     harness_state: 'working', blocked_on: null, fault: null, revision: '1',
     updated_at: '2026-10-04T12:00:00Z',
@@ -248,7 +248,7 @@ it('renders the RM1 two-line facts and freezes age without replacing the working
   await mount(1440)
   const row = roster().querySelector('[data-testid="taste-agent-row"]')!
   expect(row.querySelector('[data-row-column="title"]')?.textContent).toContain(agent.name)
-  expect(row.querySelector('[data-row-column="line2"]')?.textContent).toContain('build-1')
+  expect(row.querySelector('[data-row-column="line2"]')?.textContent).toContain('example-primary')
   expect(row.querySelector('[data-row-column="time"] time')?.textContent).toBe('4s')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   await act(async () => registry.set(now, 60_000))

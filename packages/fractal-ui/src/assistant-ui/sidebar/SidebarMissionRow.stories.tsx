@@ -20,11 +20,11 @@ import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 const storyNow = Date.UTC(2026, 9, 21, 9, 30, 0)
 const base: Row = {
-  ref: 'agent/base', id: 'base', title: 'Base', status: 'working', statusLabel: statuses.working.label, host: 'build-1', freshness: 'live',
+  ref: 'agent/example-base', id: 'base', title: 'Base', status: 'working', statusLabel: statuses.working.label, host: 'build-1', freshness: 'live',
   usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 180_000 }, children: [],
 }
 const mission = (id: string, slug: string, rest: Omit<Extract<SidebarMissionContext, { _tag: 'Mission' }>, '_tag' | 'id' | 'slug'>): SidebarMissionContext => ({ _tag: 'Mission', id: `mission/example/${id}`, slug, ...rest })
-const row = (key: string, title: string, rest: Partial<Row>): Row => ({ ...base, ref: `agent/${key}`, id: key, title, ...rest })
+const row = (key: string, title: string, rest: Partial<Row>): Row => ({ ...base, ref: `agent/example-${key}`, id: key, title, ...rest })
 const waiting = { status: 'waiting', statusLabel: statuses.waiting.label, needsMe: true } as const satisfies Partial<Row>
 const longSlug = 'review-hover-scopes-and-every-long-mission-name'
 
@@ -49,8 +49,8 @@ const folders: readonly { readonly label: string; readonly rows: readonly Row[] 
 ]
 
 interface MissionTreeItem extends SidebarTreeItem<MissionTreeItem> { readonly row: Row }
-const missionChild: Row = { ...folders[0]!.rows[1]!, ref: 'agent/mission-parent/child', parentRef: 'agent/mission-parent', title: 'Observed mission helper', children: [] }
-const missionParent: Row = { ...folders[1]!.rows[3]!, ref: 'agent/mission-parent', title: 'Mission parent with subagents', children: [missionChild] }
+const missionChild: Row = { ...folders[0]!.rows[1]!, ref: 'agent/example-mission-helper', parentRef: 'agent/example-mission-parent', title: 'Observed mission helper', children: [] }
+const missionParent: Row = { ...folders[1]!.rows[3]!, ref: 'agent/example-mission-parent', title: 'Mission parent with subagents', children: [missionChild] }
 const missionTree: readonly MissionTreeItem[] = [{
   id: missionParent.ref, depth: 0, textValue: missionParent.title, row: missionParent, disclosurePlacement: 'trailing',
   children: [{ id: missionChild.ref, depth: 1, textValue: missionChild.title, row: missionChild, children: [], isDisabled: true }],

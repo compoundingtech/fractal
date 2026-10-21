@@ -77,7 +77,7 @@ const row = openAgent(decodeUnknownSync(
 test('projects authoritative native subagents, distinguishes absence and retains equivalent row identity', () => {
   const decode = decodeUnknownSync(Agent)
   const encoded = {
-    kind: 'agent', id: 'agent/children', name: 'Parent', host_id: 'host/example',
+    kind: 'agent', id: 'agent/example-parent', name: 'Parent', host_id: 'host/example',
     runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
     blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-18T12:00:00Z',
     subagents: [{
