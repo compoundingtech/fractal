@@ -680,6 +680,24 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
   ]
 }
 
+/**
+ * A test lane's count of tests nextest passed only on a retry, as the name of a tiny artifact
+ * (`nextest-flaky-<lane>-<N>`), so `st slo` reads it with one artifacts listing per run and no
+ * download. `scripts/ci-linux tests` writes `flaky=N` and the file; nothing is uploaded for 0.
+ */
+export const nextestFlakyUpload = (name: string) => ({
+  name: 'Name the flaky test count',
+  if: "${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}",
+  'continue-on-error': true,
+  uses: 'actions/upload-artifact@v4',
+  with: {
+    name: `nextest-flaky-${name}-\${{ steps.nextest.outputs.flaky }}`,
+    path: '${{ runner.temp }}/nextest-flaky.txt',
+    'if-no-files-found': 'ignore',
+    'retention-days': 1,
+  },
+})
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({

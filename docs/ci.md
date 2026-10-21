@@ -294,7 +294,13 @@ CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separa
 safe and later ones reuse it, so nothing is built.
 Each run isolates test `HOME` and XDG state. The summary records the tested SHA,
 each stage's elapsed time, result and exit code; each stage job uploads `<job>-logs` with its log and `.time` file.
-Nextest's final summary retains flaky outcomes.
+Nextest's final summary retains flaky outcomes. The four test lanes (`linux-tests` and
+`linux-tests-shard-2`, `-3`, `-4`) also count them: `scripts/ci-linux tests` reads the `N flaky` of
+nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
+`genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
+not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
+lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 st3 integration fixtures use the separate `st3-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
