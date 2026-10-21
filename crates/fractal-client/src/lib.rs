@@ -2211,6 +2211,15 @@ impl Client {
         self.list_internal("terminals", cursor, limit, history)
             .await
     }
+    pub async fn runtime_starts_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        self.list_internal("runtime-starts", cursor, limit, history)
+            .await
+    }
     pub async fn operations_list(
         &self,
         cursor: Option<&str>,

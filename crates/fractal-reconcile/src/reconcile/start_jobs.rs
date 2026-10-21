@@ -514,6 +514,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         operation: &RuntimeStartOperation,
         prepared: &PreparedStart,
     ) -> Result<()> {
+        if self
+            .store
+            .close_runtime_start_from_stored_witness(&operation.id)?
+        {
+            self.start_changed(&operation.subject);
+            return Ok(());
+        }
         let member = &prepared.member;
         let observation = if member.terminal {
             self.runtime
@@ -526,13 +533,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(observation) = observation else {
             // An error from an entered backend does not prove its detached producer closed.
             if operation.finished
-                && (operation
-                    .result
-                    .as_ref()
-                    .is_some_and(|r| r["producer_closed"] == true)
-                    || self
-                        .runtime
-                        .start_operation_closed(&prepared.launch_member)?)
+                && self
+                    .runtime
+                    .start_operation_closed(&prepared.launch_member)?
             {
                 self.store
                     .retain_runtime_start_producer_closed(&operation.id)?;

@@ -667,6 +667,7 @@ export class FractalClient {
     async lanesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/lanes' + query(options), undefined, requestOptions); }
     async lanesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/lanes/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async terminalsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/terminals' + query(options), undefined, requestOptions); }
+    async runtimeStartsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/runtime-starts' + query(options), undefined, requestOptions); }
     async operationsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/operations' + query(options), undefined, requestOptions); }
     async operationsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/operations/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async historyList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/history' + query(options), undefined, requestOptions); }
