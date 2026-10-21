@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState } from 'react-native';
-import { clientName } from '@smalltalk/st3-views/clientName';
+import { clientName } from '@fractal/views/clientName';
 import app from './app.json';
 import { LocalQuality, readQualityLaunchClock } from './quality';
 import { LocalDrafts } from './draftsStorage';
@@ -12,7 +12,8 @@ export const quality = new LocalQuality(AsyncStorage, {
   now: () => performance.now(), wall: () => Date.now(),
   after: (fn, ms) => setTimeout(fn, ms), cancel: timer => clearTimeout(timer as ReturnType<typeof setTimeout> | undefined),
   frame: fn => { requestAnimationFrame(fn); },
-}, 'ios', clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD), AppState.currentState === 'active', launchStarted);
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
+}, 'ios', clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD), AppState.currentState === 'active', launchStarted);
 export const localDrafts = new LocalDrafts(AsyncStorage);
 AppState.addEventListener('change', state => quality.foreground(state === 'active'));
 

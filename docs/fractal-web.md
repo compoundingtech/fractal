@@ -14,7 +14,7 @@ or contact an agent-selected tracking endpoint.
 The policy is:
 
 ```text
-default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <inline-script SHA-256 hashes>; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://<page-authority> wss://<page-authority> <configured collector origins>; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <inline-script SHA-256 hashes>; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg=' <inline-stylesheet SHA-256 hashes>; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://<page-authority> wss://<page-authority> <configured collector origins>; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
 ```
 
 `'wasm-unsafe-eval'` lets the terminal key encoder compile its WebAssembly module.
@@ -25,11 +25,16 @@ connect, the server's deployment identity, and Vite's development React-refresh
 preamble. There is no script `unsafe-inline` or `unsafe-eval` exception. Compiled
 StyleX CSS and fonts are same-origin. Only `style-src-attr` needs `unsafe-inline`:
 StyleX variable values, resizable widths and React Aria positioning are runtime
-style attributes whose changing values cannot use fixed hashes. The two style
+style attributes whose changing values cannot use fixed hashes. The two fixed style
 hashes authorize React Aria 3.52.1's fixed pressable touch-action and iOS modal
 overscroll stylesheets (`usePress` and `usePreventScroll`); recheck them when
-upgrading React Aria. Production and preview admit no other inline stylesheet
-elements. Vite development additionally allows `style-src-elem 'self' 'unsafe-inline'`
+upgrading React Aria. Inline-stylesheet hashes cover the `<style>` elements of the
+trusted application HTML: the themed first-paint shell, which must apply before any
+bundle stylesheet loads. Production and preview admit no other inline stylesheet
+elements, and no `data:` stylesheet. The bundle stylesheets (application CSS and
+compiled StyleX) are deferred `media="print"` links that a hashed bootstrap enables
+together once all have loaded; the app renders only then.
+Vite development additionally allows `style-src-elem 'self' 'unsafe-inline'`
 for its injected stylesheets and
 `worker-src 'self' blob:` for Vite's HMR reconnect SharedWorker. These development
 exceptions do not relax `img-src` or production's script/worker policy.
@@ -74,6 +79,24 @@ request then reaches a browser route, which aborts it without contacting the
 remote site. With CSP enforced the route is never reached and `img-src` reports
 the violation. Browser sessions, listeners and temporary build files are closed
 and removed on exit. There is no production CSP-disable switch.
+
+## Observation and unavailable states
+
+The roster and conversation retain trusted content across disconnects. Feed freshness
+and connection state determine whether that content is live; a stale observation never
+claims that a working agent is still working. Observation ages come from the source's
+retained `sync.*.last.observedAt`, not the moment a component renders or a connection
+fails. Sources without that evidence show no invented age. Relative-time leaves share
+the source clock; roster rows do not acquire timers or rerender on clock ticks.
+An in-progress run remains completion-unverified when frozen, even when some tool
+calls already completed. Its recorded calls stay expanded; disconnecting never
+turns unfinished work into a settled “Worked” summary.
+
+Waiting feeds show loading, observed empty feeds show empty content, and a filtered
+roster with no results offers Clear filters. A failed roster read exposes Retry through
+`source.retryAgents`; an unavailable conversation uses `source.retryConversation`.
+Those actions reacquire failed or ended follows without restarting healthy follows.
+Authorization and capability refusals retain their distinct explanations.
 
 ## Hosting the web app on a tailnet
 
@@ -200,14 +223,62 @@ Only successful calls with an observed nonerror result and known changed content
 The inspector preserves reported tool/sender provenance, separates repeated captures of
 the same path, and scopes counts to the shown capture and loaded transcript window.
 Missing captures do not establish that a repository is unchanged. Waiting, unavailable,
-stale observations and older-history boundaries remain visible. Resource card/chip actions
-select captured content locally; they do not fetch repository state.
+stale observations and older-history boundaries remain available. On desktop, the
+Changes header is followed directly by the Captured/current-turn toolbar and files.
+The keyboard-accessible information disclosure holds intact provenance and scope
+caveats, plus local capture selection when multiple resources exist. Repeated card/chip
+summaries are absent; Open on the file header focuses its diff. Unified rows show only
+new line numbers; Split preserves separate old/new numbers. Narrow card/chip actions
+still select captured content locally; neither path fetches repository state.
 
 The panel acquires visible conversation demand while mounted and shares the thread's
 retained feed. Its kit diff viewer loads on demand to preserve the shell's eager-graph
 boundary. `LiveHeader.integration.test.tsx` exercises the actual shell and kit inspector
 with decoded public conversation frames; `capturedChanges.unit.test.ts` guards the
 capture, count, provenance and selection rules.
+
+On desktop, the shared kit `DockedSplit` places captured Changes beside the thread.
+Both panes use the compact 32 px header. The separator normally clamps to 320–720 px:
+arrow keys resize by 8 px (Shift: 32 px), Home/End select the bounds, Enter closes,
+and double-click restores the default. Width persists in browser storage per reported
+host/workspace, with the conversation identity used when the workspace is unknown.
+Pointer resize updates a CSS variable and separator ARIA values without re-rendering
+the thread. Closing Changes unmounts its lazy inspector and releases its demand.
+The live split reserves the kit's general `geometryNumbers.panelMin` (360 px) for the
+thread/composer lane; RM1 has no separate thread-width minimum. Its effective dock
+maximum is the lesser of 720 px and actual container width minus 360 px and the
+separator. At constrained desktop widths, the dock may temporarily become narrower
+than 320 px rather than hiding the thread. Restore and container/window shrink apply
+the same bounds and ARIA maximum without changing the saved preference; more space
+restores that preference.
+Native header actions share one horizontal slot. A named inline-size container on the
+desktop header degrades chrome by the thread lane, not the viewport: at 680 px View KDL
+becomes a named, tooltipped icon; at 560 px the host breadcrumb is omitted and the agent
+name truncates; at 440 px Resources and View KDL move into the Conversation menu.
+The gear is conversation settings, not a theme control. Unavailable Resources retains
+its accessible refusal description/tooltip, and the overflow menu shows that reason.
+The narrow sheet keeps its own presentation. All desktop header controls remain on one
+32 px band without resize-driven React state. Run the real app geometry regression with
+`node apps/fractal-web/scripts/split-header-geometry-proof.mjs` through the heavy build
+lane; it checks pairwise control/breadcrumb overlap and lane containment at 900 px and
+at 1440 px with Changes fully expanded.
+The desktop pane header is the conversation's sole title owner. The transcript omits
+its own title band and portals its synchronization, retry and run controls into the
+stable pane-header action slot; parked conversations contribute no header controls.
+Portalled sync status uses `SyncLine.inline`: absent status takes no width, and hidden
+retry/details actions do not reserve their standalone slot. The native cluster therefore
+stays right-aligned next to the pane toggles; standalone desktop sync layout is unchanged.
+When status is visible, inline sync is the shrinkable item: its single-line text
+ellipsizes, the full reason stays in its accessible name and tooltip, and Retry/Details
+do not shrink. Below a 440 px lane only the status glyph, “Sync failed” and Retry remain;
+the status tooltip retains the full reason, and a retained failure adds “Sync details”
+to the Conversation menu to open the shared diagnostics (not merely the tooltip).
+Narrow SyncLine Retry and Details buttons, and narrow Conversation menu entries, use
+the shared 44 px touch target; desktop SyncLine keeps its dense 24 px controls.
+The browser regression reaches diagnostics through overflow at a 360 px lane and checks
+both phone Retry/Details targets, alongside retained subscription-limit geometry at
+360, 462 and 742 px lanes in both schemes, not only the live/empty status.
+History range, earlier-message and search navigation stay in the transcript viewport.
 
 ## Fractal web composer
 
@@ -359,7 +430,7 @@ roster-loading fallback that enabled a canonical terminal subject without runtim
 the first-control assertion must fail even if the settled control is correctly disabled.
 
 `data/liveSource.ts` resolves an agent's terminal runtime and passes the decoded runtime
-and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@st3/sdk/effect`.
+and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@fractal/sdk/effect`.
 The first attach consumes that observation rather than reading the same runtime twice.
 Admission identity remains the runtime ID; the observation is not a runtime cache.
 Reconnects and resyncs read the runtime afresh before obtaining another attachment.
