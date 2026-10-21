@@ -35,12 +35,18 @@ def run(*command, cwd=None, stdin=None):
 
 class Fixture:
     def __init__(self, object_format='sha1', layout='tree'):
-        self.layout = layout  # 'tree': refs/notes/evidence/<tree>/<record> (what publishers write); 'legacy': refs/notes/evidence/<record>
+        # 'tree': refs/notes/evidence/<tree>/<record> (what publishers write); 'tag': refs/tags/evidence/<tree>/<record> (protected, next);
+        # 'legacy': refs/notes/evidence/<record>
+        self.layout = layout
         self.ref_of = {}
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.repo = self.root / 'repo'
         run('git', 'init', '-q', f'--object-format={object_format}', str(self.repo))
+        # No automatic gc or maintenance: git starts it detached after a commit once loose objects pile up, and it then writes into
+        # objects/pack while the temporary directory is being removed (seen in CI as "Directory not empty: 'pack'" at cleanup).
+        run('git', '-C', str(self.repo), 'config', 'gc.auto', '0')
+        run('git', '-C', str(self.repo), 'config', 'maintenance.auto', 'false')
         self.allowed = []
         self.keys = self.root / 'allowed-signers'
         self.counter = 0
@@ -49,7 +55,7 @@ class Fixture:
         return run('git', '-C', str(self.repo), *IDENTITY, *args, stdin=stdin)
 
     def ref_for(self, record, tree):
-        return f'refs/notes/evidence/{tree}/{record}' if self.layout == 'tree' else f'refs/notes/evidence/{record}'
+        return {'tree': f'refs/notes/evidence/{tree}/{record}', 'tag': f'refs/tags/evidence/{tree}/{record}'}.get(self.layout, f'refs/notes/evidence/{record}')
 
     def key(self, name, principal=None):
         path = self.root / name
@@ -1166,11 +1172,11 @@ class CommittedPolicy(unittest.TestCase):
         declared = {'linux-gate': sorted([
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
-            'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/st3-daemon/src/attach_image.rs
+            'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
             'slo', 'src', 'templates', 'tests', 'vendor', 'wit']), 'typescript-client': sorted([
-            'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json',
+            'apps/fractal-web/package.json', 'apps/fractal-web/packages/fractal-sdk/package.json',
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
-            'clients/typescript', 'crates/stui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
+            'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
         for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
@@ -1416,6 +1422,16 @@ class InputKeyed(unittest.TestCase):
         code, result = self.check(self.tree)
         self.assertEqual((code, result['match']), (0, 'tree'))
 
+    def test_an_input_index_filed_as_a_tag_is_read_and_one_under_both_names_counts_once(self):
+        key = self.key(self.tree)
+        record = self.observed(self.commit, self.tree, key, index=False)
+        self.f.git('update-ref', f'refs/tags/evidence/input/unit/{key}/{record}', record)
+        _, later = self.commit_files({'docs/readme.txt': 'edited'})
+        code, result = self.check(later)
+        self.assertEqual((code, result['match'], result['record']), (0, 'inputs', record), result)
+        self.f.git('update-ref', f'refs/notes/evidence-input/unit/{key}/{record}', record)
+        self.assertEqual(evidence_verify.input_refs(str(self.f.repo), 'unit', key), [record])
+
     def test_a_changed_declared_file_finds_nothing(self):
         self.observed(self.commit, self.tree, self.key(self.tree))
         _, changed = self.commit_files({'src/a.txt': 'edited'})
@@ -1519,6 +1535,55 @@ class InputKeyed(unittest.TestCase):
         self.assertEqual(document['source_inputs'], self.key(self.f.git('rev-parse', 'HEAD^{tree}')))
 
 
+class PartialClone(InputKeyed):
+    """The gate's checkout is a partial clone (it deepens with blob:none) and a record found by input key names another tree's
+    commit, which the checkout lacks. Nothing the verifier reads may be fetched lazily: each such fetch has no negotiation, so it
+    brings the commit's whole history (about 3.4 s each on a runner; 34 of them took a verify past the gate's 30 s)."""
+
+    def clone(self):
+        server = self.f.root / 'server.git'
+        run('git', 'clone', '-q', '--bare', '--mirror', str(self.f.repo), str(server))
+        run('git', '-C', str(server), 'config', 'uploadpack.allowFilter', 'true')
+        run('git', '-C', str(server), 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+        client = self.f.root / 'client'
+        run('git', 'clone', '-q', '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
+        return client
+
+    def lazy_fetches(self, action):
+        trace = self.f.root / f'trace-{self.f.counter}'
+        self.f.counter += 1
+        saved = os.environ.get('GIT_TRACE')
+        os.environ['GIT_TRACE'] = str(trace)
+        try:
+            value = action()
+        finally:
+            os.environ.pop('GIT_TRACE')
+            if saved is not None:
+                os.environ['GIT_TRACE'] = saved
+        text = trace.read_text() if trace.exists() else ''
+        return value, text.count('fetch.negotiationAlgorithm=noop')
+
+    def test_a_record_of_another_tree_and_a_projection_need_no_lazy_fetch(self):
+        self.f.git('branch', '-q', '-M', 'main')
+        old_commit, old_tree = self.commit, self.tree
+        self.f.git('checkout', '-q', '-b', 'other')
+        other, other_tree = self.commit_files({'docs/readme.txt': 'only docs'})  # same key, another tree, on a branch the clone lacks
+        key = self.key(other_tree)
+        record = self.observed(other, other_tree, key)
+        self.f.git('checkout', '-q', 'main')
+        head, head_tree = self.commit_files({'docs/readme.txt': 'main docs', 'src/a.txt': 'a'})
+        self.assertEqual(self.key(head_tree), key)
+        client = self.clone()
+        ref = f'refs/notes/evidence-input/unit/{key}/{record}'
+        run('git', '-C', str(client), 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{ref}:{ref}')
+        self.assertNotEqual(subprocess.run(['git', '-C', str(client), 'cat-file', '-e', other], env=dict(os.environ, GIT_NO_LAZY_FETCH='1'),
+                                           capture_output=True).returncode, 0, 'the record\'s subject commit is not in the clone')
+        result, fetches = self.lazy_fetches(lambda: evidence_verify.verify(str(client), head_tree, 'unit', str(self.f.keys), None, rules=self.rules))
+        self.assertEqual((result['record'], result['match'], fetches), (record, 'inputs', 0), result)
+        projected, fetches = self.lazy_fetches(lambda: evidence_verify.project(str(client), old_tree, tuple(self.PATHS)))
+        self.assertEqual((projected, fetches), (self.key(old_tree), 0), 'an old tree whose blobs the clone lacks projects to the same key')
+
+
 class Sha256Repository(unittest.TestCase):
     def test_sha256_object_ids_work_in_both_layouts_including_the_stale_tree_scan(self):
         for layout, missing in (('legacy', 'stale_tree'), ('tree', 'no_record')):
@@ -1568,6 +1633,25 @@ class Layouts(unittest.TestCase):
         code, result = self.f.verify(self.tree)
         self.assertEqual((code, result['record'], result['attempts']), (0, legacy_record, 2))
 
+    def test_a_record_filed_as_a_tag_is_found_and_one_under_both_names_counts_once(self):
+        self.f.layout = 'tag'
+        record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        code, result = self.f.verify(self.tree)
+        self.assertEqual((code, result['record'], result['attempts']), (0, record, 1))
+        self.f.git('update-ref', f'refs/notes/evidence/{self.tree}/{record}', record)  # the same record under its notes name too
+        self.assertEqual(self.f.verify(self.tree)[1]['attempts'], 1)
+        self.f.layout = 'tree'
+        newer = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=1)
+        code, result = self.f.verify(self.tree)
+        self.assertEqual((code, result['record'], result['attempts']), (0, newer, 2))  # either namespace counts, newest decides as before
+
+    def test_a_tag_under_the_wrong_tree_or_with_the_wrong_suffix_finds_nothing(self):
+        other_commit, other_tree = self.f.commit('two')
+        record = self.f.note(other_commit, other_tree, self.ci, 'machine/ci1')
+        self.f.git('update-ref', f'refs/tags/evidence/{self.tree}/{record}', record)
+        self.f.git('update-ref', f'refs/tags/evidence/{self.tree}/{"1" * 40}', record)
+        self.assertEqual(self.f.verify(self.tree)[1]['reason'], 'no_record')
+
     def test_looking_up_a_tree_never_lists_the_records_of_other_trees(self):
         for number in range(40):
             other_commit, other_tree = self.f.commit(f'other {number}')
@@ -1576,12 +1660,13 @@ class Layouts(unittest.TestCase):
         mine = [self.f.note(commit, tree, self.ci, 'machine/ci1', seconds=n) for n in range(3)]
         code, result, asked = self.listings(tree)
         self.assertEqual((code, result['attempts']), (0, 3))
-        namespace = [(pattern, lines) for pattern, lines in asked if pattern.startswith('refs/notes/evidence/') or pattern == 'refs/notes/evidence']
+        namespace = [(pattern, lines) for pattern, lines in asked if pattern.startswith(('refs/notes/evidence', 'refs/tags/evidence'))]
         self.assertTrue(namespace)
         self.assertLessEqual(sum(lines for _, lines in namespace), len(mine), namespace)  # bounded by this tree's own records
-        self.assertNotIn('refs/notes/evidence', [pattern for pattern, _ in namespace], 'the whole namespace was listed')
+        for whole in ('refs/notes/evidence', 'refs/tags/evidence', 'refs/tags/evidence/input'):
+            self.assertNotIn(whole, [pattern for pattern, _ in namespace], 'the whole namespace was listed')
         for pattern, _ in namespace:
-            self.assertTrue(pattern == f'refs/notes/evidence/{tree}' or '?' in pattern, pattern)
+            self.assertTrue(pattern in (f'refs/notes/evidence/{tree}', f'refs/tags/evidence/{tree}') or '?' in pattern, pattern)
 
     def test_a_miss_does_not_scan_either(self):
         for number in range(30):

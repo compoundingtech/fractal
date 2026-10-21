@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/063ff7f9d6ef099f76c31752b2eb52c5bba94c17";
+    pty.url = "github:compoundingtech/pty/e237afa8587fb953cc589c35e0c9a252f7192444";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
@@ -71,7 +71,17 @@
               options = {
                 xdg.configHome = lib.mkOption { type = lib.types.str; default = "/home/example/.config"; };
                 xdg.stateHome = lib.mkOption { type = lib.types.str; default = "/home/example/.local/state"; };
-                xdg.configFile = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                xdg.configFile = lib.mkOption {
+                  type = lib.types.attrsOf (lib.types.submodule {
+                    freeformType = lib.types.attrsOf lib.types.anything;
+                    options = {
+                      force = lib.mkOption { type = lib.types.bool; default = false; };
+                      enable = lib.mkOption { type = lib.types.bool; default = true; };
+                      text = lib.mkOption { type = lib.types.lines; default = ""; };
+                    };
+                  });
+                  default = { };
+                };
                 home.homeDirectory = lib.mkOption { type = lib.types.str; default = "/home/example"; };
                 home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 home.activation = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
@@ -82,10 +92,10 @@
               };
               config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
               config.home.file = extraConfig.homeFiles or { };
-              config.xdg.configFile = (extraConfig.configFiles or { })
-                // lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
+              config.xdg.configFile = lib.recursiveUpdate (extraConfig.configFiles or { })
+                (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
-                };
+                });
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
@@ -115,7 +125,7 @@
         # pure input, so baking it lets a hermetic build know its own identity
         # without an impure `.git` read. Same env var + JSON shape as the rest of
         # the fleet (TS `@overeng/utils/node/cli-version`; the otel-scrape Rust
-        # reader) — `crates/st-build-stamp` reads it via `option_env!("CLI_BUILD_STAMP")` for the binaries.
+        # reader) — `crates/fractal-build-stamp` reads it via `option_env!("CLI_BUILD_STAMP")` for the binaries.
         # `self.shortRev`/`lastModified` are absent only for a dirty tree, where
         # `dirtyShortRev` and the working-tree mtime stand in and `dirty` is true.
         sourceRev = self.shortRev or self.dirtyShortRev or "unknown";
@@ -148,7 +158,7 @@
         });
         libghosttyVT =
           let
-            bindings = (builtins.fromTOML (builtins.readFile ./crates/st3/Cargo.toml)).dependencies;
+            bindings = (builtins.fromTOML (builtins.readFile ./crates/fractal/Cargo.toml)).dependencies;
           in
           assert bindings.libghostty-vt == "=${pty.lib.libghosttyContract.rustBindingsVersion}";
           assert bindings.libghostty-vt-sys.version == "=${pty.lib.libghosttyContract.rustBindingsVersion}";
@@ -158,6 +168,16 @@
           inherit pkgs;
           baseline = builtins.fromJSON (builtins.readFile ./.github/messaging-compat-baseline.json);
         };
+
+        # The pinned fleet-compatibility release bundle as the archive itself (a fixed-output fetch), for
+        # checks that run scripts/compat-baseline in the sandbox, which has no network. The script
+        # still verifies its checksum and BUILD.json.
+        fleetBaselineArchive =
+          let
+            pin = builtins.fromJSON (builtins.readFile ./.github/fleet-compat-baseline.json);
+            bundle = pin.bundles.${pkgs.stdenv.hostPlatform.rust.rustcTarget} or null;
+          in
+          if bundle == null then null else pkgs.fetchurl { inherit (bundle) url sha256; };
 
         # Give the historical binary a distinct name in the check-only PATH.
         # Resolving it there keeps its store identity out of the runtime derivation.
@@ -190,7 +210,7 @@
             prefixes,
             # These prefixes belong to st2's integration binary. Without an explicit package,
             # Cargo also builds workspace default members and their native test dependencies.
-            flags ? [ "-p" "st2" ],
+            flags ? [ "-p" "fractal-legacy-runner" ],
             testFlags ? [ ],
           }:
           ''
@@ -220,78 +240,78 @@
         st2WorkspaceTestFlags = [
           "--workspace"
           "--exclude"
-          "st2-resource-providers"
+          "fractal-resource-providers"
           "--exclude"
-          "st2-github-issue-component"
+          "fractal-github-issue-component"
           "--exclude"
-          "st2-github-pr-component"
+          "fractal-github-pr-component"
           "--exclude"
-          "st2-pty-stats-component"
+          "fractal-pty-stats-component"
           "--exclude"
-          "st2-vista-component"
+          "fractal-vista-component"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
           "--exclude"
-          "st-runtime"
+          "fractal-runtime"
           "--exclude"
-          "st3"
+          "fractal"
           "--exclude"
-          "st3-daemon"
+          "fractal-daemon"
           "--exclude"
-          "st3-e2e"
+          "fractal-e2e"
           "--exclude"
-          "st3-kernel"
+          "fractal-kernel"
           "--exclude"
-          "st3-telemetry"
+          "fractal-telemetry"
           "--exclude"
-          "st3-secrets"
+          "fractal-secrets"
           "--exclude"
-          "st3-seats-base"
+          "fractal-seats-base"
           "--exclude"
-          "st3-delivery-base"
+          "fractal-delivery-base"
           "--exclude"
-          "st3-missions-base"
+          "fractal-missions-base"
           "--exclude"
-          "st3-github-base"
+          "fractal-github-base"
           "--exclude"
-          "st3-store"
+          "fractal-store"
           "--exclude"
-          "st3-delivery"
+          "fractal-delivery"
           "--exclude"
-          "st3-missions"
+          "fractal-missions"
           "--exclude"
-          "st3-seats"
+          "fractal-seats"
           "--exclude"
-          "st3-attention"
+          "fractal-attention"
           "--exclude"
-          "st3-evidence"
+          "fractal-evidence"
           "--exclude"
-          "st3-github"
+          "fractal-github"
           "--exclude"
-          "st3-peer"
+          "fractal-peer"
           "--exclude"
-          "st3-reconcile"
+          "fractal-reconcile"
           "--exclude"
-          "st3-api-core"
+          "fractal-api-core"
           "--exclude"
-          "st3-api-client-v0"
+          "fractal-api-client-v0"
           "--exclude"
-          "st3-api-mailbox"
+          "fractal-api-mailbox"
           "--exclude"
-          "st3-client"
+          "fractal-client"
           "--exclude"
-          "st3-client-codegen"
+          "fractal-client-codegen"
           "--exclude"
-          "st3-feed"
+          "fractal-feed"
           "--exclude"
-          "st3-client-tui"
+          "fractal-client-tui"
           "--exclude"
-          "st3-migrate"
+          "fractal-migrate"
           "--exclude"
-          "st3-schema"
+          "fractal-schema"
           "--exclude"
-          "stui"
+          "fractal-tui"
         ];
 
         st2 = pkgs.rustPlatform.buildRustPackage {
@@ -305,7 +325,7 @@
           # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
           cargoBuildFlags = [
             "-p"
-            "st2"
+            "fractal-legacy-runner"
           ];
 
           # This NixStamp is the binary's authoritative build identity; it wins
@@ -443,7 +463,7 @@
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
-            for hook in crates/st3-daemon/hooks/claude-observe.sh crates/st3-daemon/hooks/claude-statusline.sh; do
+            for hook in crates/fractal-daemon/hooks/claude-observe.sh crates/fractal-daemon/hooks/claude-statusline.sh; do
               if [ ! -f "$hook" ]; then
                 echo "Missing embedded Claude hook: $hook" >&2
                 exit 1
@@ -462,9 +482,9 @@
           inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
-            "st3"
+            "fractal"
             "-p"
-            "st3-migrate"
+            "fractal-migrate"
           ];
           # `--no-fail-fast` reports every failing test target in one run.
           cargoTestFlags = [
@@ -472,69 +492,69 @@
             "-p"
             "smallclaims"
             "-p"
-            "st-runtime"
+            "fractal-runtime"
             "-p"
-            "st3"
+            "fractal"
             "-p"
-            "st3-daemon"
+            "fractal-daemon"
             "-p"
-            "st3-e2e"
+            "fractal-e2e"
             "-p"
-            "st3-kernel"
+            "fractal-kernel"
             "-p"
-            "st3-telemetry"
+            "fractal-telemetry"
             "-p"
-            "st3-secrets"
+            "fractal-secrets"
             "-p"
-            "st3-seats-base"
+            "fractal-seats-base"
             "-p"
-            "st3-delivery-base"
+            "fractal-delivery-base"
             "-p"
-            "st3-missions-base"
+            "fractal-missions-base"
             "-p"
-            "st3-github-base"
+            "fractal-github-base"
             "-p"
-            "st3-store"
+            "fractal-store"
             "-p"
-            "st3-delivery"
+            "fractal-delivery"
             "-p"
-            "st3-missions"
+            "fractal-missions"
             "-p"
-            "st3-seats"
+            "fractal-seats"
             "-p"
-            "st3-attention"
+            "fractal-attention"
             "-p"
-            "st3-evidence"
+            "fractal-evidence"
             "-p"
-            "st3-github"
+            "fractal-github"
             "-p"
-            "st3-peer"
+            "fractal-peer"
             "-p"
-            "st3-reconcile"
+            "fractal-reconcile"
             "-p"
-            "st3-api-core"
+            "fractal-api-core"
             "-p"
-            "st3-api-client-v0"
+            "fractal-api-client-v0"
             "-p"
-            "st3-api-mailbox"
+            "fractal-api-mailbox"
             "-p"
-            "st3-client"
+            "fractal-client"
             "-p"
-            "st3-client-codegen"
+            "fractal-client-codegen"
             "-p"
-            "st3-feed"
+            "fractal-feed"
             "-p"
-            "st3-client-tui"
+            "fractal-client-tui"
             "-p"
-            "st3-migrate"
+            "fractal-migrate"
             "-p"
-            "st3-schema"
+            "fractal-schema"
             "-p"
-            "stui"
+            "fractal-tui"
             "-p"
-            "st-chatgpt"
+            "fractal-chatgpt"
             "-p"
-            "st-fabric-adapter"
+            "fractal-fabric-adapter"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -660,7 +680,7 @@
           pname = "st-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "st-chatgpt" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
@@ -677,7 +697,7 @@
           pname = "st-fabric-adapter";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "st-fabric-adapter" "--bin" "st-fabric-adapter" ];
+          cargoBuildFlags = [ "-p" "fractal-fabric-adapter" "--bin" "st-fabric-adapter" ];
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
@@ -795,10 +815,10 @@
         });
 
         providerComponentPackages = {
-          "st2-github-issue-component" = "st2_github_issue_component";
-          "st2-github-pr-component" = "st2_github_pr_component";
-          "st2-pty-stats-component" = "st2_pty_stats_component";
-          "st2-vista-component" = "st2_vista_component";
+          "fractal-github-issue-component" = "st2_github_issue_component";
+          "fractal-github-pr-component" = "st2_github_pr_component";
+          "fractal-pty-stats-component" = "st2_pty_stats_component";
+          "fractal-vista-component" = "st2_vista_component";
         };
 
         # One cargo invocation builds all four guest crates: they share the same wasm32 dependency
@@ -827,11 +847,15 @@
           installPhase = ''
             runHook preInstall
             mkdir -p "$out/share/st2/providers"
-            ${pkgs.lib.concatMapStringsSep "\n" (wasmName: ''
+            ${pkgs.lib.concatMapStringsSep "\n" (package:
+              let
+                wasmName = builtins.replaceStrings [ "-" ] [ "_" ] package;
+                installedName = providerComponentPackages.${package};
+              in ''
               wasm-tools component new \
                 "target/wasm32-unknown-unknown/release/${wasmName}.wasm" \
-                -o "$out/share/st2/providers/${wasmName}.component.wasm"
-            '') (pkgs.lib.attrValues providerComponentPackages)}
+                -o "$out/share/st2/providers/${installedName}.component.wasm"
+            '') (pkgs.lib.attrNames providerComponentPackages)}
             runHook postInstall
           '';
         };
@@ -858,7 +882,7 @@
           ST2_VISTA_COMPONENT = providerComponentPath "st2_vista_component";
           cargoTestFlags = [
             "-p"
-            "st2-resource-providers"
+            "fractal-resource-providers"
             "--lib"
             "--test"
             "integration"
@@ -868,7 +892,7 @@
               label = "wasip2 supervisor integration";
               flags = [
                 "-p"
-                "st2"
+                "fractal-legacy-runner"
                 "--features"
                 "wasip2-provider-runtime"
                 "--test"
@@ -880,7 +904,7 @@
               prefixes = [ "resource_provider_e2e::" ];
               flags = [
                 "-p"
-                "st2"
+                "fractal-legacy-runner"
                 "--features"
                 "wasip2-provider-runtime"
               ];
@@ -889,7 +913,7 @@
               label = "wasip2 resource executor";
               flags = [
                 "-p"
-                "st2-resource-wasip2"
+                "fractal-resource-wasip2"
                 "--features"
                 "runtime"
                 "--lib"
@@ -960,7 +984,7 @@
         hookSuccessorSource = pkgs.runCommand "st2-hook-successor-source" { } ''
           cp -R ${self} $out
           chmod -R u+w $out
-          printf '\n# Nix hook replacement acceptance probe.\n' >> $out/crates/st-drivers/hooks/codex-stop.sh
+          printf '\n# Nix hook replacement acceptance probe.\n' >> $out/crates/fractal-drivers/hooks/codex-stop.sh
         '';
 
         st2HookSuccessor = st2.overrideAttrs (_: {
@@ -1095,6 +1119,17 @@
               fractalMigration.phase = "stage";
               environment.FRACTAL_TEST_XML = "<tag>&value";
             }).config;
+            consumer = phase: (mkHmModuleEval {
+              fractalMigration.phase = phase;
+              stateDir = "/home/example/.local/state/st3/store";
+              ptyRoot = "/home/example/.local/state/st3/pty";
+              forceLegacyConfig = true;
+              declarationsApply.enable = false;
+              configFiles."st3/config.toml".text = pkgs.lib.mkAfter ''
+                [checkpoint]
+                enabled = false
+              '';
+            }).config;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
             legacyPreflight = unstaged.home.activation.fractalMigrationPreflight;
@@ -1157,16 +1192,35 @@
           assert builtins.all (item: item.assertion) rendered.assertions;
           assert builtins.all forcedPathsMatch [ "stage" "completed" ];
           assert builtins.all forcedConfigPathsMatch [ "stage" "completed" ];
-          assert !(builtins.all (item: item.assertion) (mkHmModuleEval {
-            fractalMigration.phase = "stage";
-            forceLegacyConfig = true;
-          }).config.assertions);
+          assert builtins.all (phase:
+            let evaluated = consumer phase;
+                file = evaluated.xdg.configFile."st3/config.toml";
+            in builtins.all (item: item.assertion) evaluated.assertions
+              && file.force == (phase == "legacy")
+              && file.enable == (phase != "completed")
+              && pkgs.lib.hasInfix "[checkpoint]" file.text
+              && pkgs.lib.hasInfix (if phase == "completed"
+                then ''state_dir = "/home/example/.local/state/fractal/store"''
+                else ''state_dir = "/home/example/.local/state/st3/store"'') file.text
+              && (phase == "legacy" || (
+                pkgs.lib.hasInfix "/home/example/.local/state/fractal/store/bin/st3"
+                  evaluated.systemd.user.services.fractal.Service.ExecStart
+                && pkgs.lib.hasInfix "/home/example/.local/state/fractal/pty"
+                  evaluated.systemd.user.services.fractal.Service.ExecStart
+              ))
+          ) [ "legacy" "stage" "completed" ];
+          assert builtins.all (stateDir:
+            !(builtins.all (item: item.assertion) (mkHmModuleEval {
+              fractalMigration.phase = "stage";
+              inherit stateDir;
+            }).config.assertions)
+          ) [ "/elsewhere" "/home/example/.local/state/st3-other" "/home/example/.local/state/st3/../other" ];
           assert preflight.before == [ "writeBoundary" ];
           assert preflight.after == [ ];
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
           assert legacyPreflight.data == preflight.data;
-          assert !(completed.xdg.configFile ? "st3/config.toml");
+          assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
           assert pkgs.lib.hasInfix "config.home-manager.toml" completed.home.activation.fractalConfig.data;
@@ -1369,6 +1423,8 @@
         checks.wasm-resolver-feature = st2WasmResolver;
         checks.wasip2-resource-providers = st2ProviderRuntime;
         checks.provider-components = st2ProviderComponents;
+        # The `typescript-client` required check: the frozen pnpm installation is a fixed-output derivation.
+        checks.typescript-client = import ./nix/typescript-client.nix { inherit effect-utils system version; self = ./.; };
         # Exercise the shipped binary, not a cargo-side surrogate: its version entrypoint runs and
         # the same artifact strictly admits a catalog carrying a real wasm profile module.
         checks.wasm-resolver-artifact = pkgs.runCommand "st2-wasm-resolver-artifact-${version}" { } ''
@@ -1431,10 +1487,10 @@
               pkgs.typescript
             ];
           } ''
-            cp -R ${self}/crates/st-drivers/hooks hooks
+            cp -R ${self}/crates/fractal-drivers/hooks hooks
             chmod -R u+w hooks
-            cp ${self}/crates/st3-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
-            cp ${self}/crates/st3-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            cp ${self}/crates/fractal-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
+            cp ${self}/crates/fractal-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
@@ -1460,7 +1516,7 @@
             # every telemetry pull throws — because a bare context takes the fail-open branch and
             # never executes the harness-context producer's body at all, which is the same blind
             # spot in a new place. The channel is a recorder rather than `true`, so the smoke reads
-            # the frames back and asserts the wire `crates/st-drivers/src/pi_channel.rs` decodes: with a pipe nobody
+            # the frames back and asserts the wire `crates/fractal-drivers/src/pi_channel.rs` decodes: with a pipe nobody
             # reads, a producer that silently emits nothing is indistinguishable from a working
             # one, and that failure looks exactly like the pre-producer state where every
             # declaration's context reads null. Nothing else couples the two halves of that wire —
@@ -1553,8 +1609,10 @@
         # the one test that needs a repository gets a throwaway one (its commit ID is an opaque
         # value there) and `tar` is declared for the cache test.
         checks.genie-freshness = pkgs.runCommand "genie-freshness-${version}" {
+          COMPAT_BASELINE_ARCHIVE = fleetBaselineArchive;
           nativeBuildInputs = [
             effect-utils.packages.${system}.genie
+            pkgs.bubblewrap
             pkgs.git
             pkgs.gnutar
             pkgs.jq
@@ -1573,7 +1631,14 @@
           git init --quiet
           git add -A
           git -c user.name=nix -c user.email=nix@localhost commit --quiet -m source
-          bash scripts/ci-genie-freshness
+          # The tests run scripts and git hooks by their `#!/usr/bin/env` line, as they do on a developer's
+          # machine; the sandbox has no /usr/bin/env. Run them in a fresh root that has one (and no
+          # network), so no test needs to change.
+          bwrap --bind /nix /nix --bind "$PWD" "$PWD" --bind "$HOME" "$HOME" --ro-bind /etc /etc \
+            --dev /dev --proc /proc --tmpfs /tmp \
+            --dir /usr/bin --ro-bind ${pkgs.coreutils}/bin/env /usr/bin/env \
+            --dir /bin --ro-bind ${pkgs.bash}/bin/sh /bin/sh \
+            --unsetenv PYTHONPATH --unshare-net --chdir "$PWD" -- bash scripts/ci-genie-freshness
           touch "$out"
         '';
 
