@@ -225,6 +225,43 @@ pub async fn fleet_membership_view(
         .map(Json)
 }
 
+/// Read the live replication authority; a journal cannot report failed persistence.
+pub async fn fleet_leave_state(
+    State(state): State<AppState>,
+) -> Result<Json<smallclaims::sync::FleetLeaveSnapshot>, ApiError> {
+    if state.fleet_id.is_none() {
+        return Ok(Json(smallclaims::sync::FleetLeaveSnapshot {
+            fleet_id: None,
+            own_member_key: None,
+            membership: crate::fleet::FleetView::default(),
+            members: Vec::new(),
+            persistence_error: None,
+        }));
+    }
+    let http = reqwest::Client::builder()
+        .unix_socket(smallclaims::sync::leave_state_socket(&state.state_dir))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(ApiError::internal)?;
+    let snapshot = http
+        .get("http://localhost/v1/internal/fleet/leave-state")
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(ApiError::internal)?
+        .json::<smallclaims::sync::FleetLeaveSnapshot>()
+        .await
+        .map_err(ApiError::internal)?;
+    if snapshot.fleet_id != state.fleet_id
+        || snapshot.own_member_key != state.store.member_public_key()
+    {
+        return Err(ApiError::internal(anyhow::anyhow!(
+            "leave authority belongs to a different fleet incarnation"
+        )));
+    }
+    Ok(Json(snapshot))
+}
+
 /// What doctor's fleet-admission check reports as admitted before this node knew better, for
 /// `st fleet wait` to refuse on.
 pub async fn fleet_admission_residue(

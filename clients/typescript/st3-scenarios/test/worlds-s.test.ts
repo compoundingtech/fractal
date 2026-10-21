@@ -89,6 +89,7 @@ describe.each(definitions)('$id', (definition) => {
         const stream = await client.collectionStream({ socket: replay.socket, onFrame: (frame) => frames.push(frame) })
         stream.subscribe('agents', 'agents', 200)
         clock.advance(0)
+        await replay.flush()
         expect(frames.some((frame) => frame.kind === 'snapshot')).toBe(true)
         stream.close()
         await expect(client.discover()).rejects.toBeInstanceOf(Error)
@@ -102,12 +103,14 @@ describe.each(definitions)('$id', (definition) => {
       stream.subscribe('agents', 'agents', 200)
       stream.subscribeConversation('conversation', thread.agent)
       clock.advance(0)
+      await replay.flush()
       if (cause === 'open-fail') {
         expect(ended).toBe(true)
         expect(frames).toHaveLength(0)
         let reopenedEnded = false
         await client.collectionStream({ socket: replay.socket, onFrame: (frame) => frames.push(frame), onEnd: () => { reopenedEnded = true } })
         clock.advance(0)
+        await replay.flush()
         expect(reopenedEnded).toBe(true)
       } else {
         if (cause === 'subscription-error') {
@@ -124,11 +127,13 @@ describe.each(definitions)('$id', (definition) => {
           const failures = frames.filter((frame) => frame.kind === 'error').length
           stream.unsubscribe('agents')
           stream.subscribe('agents', 'agents', 200)
+          await replay.flush()
           expect(frames.filter((frame) => frame.kind === 'error').length).toBeGreaterThan(failures)
         }
         if (cause === 'resync-coded') {
           const initial = frames.find((frame) => frame.kind === 'conversation')
           clock.advance(4_000)
+          await replay.flush()
           expect(frames.find((frame) => frame.kind === 'resync')).toMatchObject({ code: 'remote-unavailable', message: 'The conversation peer is temporarily unavailable' })
           expect(initial).toBeDefined()
           expect(frames.some((frame) => frame.kind === 'snapshot' && frame.id === 'agents')).toBe(true)
@@ -163,8 +168,10 @@ it('withholds requested snapshots, then releases progress-absent without invente
       const stream = await client.collectionStream({ socket: replay.socket, onFrame: (frame) => frames.push(frame) })
       stream.subscribe('agents', 'agents', 200)
       clock.advance(0)
+      await replay.flush()
       expect(frames).toHaveLength(0)
       clock.advance(6_000)
+      await replay.flush()
       expect(frames.some((frame) => frame.kind === 'snapshot')).toBe(variant === 'progress-absent')
       expect(world.slices.sync.state.expected.some(({ status }) => status._tag === 'Progress')).toBe(false)
       stream.close()
@@ -183,6 +190,7 @@ it('holds connecting socket opens without reporting transport failure', async ()
     const stream = await client.collectionStream({ socket: replay.socket, onFrame: (frame) => frames.push(frame), onEnd: () => { ended = true } })
     stream.subscribe('agents', 'agents', 200)
     clock.advance(20_000)
+    await replay.flush()
     expect(frames).toHaveLength(0)
     expect(ended).toBe(false)
     expect(world.slices.sync.state.expected[0]?.status._tag).toBe('Connecting')

@@ -35,6 +35,7 @@
 //!   `agents-v1`, holds the agents roster only. A report compares only with main's reports of
 //!   its own profile.
 
+use st3::AgentMessagesStore;
 use st3::MissionsStore;
 use st3::SeatsStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -586,7 +587,7 @@ fn target_rows_pool_each_targets_paths_and_keep_message_send_apart() {
         ("person read /v1/client/work".to_owned(), ms(&[30])),
         ("person read fresh".to_owned(), ms(&[250, 400])),
         ("harness event".to_owned(), ms(&[5])),
-        ("message send".to_owned(), ms(&[7, 150])),
+        ("message send".to_owned(), ms(&[7, 400])),
         // Not a latency target's path.
         ("claim".to_owned(), ms(&[900])),
         (LONG_POLL.to_owned(), ms(&[30_000])),
@@ -598,7 +599,7 @@ fn target_rows_pool_each_targets_paths_and_keep_message_send_apart() {
     assert_eq!(rows["write-ack"].count, 3, "a harness event and both message sends");
     assert_eq!(rows["message-send"].count, 2);
     assert_eq!(rows["message-send"].target_ms, rows["write-ack"].target_ms);
-    assert!(rows["message-send"].over_target);
+    assert!(rows["message-send"].over_target, "400 ms is over the 300 ms write-ack target");
     assert!(!rows.contains_key("terminal-attach"));
 }
 
@@ -1594,6 +1595,45 @@ fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
     }
 }
 
+/// As the daemon starts: count the retained sends for the usage estimate in background pages,
+/// one writer turn each, until the counts are ready. A steady run waits for them, as it waits
+/// for the event migration; an upgrade run serves the load while they page.
+fn start_usage_backfill(daemon: &tokio::runtime::Runtime, store: Arc<Store>, regime: LoadRegime) {
+    let pages = daemon.spawn(async move {
+        loop {
+            let page_store = store.clone();
+            let ready = page_store
+                .connection
+                .write_workers()
+                .spawn_blocking(move || page_store.advance_agent_message_days())
+                .await
+                .unwrap()
+                .unwrap();
+            if ready {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    if matches!(regime, LoadRegime::Steady) {
+        daemon.block_on(pages).unwrap();
+    }
+}
+
+/// A cached generated source may already hold the usage estimate's send counts, as one written
+/// before the backfill moved off `Store::open` does. Withdraw them on this private copy, so both
+/// regimes start from the counts an upgraded store has, whatever the cache holds.
+fn withdraw_usage_counts(path: &Path) {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "DELETE FROM meta WHERE key IN ('agent_message_days_v1','agent_message_days_v1_through');
+             DELETE FROM agent_message_sends;
+             DELETE FROM agent_message_days;",
+        )
+        .unwrap();
+}
+
 /// Cached generated sources may already be schema 17. Reconstruct only the legacy event
 /// table on this private fixture copy so the explicit upgrade case really has work to drain.
 /// This fixture preparation is reported separately; it is not production upgrade cost.
@@ -1657,11 +1697,13 @@ fn run(
         .collect::<BTreeSet<_>>();
 
     let fixture_legacy_reconstruction_ms = prepare_legacy_event_fixture(&database);
+    withdraw_usage_counts(&database);
     let opened = Instant::now();
     let store = Arc::new(Store::open(&database, NODE).unwrap());
     let store_open_ms = opened.elapsed().as_secs_f64() * 1_000.0;
     assert!(store.event_payload_migration_pending().unwrap());
     let (migration, mut event_migration) = start_event_migration(daemon, store.clone(), regime);
+    start_usage_backfill(daemon, store.clone(), regime);
     store.bind_fleet(FLEET).ok();
     let claims = store.index().unwrap();
     let socket = root.join("st3.sock");

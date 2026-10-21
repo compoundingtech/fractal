@@ -68,8 +68,8 @@ governs profile-installed commands.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
 Updating the module alone retains the legacy service names and state directories.
-For an existing installation using the default `stateDir`, explicitly stage the
-replacement before performing the host cutover:
+For an existing installation whose `stateDir` is the default `st3` state root or
+a directory beneath it (for example `st3/store`), explicitly stage the replacement:
 
 ```nix
 services.smalltalk.fractalMigration.phase = "stage";
@@ -100,10 +100,15 @@ writing the receipt, creating migration symlinks, starting the replacement,
 probing its API, and retiring legacy service files and whole drop-in directories.
 Do not start the target units manually before this handoff.
 
-Target commands use `~/.config/fractal/config.toml` and
-`~/.local/state/fractal`; their stable binary is in the migrated state's `bin`
-directory. The migration's `st3 -> fractal` directory symlinks keep old binary
-and socket paths accessible. External `binary.path` ownership remains unchanged.
+Target commands use `~/.config/fractal/config.toml` and the corresponding path
+beneath `~/.local/state/fractal`: `st3/store` becomes `fractal/store`, with its
+stable binary in `fractal/store/bin`. PTY and socket paths beneath the legacy root
+are translated independently, so `st3/pty` becomes `fractal/pty`. The migration's
+`st3 -> fractal` directory symlinks keep old binary and socket paths accessible.
+External `binary.path` ownership remains unchanged.
+The host migrator renames the entire `st3` root, not just the configured daemon
+store. It reads node/fleet identity and acquires the post-stop daemon lock from
+the configured nested store, preserving sibling PTY directories in the same move.
 The target refuses to run without the exact state-migration marker followed by
 a newline in **both** `~/.config/fractal/.fractal-migration-completed` and
 `~/.local/state/fractal/.fractal-migration-completed`, while either legacy
@@ -140,14 +145,20 @@ be sufficient: Home Manager's backup extension/command modes accept regular-file
 collisions, but reject this foreign symlink.
 
 Home Manager's explicit `force = true` bypasses collision checks altogether.
-Stage/completed configurations reject forced paths that are raw string prefixes
-of either the legacy `~/.config/st3/config.toml` path or the legacy
-`~/.local/state/st3` root (using the configured XDG directories). This matches
-the pinned Home Manager checker's `$targetPath == $forcedPath*`, not a
-path-component comparison: exact paths and ancestors are rejected, but so are
-prefixes such as `.config/st3/config` and `.local/state/st`. An unrelated path
-such as `.config/other`, or a longer sibling such as `.local/state/st3-other`,
-does not match. Both `home.file` and `xdg.configFile` forced ownership count.
+For the module-managed `xdg.configFile."st3/config.toml"` entry, stage overrides
+`force` to false: adoption must pass normal collision checks so that the staged
+generation is itself a safe rollback candidate. Completed disables this file-linker
+entry, retaining its merged TOML settings in the persistent Fractal backing file.
+Remove conflicting `mkForce true` overrides before staging.
+
+Other forced paths remain rejected when they are raw string prefixes of either
+the legacy `~/.config/st3/config.toml` path or the legacy `~/.local/state/st3` root
+(using the configured XDG directories). This matches the pinned Home Manager
+checker's `$targetPath == $forcedPath*`, not a path-component comparison: exact
+paths and ancestors are rejected, but so are prefixes such as `.config/st3/config`
+and `.local/state/st`. An unrelated path such as `.config/other`, or a longer
+sibling such as `.local/state/st3-other`, does not match. Both `home.file` and
+`xdg.configFile` forced ownership count.
 
 Do not remove the foreign link. Old generations with matching force overrides
 are not safe rollback candidates and must be removed before cutover; the host

@@ -7,8 +7,8 @@ import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { colorVars as c, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 const terminalReason = 'The terminal opens once this agent is running on a host.'
-function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = false }: { scheme?: Scheme; terminalDisabledReason?: string; narrow?: boolean }) {
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = false, laneWidth }: { scheme?: Scheme; terminalDisabledReason?: string; narrow?: boolean; laneWidth?: number }) {
+  return <main data-scheme={scheme} style={laneWidth === undefined ? undefined : { width: laneWidth }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     {narrow
       ? <div data-testid="phone-frame" {...stylex.props(styles.phone)}>
         <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
@@ -16,7 +16,7 @@ function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = f
       : <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} terminalDisabledReason={terminalDisabledReason} />}
   </main>
 }
-const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
+const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact terminal-disabled reason and fixed short/long titles isolate accessible control names, tooltip focus and constrained-lane/phone overflow; the working label is a fixed geometry probe rather than a catalog agent state.' }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
 export default meta
 type Story = StoryObj<typeof meta>
 /** The host knows why the terminal is unavailable: the toggle stays in place and in the tab order, disabled and described; focus shows the reason in the kit tooltip. */
@@ -48,6 +48,20 @@ export const TerminalHidden: Story = { tags: ['critical'], play: async ({ canvas
   await expect(within(header).queryByText(terminalReason)).toBeNull()
 } }
 export const TerminalHiddenLight: Story = { ...TerminalHidden, args: { scheme: 'light' } }
+/** The desktop header adapts to its own lane even inside a wide viewport. */
+export const ConstrainedLane: Story = { tags: ['critical'], args: { laneWidth: 360 }, play: async ({ canvasElement }) => {
+  const header = within(canvasElement).getByTestId('thread-header')
+  const lane = header.getBoundingClientRect()
+  await expect(lane.height).toBe(32)
+  await expect(within(header).getByText('fractal')).not.toBeVisible()
+  await expect(within(header).getByRole('heading', { name: 'Row projection' })).toBeVisible()
+  const controls = within(header).getAllByRole('button').map(button => button.getBoundingClientRect())
+  for (const a of controls) {
+    await expect(a.left >= lane.left && a.right <= lane.right && a.top >= lane.top && a.bottom <= lane.bottom).toBe(true)
+    for (const b of controls) if (a !== b) await expect(a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top).toBe(false)
+  }
+} }
+export const ConstrainedLaneLight: Story = { ...ConstrainedLane, args: { ...ConstrainedLane.args, scheme: 'light' } }
 /**
  * A 390px phone: the header keeps the breadcrumb and status, drops the terminal toggle, and its two controls
  * (Expand sidebar, Agent details) are 44px touch targets that stay inside the header without overflowing it.

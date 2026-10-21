@@ -5357,10 +5357,12 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
     // The owner stands in for the seat's runtime. It waits on a deadline, not a count of 10 ms sleeps, because
     // under CI load those sleeps and the CLI's own start-up both stretch; this test covers declarations
     // surviving restarts, not how fast a seat becomes ready.
+    let started = tokio::time::Instant::now();
     let owner = tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = started + Duration::from_secs(20);
         while tokio::time::Instant::now() < deadline {
             if store.selected_desired_token(SEAT).unwrap().is_some() {
+                let saw = started.elapsed();
                 for (kind, fields) in [
                     (
                         "runtime.observed",
@@ -5386,7 +5388,7 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
                 // The CLI waits on the daemon's event channel after its first state read.
                 events.send_modify(|version| *version += 1);
                 notify.notify_waiters();
-                return;
+                return (saw, started.elapsed());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -5410,8 +5412,38 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
             ],
         )
         .await;
+    let returned = started.elapsed();
     // Join the owner first, so a declaration that never appeared fails as that, not as a readiness timeout.
-    owner.await.unwrap();
+    let (saw, ready) = owner.await.unwrap();
+    if !created.status.success() {
+        // This has stalled only on CI (once in 34 merge groups after #3447); say which side stalled.
+        let shown = tokio::time::timeout(
+            Duration::from_secs(5),
+            daemon.cli(PERSON, &["agents", "show", SEAT]),
+        )
+        .await
+        .map_or_else(
+            |_| "no answer within 5 s".to_owned(),
+            |shown| match serde_json::from_slice::<Value>(&shown.stdout) {
+                Ok(shown) => ["state", "harness_state", "reachability", "observation", "fault"]
+                    .map(|field| format!("{field}={}", shown["value"][field]))
+                    .join(" "),
+                Err(_) => String::from_utf8_lossy(&shown.stderr).into_owned(),
+            },
+        );
+        let events = daemon
+            .store()
+            .events_after(0, Some(SEAT))
+            .unwrap()
+            .into_iter()
+            .map(|event| format!("{} {}", event.store_index, event.kind))
+            .collect::<Vec<_>>();
+        panic!(
+            "{}\nthe owner saw the declaration at {saw:?} and wrote readiness at {ready:?}; the CLI returned at {returned:?}\nstore index {}, {SEAT} events: {events:?}\nagents show: {shown}",
+            String::from_utf8_lossy(&created.stderr),
+            daemon.store().index().unwrap(),
+        );
+    }
     cli_value(created);
     for (command, expected) in [("stop", "stop"), ("start", "agent")] {
         daemon.restart().await;
@@ -6204,11 +6236,34 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
     if st3::test_support::supervise_test() {
         return;
     }
+    const PERSON: &str = "person/robin";
+    const WORKER: &str = "agent/example-retired/worker";
+    const STOPPED: &str = "agent/example-stopped/worker";
     let mut daemon = Daemon::new().await;
     daemon.apply(
-        "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
+        "version 2\nagent \"example-retired/worker\" { command \"true\"; workspace \"/tmp\"; }\nagent \"example-stopped/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
         "retirement-declaration",
     );
+    cli_value(
+        daemon
+            .cli(PERSON, &["agents", "stop", STOPPED, "--as", PERSON])
+            .await,
+    );
+    daemon.store().append_claim(&ClaimInput {
+        subject: STOPPED.into(),
+        kind: "runtime.observed".into(),
+        actor: Some(STOPPED.into()),
+        fields: serde_json::from_value(json!({
+            "runtime_id": "example-stopped-runtime",
+            "incarnation_id": "example-stopped-runtime:i1",
+            "status": "stopped",
+            "terminal": true,
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let transport = st3::client::Client::unix_as(daemon.socket(), PERSON).unwrap();
     let parameters = json!({"to":WORKER,"content":"An invented note.","kind":"wake"});
     let accepted = dispatch(
         &daemon.client(PERSON),
@@ -6231,8 +6286,59 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
         "--idempotency-key",
         key,
     ];
+    let before_retirement = cli_value(daemon.cli(PERSON, &["agents", "ls", "--all"]).await);
+    let active = before_retirement["value"]["items"]
+        .as_array().unwrap().iter()
+        .find(|item| item["id"] == WORKER)
+        .unwrap_or_else(|| panic!("{WORKER}: {before_retirement}"));
+    assert_ne!(active["state"], "retired", "{active}");
     let retired = cli_value(daemon.cli(PERSON, &args).await);
-    daemon.restart().await;
+    // Both the live publication and its restart must agree with the send fence.
+    for restarted in [false, true] {
+        if restarted {
+            daemon.restart().await;
+        }
+        let listed = cli_value(daemon.cli(PERSON, &["agents", "ls", "--all"]).await);
+        let http_list: Value = transport
+            .get("/v1/client/agents?history=true")
+            .await
+            .unwrap();
+        for (subject, state) in [(WORKER, "retired"), (STOPPED, "stopped")] {
+            let shown = cli_value(
+                daemon.cli(PERSON, &["agents", "show", subject, "--all"]).await,
+            );
+            assert_eq!(shown["value"]["id"], subject, "{shown}");
+            assert_eq!(shown["value"]["state"], state, "{shown}");
+            let cli_card = listed["value"]["items"]
+                .as_array().unwrap().iter()
+                .find(|item| item["id"] == subject)
+                .unwrap_or_else(|| panic!("{subject}: {listed}"));
+            assert_eq!(cli_card["state"], state, "{cli_card}");
+            let exact: Value = transport
+                .get(&format!("/v1/client/agents/{subject}?history=true"))
+                .await
+                .unwrap();
+            assert_eq!(exact["id"], subject, "{exact}");
+            assert_eq!(exact["state"], state, "{exact}");
+            let http_card = http_list["items"]
+                .as_array().unwrap().iter()
+                .find(|item| item["id"] == subject)
+                .unwrap_or_else(|| panic!("{subject}: {http_list}"));
+            assert_eq!(http_card["state"], state, "{http_card}");
+        }
+    }
+    assert!(daemon.store()
+        .claims_for_subject_kind_at(STOPPED, "agent.retired", None, false, 10)
+        .unwrap().claims.is_empty());
+    dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-stopped-control-message",
+        daemon.fence(PERSON).await,
+        json!({"to":STOPPED,"content":"A stopped seat can still receive mail.","kind":"wake"}),
+    )
+    .await
+    .unwrap();
     let repeated = cli_value(daemon.cli(PERSON, &args).await);
     assert_eq!(
         retired["value"]["action_id"],
@@ -6298,7 +6404,7 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
         stderr.contains("Retired") && stderr.contains(WORKER),
         "{stderr}"
     );
-    let raw = daemon.transport().post::<_,Value>("/v1/messages",&json!({"to":WORKER,"from":PERSON,"content":"An adapter note","idempotency_key":"retirement-adapter-message"})).await.unwrap_err();
+    let raw = transport.post::<_,Value>("/v1/messages",&json!({"to":WORKER,"from":PERSON,"content":"An adapter note","idempotency_key":"retirement-adapter-message"})).await.unwrap_err();
     let (status,code,_,details)=st3::client::api_error_parts(&raw).unwrap();
     assert_eq!(status,409);assert_eq!(code,"recipient-retired");assert_eq!(details["applied"],"none");
     let restarted = daemon

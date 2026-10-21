@@ -92,7 +92,7 @@ pub fn deliver_tx(
             &json!({"fields": {
                 "from": format!("daemon/{origin}"),
                 "to": recipient,
-                "title": format!("P0: main Performance failed: {} run {}/{}", failure.repository, failure.run_id, failure.run_attempt),
+                "title": format!("P0: main {} failed: {} run {}/{}", failure.failed(), failure.repository, failure.run_id, failure.run_attempt),
                 "content": serde_json::to_string(&content).map_err(internal)?,
                 "status": "sent",
                 "tags": ["P0", "github-workflow-failure", subscription, resource],

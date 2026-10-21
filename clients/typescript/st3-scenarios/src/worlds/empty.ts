@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { WorldDefinition } from '../kit/world.ts'
 import { liveSync } from '../kit/variants.ts'
 import { syntheticFleetMidRefactor } from './fleetMidRefactor.ts'
@@ -22,3 +23,5 @@ export const empty: WorldDefinition = {
     }
   },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

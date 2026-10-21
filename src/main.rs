@@ -18,6 +18,11 @@ mod cli;
 use cli::*;
 
 fn main() -> Result<()> {
+    // Before anything reads the version: clap's `--version`, telemetry, hook receipts.
+    st2::version::set_build_stamps(
+        st_build_stamp::CLI_BUILD_STAMP,
+        st_build_stamp::ST_BUILD_STAMP_LOCAL,
+    );
     let Cli {
         catalog_path,
         command,
@@ -826,7 +831,7 @@ fn validate_cmd(
         let out = serde_json::json!({
             "schema": st2::validate::VALIDATE_RECEIPT_SCHEMA,
             "policyProfile": st2::validate::CORE_CATALOG_POLICY_PROFILE,
-            "agentSpecRevision": agent_spec::AGENT_SPEC_REVISION,
+            "agentSpecRevision": st_build_stamp::AGENT_SPEC_REVISION,
             "issues": issues,
             "agents": report.agents,
             "errors": errors,

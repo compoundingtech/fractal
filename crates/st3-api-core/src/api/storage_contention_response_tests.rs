@@ -94,3 +94,11 @@ fn typed_sqlite_contention_is_a_service_failure_not_input_validation() {
     }
     assert_eq!(super::ApiError::bad(super::St3Error::new("internal", "other fault")).status, super::StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+#[test]
+fn diagnostic_rate_limit_keeps_its_public_retryable_code() {
+    let response = super::ApiError::bad(super::St3Error::new("client-diagnostics-rate-limit", "slow down"));
+    assert_eq!(response.status, super::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(super::client_error_code(Some(&response.code)), "rate-limited");
+    assert!(super::client_error_retryable(response.status, Some("rate-limited")));
+}

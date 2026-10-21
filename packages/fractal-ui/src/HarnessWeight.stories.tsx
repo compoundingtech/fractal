@@ -25,7 +25,7 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
   </section>
 }
 
-const meta = { title: 'Fractal/Explore/Harness event weight', component: HarnessWeightComparison, excludeStories: ['HarnessWeightComparison'], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof HarnessWeightComparison>
+const meta = { title: 'Fractal/Explore/Harness event weight', component: HarnessWeightComparison, excludeStories: ['HarnessWeightComparison'], parameters: { scenario: { _tag: 'contract-fixture', reason: "Compares exact local harness event rows and cards not represented by a scenario slice." }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof HarnessWeightComparison>
 export default meta
 type Story = StoryObj<typeof meta>
 

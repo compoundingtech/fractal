@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { TimelineEntry } from '@smalltalk/st3-client'
 import ciRows from '../../recordings/ci-failing-fix.normalized.json' with { type: 'json' }
 import ciScript from '../../recordings/ci-failing-fix.script.json' with { type: 'json' }
@@ -112,3 +113,5 @@ export const adoptNarrativeRecording = (definition: WorldDefinition): WorldDefin
     },
   }
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture
