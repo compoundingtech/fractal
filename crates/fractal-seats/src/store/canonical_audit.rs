@@ -1304,7 +1304,7 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
             };
             let changed = transaction
                 .execute(
-                    &format!(/* sqlite-large-value: allow-for-now lv-h19e2d1e1422a owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {column}={expression} WHERE ({key})=({selected_row})"),
+                    &format!(/* sqlite-large-value: allow-for-now lv-hf30a0d981c85 owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {column}={expression} WHERE ({key})=({selected_row})"),
                     [],
                 )
                 .unwrap_or_else(|error| panic!("mutating {table}.{column}: {error}"));

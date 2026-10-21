@@ -1585,7 +1585,7 @@ impl SeatsStore for Store {
         let connection = self.readers.get();
         let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
         let subject = subject.as_str();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h21f0cb70fa1b owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he9f0b095e150 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind='intent.desired'
              ORDER BY {CANONICAL_ORDER_DESC}"
         ))?;

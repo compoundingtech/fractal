@@ -89,7 +89,7 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
                 // Local admission already binds aliases; signed replay references are immutable.
                 writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key})));
             }
-            Operation::Retire {} => { transaction.execute(/* sqlite-large-value: allow-for-now lv-h04cf56a8fdef owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
+            Operation::Retire {} => { transaction.execute(/* sqlite-large-value: allow-for-now lv-hcd2673f57bfc owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
         }
     }
     for (register,value) in writes {

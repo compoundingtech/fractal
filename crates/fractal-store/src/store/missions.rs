@@ -99,7 +99,7 @@ impl Store {
         let connection = self.readers.get();
         let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
         let (body, identity, blocked): (Option<String>, String, Option<String>) = connection.query_row(
-            /* sqlite-large-value: allow-for-now lv-h0988d0e7d489 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+            /* sqlite-large-value: allow-for-now lv-h9d524e52ffa5 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
                  SELECT COALESCE((SELECT identity FROM identity_names WHERE name='mission/'||?1),'mission/'||?1) AS identity
              )
              SELECT r.body, requested.identity, COALESCE(h.unavailable,
@@ -138,7 +138,7 @@ impl Store {
         let connection = self.readers.get();
         let bare: Vec<_> = ids.iter().map(|id| id.strip_prefix("mission/").unwrap_or(id)).collect();
         let mut statement = connection.prepare(
-            /* sqlite-large-value: allow-for-now lv-hb9049ed33321 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+            /* sqlite-large-value: allow-for-now lv-h90ef29d765f7 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
                  SELECT DISTINCT COALESCE(names.identity,'mission/'||input.value) AS identity
                  FROM json_each(?1) input LEFT JOIN identity_names names ON names.name='mission/'||input.value
              )

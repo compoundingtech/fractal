@@ -37,7 +37,7 @@ fn desired_reads_fence_pending_lifecycle_without_a_naming_head() {
             ).unwrap();
             assert_eq!(heads, 0);
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h8f564527f357 owner=fractal_store::store::identities_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-h80e80dafa3db owner=fractal_store::store::identities_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
                  VALUES('record/pending','example-peer',1,'pending',0,'{}',?1,?2,?3,'1')",
                 params![state, ORIGINAL, kind],
             ).unwrap();
@@ -357,7 +357,7 @@ fn repaired_naming_fact_does_not_release_historical_name_reservation() {
         let mut connection = peer.connection.write();
         let transaction = connection.transaction().unwrap();
         let changed = transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h6280744ff89b owner=fractal_store::store::identities_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+            /* sqlite-large-value: allow-for-now lv-hcb882e211fa6 owner=fractal_store::store::identities_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
             [&receipt.claim_id],
         ).unwrap();
         assert!(changed > 0);

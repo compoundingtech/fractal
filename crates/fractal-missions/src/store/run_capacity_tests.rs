@@ -129,11 +129,11 @@ fn batched_mission_reads_preserve_alias_lifecycle_fences() {
         if fence == "head-conflict" {
             // The naming fold exposes a losing partition reservation through this head.
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-hc707a8ad70dc owner=fractal_missions::store::run_capacity_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE identity_heads SET unavailable='conflict' WHERE identity='mission/example-before'", [],
+                /* sqlite-large-value: allow-for-now lv-h6fc9dbf9fbe3 owner=fractal_missions::store::run_capacity_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE identity_heads SET unavailable='conflict' WHERE identity='mission/example-before'", [],
             ).unwrap();
         } else {
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h207736d22c9c owner=fractal_missions::store::run_capacity_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hf51505e88cb4 owner=fractal_missions::store::run_capacity_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
                  VALUES('record/pending','example-peer',1,'pending',0,'{}',?1,'mission/example-before','mission.renamed','1')",
                 [fence],
             ).unwrap();

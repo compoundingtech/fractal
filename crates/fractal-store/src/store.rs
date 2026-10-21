@@ -7170,7 +7170,7 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
              LEFT JOIN identity_heads h ON h.identity=requested.identity
              LEFT JOIN desired d ON d.subject=requested.identity",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-hb5ffe16d1cdb owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h6ba84b692e14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| {
             let desired = if row.get_ref(0)?.data_type() == rusqlite::types::Type::Null {
                 None
             } else { Some(DesiredRow {

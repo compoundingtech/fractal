@@ -202,8 +202,8 @@ impl ConversationReadsStore for Store {
         if after == through && local_after == local_through {
             return Ok(false);
         }
-        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5d6619ff3fff owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hc9cc1afde011 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
+        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3794736069fe owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdcbe3463817e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
     }
 
     fn conversation_owner_at(&self, subject: &str, through: u64) -> Result<Option<Owner>> {
@@ -390,7 +390,7 @@ impl ConversationReadsStore for Store {
             };
             connection
                 .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h79ed912dab05 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+                    /* sqlite-large-value: allow-for-now lv-h53448c5c25f2 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
                     SELECT store_index FROM claims INDEXED BY claims_message_to_order_index
                     WHERE kind='message.sent' AND json_extract(body,'$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                       AND store_index>=?2 AND store_index<?3

@@ -2,7 +2,7 @@
 use super::*;
 use crate::model::{LifecycleUnavailableReason, MessageSendRefusal};
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2f8c9da2d2ad owner=fractal_store::store::retirements TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS st3_replica_lifecycle_unavailable
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3cc529e49cd3 owner=fractal_store::store::retirements TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS st3_replica_lifecycle_unavailable
     ON replica_records(subject_hint,kind_hint) WHERE state IN ('unknown','invalid');
     DROP INDEX IF EXISTS st3_lifecycle_operation_index;
     CREATE INDEX IF NOT EXISTS st3_lifecycle_operation_index_v2
@@ -130,7 +130,7 @@ pub fn admit_recipient(
     let recipient = recipient_identity.as_str();
     let pending: bool = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM replica_records INDEXED BY st3_replica_lifecycle_unavailable
         WHERE subject_hint=?1 AND state IN ('unknown','invalid') AND (kind_hint IN ('agent.retired','intent.desired','agent.renamed') OR kind_hint IS NULL))")
-        .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-h1a0ced6d1410 owner=fractal_store::store::retirements TODO=trace-statement-and-value-representation */ [recipient], |row| row.get(0)).map_err(internal)?;
+        .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-h4eb2f4d0f48a owner=fractal_store::store::retirements TODO=trace-statement-and-value-representation */ [recipient], |row| row.get(0)).map_err(internal)?;
     if pending {
         return Err(unavailable(
             recipient,

@@ -437,7 +437,7 @@ pub fn writer_required() -> St3Error {
     St3Error::new("invalid-rename", "identity naming claims must be written through rename-id")
 }
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0d6e1b73d318 owner=fractal_store::store::identities TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS identity_heads (
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h40ca3df48b16 owner=fractal_store::store::identities TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS identity_heads (
     identity TEXT PRIMARY KEY, kind TEXT NOT NULL, canonical_id TEXT NOT NULL,
     naming_revision TEXT, unavailable TEXT
 ) WITHOUT ROWID;
@@ -457,7 +457,7 @@ WHEN OLD.state<>NEW.state AND (OLD.state='repaired' OR NEW.state='repaired')
 BEGIN INSERT OR IGNORE INTO identity_dirty VALUES(1); END;";
 
 pub fn open(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h9003efe6dc7a owner=fractal_store::store::identities TODO=trace-statement-and-value-representation */ SCHEMA)?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcee25249b3a6 owner=fractal_store::store::identities TODO=trace-statement-and-value-representation */ SCHEMA)?;
     rebuild(transaction)
 }
 
@@ -580,23 +580,23 @@ fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {
         names.entry(fact.from.clone()).or_insert_with(|| (fact.identity.clone(),Some(fact.id.clone())));
     }
     if clear {
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h98e13074dae2 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_names", [])?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h888c7aa41e1e owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_heads", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h4d43fd014a3c owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_names", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h5ef5d37f634d owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_heads", [])?;
     }
     for (identity,head) in heads {
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h302875b8f49c owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_heads(identity,kind,canonical_id,naming_revision,unavailable) VALUES (?1,?2,?3,?4,?5)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h5096ce555101 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_heads(identity,kind,canonical_id,naming_revision,unavailable) VALUES (?1,?2,?3,?4,?5)
             ON CONFLICT(identity) DO UPDATE SET kind=excluded.kind,canonical_id=excluded.canonical_id,naming_revision=excluded.naming_revision,unavailable=excluded.unavailable
             WHERE identity_heads.kind IS NOT excluded.kind OR identity_heads.canonical_id IS NOT excluded.canonical_id
                 OR identity_heads.naming_revision IS NOT excluded.naming_revision OR identity_heads.unavailable IS NOT excluded.unavailable",
             params![identity,head.kind.label(),head.canonical,head.revision,head.blocked])?;
     }
     for (name,(identity,claim)) in names {
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-heb10d6ba9e0f owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_names(name,identity,claim_id) VALUES (?1,?2,?3)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h6a4d3dc93653 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO identity_names(name,identity,claim_id) VALUES (?1,?2,?3)
             ON CONFLICT(name) DO UPDATE SET identity=excluded.identity,claim_id=excluded.claim_id
             WHERE identity_names.identity IS NOT excluded.identity OR identity_names.claim_id IS NOT excluded.claim_id",
             params![name,identity,claim])?;
     }
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-hfcc28d7299c4 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_dirty", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h80464fa0fc3c owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM identity_dirty", [])?;
     Ok(())
 }
 
