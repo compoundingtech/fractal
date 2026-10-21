@@ -70,6 +70,8 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case setsGet = "sets.get"
     case capabilitiesGet = "capabilities.get"
     case documentGet = "document.get"
+    case documentsList = "documents.list"
+    case documentReferencesGet = "document-references.get"
     case publicationDefinition = "publication.definition"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
@@ -101,6 +103,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case agentDeclarationGet = "agent-declaration.get"
     case statusHistoryGet = "status-history.get"
     case agentQueueGet = "agent-queue.get"
+    case harnessInventoryGet = "harness-inventory.get"
     case runtimesList = "runtimes.list"
     case runtimesGet = "runtimes.get"
     case observersList = "observers.list"
@@ -147,6 +150,8 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .setsGet: "/v1/client/sets/{id}",
     .capabilitiesGet: "/v1/client/capabilities",
     .documentGet: "/v1/client/documents/content",
+    .documentsList: "/v1/client/documents",
+    .documentReferencesGet: "/v1/client/document-references",
     .publicationDefinition: "/v1/client/publication-definition",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
@@ -178,6 +183,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .agentDeclarationGet: "/v1/client/agent-declarations/{id}",
     .statusHistoryGet: "/v1/client/status-history/{id}",
     .agentQueueGet: "/v1/client/agent-queues/{id}",
+    .harnessInventoryGet: "/v1/client/harness-inventory/{id}",
     .runtimesList: "/v1/client/runtimes",
     .runtimesGet: "/v1/client/runtimes/{id}",
     .observersList: "/v1/client/observers",

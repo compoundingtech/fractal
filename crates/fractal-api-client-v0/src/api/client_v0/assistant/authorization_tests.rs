@@ -283,7 +283,7 @@ async fn assistant_final_delivery_denials_leave_durable_receipts() {
         let mut headers=HeaderMap::new();
         headers.insert(HEADER,fixture.header(&payload,&fixture.attestor).parse().unwrap());
         let context = response_body::Context {
-            state: fixture.state.clone(), client_request: true, observation_report: false,
+            state: fixture.state.clone(), client_request: true, local_only_response: false,
             request_id: "request/test".into(), client_snapshot: None, server: None, roster: false,
         };
         let (Extension(mut receipt),_,Json(value))=read_inner(State(fixture.state.clone()),

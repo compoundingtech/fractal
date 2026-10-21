@@ -461,6 +461,60 @@ async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
 }
 
 #[tokio::test]
+async fn targeted_attention_preserves_actionable_rows_and_filtered_continuations() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    fleet(&state, root.path(), false);
+    for (index, actor) in [(0, AGENT), (1, "agent/reads-fixture.second"), (2, AGENT)] {
+        let key = format!("targeted-attention-{index}");
+        state.store.ask_person(&serde_json::from_value(json!({
+            "person": OWNER, "actor": actor, "title": key, "reason": "fixture",
+            "new_run": key, "idempotency_key": key,
+        })).unwrap()).unwrap();
+    }
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    for projection in ["attention", "attention-rich"] {
+        let baseline = read(&state, projection, &[], MAX_RESPONSE_BYTES).await.unwrap();
+        let expected = baseline["items"].as_array().unwrap().iter()
+            .filter(|row| row["agent_id"] == AGENT).cloned().collect::<Vec<_>>();
+        assert!(expected.len() >= 2);
+        assert!(baseline["items"].as_array().unwrap().iter().any(|row| row["agent_id"] != AGENT));
+        let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
+            &params(&[("agent_id", AGENT), ("limit", "1")]),
+            MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+        assert_eq!(first["items"], json!([expected[0]]));
+        let mut delivered = first["items"].as_array().unwrap().clone();
+        let first_cursor = first["page"]["next_cursor"].as_str().unwrap();
+        let mut next = Some(first_cursor.to_owned());
+        while let Some(cursor) = next {
+            let (_, page) = project(&state, &snapshot, projection,
+                &params(&[("agent_id", AGENT), ("cursor", &cursor)]),
+                MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+            delivered.extend(page["items"].as_array().unwrap().iter().cloned());
+            next = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        }
+        assert_eq!(delivered, expected);
+        if projection == "attention" { assert_no_source_text(&first); }
+        for query in [params(&[("cursor", first_cursor)]),
+            params(&[("cursor", first_cursor), ("agent_id", "agent/reads-fixture.second")])] {
+            assert_eq!(project(&state, &snapshot, projection, &query,
+                MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap_err().code, "page-cursor-expired");
+        }
+        assert_eq!(project(&state, &snapshot, projection,
+            &params(&[("agent_id", AGENT), ("cursor", first_cursor)]),
+            MAX_RESPONSE_BYTES, "other-grant:1").await.unwrap_err().code, "page-cursor-expired");
+        let absent = read(&state, projection, &[("agent_id", "agent/absent")], MAX_RESPONSE_BYTES).await.unwrap();
+        assert!(absent["items"].as_array().unwrap().is_empty());
+        assert_eq!(absent["page"]["has_more"], false);
+        assert!(read(&state, projection, &[("agent_id", AGENT)], 1).await.is_err());
+        for invalid in ["chief-of-staff", "agent/", "person/operator", "agent/private prose"] {
+            assert_eq!(read(&state, projection, &[("agent_id", invalid)], MAX_RESPONSE_BYTES)
+                .await.unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+}
+
+#[tokio::test]
 async fn exact_agent_selector_filters_before_paging_and_binds_continuations() {
     for published_agents in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -972,7 +1026,7 @@ async fn assistant_pages_pack_whole_items_and_resume_at_the_exact_budget_boundar
     let state = state(root.path());
     let snapshot = new_client_snapshot(&state);
     let context = response_body::Context {
-        state: state.clone(), client_request: true, observation_report: false,
+        state: state.clone(), client_request: true, local_only_response: false,
         request_id: "request/00000000-0000-0000-0000-000000000000".into(),
         client_snapshot: Some(snapshot.clone()), server: None, roster: false,
     };
@@ -1047,7 +1101,7 @@ async fn assistant_pages_reject_cursor_limits_and_offsets_outside_the_cached_sna
     let state = state(root.path());
     let snapshot = new_client_snapshot(&state);
     let context = response_body::Context {
-        state: state.clone(), client_request: true, observation_report: false,
+        state: state.clone(), client_request: true, local_only_response: false,
         request_id: "request/test".into(), client_snapshot: Some(snapshot.clone()),
         server: None, roster: false,
     };

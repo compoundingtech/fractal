@@ -786,8 +786,11 @@ async fn revoked_jobs_hold_capacity_and_completion_admits_a_queued_seat() {
     // incarnation, and the crash-loop guard parks none.
     #[tokio::test]
 async fn five_simultaneous_starts_get_distinct_incarnations_without_crash_loop_park() {
-    let store = Arc::new(Store::open_memory("node").unwrap());
+    // A file store, as the daemon has. The start workers write on their own threads, and an
+    // in-memory store's shared cache answers a concurrent reader with a table lock (SQLite 262)
+    // that no busy timeout retries: under parallel load 94 of 800 runs failed with it, 0 of 800 here.
     let workspace = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&workspace.path().join("claims.sqlite3"), "node").unwrap());
     let seats = ["a", "b", "c", "d", "e"].map(|letter| format!("agent/canary/seat-{letter}"));
     let source = seats.iter().fold(String::from("version 2\n"), |source, subject| {
         format!(

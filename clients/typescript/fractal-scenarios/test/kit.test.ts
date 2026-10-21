@@ -1,3 +1,4 @@
+import { deepStrictEqual, ok, strictEqual } from 'node:assert'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +11,7 @@ import { describe, expect } from 'vitest'
 import { ANCHOR, ANCHOR_MS, catalog, loadWorld, parseTimestamp, rebase, SLICE_KINDS, TimeRangeError, type AnySlice } from '../src/index.ts'
 import type { Asciicast } from '../src/kit/asciicast.ts'
 import { screenAt } from '../src/kit/screen.ts'
-import { canonicalJson, generate, sliceFile, sliceTimes } from '../scripts/emit.ts'
+import { generate, sliceFile, sliceTimes } from '../scripts/emit.ts'
 import { rebaseVectors } from '../scripts/vectors.ts'
 import { buildWorld, genericVariants } from '../src/index.ts'
 import { syntheticFleetMidRefactor } from '../src/worlds/fleetMidRefactor.ts'
@@ -44,30 +45,64 @@ describe('rebase', () => {
 
   // Huge's full files are rebased once in huge.test.ts, not once per random clock draw.
   const ordinaryCatalog = catalog.filter(({ id }) => id !== 'huge')
+  // Discover pointers and parse their anchor values once, not once per sampled clock.
   const files = ordinaryCatalog.flatMap(({ id }) => {
     const world = loadWorld(id, { now: ANCHOR_MS })
-    return SLICE_KINDS.map((kind) => ({ id, kind, file: JSON.parse(canonicalJson(sliceFile(world, world.slices[kind] as AnySlice))) }))
+    return SLICE_KINDS.map((kind) => {
+      const file = sliceFile(world, world.slices[kind])
+      const instants = file.times.map(({ pointer, codec }) => {
+        const value = read(file, pointer)
+        ok(typeof value === (codec === 'timestamp' ? 'string' : 'number'))
+        const before = typeof value === 'string' ? parseTimestamp(value) : value
+        ok(typeof before === 'number')
+        return { pointer, codec, before }
+      })
+      return { id, kind, file, instants }
+    })
   })
 
   // 1900..2200: wide enough to cross centuries, inside the range every committed instant supports.
   const nows = Schema.Int.check(Schema.isBetween({ minimum: Date.UTC(1900, 0, 1), maximum: Date.UTC(2200, 0, 1) }))
 
-  it.prop('a rebased file equals the world generated at that now; differences stay exact', { now: nows }, ({ now }) => {
+  const checkRebase = (now: number) => {
     const worlds = new Map(ordinaryCatalog.map(({ id }) => [id, loadWorld(id, { now })]))
-    for (const { id, kind, file } of files) {
+    for (const { id, kind, file, instants } of files) {
       const rebased = rebase({ state: file.state, timeline: file.timeline }, file.times, ANCHOR, now)
-      const world = worlds.get(id)!
-      const direct = JSON.parse(canonicalJson(sliceFile(world, world.slices[kind] as AnySlice)))
-      expect(rebased).toEqual({ state: direct.state, timeline: direct.timeline })
-      for (const { pointer, codec } of file.times as { pointer: string; codec: string }[]) {
-        const before = read(file, pointer)
+      const direct = worlds.get(id)!.slices[kind]
+      deepStrictEqual(rebased, { state: direct.state, timeline: direct.timeline })
+      for (const { pointer, codec, before } of instants) {
         const after = read(rebased, pointer)
-        const delta = codec === 'timestamp' ? parseTimestamp(after as string) - parseTimestamp(before as string) : (after as number) - (before as number)
-        expect(delta).toBe(now - ANCHOR_MS)
-        if (codec === 'timestamp') expect(after).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+        if (codec === 'timestamp') {
+          ok(typeof after === 'string')
+          strictEqual(parseTimestamp(after) - before, now - ANCHOR_MS)
+          ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(after))
+        } else {
+          ok(typeof after === 'number')
+          strictEqual(after - before, now - ANCHOR_MS)
+        }
       }
     }
-  }, { timeout: 60_000 })
+  }
+
+  // Valid shifts all take the same affine branch; vectors above cover truncation and range errors.
+  // Pin calendar boundaries, then sample 32 more clocks instead of repeating that branch 100 times.
+  it.each([
+    Date.UTC(1900, 0, 1),
+    Date.UTC(1900, 2, 1) + 1,
+    0,
+    Date.UTC(2000, 1, 29) + 123,
+    ANCHOR_MS,
+    ANCHOR_MS + 1,
+    Date.UTC(2100, 2, 1) - 1,
+    Date.UTC(2200, 0, 1),
+  ])('rebases every slice at calendar boundary %s', checkRebase)
+
+  it.prop(
+    'a rebased file equals the world generated at that now; differences stay exact',
+    { now: nows },
+    ({ now }) => checkRebase(now),
+    { timeout: 60_000, arbitrary: { runs: 32, seed: 20261021 } },
+  )
 
   it('lists every instant of the default world', () => {
     const world = loadWorld('fleet-mid-refactor', { now: ANCHOR_MS })

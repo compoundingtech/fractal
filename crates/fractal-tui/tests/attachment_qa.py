@@ -28,8 +28,9 @@ def main(binary: str, name: str) -> None:
                 time.sleep(1)
         else:
             raise AssertionError(f"attach failed for {name}")
-        send(session, "\x1c")  # Ctrl+\
-        wait_screen(session, lambda value: not attached(value), "Ctrl+\\ detach")
+        send(session, "\x1c")  # Ctrl+\, the leader
+        send(session, "c")     # then c: the conversation
+        wait_screen(session, lambda value: not attached(value), "Ctrl+\\ c detach")
         send(session, "\x1d")
         value = wait_screen(session, attached, "attached again")
         row = next(index for index, line in enumerate(value.splitlines()) if HEADER in line)

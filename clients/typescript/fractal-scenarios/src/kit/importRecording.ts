@@ -344,7 +344,10 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
     conversation: { ...common, kind: 'conversation', state: { threads, recorded_history: conversationHistory }, timeline: conversation },
     terminal: { ...common, kind: 'terminal', state: { terminals, recorded_history: screenHistory }, timeline: terminal },
     sync: { ...common, kind: 'sync', state: { expected: [] }, timeline: [] },
-  }, recording: { frames, http, socket_ids: [...new Set(rows.filter((row) => row.kind === 'command').flatMap((row) => row.socket_id === null ? [] : [row.socket_id]))] } }
+  }, recording: { frames, http,
+    subscriptions: rows.filter((row) => row.kind === 'command' && row.value.kind === 'subscribe')
+      .map((row) => ({ at_ms: row.receive_ms, socket_id: row.socket_id ?? undefined, command: row.value })),
+    socket_ids: [...new Set(rows.filter((row) => row.kind === 'command').flatMap((row) => row.socket_id === null ? [] : [row.socket_id]))] } }
 }
 
 /** Shift schema-declared instants only: opaque tool input, output and text stay byte-identical. */

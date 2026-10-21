@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('r15_proof', str(ROOT / 'scripts/r15-rename-proof'))
@@ -17,6 +18,134 @@ loader.exec_module(proof)
 
 
 class RenameProof(unittest.TestCase):
+    def test_indirect_directory_literals_follow_path_assignments_and_loops(self):
+        spec = importlib.util.spec_from_file_location('script_paths', ROOT / 'scripts/r15-rename-scripts.py')
+        scripts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scripts)
+        source = ('for package in ("st3-client", "st3-views"):\n'
+                  '    package_path = f"clients/typescript/{package}"\n'
+                  '    source = (root / package_path / "BUCK").read_text()\n'
+                  'label = "st3-client"\n')
+        matches = scripts.path_directory_literals(source, scripts.moved_directory_names())
+        self.assertEqual([row[3] for row in matches], ['st3-client', 'st3-views'])
+        rewritten = scripts.rewrite_path_directory_literals(source)
+        self.assertIn('("fractal-client", "fractal-views")', rewritten)
+        self.assertIn('label = "st3-client"', rewritten)
+        self.assertFalse(scripts.path_directory_literals(rewritten, scripts.moved_directory_names()))
+        embedded = "python3 - <<'PY'\n" + source + "PY\n"
+        self.assertEqual(len(scripts.path_directory_literals(embedded, scripts.moved_directory_names())), 2)
+        assigned = ('package = "st3-client"\n'
+                    'base = root / "clients" / "typescript"\n'
+                    'path = base / package / "BUCK"\n')
+        self.assertEqual(len(scripts.path_directory_literals(assigned, scripts.moved_directory_names())), 1)
+        local = 'local = root / "assistant-ui"\npath = local / "st3-views"\n'
+        self.assertFalse(scripts.path_directory_literals(local, scripts.moved_directory_names()))
+
+    def test_documented_flake_selectors_resolve_local_and_remote_outputs(self):
+        outputs = {
+            'packages': {'x86_64-linux': ['st-chatgpt']},
+            'apps': {}, 'checks': {'x86_64-linux': ['genie-freshness']},
+            'devShells': {'x86_64-linux': ['web', 'genie', 'perf']},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'docs').mkdir()
+            path = tree / 'docs/build.md'
+            valid = ('nix build .#st-chatgpt\nnix develop .#web\n'
+                     'nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt\n'
+                     'nix build .#checks.<system>.genie-freshness\n'
+                     'nix build .#checks.<system>.NAME\n')
+            path.write_text(valid)
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['checked'], 5)
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'PASS')
+            self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['placeholder_selectors'], 2)
+            for invalid in ('nix build .#fractal-chatgpt', 'nix build .#web',
+                            'nix build .#checks.x86_64-linux.suite',
+                            'nix build .#checks.unknown.NAME',
+                            'nix build github:compoundingtech/smalltalk/main#missing'):
+                path.write_text(valid + invalid)
+                self.assertEqual(proof.documented_flake_selector_guard(tree, outputs)['result'], 'FAIL')
+
+    def test_docs_preserve_executables_and_command_guard_rejects_crate_names(self):
+        spec = importlib.util.spec_from_file_location('rename_docs', ROOT / 'scripts/r15-rename-docs.py')
+        docs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(docs)
+        old, new = 'st-fabric-adapter', 'fractal-' + 'fabric-adapter'
+        text = f'{old} --once\n`{old}` is a separate process\n~/.local/state/{old}\ncargo test -p {old}\n'
+        expected = text.replace(f'-p {old}', f'-p {new}')
+        self.assertEqual(docs.rewrite(text), expected)
+        self.assertEqual(docs.rewrite(expected), expected)
+        for prefix in ('.#', 'github:compoundingtech/smalltalk/<commit>#'):
+            self.assertEqual(docs.rewrite('nix build ' + prefix + 'fractal-chatgpt'),
+                             'nix build ' + prefix + 'st-chatgpt')
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / 'scripts').mkdir()
+            (tree / 'docs').mkdir()
+            path = tree / 'docs/adapter.md'
+            path.write_text(expected)
+            self.assertEqual(proof.executable_command_guard(tree, {old}, {old: new})['result'], 'PASS')
+            for command in (f'{new} --once', f'`{new} --status`',
+                            f'subprocess.run(["{new}", "--once"])'):
+                path.write_text(command)
+                self.assertEqual(proof.executable_command_guard(tree, {old}, {old: new})['result'], 'FAIL')
+
+    def test_staged_npm_authority_requires_declared_path_and_pinned_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            source = 'repos/member/packages/@fixture/widget'
+            (tree / 'pnpm-source-inputs.json').write_text(json.dumps({'sourceInputPaths': [source]}))
+            (tree / 'megarepo.lock').write_text(json.dumps({
+                'members': {'member': {'commit': 'a' * 40}}}))
+            workspace = tree / 'pnpm-workspace.yaml'
+            workspace.write_text(
+                'overrides:\n  "@fixture/widget": "file:.devenv/pnpm-source-inputs/current/' + source + '"\n')
+            with patch.object(proof.subprocess, 'check_output',
+                              return_value=json.dumps({'name': '@fixture/widget'})) as read:
+                self.assertEqual(proof.staged_npm_packages(tree), {'@fixture/widget'})
+                self.assertEqual(read.call_args.args[0][-1],
+                                 'a' * 40 + ':packages/@fixture/widget/package.json')
+            with patch.object(proof.subprocess, 'check_output',
+                              return_value=json.dumps({'name': '@fixture/wrong'})):
+                with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                    proof.staged_npm_packages(tree)
+            (tree / 'pnpm-source-inputs.json').write_text('{"sourceInputPaths":[]}')
+            with self.assertRaisesRegex(ValueError, 'no declared source input'):
+                proof.staged_npm_packages(tree)
+
+    def test_embedded_cargo_fixture_keys_resolve_after_script_rewrite(self):
+        loader = importlib.machinery.SourceFileLoader(
+            'r15_scripts_test', str(ROOT / 'scripts/r15-rename-scripts.py'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        scripts = importlib.util.module_from_spec(spec)
+        loader.exec_module(scripts)
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            crate = tree / 'crates/fractal-build-stamp'
+            crate.mkdir(parents=True)
+            (crate / 'Cargo.toml').write_text('[package]\nname="fractal-build-stamp"\n')
+            (tree / 'scripts').mkdir()
+            path = tree / 'scripts/fixture'
+            manifest = ('[dependencies]\nst-build-stamp={path="crates/fractal-build-stamp"}\n'
+                        'library={path="crates/library"}\n')
+            source = "(work / 'Cargo.toml').write_text(" + repr(manifest) + ")\n"
+            path.write_text(source)
+            result = proof.embedded_cargo_guard(tree)
+            self.assertEqual(result['result'], 'FAIL')
+            self.assertEqual(result['checked'], 1)
+            self.assertEqual(result['unresolved'][0]['dependency'], 'st-build-stamp')
+            updated = scripts.rewrite(Path('scripts/ci-build-snapshot-test'), source)
+            self.assertNotEqual(updated, source)
+            self.assertEqual(scripts.rewrite(Path('scripts/ci-build-snapshot-test'), updated), updated)
+            path.write_text(updated)
+            self.assertEqual(proof.embedded_cargo_guard(tree)['result'], 'PASS')
+            # Explicit Cargo renames resolve; an incorrect package field does not.
+            for package, expected in (('fractal-build-stamp', 'PASS'), ('missing', 'FAIL')):
+                manifest = ('[dev-dependencies]\nalias={path="./crates/fractal-build-stamp",'
+                            'package="' + package + '"}\n')
+                path.write_text("(work / 'Cargo.toml').write_text(" + repr(manifest) + ")\n")
+                self.assertEqual(proof.embedded_cargo_guard(tree)['result'], expected)
+
     def test_client_rewrite_selects_non_ts_sources_but_not_recorded_data(self):
         source = ast.parse((ROOT / 'scripts/r15-rename-client.py').read_text())
         (ROOT / 'tmp/r15').mkdir(parents=True, exist_ok=True)
@@ -252,6 +381,7 @@ let socket = "/state/st3.sock";
                 'packages': {'x86_64-linux': ['stable-output'], 'aarch64-darwin': ['other']},
                 'apps': {'aarch64-linux': ['stable-output']},
                 'checks': {'x86_64-darwin': ['stable-output']},
+                'devShells': {},
             })
             for kind, system in (
                 ('packages', 'x86_64-linux'), ('apps', 'aarch64-linux'), ('checks', 'x86_64-darwin'),
@@ -414,6 +544,29 @@ let socket = "/state/st3.sock";
                 with self.subTest(mutation=mutation):
                     source.write_text(mutation)
                     self.assertEqual(proof.npm_resolution_guard(tree, {})['result'], 'FAIL')
+
+    def test_npm_seed_graph_imports_are_manifest_scoped_not_live_aliases(self):
+        source = """
+const seededSources = {
+  [workspace]: `import 'fixture-package';`,
+  [`${repository}/node_modules/fixture-package/package.json`]: JSON.stringify({
+    name: 'fixture-package', main: './index.ts',
+  }),
+}
+createTypeScriptGraph([entry], {}, seededSources)
+"""
+        masked, count = proof.npm_seed_graph_mask(source, {})
+        self.assertEqual(count, 1)
+        self.assertNotIn("import 'fixture-package'", masked)
+        live = source + "\nimport 'fixture-package';\n"
+        self.assertIn("import 'fixture-package';", proof.npm_seed_graph_mask(live, {})[0])
+        for mutation in (
+            source.replace("name: 'fixture-package'", "name: 'different-package'"),
+            source.replace('createTypeScriptGraph(', 'executeSources('),
+            source.replace('/package.json', '/not-a-manifest'),
+        ):
+            self.assertEqual(proof.npm_seed_graph_mask(mutation, {})[1], 0)
+        self.assertEqual(proof.npm_seed_graph_mask(source, {'fixture-package': 'canonical'})[1], 0)
 
     def test_npm_historical_release_fragments_are_immutable_not_live_consumers(self):
         old = {'@smalltalk/fractal-ui': '@fractal/ui'}

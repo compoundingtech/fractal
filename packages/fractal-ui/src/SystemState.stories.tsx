@@ -145,7 +145,7 @@ type SystemStatesArgs = React.ComponentProps<typeof SystemStatesStory> & { roste
 const meta = {
   title: 'Fractal UI/System states',
   component: SystemStatesStory,
-  parameters: { layout: 'fullscreen', scenario: { slices: ['roster'] } },
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['roster'] } },
   args: { scheme: 'dark', connection: 'offline' },
   argTypes: { ...scenarioArgTypes(['roster']), scheme: { options: ['dark', 'light'], control: 'radio' }, connection: { options: ['live', 'offline', 'reconnecting', 'stale', 'failed'], control: 'radio' }, failure: { control: 'text' }, ticking: { control: 'boolean' } },
 } satisfies Meta<SystemStatesArgs>
@@ -243,7 +243,7 @@ const dropAndRestore = async (canvasElement: HTMLElement, between: () => Promise
 /** Geometry plays pin populated long history, bounded to 48 rows; they do not browse whole worlds. */
 const geometry = {
   args: { conversation: 'long' },
-  parameters: { scenario: { slices: ['conversation'], world: 'ci-failing-fix' } },
+  parameters: { scenario: { _tag: 'slices', slices: ['conversation'], world: 'ci-failing-fix' } },
   argTypes: { conversation: { control: false }, roster: { table: { disable: true } } },
   render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />,
 } satisfies Story

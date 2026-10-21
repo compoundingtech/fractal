@@ -175,6 +175,10 @@ pub enum ClientReadOperation {
     AgentWorkspace {
         identity: String,
     },
+    HarnessInventory {
+        agent_id: String,
+        query: fractal_client::HarnessInventoryQuery,
+    },
     /// Up to 512 KiB of an attachment from `offset`, from the member that took the upload. The
     /// answer is base64 in JSON with the file's size; the reader asks again until it has it all.
     Blob {
@@ -1317,8 +1321,10 @@ async fn receive_client_read(
                 cursor,
             } => {
                 anyhow::ensure!((1..=200).contains(&limit), "the timeline limit is invalid");
+                // A cursor carries its own page size. The relayed limit is a required field
+                // that a gateway fills with its default, so it only sizes a first page.
                 let answer = relay_trace::future(Phase::OwnerCall,
-                    client.timeline(&session_id, cursor.as_deref(), Some(limit))).await;
+                    client.timeline(&session_id, cursor.as_deref(), cursor.is_none().then_some(limit))).await;
                 if let Some(trace) = relay_trace::current() {
                     match &answer {
                         Ok(envelope) => trace.response(&envelope.request_id),
@@ -1455,6 +1461,10 @@ async fn receive_client_read(
                     StatusCode::CONFLICT, format!("{error:#}")
                 ).into())
             }
+            ClientReadOperation::HarnessInventory { agent_id, query } => {
+                let value = client.harness_inventory_get(&agent_id, &query).await?.value;
+                Ok(serde_json::to_value(value)?)
+            }
             ClientReadOperation::AgentWorkspace { identity } => {
                 let workspace =
                     crate::config::default_agent_workspace(&identity).map_err(|error| {
@@ -1519,6 +1529,7 @@ async fn receive_client_read(
                                 fractal_client::ErrorCode::NotFound
                                 | fractal_client::ErrorCode::BlobNotFound => StatusCode::NOT_FOUND,
                                 fractal_client::ErrorCode::StaleFence => StatusCode::CONFLICT,
+                                fractal_client::ErrorCode::InventoryUnavailable => StatusCode::SERVICE_UNAVAILABLE,
                                 _ => StatusCode::UNPROCESSABLE_ENTITY,
                             };
                             (
@@ -1611,6 +1622,23 @@ impl MainBackend {
     pub fn socket(&self) -> &Path {
         &self.socket
     }
+
+    fn exchange_error(
+        error: anyhow::Error,
+        phase: smallclaims::replication::ReplicationFailurePhase,
+        started: std::time::Instant,
+    ) -> anyhow::Error {
+        let mut failure = smallclaims::replication::ReplicationExchangeFailure::from_error(
+            &error, phase, started.elapsed(), None,
+        );
+        // This response came from our own daemon, not unsigned remote peer prose.
+        if let Some((status, code, _, _)) = crate::client::api_error_parts(&error) {
+            failure.code = code.to_owned();
+            failure.http_status = Some(status);
+        }
+        let display = error.to_string();
+        error.context(failure).context(display)
+    }
 }
 
 impl Backend for MainBackend {
@@ -1630,6 +1658,7 @@ impl Backend for MainBackend {
         summary_only: bool,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
+        let started = std::time::Instant::now();
         self.client
             .post(
                 "/v1/internal/replication/export",
@@ -1641,7 +1670,9 @@ impl Backend for MainBackend {
                     signature_requests: signature_requests.to_vec(),
                 },
             )
-            .await
+            .await.map_err(|error| Self::exchange_error(
+                error, smallclaims::replication::ReplicationFailurePhase::LocalExport, started,
+            ))
     }
 
     async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
@@ -1669,6 +1700,7 @@ impl Backend for MainBackend {
         round_trip: Option<Duration>,
         carrier: smallclaims::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
+        let started = std::time::Instant::now();
         self.client
             .post(
                 "/v1/internal/replication/receive",
@@ -1680,7 +1712,9 @@ impl Backend for MainBackend {
                     carrier,
                 },
             )
-            .await
+            .await.map_err(|error| Self::exchange_error(
+                error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
+            ))
     }
 
     async fn checkpoint_manifest(
@@ -1753,6 +1787,7 @@ impl Backend for MainBackend {
         status: &str,
         error: &str,
         carrier: Option<smallclaims::replication::ReplicationCarrier>,
+        failure: Option<&smallclaims::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
         let _: serde_json::Value = self
             .client
@@ -1763,6 +1798,7 @@ impl Backend for MainBackend {
                     status: status.to_owned(),
                     error: error.to_owned(),
                     carrier,
+                    failure: failure.cloned(),
                 },
             )
             .await?;
@@ -1789,6 +1825,40 @@ pub fn smalltalk_routes(splice: RawSplice) -> Router<PeerState> {
             post(receive_client_read).get(client_read_capabilities).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
+}
+
+/// Serve a conversation owner's peer listener for tests, and return the client relay of a
+/// gateway that reaches it. The owner's API answers on `owner_socket`; the caller serves it.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn conversation_gateway_relay(
+    owner_socket: &Path,
+    splice: RawSplice,
+    root: &Path,
+) -> Result<Option<ClientRelay>> {
+    use smallclaims::sync::{FleetContext, peer_router};
+    use std::os::unix::fs::PermissionsExt as _;
+    let peer = PeerState::new(
+        MainBackend::new(owner_socket.to_path_buf()),
+        "conversation-owner".into(),
+        FleetAuth::test("fleet-test", &[7; 32]),
+        FleetContext::legacy(BTreeSet::from(["conversation-gateway".into()])),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(splice))).await });
+    let secret = root.join("fleet-secret");
+    fs::write(&secret, [7_u8; 32])?;
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))?;
+    ClientRelay::from_config(&Config {
+        node: "conversation-gateway".into(),
+        fleet_id: Some("fleet-test".into()),
+        shared_secret_file: Some(secret),
+        peers: vec![PeerConfig {
+            name: "conversation-owner".into(),
+            url: format!("http://{address}"),
+        }],
+        ..Default::default()
+    })
 }
 
 /// Run the replication worker: sync this node's store, through its daemon, with the fleet.
@@ -1835,6 +1905,44 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn daemon_export_failures_preserve_machine_code_without_private_messages() {
+        use smallclaims::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+        use std::future::IntoFuture as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/v1/internal/replication/export",
+            post(|| async {
+                (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({
+                    "code": "replication-exchange-metadata-too-large",
+                    "message": "private request content must not be retained",
+                    "details": {}
+                })))
+            }),
+        );
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let backend = MainBackend {
+            client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
+            socket: PathBuf::new(),
+        };
+        let result = backend.export("sample", &ReplicationInventory::default(), false, &[]).await;
+        server.abort();
+        let _ = server.await;
+        let error = result.unwrap_err();
+        let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+        assert_eq!(failure.code, "replication-exchange-metadata-too-large");
+        assert_eq!(failure.phase, ReplicationFailurePhase::LocalExport);
+        assert_eq!(failure.http_status, Some(500));
+        assert!(!failure.cause.contains("private"));
+        let contextual = ReplicationExchangeFailure::from_error(
+            &error, ReplicationFailurePhase::FollowUpExport, Duration::from_millis(123), None,
+        );
+        assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
+        assert_eq!(contextual.elapsed_ms, 123);
+        assert_eq!(contextual.http_status, Some(500));
+    }
 
     #[test]
     fn messages_paging_relay_preserves_explicit_negotiation_and_legacy_wire_shape() {

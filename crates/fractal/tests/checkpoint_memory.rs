@@ -123,6 +123,10 @@ struct Pass {
 fn pass(claims: usize) -> Pass {
     let directory = tempfile::tempdir().unwrap();
     let store = fractal_daemon::store::Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
+    // The trim rests at least 100 ms after each 20 ms chunk so a daemon's writer keeps up. A
+    // rest allocates nothing, and trim pacing has its own tests; without the rests this measures
+    // the same heap with a sixth of the trim's wall time.
+    store.set_trim_pause(std::time::Duration::ZERO);
     history(&store, claims);
     let scratch = directory.path().join("checkpoint");
     let cut = 10 * 86_400_000;

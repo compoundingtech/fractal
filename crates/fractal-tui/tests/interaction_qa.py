@@ -111,6 +111,7 @@ def open_agent(session: str, name: str) -> str:
     time.sleep(1.0)
     if attached(screen(session)):
         send(session, "\x1c")
+        send(session, "c")
         opened = wait_screen(session, lambda value: not attached(value), f"{name}'s conversation")
     return opened
 

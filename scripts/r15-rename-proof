@@ -145,6 +145,190 @@ def wit_artifacts(tree, crates, packages):
             for path in sorted(tree.rglob('*.wit')) if not path.is_symlink()}
 
 
+def executable_command_guard(tree, protected, crates, public_commands=()):
+    """Reject canonical crate names used as preserved executable commands."""
+    renamed = {crates[old]: old for old in protected
+               if old in crates and crates[old] != old
+               and crates[old] not in set(protected) | set(public_commands)}
+    errors, checked = [], 0
+    paths = set(tree.rglob('*.md'))
+    paths.update(path for path in (tree / 'scripts').rglob('*') if path.is_file())
+    for path in sorted(paths):
+        if path.is_symlink():
+            continue
+        try:
+            text = path.read_text()
+        except UnicodeError:
+            continue
+        for new, old in renamed.items():
+            for match in re.finditer(r'(?<![\w./-])' + re.escape(new) + r'(?![\w-])', text):
+                prefix = text[max(text.rfind('\n', 0, match.start()) + 1, match.start() - 200):match.start()]
+                suffix = text[match.end():]
+                # Cargo selectors intentionally use the renamed package.
+                if re.search(r'(?:-p|--package|--exclude)[ =]+$', prefix):
+                    continue
+                shell_block = False
+                if path.suffix == '.md':
+                    for fence in re.finditer(r'^```([^\n]*)', text[:match.start()], re.M):
+                        shell_block = (not shell_block and fence[1].strip() in
+                                       ('sh', 'bash', 'shell', 'console'))
+                command = (
+                    re.match(r'\s+--?[\w]', suffix)
+                    or ((path.suffix != '.md' or shell_block)
+                        and re.fullmatch(r'\s*(?:[$>]\s*)?(?:exec\s+|sudo\s+)?', prefix))
+                    or re.search(r'''(?:Command::new|execFileSync|execFile|spawnSync|spawn)\(\s*["']$''', prefix)
+                    or re.search(r'''subprocess\.(?:run|check_call|check_output|Popen)\(\s*\[\s*["']$''', prefix)
+                    or re.search(r'--bin[ =]+$', prefix)
+                )
+                if command:
+                    checked += 1
+                    errors.append({'path': path.relative_to(tree).as_posix(),
+                                   'line': text.count('\n', 0, match.start()) + 1,
+                                   'command': new, 'expected': old})
+    return {'result': 'FAIL' if errors else 'PASS', 'checked': checked,
+            'protected': sorted(protected), 'unresolved': errors}
+
+
+def documented_flake_selector_guard(tree, outputs):
+    """Resolve local and this repository's documented selectors at the exact head."""
+    checked, placeholders, errors = 0, 0, []
+    selector = re.compile(
+        r'(?:\.|github:compoundingtech/smalltalk(?:/[^#\s`"\']+)?)#'
+        r'(?P<attribute>[A-Za-z0-9_<>${}.-]+)')
+    for path in sorted((tree / 'docs').rglob('*.md')):
+        text = path.read_text()
+        for match in selector.finditer(text):
+            attribute = match['attribute'].rstrip('.,')
+            checked += 1
+            parts = attribute.split('.')
+            prefix = text[text.rfind('\n', 0, match.start()) + 1:match.start()]
+            commands = list(re.finditer(r'\bnix\s+(build|run|develop|print-dev-env)\b', prefix))
+            command = commands[-1][1] if commands else None
+            kinds = (('devShells',) if command in ('develop', 'print-dev-env')
+                     else ('packages', 'apps') if command == 'run'
+                     else ('packages',) if command == 'build' else tuple(outputs))
+            if len(parts) == 1:
+                resolved = any(attribute in names for kind in kinds
+                               for names in outputs.get(kind, {}).values())
+            elif len(parts) == 3 and parts[0] in outputs:
+                kind, system, name = parts
+                systems = (list(outputs[kind]) if system in ('<system>', '${system}')
+                           else [system])
+                name_placeholder = name in ('NAME', '<name>', '${name}')
+                if name_placeholder or system in ('<system>', '${system}'):
+                    placeholders += 1
+                resolved = bool(systems) and all(
+                    bool(outputs[kind].get(candidate, [])) if name_placeholder
+                    else name in outputs[kind].get(candidate, []) for candidate in systems)
+            else:
+                resolved = False
+            if not resolved:
+                errors.append({'path': path.relative_to(tree).as_posix(),
+                               'line': text.count('\n', 0, match.start()) + 1,
+                               'selector': match[0], 'attribute': attribute,
+                               'reason': 'documented selector has no matching HEAD flake output'})
+    return {'result': 'FAIL' if errors else 'PASS', 'checked': checked,
+            'placeholder_selectors': placeholders, 'unresolved': errors}
+
+
+def script_directory_literal_guard(tree):
+    spec = importlib.util.spec_from_file_location(
+        'r15_script_paths', tree / 'scripts/r15-rename-scripts.py')
+    scripts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scripts)
+    directories = scripts.moved_directory_names()
+    errors, checked, historical = [], 0, 0
+    for path in sorted((tree / 'scripts').rglob('*')):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            source = path.read_text()
+        except UnicodeError:
+            continue
+        checked += 1
+        historical_function = None
+        if path.name == 'profile-mailbox-wakes':
+            historical_function = next((node for node in ast.walk(ast.parse(source))
+                                        if isinstance(node, ast.FunctionDef)
+                                        and node.name == 'mailbox_library'), None)
+            expected = {'st3-api-mailbox', 'st3-daemon', 'st3'}
+            names = ({node.value for node in ast.walk(historical_function)
+                      if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+                     if historical_function is not None else set())
+            if not expected <= names:
+                errors.append({'path': path.relative_to(tree).as_posix(),
+                               'reason': 'historical Git-ref lookup lost its pre-rename candidates'})
+        for _, _, line, old, new in scripts.path_directory_literals(source, directories):
+            if (historical_function is not None
+                    and historical_function.lineno <= line <= historical_function.end_lineno
+                    and old in expected):
+                historical += 1
+                continue
+            errors.append({'path': path.relative_to(tree).as_posix(), 'line': line,
+                           'directory': old, 'expected': new})
+    return {'result': 'FAIL' if errors else 'PASS', 'scripts': checked,
+            'historical_git_ref_lookups': historical, 'unresolved': errors}
+
+
+def embedded_cargo_guard(tree):
+    """Resolve embedded script fixture dependencies against real source crates.
+
+    Synthetic fixture-only crates are not workspace dependencies. For a path
+    that names a real crate, Cargo requires either that package's name as the
+    dependency key or an explicit matching `package` field.
+    """
+    workspace = {}
+    for manifest in sorted((tree / 'crates').glob('*/Cargo.toml')):
+        data = tomllib.loads(manifest.read_text())
+        if 'package' in data:
+            workspace[manifest.parent.relative_to(tree).as_posix()] = data['package']['name']
+    checked, unresolved = 0, []
+    for script in sorted((tree / 'scripts').rglob('*')):
+        if not script.is_file() or script.is_symlink():
+            continue
+        try:
+            source = script.read_text()
+        except UnicodeError:
+            continue
+        # Python fixture strings also appear inside shell-script heredocs.
+        candidates = []
+        for _, start, end in literals(source, '.py', spans=True):
+            if not re.search(r'''["']Cargo\.toml["']\s*\)\.write_text\(\s*$''',
+                             source[max(0, start - 160):start]):
+                continue
+            try:
+                value = ast.literal_eval(source[start:end])
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(value, str) and re.search(r'\[(?:[^\]\n]*\.)?(?:dev-|build-)?dependencies\]', value):
+                candidates.append((value, source.count('\n', 0, start) + 1))
+        for value, line in candidates:
+            try:
+                manifest = tomllib.loads(value)
+            except tomllib.TOMLDecodeError:
+                continue
+            tables = [manifest]
+            tables.extend(manifest.get('target', {}).values())
+            for table in tables:
+                for section in ('dependencies', 'dev-dependencies', 'build-dependencies'):
+                    for key, dependency in table.get(section, {}).items():
+                        if not isinstance(dependency, dict) or 'path' not in dependency:
+                            continue
+                        path = dependency['path'].removeprefix('./')
+                        if path not in workspace:
+                            continue
+                        checked += 1
+                        package = dependency.get('package', key)
+                        if package != workspace[path]:
+                            unresolved.append({
+                                'path': script.relative_to(tree).as_posix(), 'line': line,
+                                'dependency': key, 'package': package,
+                                'expected': workspace[path], 'source_path': path,
+                            })
+    return {'checked': checked, 'unresolved': unresolved,
+            'result': 'FAIL' if unresolved else 'PASS'}
+
+
 def symlink_guard(tree):
     links = sorted(path for path in tree.rglob('*') if path.is_symlink())
     dangling = []
@@ -169,14 +353,14 @@ def nix_output_names(tree, revision, repository=ROOT):
       builtins.listToAttrs (map (kind: {{
         name = kind;
         value = builtins.mapAttrs (_: outputs: builtins.attrNames outputs) (flake.${{kind}} or {{}});
-      }}) [ "packages" "apps" "checks" ])'''
+      }}) [ "packages" "apps" "checks" "devShells" ])'''
     command = ['nix', 'eval', '--json', '--no-write-lock-file',
                '--no-update-lock-file', '--expr', expression]
     result = subprocess.run(command, cwd=tree, text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError(f'Nix output evaluation failed in {tree}: {result.stderr.strip()}')
     outputs = json.loads(result.stdout)
-    if not isinstance(outputs, dict) or set(outputs) != {'packages', 'apps', 'checks'}:
+    if not isinstance(outputs, dict) or set(outputs) != {'packages', 'apps', 'checks', 'devShells'}:
         raise ValueError('invalid Nix output attribute map')
     for systems in outputs.values():
         if not isinstance(systems, dict) or any(
@@ -237,6 +421,45 @@ def npm_declaration_mask(text, relative, old_packages):
         end = offsets[node.end_lineno - 1] + len(lines[node.end_lineno - 1].encode()[:node.end_col_offset].decode())
         masked[start:end] = ['\n' if char == '\n' else ' ' for char in text[start:end]]
         count += 1
+    return ''.join(masked), count
+
+
+def npm_seed_graph_mask(text, old_packages):
+    """Resolve embedded source imports only within their manifest-backed seed map."""
+    spans = list(literals(text, '.ts', spans=True))
+    masked = list(text)
+    count = 0
+    for declaration in re.finditer(r'\bconst\s+(\w+)\s*=\s*\{', text):
+        # The final graph argument is an in-memory file map, not module imports.
+        if not re.search(r'\bcreateTypeScriptGraph\([\s\S]*?,\s*' + re.escape(declaration[1]) + r'\s*\)', text[declaration.end():]):
+            continue
+        start = declaration.end() - 1
+        end, depth = start, 0
+        ignored = {begin: finish for _, begin, finish in spans}
+        while end < len(text):
+            if end in ignored:
+                end = ignored[end]
+                continue
+            depth += (text[end] == '{') - (text[end] == '}')
+            end += 1
+            if not depth:
+                break
+        block = text[start:end]
+        names = set()
+        for manifest in re.finditer(
+                r'''node_modules/(''' + NPM_NAME + r''')/package\.json[`'"]\s*\]\s*:\s*JSON\.stringify\(\{\s*name:\s*['"]([^'"]+)['"]''',
+                block):
+            if manifest[1] == manifest[2] and manifest[1] not in old_packages:
+                names.add(manifest[1])
+        for value, begin, finish in spans:
+            if not start < begin < finish < end or not re.search(r'\]\s*:\s*$', text[start:begin]):
+                continue
+            for position, reference in npm_references(value, '', set()):
+                if npm_package(reference) not in names:
+                    continue
+                absolute = begin + 1 + position
+                masked[absolute:absolute + len(reference)] = ' ' * len(reference)
+                count += 1
     return ''.join(masked), count
 
 
@@ -321,6 +544,37 @@ def npm_references(text, relative, internal_scopes):
     return sorted(found.items())
 
 
+def staged_npm_packages(tree):
+    """Resolve root-owned staged packages from their immutable member commits."""
+    authority = tree / 'pnpm-source-inputs.json'
+    if not authority.is_file():
+        return set()
+    inputs = set(json.loads(authority.read_text())['sourceInputPaths'])
+    members = json.loads((tree / 'megarepo.lock').read_text())['members']
+    workspace = (tree / 'pnpm-workspace.yaml').read_text()
+    names = set()
+    for match in re.finditer(
+            r'^  "([^"]+)": "file:\.devenv/pnpm-source-inputs/current/(repos/[^"]+)"$',
+            workspace, re.M):
+        name, path = match.groups()
+        if path not in inputs:
+            raise ValueError('staged override has no declared source input: ' + path)
+        source = re.fullmatch(r'repos/([a-z0-9._-]+)/(packages/(?:@[a-z0-9._-]+/)?[a-z0-9._-]+)', path)
+        if source is None:
+            raise ValueError('invalid staged source package path: ' + path)
+        member, package_path = source.groups()
+        commit = members[member]['commit']
+        if not re.fullmatch(r'[0-9a-f]{40}', commit):
+            raise ValueError('staged member commit is not immutable: ' + member)
+        manifest = json.loads(subprocess.check_output(
+            ['git', '-C', str(ROOT / 'repos' / member), 'show',
+             commit + ':' + package_path + '/package.json'], text=True))
+        if manifest['name'] != name:
+            raise ValueError('staged override package identity mismatch: ' + path)
+        names.add(name)
+    return names
+
+
 def npm_resolution_guard(tree, old_packages, baseline_tree=None):
     files = []
     for path in sorted(tree.rglob('*')):
@@ -347,10 +601,11 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
             raise ValueError('workspace pattern has no package manifests: ' + pattern)
         members.update(matches)
     workspace = {manifests[path]['name'] for path in members if 'name' in manifests[path]}
+    staged = staged_npm_packages(tree)
     internal_scopes = {name.split('/')[0] for name in workspace | set(old_packages) if name.startswith('@')}
     isolated = {directory: {data['name']} if 'name' in data else set()
                 for directory, data in manifests.items() if directory not in members}
-    registry = set()
+    registry = set(staged)
     aliases = set()
     errors = []
     checked = 0
@@ -377,7 +632,7 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
                 name, selector = dependency.groups()
                 checked += 1
                 if ((name.split('/')[0] in internal_scopes or selector.startswith('workspace:'))
-                        and name not in workspace):
+                        and name not in workspace | staged):
                     errors.append({'path': path.relative_to(tree).as_posix(), 'reference': name,
                                    'selector': selector, 'reason': 'lock importer has no workspace package'})
         if path.name.startswith('tsconfig') and path.suffix == '.json':
@@ -399,7 +654,7 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
                 elif selector.startswith('workspace:'):
                     target = selector.removeprefix('workspace:')
                     target = npm_package(target) if target.startswith('@') or re.match(r'[a-z].*@', target) else name
-                    if target not in workspace:
+                    if target not in workspace | staged:
                         reason = 'workspace dependency has no package manifest'
                 elif selector.startswith(('file:', 'link:')):
                     target = (directory / selector.split(':', 1)[1]).resolve()
@@ -437,6 +692,9 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
             continue
         text, count = npm_declaration_mask(text, relative, old_packages)
         declarations += count
+        if path.suffix in ('.ts', '.tsx'):
+            text, count = npm_seed_graph_mask(text, old_packages)
+            declarations += count
         for position, reference in npm_references(text, relative, internal_scopes):
             package = npm_package(reference)
             if package is None or package.split('/')[0] in NODE_BUILTINS:
@@ -464,6 +722,7 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
                 errors.append({'path': relative, 'reason': 'historical release fragment removed'})
     return {'result': 'FAIL' if errors else 'PASS', 'checked': checked, 'text_files': len(files),
             'workspace_names': sorted(workspace), 'registry_names': len(registry),
+            'staged_member_names': sorted(staged),
             'declaration_literals': declarations, 'recorded_payloads': payloads,
             'immutable_release_fragments': historical_fragments,
             'isolated_manifests': len(isolated), 'unresolved': errors}
@@ -618,6 +877,12 @@ def main():
             tree.mkdir()
             snapshot(revision, tree)
         guards = {}
+        guards['script_directory_literals'] = script_directory_literal_guard(trees[1])
+        differences.extend({'category': 'script_directory_literal', **error}
+                           for error in guards['script_directory_literals']['unresolved'])
+        guards['embedded_cargo_dependencies'] = embedded_cargo_guard(trees[1])
+        differences.extend({'category': 'embedded_cargo_dependency_resolution', **error}
+                           for error in guards['embedded_cargo_dependencies']['unresolved'])
         guards['npm_references'] = npm_resolution_guard(trees[1], packages, trees[0])
         differences.extend({'category': 'npm_reference_resolution', **error}
                            for error in guards['npm_references']['unresolved'])
@@ -650,6 +915,17 @@ def main():
                                   'checked': len(wit_before), 'changed': wit_changed}
         differences.extend({'category': 'wit_artifact', 'path': path} for path in wit_changed)
         binary_lists = [binaries(tree) for tree in trees]
+        # Existing public Nix command aliases (notably fractal) remain valid.
+        public_commands = {name for names in guards['nix_output_attributes'].get(
+            'before', {}).get('packages', {}).values() for name in names}
+        guards['protected_executable_commands'] = executable_command_guard(
+            trees[1], set(binary_lists[0]), crates, public_commands)
+        differences.extend({'category': 'protected_executable_command', **error}
+                           for error in guards['protected_executable_commands']['unresolved'])
+        guards['documented_flake_selectors'] = documented_flake_selector_guard(
+            trees[1], guards['nix_output_attributes'].get('after', {}))
+        differences.extend({'category': 'documented_flake_selector', **error}
+                           for error in guards['documented_flake_selectors']['unresolved'])
         if binary_lists[0] != binary_lists[1]:
             differences.append({'category': 'binary_names', 'before': binary_lists[0], 'after': binary_lists[1]})
         provider_names = []

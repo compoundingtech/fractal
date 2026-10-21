@@ -482,6 +482,16 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation})).await
     }
+    /// Follow an agent's or a session's conversation showing at most `limit` of its newest
+    /// entries in the first frame; the server caps the request to its page ceiling.
+    pub async fn subscribe_conversation_with_limit(
+        &mut self,
+        id: &str,
+        conversation: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"conversation", "conversation":conversation, "limit":limit})).await
+    }
     pub async fn unsubscribe(&mut self, id: &str) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"unsubscribe", "id":id}))
             .await
@@ -630,6 +640,9 @@ pub enum CollectionEvent {
         items: Vec<TimelineEntry>,
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
+        /// On a replacement with older history: the timeline cursor for the entries just
+        /// before this frame's oldest entry. Absent on deltas and when nothing is older.
+        older_cursor: Option<String>,
         /// The conversation header (contract §3) when this frame carries one.
         header: Option<serde_json::Value>,
     },
@@ -686,6 +699,7 @@ impl CollectionEvent {
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
                 has_more: field(&frame, "has_more")?,
+                older_cursor: field(&frame, "older_cursor")?,
                 header: frame.get("header").cloned(),
                 id,
             }),
@@ -813,6 +827,7 @@ impl ClientError {
                             | ErrorCode::PageCursorExpired
                             | ErrorCode::CursorGap
                             | ErrorCode::RemoteUnavailable
+                            | ErrorCode::DocumentNotSynced
                             | ErrorCode::RateLimited
                             | ErrorCode::RuntimeAuthorityIndeterminate
                             | ErrorCode::TerminalUnavailable
@@ -825,6 +840,11 @@ impl ClientError {
     }
 }
 
+/// How st begins its refusal of an answer to a native prompt, written for the person: the prompt
+/// was answered elsewhere or replaced, or only its terminal can answer it. A `stale-fence` that
+/// begins with it keeps st's own words.
+pub const PROMPT_REFUSAL_PREFIX: &str = "that prompt ";
+
 /// An error st sent (a code, when it gave one, and its message) as a person reads it.
 pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
     let Some(code) = code else {
@@ -835,6 +855,9 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         .find_map(|word| word.strip_prefix("host/"))
         .map(|host| host.trim_end_matches(|c: char| !c.is_alphanumeric()));
     match code {
+        // A native prompt's answer is refused in words written for the person: the prompt was
+        // answered elsewhere or replaced, or only its terminal can answer it.
+        ErrorCode::StaleFence if message.starts_with(PROMPT_REFUSAL_PREFIX) => message.to_owned(),
         ErrorCode::StaleFence => {
             "st changed while this was on its way, so it was not applied".into()
         }
@@ -865,6 +888,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::Forbidden => format!("not allowed: {message}"),
         ErrorCode::Internal => format!("st hit a problem: {message}"),
         ErrorCode::TimelineHistoryIncomplete
+        | ErrorCode::InventoryUnavailable
         | ErrorCode::ConversationContentInvalidated
         | ErrorCode::TranscriptUnavailable => message.to_owned(),
         ErrorCode::TerminalEnded => "the terminal ended: its process exited".into(),
@@ -884,6 +908,10 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::MessageStoreFull
         | ErrorCode::LongMessageSignatureUnsupported => message.to_owned(),
         ErrorCode::BlobNotFound => "this image is not stored on this machine".into(),
+        ErrorCode::DocumentNotSynced => {
+            "this version of the document has not reached this host yet".into()
+        }
+        ErrorCode::InvalidDocumentReference => message.to_owned(),
         ErrorCode::BlobExpired => {
             "this image was removed after its retention window; the message text remains".into()
         }
@@ -1624,9 +1652,27 @@ impl Client {
     }
 
     // @st3-codegen:rust-operation-methods
+    /// Upload 1–32 bounded events (at most 128 KiB). Acknowledged IDs are durable,
+    /// including duplicates. Requires `write.client-diagnostics`.
+    pub async fn diagnostics_submit(
+        &self,
+        batch: &ClientDiagnosticsBatch,
+    ) -> Result<Envelope<ClientDiagnosticsAck>, ClientError> {
+        self.post("/v1/client/diagnostics", batch).await
+    }
     /// Local diagnostic acceptance; retry the identical disjoint intervals and report ID.
     pub async fn observations_report(&self, report: &ObservationReport) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Replace this paired device's local-only push registration. No graph receipt.
+    pub async fn push_register(&self, registration: &PushRegistration) -> Result<PushRegistrationResponse, ClientError> {
+        self.post("/v1/client/push-registration", registration).await
+    }
+
+    /// Remove this paired device's local-only push registration.
+    pub async fn push_unregister(&self) -> Result<PushRegistrationResponse, ClientError> {
+        self.request(Method::DELETE, "/v1/client/push-registration", None).await
     }
 
     pub async fn pairing_begin(
@@ -3070,6 +3116,24 @@ mod tests {
     }
 
     #[test]
+    fn push_request_debug_never_contains_secret_fields() {
+        let registration = PushRegistration {
+            token: "abcdef0123456789".into(),
+            environment: PushEnvironment::Development,
+            bundle_id: "example.push".into(),
+            app_version: "1.0".into(),
+        };
+        let debug = format!("{registration:?}");
+        assert!(!debug.contains(&registration.token));
+        assert!(debug.contains("[REDACTED]"));
+        let safe = PushRegistrationStatus {
+            registered: false,
+            environment: None,
+        };
+        assert_eq!(serde_json::to_value(safe).unwrap(), serde_json::json!({"registered":false}));
+    }
+
+    #[test]
     fn a_refused_long_message_reads_as_the_daemon_worded_it_with_its_limit() {
         let text = "a message cannot be longer than 256 KiB; this one is 300 KiB.";
         for code in [
@@ -3102,6 +3166,15 @@ mod tests {
             stale.plain(),
             "st changed while this was on its way, so it was not applied"
         );
+        // A prompt's refusal keeps st's own words: why it cannot be answered from here.
+        assert_eq!(
+            api(
+                ErrorCode::StaleFence,
+                "that prompt is no longer waiting: it was answered or replaced"
+            )
+            .plain(),
+            "that prompt is no longer waiting: it was answered or replaced"
+        );
         assert!(stale.is_transient());
         let remote = api(
             ErrorCode::RemoteUnavailable,
@@ -3109,6 +3182,9 @@ mod tests {
         );
         assert_eq!(remote.plain(), "Juniper cannot be reached right now");
         assert!(remote.is_transient());
+        let unsynced = api(ErrorCode::DocumentNotSynced, "document `doc/a@b` has not reached this host yet");
+        assert_eq!(unsynced.plain(), "this version of the document has not reached this host yet");
+        assert!(unsynced.is_transient());
         let gone = api(ErrorCode::NotFound, "agent `agent/x` does not exist");
         assert_eq!(gone.plain(), "it is gone: agent `agent/x` does not exist");
         assert!(!gone.is_transient());
