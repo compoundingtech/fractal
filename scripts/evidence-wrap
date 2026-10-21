@@ -9,7 +9,9 @@ the command, its exit code, the sha256 of its exact output and an environment fi
 (flake.lock, the dev shell derivation, this script's own bytes, the system, the attempt). The
 signer (scripts/evidence-sign, behind a sekrets grant; this script never sees the key)
 recomputes the tree and flake.lock itself and signs. A failing command is recorded too: a
-failure is a record, not a missing record.
+failure is a record, not a missing record. COMMAND keeps the caller's environment; the signer is
+started without the loader and interpreter variables it refuses (LD_*, DYLD_*, PYTHON*,
+GLIBC_TUNABLES, GCONV_PATH, NLSPATH) and with a fixed PATH.
 
 The note is imported as refs/tags/evidence/<tree>/<record> in this checkout and, while gates on older bases
 read only notes, as refs/notes/evidence/<tree>/<record> naming the same record. With --push REMOTE both are
@@ -44,6 +46,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -51,10 +54,31 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_SIGNER = ['st', 'sekrets', '--', 'evidence-sign']
+# What would make the loader or the interpreter load code into the signer, which refuses to start with any of them
+# set (scripts/evidence-sign REFUSED_ENVIRONMENT; the refusal stays, it is the signer's tripwire). Some hosts preload
+# a library into every process (hetz2: jemalloc), so the signer is started without these, and with a fixed PATH: its
+# program is resolved first, with the caller's.
+LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
+LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')
+SIGNER_PATH = '/run/current-system/sw/bin:/usr/bin:/bin'
 
 
 class Failure(Exception):
     pass
+
+
+def signer_launch(argv, environ=None):
+    """(argv, env) that start the signer: the program as an absolute path, the caller's environment without any
+    loader or interpreter variable, and SIGNER_PATH as PATH."""
+    environ = os.environ if environ is None else environ
+    if not argv or not all(isinstance(a, str) for a in argv):
+        raise Failure('--signer must be a JSON array of strings')
+    program = argv[0] if '/' in argv[0] else shutil.which(argv[0], path=environ.get('PATH', ''))
+    if not program:
+        raise Failure(f'the signer {argv[0]!r} is not on PATH')
+    env = {k: v for k, v in environ.items() if not k.startswith(LOADER_PREFIXES) and k not in LOADER_VARIABLES}
+    env['PATH'] = SIGNER_PATH
+    return [os.path.abspath(program), *argv[1:]], env
 
 
 def git(*args, stdin=None, check=True, env_extra=None):
@@ -198,8 +222,8 @@ def main(argv):
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}
         if args.aggregate and facts.get('runner'):
             request['runner'] = facts['runner']
-        signer = json.loads(args.signer)
-        done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300)
+        signer, signer_env = signer_launch(json.loads(args.signer))
+        done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300, env=signer_env)
         if done.returncode != 0:
             raise Failure('the signer refused: ' + done.stderr.decode(errors='replace').strip()[-500:])
         answer = json.loads(done.stdout)

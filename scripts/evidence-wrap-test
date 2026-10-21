@@ -94,6 +94,42 @@ def main(argv):
         assert statement(failed['record'])['predicate']['observed']['checks']['linux-gate']['exit_code'] == 3
         print('passed: a failing command is recorded with its exit code, and the wrapper returns it')
 
+        # A host that preloads a library into every process (hetz2: jemalloc) still signs: the caller's loader and
+        # interpreter variables reach the command, never the signer, and the signer itself still refuses them.
+        (tmp / 'empty-lib').mkdir()
+        (tmp / 'empty-py').mkdir()
+        hostile = {'LD_PRELOAD': '/nonexistent/libpreload.so', 'LD_AUDIT': '/nonexistent/libaudit.so',
+                   'LD_LIBRARY_PATH': str(tmp / 'empty-lib'), 'GLIBC_TUNABLES': 'glibc.malloc.check=3',
+                   'PYTHONPATH': str(tmp / 'empty-py'), 'PYTHONSTARTUP': '/nonexistent/startup.py', 'DYLD_INSERT_LIBRARIES': '/x.dylib'}
+        seen = tmp / 'command-env'
+        preloaded = run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain, '--signer', signer,
+                         '--', 'sh', '-c', f'env > {seen}'], repo, home, **hostile)
+        assert preloaded.returncode == 0, preloaded.stderr.decode()
+        signed = json.loads(preloaded.stderr.decode()[preloaded.stderr.decode().index('{'):])['record']
+        assert statement(signed)['predicate']['tier'] == 'full'
+        assert 'LD_PRELOAD=/nonexistent/libpreload.so' in seen.read_text().splitlines(), 'the command keeps the caller environment'
+        stub_dir = tmp / 'stub-bin'
+        stub_dir.mkdir()
+        dump, argv0 = tmp / 'signer-env', tmp / 'signer-argv0'
+        (stub_dir / 'stub-signer').write_text(f'#!/bin/sh\nenv > {dump}\nprintf "%s" "$0" > {argv0}\nexit 7\n')
+        (stub_dir / 'stub-signer').chmod(0o755)
+        stubbed = run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain, '--signer', '["stub-signer"]',
+                       '--', 'true'], repo, home, **dict(hostile, PATH=f'{stub_dir}:{ENV["PATH"]}'))
+        assert stubbed.returncode == 1 and b'the signer refused' in stubbed.stderr, stubbed.stderr.decode()
+        reached = dict(line.split('=', 1) for line in dump.read_text().splitlines() if '=' in line)
+        leaked = sorted(k for k in reached if k.startswith(('LD_', 'DYLD_', 'PYTHON')) or k in ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH'))
+        assert not leaked, leaked
+        assert reached['PATH'] == '/run/current-system/sw/bin:/usr/bin:/bin' and reached['HOME'] == str(home), reached
+        assert argv0.read_text() == str(stub_dir / 'stub-signer'), 'the signer program is resolved with the caller PATH, then run by absolute path'
+        missing = run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain, '--signer', '["no-such-signer"]',
+                       '--', 'true'], repo, home)
+        assert missing.returncode == 1 and b'is not on PATH' in missing.stderr, missing.stderr.decode()
+        refused = subprocess.run([sys.executable, str(SIGN)], input=b'{}', capture_output=True,
+                                 env=dict(ENV, HOME=str(home), LD_PRELOAD='/nonexistent/libpreload.so'))
+        assert refused.returncode != 0 and b'refusing to run with LD_PRELOAD set' in refused.stderr, refused.stderr.decode()
+        print('passed: with LD_PRELOAD and the other loader variables set by the caller the note is still signed; the signer gets '
+              'none of them and a fixed PATH, and still refuses LD_PRELOAD when started with it')
+
         facts = tmp / 'facts.json'
         facts.write_text(json.dumps({'command': ['linux-gate', 'aggregate', 'a', 'b'], 'exit_code': 0,
                                      'output': {'verdict': 'success', 'needs': {'b': 'success', 'a': 'success'}},
