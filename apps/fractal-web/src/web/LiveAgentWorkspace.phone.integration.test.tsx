@@ -141,6 +141,7 @@ it('keeps a labelled Terminal toggle in the phone tab row that stays described a
   expect(new URLSearchParams(window.location.search).get('open')).toBeNull()
   expect(terminal.getAttribute('aria-pressed')).toBe('false')
   expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+  await vi.waitFor(() => expect(reason.contains(document.activeElement)).toBe(true))
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Terminal unavailable"]')).toBeNull())
 })
