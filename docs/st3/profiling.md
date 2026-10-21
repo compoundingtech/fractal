@@ -255,9 +255,37 @@ hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci
 series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
 time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
 workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
-nextest passed only on a retry and merge groups ejected from the queue, none an hour). Nothing
-feeds these series yet, so each lists as `no-data` with its target; they are not in the
-request-latency read, its gauges or `st doctor`.
+nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
+not in the request-latency read, its gauges or `st doctor`.
+
+Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
+`main_performance_failures` also reads, with the same token, conditional cache and five-minute
+cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
+completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
+the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
+the member that runs that observer has them; every other member, and that one until its first
+read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
+fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
+first observer that read them; another repository's observer does not read them and logs a warning.
+If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
+workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
+reading as an idle day. Only run-level timestamps are read, no jobs:
+
+- `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
+  `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
+  a rerun restarts `run_started_at` and reruns only some jobs. A run whose jobs were all skipped, such as a draft's, counts as a fast sample.
+- `merge-latency/p50` and `/p95`: each successful merge group run (head branch
+  `gh-readonly-queue/...`), from its `created_at`, when the group entered the queue, to its
+  `updated_at`, when it went green. This is a proxy for entering the queue until merging: the wait
+  before GitHub creates the group's run and the merge after it are not counted, and a pull request
+  whose group is rebuilt after an ejection counts once per green group, not from its first entry.
+- `flakes`: merge group runs that concluded `failure`, an ejected group, that finished in the last
+  hour. Tests nextest passed only on a retry are not counted yet.
+
+A duration's samples are the runs that finished in the last day; its value is the nearest-rank
+percentile, and `LEFT` is how much of the `100 - percentile` share allowed over its target the
+day has not spent. The count is over the last hour, and with `max_per_hour = 0` one ejected group
+spends it all. A window without a sample, or without a merge group for the count, is `no-data`.
 
 `st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
