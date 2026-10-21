@@ -133,7 +133,8 @@
           },
           "trust_levels": [
             "fleet",
-            "host"
+            "host",
+            "agent"
           ],
           "by_level": {
             "host": {
@@ -159,6 +160,31 @@
               "events": [
                 "pull_request"
               ]
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                ".#web",
+                "-c",
+                "bash",
+                "-c",
+                "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
             }
           }
         }
@@ -238,7 +264,8 @@
           },
           "trust_levels": [
             "fleet",
-            "host"
+            "host",
+            "agent"
           ],
           "by_level": {
             "host": {
@@ -263,6 +290,30 @@
               "events": [
                 "pull_request"
               ]
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                ".#genie",
+                "-c",
+                "bash",
+                "scripts/ci-genie-freshness"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
             }
           }
         }

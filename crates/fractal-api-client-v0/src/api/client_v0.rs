@@ -3319,19 +3319,12 @@ fn observer_subscription_resources(
         } else {
             "subscription.state"
         };
-        let claim = state
-            .store
-            .claims_for_subject_kind_at(
-                &desired.subject,
-                claim_kind,
-                Some(snapshot.store_index.saturating_add(1)),
-                true,
-                1,
-            )?
-            .claims
-            .into_iter()
-            .next()
-            .map(|claim| (claim.body, claim.accepted_at_unix_ms));
+        // The canonical newest state at the cut, the one the detail read and attention choose.
+        let claim = state.store.observer_subscription_state(
+            &desired.subject,
+            claim_kind,
+            snapshot.store_index,
+        )?;
         let revision = state
             .store
             .selected_desired_revision(&desired.subject)?

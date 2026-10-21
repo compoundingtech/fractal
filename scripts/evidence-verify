@@ -78,7 +78,7 @@ CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
 MAX_INPUTS = 300
 KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level'}
-LEVEL_KEYS = {'command', 'required_inputs', 'bind_inputs', 'events'}
+LEVEL_KEYS = {'command', 'required_inputs', 'bind_inputs', 'events', 'lane'}
 EVENTS = ('pull_request', 'merge_group')
 
 
@@ -166,8 +166,12 @@ def policy_rules(text, check, repository):
             if not valid_events(events):
                 raise Failure('error', f'skip policy for {check}/{kind}: events must be a nonempty list of {", ".join(EVENTS)}')
             lcommand, lrequired, lbind = checked_command_inputs(override, f'{check}/{kind}/{level}')
+            # `lane: true` holds this level's notes to the lane definition at the accepted base (.st/required-lanes.json at the policy's
+            # commit): the tree must not change the lane's definition paths and the note must carry its lane_definition_sha256.
+            if not isinstance(override.get('lane', False), bool):
+                raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} lane must be true or false')
             by_level[level] = {'command': [fill(v) for v in lcommand], 'required_inputs': sorted(set(lrequired) | set(lbind)),
-                               'bind_inputs': dict(lbind), 'events': list(events)}
+                               'bind_inputs': dict(lbind), 'events': list(events), 'lane': override.get('lane', False)}
         kinds[kind] = {'command': [fill(v) for v in command],
                        'runner_prefix': fill(prefix) if prefix else None,
                        # Binding an input also requires it, so the list can never be shorter than the binding.
@@ -463,7 +467,9 @@ def signature(repo, commit, keys, revocations):
 
 
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-           trust_levels=None, now=None, rules=None, lane=None):
+           trust_levels=None, now=None, rules=None, lane=None, level_lane=None):
+    """`level_lane`, when given, is a callable returning the lane check at the policy's base; it is used only for a signer level
+    whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone."""
     with tempfile.NamedTemporaryFile() as revocations:
         everything = legacy_refs(repo, len(tree))  # the first layout, until the GC has removed it
         hits = with_note_for(repo, list(dict.fromkeys(tree_refs(repo, tree) + everything)), tree)  # commits that carry a note named by the tree
@@ -556,6 +562,12 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
     override = rule['by_level'].get(level) if rule else None
     if override:
         command, bind, required_inputs, events = override['command'], list(override['bind_inputs'].items()), override['required_inputs'], override['events']
+        if override.get('lane') and lane is None:
+            if level_lane is None:
+                raise Failure('no_lane', f'signer level {level!r} must be held to a lane definition, and none was given', attempts=attempts)
+            lane = level_lane()
+            if lane is None:
+                raise Failure('no_lane', f'no lane definition for check {check} at the accepted base', attempts=attempts)
     if runner_prefix is not None and not observed['runner'].startswith(runner_prefix):
         raise Failure('wrong_runner', 'record is for a different repository or producer', attempts=attempts)
     # A future-dated record is refused whether or not an age limit is set: otherwise a trusted
@@ -859,8 +871,12 @@ def main(argv):
                 raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
             rules = policy_rules(text, args.check, args.repository)
         lanes = (read_lanes(args.repo, args.lanes_from), args.lanes_from) if args.lanes_from else None
+        # A level held to its lane (by_level lane: true) is judged against the lane file of the same base as the policy.
+        policy_base = args.policy_from
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
-                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check))
+                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check),
+                        level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check))
+                        if policy_base else None)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:
