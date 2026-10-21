@@ -364,6 +364,7 @@ impl Runtime for SmalltalkRuntime {
             let _ = rebuilt;
         }
         migrate_occurrence_creation_projections_tx(transaction)?;
+        mission_projection_upgrade::migrate(transaction)?;
         Ok(())
     }
 
@@ -383,7 +384,12 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([("mission_run_deadlines".into(), 3)])
+        BTreeMap::from([
+            ("mission_run_deadlines".into(), 3),
+            ("mission_runs".into(), 2),
+            ("run_generations".into(), 2),
+            ("step_runs".into(), 2),
+        ])
     }
 
     fn classify_replicated_claim(
