@@ -1,5 +1,5 @@
 #!/bin/sh
-# Download a verified Small Talk release, install it, and open st.
+# Download a verified Fractal release, install it, and open st.
 set -eu
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 base=${FRACTAL_INSTALL_RELEASE_BASE_URL-${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/smalltalk/releases}}
@@ -34,15 +34,26 @@ case "$base" in
     *) printf 'install: release downloads need HTTPS\n' >&2; exit 2 ;;
 esac
 if [ -n "$tag" ]; then channel=download/$tag; else channel=latest/download; fi
-package=smalltalk-$target
+package=fractal-$target
 archive=$package.tar.gz
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
-for name in "$archive" "$archive.sha256"; do
+download() {
     curl --fail --silent --show-error --location --proto "=$protocol" --proto-redir "=$protocol" \
-        "$base/$channel/$name" --output "$work/$name"
-done
+        "$base/$channel/$1" --output "$work/$1"
+}
+# arn:lmig:smalltalk:2026-10-20-release-artifact-aliases — sunset 2026-11-01 (#3032).
+# Retained tags predate the Fractal asset name. Only a missing asset selects the
+# legacy name; network failures and integrity failures must not trigger fallback.
+status=$(curl --silent --show-error --location --proto "=$protocol" --proto-redir "=$protocol" \
+    --write-out '%{http_code}' "$base/$channel/$archive" --output "$work/$archive")
+case "$status" in
+    200) ;;
+    404) package=smalltalk-$target; archive=$package.tar.gz; download "$archive" ;;
+    *) printf 'install: archive download failed (HTTP %s)\n' "$status" >&2; exit 1 ;;
+esac
+download "$archive.sha256"
 read -r expected filename extra < "$work/$archive.sha256"
 case "$expected" in ''|*[!0-9a-fA-F]*) printf 'install: invalid archive checksum\n' >&2; exit 1 ;; esac
 [ "${#expected}" -eq 64 ] && [ "${filename#\*}" = "$archive" ] && [ -z "$extra" ] || {

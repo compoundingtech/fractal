@@ -652,10 +652,14 @@ pub async fn client_agents_detail(
     Query(query): Query<ClientListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
+    use crate::store::identities::IdentityKind;
+    let requested_id = client_detail_id("agent", &id);
+    let resolved = public_identity(&store, IdentityKind::Agent, &requested_id)?;
+    let identity = resolved.identity;
     let history = query.history;
     let created_at = snapshot.created_at.clone();
     let snapshot_index = snapshot.store_index;
-    let subject = client_detail_id("agent", &id);
+    let subject = identity.to_owned();
     let items = blocking_store(move || {
         let selected = BTreeSet::from([subject]);
         let mut items = client_agent_resources_selected(
@@ -690,7 +694,7 @@ pub async fn client_agents_detail(
         Ok(items)
     })
     .await?;
-    client_detail(items, "agent", &id)
+    client_detail(items, "agent", &identity)
 }
 
 pub async fn client_sessions(

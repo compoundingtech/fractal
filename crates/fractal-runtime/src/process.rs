@@ -793,17 +793,18 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(generation.pid as i32);
+        // The shell creates child.pid before it writes the pid: wait for the pid, not the file.
+        let mut child = None;
         for _ in 0..200 {
-            if root.path().join("child.pid").exists() {
+            child = fs::read_to_string(root.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok());
+            if child.is_some() {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let child = fs::read_to_string(root.path().join("child.pid"))
-            .unwrap()
-            .trim()
-            .parse::<u32>()
-            .unwrap();
+        let child = child.expect("the child never wrote its pid");
         runtime
             .stop_if("work", Some(&generation.generation_id))
             .unwrap();

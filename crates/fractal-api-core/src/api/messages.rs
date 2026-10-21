@@ -51,7 +51,12 @@ pub async fn message_by_key(
             .message(&claim.subject)
             .map_err(ApiError::internal)?
             .ok_or_else(not_sent)?;
+        let requested_recipient = message.to.clone();
+        let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
         Ok(Json(MessageSendReceipt {
+            requested_recipient,
+            recipient,
+            recipient_identity,
             kind: Some(
                 if crate::silent::is_held(&message) {
                     "silent"

@@ -21,5 +21,6 @@ pub mod delivery_hold;
 pub mod file_inventory;
 pub mod gate_check;
 pub mod graph_watch_ivm;
+pub mod objective_faults;
 pub mod objectives;
 pub mod subagent_sessions;

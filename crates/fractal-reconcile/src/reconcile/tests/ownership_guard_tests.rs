@@ -832,12 +832,19 @@ fn quiet_owned_pass_sql_budget() {
         let before = smallclaims::sqlite::work::total();
         reconciler.reconcile_once().unwrap();
         let cost = smallclaims::sqlite::work::total() - before;
-        let receipt_reads: u64 = smallclaims::sqlite::histogram::take()
+        let histogram = smallclaims::sqlite::histogram::take();
+        let alias_reads: u64 = histogram
+            .iter()
+            .filter(|(sql, _)| sql.contains("FROM identity_names"))
+            .map(|(_, shape)| shape.count)
+            .sum();
+        let receipt_reads: u64 = histogram
             .iter()
             .filter(|(sql, _)| sql.starts_with("SELECT id,subject,body,accepted_at_unix_ms FROM claims WHERE kind="))
             .map(|(_, shape)| shape.count)
             .sum();
         eprintln!("quiet owned roster={count}: {cost:?}, receipt_reads={receipt_reads}");
+        assert_eq!(alias_reads, 0, "quiet attention scans must not resolve every member's identity");
         assert!(
             (1..=12).contains(&receipt_reads),
             "quiet passes must not fence or prepare every unchanged member"

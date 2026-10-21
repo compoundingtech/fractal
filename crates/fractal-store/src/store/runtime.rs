@@ -616,7 +616,7 @@ impl Runtime for SmalltalkRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.person-directive-notes.forward-compat.v1";
+    "st3.shared-projections.identity-naming.claim-id-collision.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {
@@ -631,12 +631,14 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
     }
     Ok(())
 }

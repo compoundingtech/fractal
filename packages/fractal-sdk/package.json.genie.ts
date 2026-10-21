@@ -21,6 +21,7 @@ export default packageJson({
   name: '@fractal/sdk',
   version: '0.1.0',
   private: true,
+  license: 'MIT',
   type: 'module',
   exports: {
     './effect': './src/effect/mod.ts',
