@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use st_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8da8a9f235f8 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h36f538d5fec9 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -129,6 +129,20 @@ cursor in `meta`, on the same paced background loans, union every `checkpoint_cl
 them, including rows adoption later withdraws, so they only grow. Claim identities use the
 ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
 activation stops those withdrawals.
+
+## Claim range digests
+
+`claim_range_digests` summarizes the claims this store retains for claims sync. Each claim falls
+in one of 4,096 leaf ranges by the first three hex digits of its ID, and each leaf in one of 64 top
+ranges; an ID that is not 64 lowercase hex digits is counted in a separate irregular range. A
+range keeps its claim count and the 512-bit modular sum of its members' domain-separated SHA-512
+hashes, so it does not depend on arrival order. Plain-SQL triggers queue every claim insert and
+delete in `claim_range_pending`, so an earlier build that writes claims queues its changes too. A
+background job (`maintenance.claim_ranges`) folds the queue into the digests after each store
+event, and once folds the claims that predate the triggers, tracked by `claim_range_import`; it
+takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
+loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
+import are both empty. Nothing reads them yet.
 "#;
 
 pub fn storage_digest() -> String {
