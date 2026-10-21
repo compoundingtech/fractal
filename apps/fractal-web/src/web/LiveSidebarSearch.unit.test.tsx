@@ -30,7 +30,7 @@ vi.mock('@stylexjs/stylex', async () => {
   }
 })
 
-import { compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { compositionLightTheme } from '@fractal/ui/assistant-ui/shell'
 import { colorVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 import { LiveSidebarToolbar } from './LiveAgentWorkspace.tsx'
