@@ -545,6 +545,29 @@ let socket = "/state/st3.sock";
                     source.write_text(mutation)
                     self.assertEqual(proof.npm_resolution_guard(tree, {})['result'], 'FAIL')
 
+    def test_npm_seed_graph_imports_are_manifest_scoped_not_live_aliases(self):
+        source = """
+const seededSources = {
+  [workspace]: `import 'fixture-package';`,
+  [`${repository}/node_modules/fixture-package/package.json`]: JSON.stringify({
+    name: 'fixture-package', main: './index.ts',
+  }),
+}
+createTypeScriptGraph([entry], {}, seededSources)
+"""
+        masked, count = proof.npm_seed_graph_mask(source, {})
+        self.assertEqual(count, 1)
+        self.assertNotIn("import 'fixture-package'", masked)
+        live = source + "\nimport 'fixture-package';\n"
+        self.assertIn("import 'fixture-package';", proof.npm_seed_graph_mask(live, {})[0])
+        for mutation in (
+            source.replace("name: 'fixture-package'", "name: 'different-package'"),
+            source.replace('createTypeScriptGraph(', 'executeSources('),
+            source.replace('/package.json', '/not-a-manifest'),
+        ):
+            self.assertEqual(proof.npm_seed_graph_mask(mutation, {})[1], 0)
+        self.assertEqual(proof.npm_seed_graph_mask(source, {'fixture-package': 'canonical'})[1], 0)
+
     def test_npm_historical_release_fragments_are_immutable_not_live_consumers(self):
         old = {'@smalltalk/fractal-ui': '@fractal/ui'}
         with tempfile.TemporaryDirectory() as directory:

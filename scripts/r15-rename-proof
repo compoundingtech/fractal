@@ -424,6 +424,45 @@ def npm_declaration_mask(text, relative, old_packages):
     return ''.join(masked), count
 
 
+def npm_seed_graph_mask(text, old_packages):
+    """Resolve embedded source imports only within their manifest-backed seed map."""
+    spans = list(literals(text, '.ts', spans=True))
+    masked = list(text)
+    count = 0
+    for declaration in re.finditer(r'\bconst\s+(\w+)\s*=\s*\{', text):
+        # The final graph argument is an in-memory file map, not module imports.
+        if not re.search(r'\bcreateTypeScriptGraph\([\s\S]*?,\s*' + re.escape(declaration[1]) + r'\s*\)', text[declaration.end():]):
+            continue
+        start = declaration.end() - 1
+        end, depth = start, 0
+        ignored = {begin: finish for _, begin, finish in spans}
+        while end < len(text):
+            if end in ignored:
+                end = ignored[end]
+                continue
+            depth += (text[end] == '{') - (text[end] == '}')
+            end += 1
+            if not depth:
+                break
+        block = text[start:end]
+        names = set()
+        for manifest in re.finditer(
+                r'''node_modules/(''' + NPM_NAME + r''')/package\.json[`'"]\s*\]\s*:\s*JSON\.stringify\(\{\s*name:\s*['"]([^'"]+)['"]''',
+                block):
+            if manifest[1] == manifest[2] and manifest[1] not in old_packages:
+                names.add(manifest[1])
+        for value, begin, finish in spans:
+            if not start < begin < finish < end or not re.search(r'\]\s*:\s*$', text[start:begin]):
+                continue
+            for position, reference in npm_references(value, '', set()):
+                if npm_package(reference) not in names:
+                    continue
+                absolute = begin + 1 + position
+                masked[absolute:absolute + len(reference)] = ' ' * len(reference)
+                count += 1
+    return ''.join(masked), count
+
+
 def npm_recorded_payload(text, suffix):
     """Recognize data-only recording/slice schemas, never arbitrary JSON or docs.
 
@@ -653,6 +692,9 @@ def npm_resolution_guard(tree, old_packages, baseline_tree=None):
             continue
         text, count = npm_declaration_mask(text, relative, old_packages)
         declarations += count
+        if path.suffix in ('.ts', '.tsx'):
+            text, count = npm_seed_graph_mask(text, old_packages)
+            declarations += count
         for position, reference in npm_references(text, relative, internal_scopes):
             package = npm_package(reference)
             if package is None or package.split('/')[0] in NODE_BUILTINS:
