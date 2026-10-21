@@ -341,6 +341,7 @@ export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: re
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'false'))
   await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull())
+  await waitFor(() => expect(terminal).toHaveFocus())
   if (!narrow) return
   await assertPhoneHeader(canvasElement)
   await assertPhoneTabRow(canvasElement)
@@ -362,6 +363,7 @@ export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: re
   await assertPhoneTabRow(canvasElement)
   await userEvent.click(longTerminal)
   await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'false'))
+  await waitFor(() => expect(longTerminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 }) }
 export const TerminalToggleLight: Story = { ...TerminalToggle, args: { ...TerminalToggle.args, scheme: 'light' } }

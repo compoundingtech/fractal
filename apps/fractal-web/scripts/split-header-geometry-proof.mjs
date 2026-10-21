@@ -48,7 +48,7 @@ try {
     await inspector.getByRole('tab', { name: 'Changes', exact: true }).click()
     await page.getByTestId('diff-code').waitFor()
     await page.waitForFunction(failed => document.querySelector('[data-testid="transcript-header-status"] [data-testid="sync-line"]')?.getAttribute('data-sync-visible') === String(failed), failed)
-    const dock = page.getByRole('separator', { name: 'Resize Details' })
+    const dock = page.getByRole('separator', { name: 'Resize Changes' })
     if (width === 900) {
       await dock.focus(); await page.keyboard.press('End')
       assert.equal(Number(await dock.getAttribute('aria-valuenow')), Number(await dock.getAttribute('aria-valuemax')))
