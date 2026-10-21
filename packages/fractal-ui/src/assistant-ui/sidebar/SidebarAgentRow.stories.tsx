@@ -55,6 +55,21 @@ function CardPair({ row }: { readonly row: Row }) {
 
 /** Hover intent opens after 150ms and closes after 300ms; a saturated strict host can stretch that past waitFor's 1s default. */
 const hoverSettleTimeout = 5_000
+
+/** Observe the whole intent window, rather than passing before the desktop's 150ms timer can fire. */
+async function assertNoPhoneHover(target: HTMLElement, phone: HTMLElement) {
+  await userEvent.hover(target)
+  target.focus()
+  const started = performance.now()
+  do {
+    await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+    await expect(phone.querySelector('[data-row-action="open"]')).toBeNull()
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  } while (performance.now() - started < 200)
+  await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  await expect(phone.querySelector('[data-row-action="open"]')).toBeNull()
+  await expect(target).toHaveFocus()
+}
 const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow, longRow, desktopParentRow].map(row => [row.ref, row]))
 
 /** The visible title is the exact name; the complete reported facts are the exact description, carried by a mounted hidden span rather than a native title or the unsupported aria-description. */
@@ -322,6 +337,7 @@ export const PhoneTouchTargets: Story = { tags: ['critical'], name: 'Phone · 44
   const longTitle = rows[1]!.querySelector<HTMLElement>('[data-row-column="title-text"]')!
   await expect(longTitle.scrollWidth).toBeGreaterThan(longTitle.clientWidth)
   // The disclosure expands and collapses from its 44px target; the nested rows keep the phone grid.
+  await assertNoPhoneHover(within(rows[3]!).getByRole('button', { name: 'Expand 2 subagents' }), phone)
   await userEvent.click(within(rows[3]!).getByRole('button', { name: 'Expand 2 subagents' }))
   await waitFor(() => expect(within(phone).getByRole('button', { name: 'Collapse 2 subagents' })).toHaveAttribute('aria-expanded', 'true'))
   for (const child of within(phone).getAllByTestId('taste-agent-row').slice(4)) await expect(child.querySelector<HTMLElement>('[data-agent-menu]')!.getBoundingClientRect().width).toBeGreaterThanOrEqual(44)
@@ -333,7 +349,8 @@ export const PhoneTouchTargets: Story = { tags: ['critical'], name: 'Phone · 44
   const items = await waitFor(() => { const found = document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]'); expect(found.length).toBeGreaterThan(0); return found })
   // The standard popover scales during entry; measure the settled touch geometry.
   for (const item of items) await waitFor(() => expect(item.getBoundingClientRect().height).toBeGreaterThanOrEqual(44))
-  await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  // A hover card the pointer left behind (the expanded row it just collapsed) closes on its own 300ms delay; the menu opening must leave none.
+  await waitFor(() => expect(document.querySelector('[role="tooltip"]')).toBeNull())
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
   await waitFor(() => expect(document.activeElement).toBe(trigger))
@@ -343,6 +360,14 @@ export const PhoneTouchTargets: Story = { tags: ['critical'], name: 'Phone · 44
   await expect(desktop).not.toHaveAttribute('data-narrow')
   await expect(desktop.querySelector('[data-agent-menu]')!.getBoundingClientRect().width).toBeLessThan(44)
   await expect(desktop.querySelector('[data-row-column="children"]')!.getBoundingClientRect().height).toBeLessThan(44)
+} }
+export const PhoneFocusNoHover: Story = { tags: ['critical'], name: 'Phone · disclosure focus never opens hover UI', render: PhoneTouchTargets.render, play: async ({ canvasElement }) => {
+  const phone = canvasElement.querySelector<HTMLElement>('[data-phone-rows]')!
+  const disclosure = within(phone).getByRole('button', { name: 'Expand 2 subagents' })
+  await assertNoPhoneHover(disclosure, phone)
+  await userEvent.unhover(disclosure)
+  disclosure.blur()
+  await assertRowNames(canvasElement)
 } }
 export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
   name: 'Themed overlays · row menu and neutral focus',

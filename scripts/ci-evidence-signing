@@ -204,7 +204,10 @@ def aggregate(path):
     """
     needs = json.loads(env('NEEDS_JSON') or '{}')
     # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
-    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items()) if not name.startswith('evidence-gate-')}
+    # Neither is a job of the path-sensitive fractal-web lane: it is its own lane with its own notes, and it is
+    # skipped whenever a change touches no web path, which must not stop the linux-gate verdict being recorded.
+    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())
+               if not name.startswith(('evidence-gate-', 'fractal-web-'))}
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
@@ -286,8 +289,9 @@ def step_facts(path):
     """What a job honestly knows about steps it already ran: which command they stand for and how each ended.
 
     STEP_CHECK is the check name, STEP_COMMAND a JSON array naming the command, STEP_OUTCOMES a JSON
-    object {step id: outcome} taken from the steps context. The note is a success only if every step
-    succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
+    object {step id: outcome} taken from the steps context. STEP_INPUTS, if set, is a JSON object of extra
+    named string inputs (a shard number, a test set) recorded next to the fixed ones; it can add names but
+    never replace one. The note is a success only if every step succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
     example it was covered by a trusted note), so no note is made, not even a failure.
     """
     gate_skipped()
@@ -316,6 +320,17 @@ def step_facts(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    try:
+        extra = json.loads(env('STEP_INPUTS') or '{}')
+    except ValueError:
+        raise Refused('STEP_INPUTS must be JSON')
+    if not (isinstance(extra, dict) and all(re.fullmatch(r'[a-z][a-z0-9_]{0,40}', k) and isinstance(v, str) and 0 < len(v) <= 200
+                                            for k, v in extra.items())):
+        raise Refused('STEP_INPUTS must be an object of short lower-case names with nonempty string values')
+    clash = sorted(set(extra) & set(facts['inputs']))
+    if clash:
+        raise Refused(f'STEP_INPUTS cannot replace the fixed input(s) {", ".join(clash)}')
+    facts['inputs'].update(extra)
     add_source_inputs(facts, check)
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 

@@ -1,6 +1,6 @@
 import { it } from '@effect/vitest'
-import { catalog, loadWorld, type World } from '@smalltalk/st3-scenarios'
-import { createReplay, manualClock, type ManualClock } from '@smalltalk/st3-scenarios/replay'
+import { catalog, loadWorld, type World } from '@fractal/scenarios'
+import { createReplay, manualClock, type ManualClock } from '@fractal/scenarios/replay'
 import { Effect } from 'effect'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
 import { liveSource, type LiveSource } from './liveSource.ts'
@@ -88,7 +88,7 @@ describe('scenario replay through the real live source', () => {
       expect(expectedAgents.length).toBeGreaterThan(0)
       expect(rosterIds(live)).toEqual(expectedAgents.map((agent) => agent.id).sort())
       expect(live.registry.get(live.source.agents)).toMatchObject({
-        _tag: 'Observed', value: [{ id: expectedAgents[0]!.id, state: { _tag: 'Unknown', raw: 'reconciling' } }],
+        _tag: 'Observed', value: [{ id: expectedAgents[0]!.id, state: { _tag: 'Unrecognized', raw: 'reconciling' } }],
       })
 
       const thread = world.slices.conversation.state.threads[0]!

@@ -5,7 +5,7 @@ import { systemEventsPreference } from './conversationPreferences.ts'
 import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
-import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
+import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
@@ -18,6 +18,7 @@ import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -211,6 +212,7 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
 }) {
   const now = useNowSnapshot()
   const observation = useConversationSync(agentRef)
-  return <Transcript {...props} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} />
+  const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
+  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} />
 }
 
