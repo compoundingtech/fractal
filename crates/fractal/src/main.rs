@@ -95,6 +95,7 @@ mod fleet_cli;
 mod launch_cli;
 mod migrate_cli;
 mod replication_cli;
+mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod work_cli;
@@ -242,6 +243,11 @@ enum Command {
     Missions {
         #[command(subcommand)]
         command: MissionViewCommand,
+    },
+    /// List locally replicated schedule declarations and their knowledge limits.
+    Schedules {
+        #[command(subcommand)]
+        command: schedules_cli::SchedulesCommand,
     },
     /// Create and review a durable planner-backed launch.
     Launch {
@@ -5100,6 +5106,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Activity(args) => run_activity(&endpoint, args, cli.json).await,
+        Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
             run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
         }

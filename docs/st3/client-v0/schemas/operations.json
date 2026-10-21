@@ -47,6 +47,7 @@
     { "id": "launch-variants.list", "method": "GET", "path": "/v1/client/launches/{id}/variants", "response": "Page" },
     { "id": "launch-decisions.list", "method": "GET", "path": "/v1/client/launches/{id}/decisions", "response": "Page" },
     { "id": "launch-approvals.list", "method": "GET", "path": "/v1/client/launches/{id}/approvals", "response": "Page" },
+    { "id": "schedules.list", "method": "GET", "path": "/v1/client/schedules", "response": "SchedulesPage", "scope": "read.declarations", "query": { "cursor": "optional host/process/session-bound next_cursor; expires after 15m or restart", "limit": "optional 1-200; default 50; must match cursor", "unheard_after_ms": "optional positive finite display threshold; default 300000; must match cursor; never host health" } },
     { "id": "missions.list", "method": "GET", "path": "/v1/client/missions", "response": "Page" },
     { "id": "missions.get", "method": "GET", "path": "/v1/client/missions/{id}", "response": "Resource" },
     { "id": "work.list", "method": "GET", "path": "/v1/client/work", "response": "Page", "query": { "fresh": "optional true: wait up to two seconds for a current work list published at least as new as the request" } },

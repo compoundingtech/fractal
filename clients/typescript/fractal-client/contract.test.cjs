@@ -974,3 +974,22 @@ test('phone observation command retries identical tagged intervals and accepts w
     assert.equal(calls[0].init.body,calls[1].init.body);
     assert.deepEqual(JSON.parse(calls[0].init.body),report);
 });
+
+
+test('schedules list preserves unknown rows and explicitly encodes one page; old server is unsupported', async () => {
+    const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/schedules-page.json'), 'utf8'));
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        requests.push(String(input));
+        return old ? new Response(null, {status:404}) : Response.json(fixture);
+    }});
+    const response = await client.schedulesList({ cursor:'next&cursor', limit:1, unheard_after_ms:300000 });
+    assert.deepEqual(response, fixture);
+    assert.equal(new URL(requests[0]).searchParams.get('cursor'), 'next&cursor');
+    assert.equal(new URL(requests[0]).pathname, '/v1/client/schedules');
+    assert.equal(requests.length, 1);
+    old = true;
+    await assert.rejects(client.schedulesList(), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.equal(requests.length, 2, 'no unsupported fallback or automatic page traversal');
+});
