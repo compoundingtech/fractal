@@ -160,6 +160,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     <StatusLine />
     <ListRow glyph="●" glyphColor={theme.idle} title="Agents" second="Search agents and conversations · list or tree" onPress={() => navigation.navigate('Agents')} />
     <ListRow glyph="◇" glyphColor={theme.waiting} title="Missions" second="Search missions · steps, progress and launches" onPress={() => navigation.navigate('Missions')} />
+    <ListRow glyph="▤" glyphColor={theme.lavender} title="Documents" second="Read documents · open one by name or follow its links" onPress={() => navigation.navigate('Documents')} />
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {arrangementsIssue ? <Note tone="warning">{arrangementsIssue}</Note> : null}
     {sidebarResourcesIssue ? <Note tone="warning">{sidebarResourcesIssue}</Note> : null}

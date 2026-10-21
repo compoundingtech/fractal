@@ -24,6 +24,7 @@ import { LaunchScreen, MissionScreen, MissionsScreen, NewMissionScreen } from '.
 import { TerminalScreen } from './screens/Terminal';
 import { GlassesScreen, SpaceScreen } from './screens/Glasses';
 import { ResourceScreen } from './screens/Resource';
+import { DocumentScreen, DocumentsScreen } from './screens/Documents';
 import { SidebarScreen } from './screens/Sidebar';
 import { FabricProofScreen } from './screens/FabricProof';
 import { quality } from './qualityNative';
@@ -77,6 +78,8 @@ function TabStack({ tab }: { tab: Tab }) {
     <Stack.Screen name="Agents" component={AgentsScreen} options={{ title: 'Agents' }} />
     <Stack.Screen name="Missions" component={MissionsScreen} options={{ title: 'Missions' }} />
     <Stack.Screen name="Resource" component={ResourceScreen} options={{ title: 'Resource' }} />
+    <Stack.Screen name="Documents" component={DocumentsScreen} options={{ title: 'Documents' }} />
+    <Stack.Screen name="Document" component={DocumentScreen} options={{ title: 'Document' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
