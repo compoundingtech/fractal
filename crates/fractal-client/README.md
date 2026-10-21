@@ -17,6 +17,46 @@ parameters, and manually paired action discriminators are private implementation
 Mutation callers pass the latest response snapshot and exact resource fences. `ClientError::Api`
 preserves stable error codes such as `stale-fence`, `runtime-not-local`, and `cursor-gap`.
 
+## Retained typed collection follows
+
+`follow::FollowClient::connect(client.clone()).await?` owns one collections socket and
+one reconnect loop. Clone that handle, rather than connecting for each model:
+
+```rust
+use fractal_client::follow::{AttentionDescriptor, FollowClient};
+use futures_util::StreamExt;
+
+let follows = FollowClient::connect(client.clone()).await?;
+let mut attention = follows.watch(AttentionDescriptor::default(), 100).await?;
+while let Some(state) = attention.next().await {
+    // Inspect state.freshness and state.error separately from the retained value.
+    if let Some(window) = &state.value {
+        for item in &window.items {
+            println!("{}", item.title);
+        }
+    }
+}
+```
+
+`current()` reads the latest retained state without waiting. Receiver clones share
+the subscription and immutable `Arc` rows; dropping the last receiver unsubscribes.
+The stream coalesces intermediate states for slow readers, retaining one state rather
+than an event queue. A window contains the server's ordered rows, snapshot and
+`has_more`; it is not complete history. Limits are 16 subscriptions per connection,
+1–200 rows per window and 16 pending watch requests.
+
+Reconnect and resync retain the last window as stale until a new snapshot arrives.
+Each resubscribe uses a new wire ID so queued frames from older generations cannot
+overwrite current state. Transport loss is stale without a subscription error;
+server subscription failures and malformed rows remain explicit errors. A successful
+snapshot clears the error. Missing order rows fail the update atomically rather than
+silently yielding an incomplete fresh window.
+
+Implement `follow::Descriptor` to pair an existing collection selector with a typed
+raw-row decoder (`decode_row` supports generated Serde models). No resource-to-JSON
+round trip is needed. Descriptors do not add server collections or capabilities;
+unsupported selectors still fail through the normal subscription error.
+
 ## Raw PTY connectors
 
 `raw_terminal_attachment(terminal_id, runtime_incarnation, RawTerminalMode::Attach)` acquires
