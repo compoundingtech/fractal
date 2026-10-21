@@ -159,7 +159,10 @@ async fn listing_requires_existing_declaration_scope_and_validates_page_and_curs
     for limit in [0,201] {
         assert!(list(State(state.clone()),Extension(ClientSession::local(Some("person/ada")).unwrap()),Query(SchedulesQuery{limit:Some(limit),..Default::default()})).await.is_err());
     }
-    assert!(list(State(state.clone()),Extension(ClientSession::local(Some("person/ada")).unwrap()),Query(SchedulesQuery{unheard_after_ms:Some(9_007_199_254_740_992),..Default::default()})).await.is_err());
+    let too_large=list(State(state.clone()),Extension(ClientSession::local(Some("person/ada")).unwrap()),Query(SchedulesQuery{unheard_after_ms:Some(9_007_199_254_740_992),..Default::default()})).await.unwrap_err();
+    assert_eq!(too_large.code,"validation-failed");
+    assert_eq!(too_large.status,axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(too_large.message.contains("9007199254740991"));
     declare(&state,"a","at \"2030-01-01T00:00:00Z\"");declare(&state,"b","at \"2030-01-01T00:00:00Z\"");
     let (_,Json(first))=list(State(state.clone()),Extension(ClientSession::local(Some("person/ada")).unwrap()),Query(SchedulesQuery{limit:Some(1),..Default::default()})).await.unwrap();
     let cursor=first["page"]["next_cursor"].as_str().unwrap().to_owned();

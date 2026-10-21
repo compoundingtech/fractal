@@ -18,7 +18,8 @@ pub(super) struct SchedulesListArgs {
     limit: Option<usize>,
     #[arg(long)]
     cursor: Option<String>,
-    /// Display threshold for direct exchange receipts; this never decides host health.
+    /// Display threshold only; never host health. First-page default: 5m.
+    /// Maximum: 9007199254740991ms (the JSON exact integer ceiling).
     #[arg(long)]
     unheard_after: Option<String>,
 }
@@ -33,14 +34,19 @@ pub(super) async fn run(endpoint: &Endpoint, configured_person: Option<&str>, co
     let unheard=args.unheard_after.as_deref().map(threshold).transpose()?;
     let actor=args.actor.as_deref().or(configured_person).context("st schedules ls needs --as person/NAME or agent/NAME, ST_AGENT, or a configured person for the existing read.declarations scope")?;
     let response=generated_client(endpoint,Some(actor))?.schedules_list(args.cursor.as_deref(),args.limit,unheard).await
-        .map_err(|error| match error {
-            fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound | fractal_client::ErrorCode::Unsupported | fractal_client::ErrorCode::UnsupportedCapability,_,_) =>
-                anyhow::anyhow!("this server does not support schedules.list; upgrade the server to list replicated schedule declarations"),
-            error=>anyhow::Error::new(error),
-        })?;
+        .map_err(describe_error)?;
     if json_output { return print_value(&response,true); }
     println!("{}",render(&serde_json::to_value(&response.value)?,actor)?);
     Ok(())
+}
+fn describe_error(error: fractal_client::ClientError) -> anyhow::Error {
+    match error {
+        fractal_client::ClientError::Api(fractal_client::ErrorCode::Forbidden,message,_) if message.contains("read.declarations") =>
+            anyhow::anyhow!("st schedules ls requires the read.declarations scope; the authenticated session does not have it"),
+        fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound | fractal_client::ErrorCode::Unsupported | fractal_client::ErrorCode::UnsupportedCapability,_,_) =>
+            anyhow::anyhow!("this server does not support schedules.list; upgrade the server to list replicated schedule declarations"),
+        error=>anyhow::Error::new(error),
+    }
 }
 fn cell(value: &Value) -> String {
     value.as_str().map(|text|text.chars().map(|c|if c.is_control() {' '} else {c}).collect())
@@ -89,10 +95,23 @@ mod tests {
         assert!(rendered.contains("Next declared is a nominal tick"));
     }
     #[test]
+    fn forbidden_listing_explains_the_missing_existing_declaration_scope() {
+        let envelope:fractal_client::ErrorEnvelope=serde_json::from_value(json!({
+            "api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/denied",
+            "code":"forbidden","message":"the authenticated client session is not granted `read.declarations`",
+            "retryable":false,"details":{}
+        })).unwrap();
+        let message=describe_error(fractal_client::ClientError::Api(envelope.code.clone(),envelope.message.clone(),Box::new(envelope))).to_string();
+        assert_eq!(message,"st schedules ls requires the read.declarations scope; the authenticated session does not have it");
+    }
+    #[test]
     fn positive_display_threshold_and_explicit_paging_are_cli_contracts() {
         assert_eq!(threshold("5m").unwrap(),300000);
         assert!(threshold("0s").is_err());
         assert!(threshold("forever").is_err());
+        assert!(threshold("9007199254740992ms").is_err());
+        let help=Cli::command().find_subcommand("schedules").unwrap().find_subcommand("ls").unwrap().clone().render_long_help().to_string();
+        assert!(help.contains("9007199254740991ms"));
         assert!(Cli::try_parse_from(["st","schedules","ls","--limit","1","--json"]).is_ok());
         assert!(Cli::try_parse_from(["st","schedules","ls","--all"]).is_err());
     }

@@ -95,7 +95,7 @@ pub async fn list(
     let limit = query.limit.or_else(|| position.as_ref().map(|p| p.limit)).unwrap_or(50);
     let unheard = query.unheard_after_ms.or_else(|| position.as_ref().map(|p| p.unheard_after_ms)).unwrap_or(DEFAULT_UNHEARD_MS);
     if !(1..=200).contains(&limit) || unheard == 0 || unheard > MAX_UNHEARD_MS {
-        return Err(validation("schedule limit must be 1 through 200 and unheard_after_ms must be positive and finite"));
+        return Err(validation("schedule limit must be 1 through 200 and unheard_after_ms must be 1 through 9007199254740991 milliseconds"));
     }
     if position.as_ref().is_some_and(|p| p.limit != limit || p.unheard_after_ms != unheard) {
         return Err(cursor_error());
