@@ -224,6 +224,10 @@ describe('live captured Changes dock', () => {
     await act(async () => inspectorTab('Changes').click())
     expect(inspectorSeparators()).toEqual(['Resize Changes'])
     await selectAgent('agent/changes-peer')
+    // Selecting a thread closes the inspector; the next explicit opening is a fresh mount.
+    expect(inspectorSeparators()).toEqual([])
+    await act(async () => toggle().click())
+    await act(async () => vi.dynamicImportSettled())
     await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
     expect(inspectorSeparators()).toEqual(['Resize Details'])
   })

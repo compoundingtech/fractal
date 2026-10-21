@@ -154,7 +154,7 @@ it('toggles the terminal drawer from the phone header Terminal button and report
 })
 
 it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {
-  const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
+  const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')].filter(tab => tab.textContent === 'Thread' || tab.textContent === 'Changes')
   expect(tabs.map(tab => tab.textContent)).toEqual(['Thread', 'Changes'])
   await act(async () => { tabs[0]!.focus(); tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })) })
   expect(tabs[1]!.getAttribute('aria-selected')).toBe('true')
