@@ -114,8 +114,8 @@ class PointerMedia extends EventTarget {
   readonly media = touchPointerQuery
   onchange: MediaQueryList['onchange'] = null
   matches = false
-  addListener(listener: EventListener | null) { if (listener !== null) this.addEventListener('change', listener) }
-  removeListener(listener: EventListener | null) { if (listener !== null) this.removeEventListener('change', listener) }
+  addListener(listener: Parameters<MediaQueryList['addListener']>[0]) { if (listener !== null) this.addEventListener('change', listener as EventListener) }
+  removeListener(listener: Parameters<MediaQueryList['removeListener']>[0]) { if (listener !== null) this.removeEventListener('change', listener as EventListener) }
   emulate(coarse: boolean) { this.matches = coarse; this.dispatchEvent(new MediaQueryListEvent('change', { matches: coarse, media: this.media })) }
 }
 const pointerMedia = new PointerMedia()
