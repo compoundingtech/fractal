@@ -766,10 +766,12 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
-        let mut producer_entered = false;
-        self.start_checked_inner(member, guard, &mut producer_entered)
+        // The backend owns its launch boundary and returns an exact StartRejected
+        // witness when it can prove that no producer was created.
+        let mut backend_entered = false;
+        self.start_checked_inner(member, guard, &mut backend_entered)
             .map_err(|error| {
-                if producer_entered {
+                if backend_entered {
                     error
                 } else {
                     error.context(fractal_runtime::StartRejected {
@@ -783,7 +785,7 @@ impl NativeRuntime {
         &self,
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
-        producer_entered: &mut bool,
+        backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let environment =
@@ -833,7 +835,7 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
                         &launch,
@@ -847,7 +849,7 @@ impl NativeRuntime {
                         guard,
                     )
                 } else {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after(
                         &member.runtime_id,
                         &launch,
@@ -862,7 +864,7 @@ impl NativeRuntime {
                 }
             } else {
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     return runtime.spawn_checked(
                         &member.runtime_id,
                         &launch,
@@ -874,7 +876,7 @@ impl NativeRuntime {
                         guard,
                     );
                 }
-                *producer_entered = true;
+                *backend_entered = true;
                 runtime.spawn(
                     &member.runtime_id,
                     &launch,
@@ -887,13 +889,13 @@ impl NativeRuntime {
             }
         } else {
             if let Some(guard) = guard {
-                *producer_entered = true;
+                *backend_entered = true;
                 return self
                     .exec
                     .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
                     .map(|_| ());
             }
-            *producer_entered = true;
+            *backend_entered = true;
             self.exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())

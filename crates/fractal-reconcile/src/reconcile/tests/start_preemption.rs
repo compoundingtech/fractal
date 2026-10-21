@@ -1508,6 +1508,50 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
 }
 
     #[test]
+fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("registry");
+    std::fs::create_dir(&registry).unwrap();
+    let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example-prelaunch/worker\" {{ workspace {:?}; argv {:?} \"1000\"; }}",
+        root.path().display().to_string(), sleep_program(),
+    ), "prelaunch");
+    let desired = store.desired_subjects_named(&["agent/example-prelaunch/worker".into()])
+        .unwrap().remove(0);
+    let member = desired.member.as_ref().unwrap().clone();
+    let row = registry.join(format!("{}.json", member.runtime_id));
+    let record = serde_json::json!({
+        "createdAt": "older", "tags": {"st3.start-operation": "older-operation"}
+    }).to_string();
+    std::fs::write(&row, &record).unwrap();
+    std::fs::write(registry.join(format!("{}.pid", member.runtime_id)),
+        std::process::id().to_string()).unwrap();
+    let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry),
+        &root.path().join("must-not-launch")));
+    let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+    let result = reconciler.dispatch_start(start_jobs::PreparedStart {
+        subject: desired.clone(), launch_member: member.clone(), member,
+        reason: "foreign PTY prelaunch regression".into(), request: None,
+        desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+        selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+        placement_evidence: Vec::new(), start_request: String::new(),
+        start_request_receipt: None, control_request: None, control_request_receipt: None,
+        expected_incarnation: None, resume_operation: None,
+    });
+    let pending = store.runtime_start_for(&desired.subject).unwrap();
+    assert!(pending.is_none(), "a known nonlaunch remained producer-open: {pending:?}; dispatch: {result:?}");
+    let failed = store.observations_for(&desired.subject, "runtime.action.failed")
+        .unwrap().pop().unwrap();
+    assert_eq!(failed.body["fields"]["operation_status"], "producer-closed");
+    assert_eq!(std::fs::read_to_string(row).unwrap(), record,
+        "rejection must not retire or change the foreign incarnation");
+}
+
+    #[test]
 fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     if crate::test_support::supervise_test() {
         return;
