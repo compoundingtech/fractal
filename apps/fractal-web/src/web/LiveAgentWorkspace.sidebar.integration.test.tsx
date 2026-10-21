@@ -75,7 +75,7 @@ const mount = async (width: number) => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 }
-const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
+const sidebar = () => host.querySelector('aside[aria-label="Agents"], [role="dialog"][aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
 
@@ -114,6 +114,11 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
   source = { ...source, missions, attention, sync: { ...source.sync!, missions: missionsSync, attention: attentionSync } }
   registry.set(agents, observed({ value: [seat] }))
   await mount(width)
+  if (width === 390) {
+    const opener = host.querySelector<HTMLButtonElement>('button[aria-label="Expand sidebar"]')!
+    expect(opener).not.toBeNull()
+    await act(async () => opener.click())
+  }
   const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
   const expected = `Worker, Working, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
   expect(row().getAttribute('aria-label')).toBe(expected)
