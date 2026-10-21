@@ -3,6 +3,7 @@
 #[path = "../../../scripts/ci-test-paths.rs"]
 mod ci_test_paths;
 
+use fractal_daemon::AgentMessagesStore;
 use fractal_daemon::CoordinationStore;
 use fractal_daemon::MissionsStore;
 use fractal_daemon::LimitsStore;
@@ -3815,8 +3816,8 @@ enum MessageCommand {
     /// Send one durable normalized message to an agent.
     ///
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
-    /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `st work handoff` for work, and `--kind silent` for anything
-    /// else, which wakes nobody and reaches the recipient at its next turn. Status goes to
+    /// which rereads its context. Use `--kind wake` (the default) for a question, answer or conversational handoff, `st work handoff` for work, and `--kind silent` (or `--fyi`) for
+    /// anything else, which wakes nobody and reaches the recipient at its next turn. Status goes to
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
     /// People have no inbox: a send or reply to a person fails. To reach a person, print in
     /// the chat.
@@ -3942,19 +3943,28 @@ struct MessageWakeArgs {
     /// Wake the recipient (default), or hold unread mail for its next real turn.
     #[arg(long, value_parser = ["silent", "wake"], default_value = "wake")]
     kind: String,
+    /// FYI: the same as `--kind silent`. Stored and readable, it wakes nobody; the recipient
+    /// sees it with its next real turn. A daemon that does not know silent wakes as before.
+    #[arg(long, conflicts_with = "kind")]
+    fyi: bool,
 }
 
 impl Default for MessageWakeArgs {
     fn default() -> Self {
         Self {
             kind: "wake".into(),
+            fyi: false,
         }
     }
 }
 
 impl MessageWakeArgs {
+    fn silent(&self) -> bool {
+        self.fyi || self.kind == "silent"
+    }
+
     fn tags(&self) -> impl Iterator<Item = String> {
-        (self.kind == "silent")
+        self.silent()
             .then(|| fractal_daemon::silent::SILENT_TAG.to_owned())
             .into_iter()
     }
@@ -6050,6 +6060,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
         std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
@@ -8818,12 +8829,19 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     } else {
         "/v1/usage"
     };
-    let report: Value = client
+    let mut report: Value = client
         .get(&format!("{path}?since_ms={since}&until_ms={until}"))
         .await?;
     if json_output || args.messages_only {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
+    }
+    // Coordination cost beside spend. A daemon without the count read shows spend alone.
+    if let Ok(counts) = client
+        .get::<Value>(&format!("/v1/usage/messages?since_ms={since}&until_ms={until}"))
+        .await
+    {
+        report["coordination"] = counts;
     }
     print!("{}", render_usage_report(&report, args.hours, args.by));
     Ok(())
@@ -9087,6 +9105,28 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             "UNPRICED  {} tokens on models without a price",
             total[6]
         );
+    }
+    if let Some(counts) = report.get("coordination").filter(|counts| counts.is_object()) {
+        let _ = write!(
+            output,
+            "MESSAGES  {} agent to agent ({} silent)",
+            counts["agent_to_agent"].as_u64().unwrap_or(0),
+            counts["silent"].as_u64().unwrap_or(0)
+        );
+        // Older daemons count messages but not merged pull requests.
+        if let Some(merged) = counts["merged_pull_requests"].as_u64() {
+            let _ = write!(output, " · {merged} merged PRs · ");
+            match counts["agent_to_agent_per_merged_pull_request"].as_f64() {
+                Some(ratio) => {
+                    let _ = write!(output, "{ratio:.1} per merged PR");
+                }
+                None if counts["complete"].as_bool() != Some(true) => {
+                    output.push_str("per merged PR unknown until message history is counted")
+                }
+                None => output.push_str("per merged PR unknown with none merged"),
+            }
+        }
+        output.push('\n');
     }
     if let Some(estimate) = report.get("agent_messages") {
         output.push_str("\nAGENT MESSAGES · daily estimate · UTC · API-equivalent\n");
@@ -13205,7 +13245,7 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
-    if args.wake.kind == "wake" && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
+    if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
     for tag in args.wake.tags() {
@@ -18170,6 +18210,28 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
                 eprintln!("st3: coordination count bootstrap failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Count the retained sends for the usage estimate in bounded pages, one writer turn each, so
+/// neither opening the store nor the first usage read rebuilds every send. A usage read that
+/// arrives before the last page completes the rest itself.
+async fn backfill_agent_message_days(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.agent_message_days", || {
+                page_store.advance_agent_message_days()
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
+            error => {
+                eprintln!("st3: agent message usage backfill failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }

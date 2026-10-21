@@ -1065,6 +1065,15 @@ path (the checks run once); so does every fixup that changes the tree; a tree th
 The checks run without the agent seat's identity and session variables (`ST_*`, `ST2_*`, `ST3_*`, `CLAUDE*`, `ANTHROPIC_*`; `ST_AGENT`, `ST_SKIP_EVIDENCE` and the `ST_EVIDENCE*` switches stay, by exact name: that list in `scripts/st-test` is the only exception mechanism, and `ST_AGENT` stays visible to the checks because the `nix` wrapper that needs it starts them), as on a CI runner: tests that read them fail or behave differently under a seat. Tests that bind a request to the seat by process ancestry still do, so a trustworthy full run of the Linux gate must be started detached from any seat. It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
 there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
 
+**The signer starts with a scrubbed loader environment.** `evidence-sign` refuses to start when the loader or the interpreter was
+told to load code (`LD_PRELOAD` and the rest of its `REFUSED_ENVIRONMENT`): a preloaded library inside the signer is an injection
+point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (hetz2 preloads jemalloc), which made every signed push
+there report "a check failed". So the launcher scrubs instead: `evidence-wrap` resolves the signer program with the caller's PATH,
+then starts it by absolute path without any `LD_*`, `DYLD_*` or `PYTHON*` variable, `GLIBC_TUNABLES`, `GCONV_PATH` or `NLSPATH`,
+and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `st-test` starts the signer's interpreter with `-I`. The checks themselves
+keep the caller's environment. Tests set these variables in the caller and require a signed note, and require the signer to still
+refuse when it is started with `LD_PRELOAD`.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,

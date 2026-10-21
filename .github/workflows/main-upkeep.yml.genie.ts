@@ -78,10 +78,12 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
-  // Fill caches for current main; keep pinned manual runs independent.
+  // Fill caches for current main; keep pinned manual runs independent. Main pushes share one group
+  // without cancelling: a started cache fill finishes, and GitHub keeps only the newest pending run, so
+  // a burst of merges coalesces into one more run instead of cancelling each one half way.
   concurrency: {
     group: "main-upkeep-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}",
-    'cancel-in-progress': "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    'cancel-in-progress': false,
   },
   actionlint: {
     ...defaultActionlintConfig,

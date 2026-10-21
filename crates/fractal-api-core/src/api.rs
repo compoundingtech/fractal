@@ -10444,5 +10444,6 @@ pub mod read_deadline_tests_shared_client_v0_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_client_v0_tests;
 
-#[cfg(any(test, feature = "test-support"))]
+// It drives `tile_endpoint`, which exists on Linux only.
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
 pub mod tile_endpoint_tests_shared_client_v0_tests;

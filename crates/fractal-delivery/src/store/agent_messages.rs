@@ -3,7 +3,7 @@
 use super::*;
 use serde::Deserialize;
 pub use fractal_store::store::agent_messages::*;
-pub use fractal_store::store::agent_messages::{DAY_MS, create_schema, flush, open, ready, synthetic};
+pub use fractal_store::store::agent_messages::{BACKFILL_PAGE, DAY_MS, backfill_page, create_schema, flush, open, ready, synthetic};
 
 pub struct DailyUsage {
     pub since: u64,
@@ -14,25 +14,10 @@ pub struct DailyUsage {
 
 const ALLOWANCES: &str = "doc/usage/agent-message-allowances";
 
+// The rest of the backfill in one transaction, for an estimate that arrives before the
+// daemon's background pages finish.
 fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
-    let filled = ready(transaction)?;
-    if !filled {
-        transaction.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-he4aeb14851ad owner=fractal_delivery::store::agent_messages TODO=prepare-body-and-predecessor-values */ "DELETE FROM agent_message_sends;
-             DELETE FROM agent_message_days;
-             INSERT OR IGNORE INTO local_agent_message_pending
-             SELECT DISTINCT subject FROM claims WHERE kind='message.sent';",
-        )?;
-    }
-    // The older allowance cache can prime all history. New coordination metadata must
-    // still bootstrap in bounded pages rather than piggyback on that legacy rebuild.
-    flush_with_coordination(transaction, filled, true)?;
-    if !filled {
-        transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h9ed4d2dfdbb5 owner=fractal_delivery::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
-            [],
-        )?;
-    }
+    backfill_page(transaction, usize::MAX)?;
     Ok(())
 }
 
@@ -89,13 +74,26 @@ fn snapshot_sends(connection: &Connection) -> Result<Vec<(u64, String)>> {
 
 pub trait AgentMessagesStore {
     fn agent_message_estimate(&self, days: &[DailyUsage]) -> Result<Value>;
+    /// One bounded page of the usage backfill on the background writer: at most
+    /// [`BACKFILL_PAGE`] sends. The daemon awaits it and pauses between pages. Returns whether
+    /// the counts are ready.
+    fn advance_agent_message_days(&self) -> Result<bool>;
 }
 
 impl AgentMessagesStore for Store {
 
+    fn advance_agent_message_days(&self) -> Result<bool> {
+        let mut connection = self.connection.write_background();
+        let transaction = connection.transaction()?;
+        let ready = backfill_page(&transaction, BACKFILL_PAGE)?;
+        transaction.commit()?;
+        Ok(ready)
+    }
+
     fn agent_message_estimate(&self, days: &[DailyUsage]) -> Result<Value> {
-        // Complete the migration atomically on the first estimate request, never return
-        // partially backfilled counts. Subsequent writes maintain the ready index as before.
+        // The daemon counts retained sends in background pages. An estimate that arrives
+        // before they finish completes the rest atomically rather than return partial counts.
+        // Subsequent writes maintain the ready index as before.
         let ready: bool = self.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
             [],
@@ -314,6 +312,136 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path, "node").unwrap();
         assert_eq!(estimate_days(&reopened, &day).unwrap()["days"][0]["messages"], 1);
+    }
+
+    /// `count` agent-to-agent sends, each its own message, in one transaction.
+    fn send_history(store: &Store, prefix: &str, count: usize) {
+        store.connection.batched(|tx| {
+            for number in 0..count {
+                let to = if number % 2 == 0 { "agent/birch" } else { "agent/cedar" };
+                append_claim_record_tx(tx, "node", &format!("message/{prefix}-{number:05}"), "message.sent", None,
+                    &json!({"fields": {"from":"agent/alder", "to":to, "status":"sent"}}), &[], None)?;
+            }
+            flush(tx)
+        }).unwrap().unwrap();
+    }
+
+    /// An upgraded store: its retained sends were never counted.
+    fn withdraw_counts(store: &Store) {
+        store.connection.batched(|tx| {
+            tx.execute_batch(
+                "DELETE FROM meta WHERE key IN ('agent_message_days_v1','agent_message_days_v1_through');
+                 DELETE FROM agent_message_sends;
+                 DELETE FROM agent_message_days;",
+            )?;
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+    }
+
+    /// Each counted message's subject, send time and recipient.
+    type Sends = Vec<(String, u64, String)>;
+    /// Each day's count per recipient.
+    type Days = Vec<(u64, String, u64)>;
+
+    fn counts(store: &Store) -> (Sends, Days) {
+        let connection = store.readers.get();
+        let sends = connection.prepare("SELECT subject,sent_ms,recipient FROM agent_message_sends ORDER BY subject").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let days = connection.prepare("SELECT day_ms,recipient,count FROM agent_message_days ORDER BY day_ms,recipient").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        (sends, days)
+    }
+
+    fn counts_ready(store: &Store) -> bool {
+        store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')", [], |row| row.get(0),
+        ).unwrap()
+    }
+
+    /// The counts a rebuild of every retained send in one transaction gives the same claims.
+    fn assert_counts_match_a_full_rebuild(store: &Store) {
+        let paged = counts(store);
+        withdraw_counts(store);
+        store.connection.batched(ensure_ready).unwrap().unwrap();
+        assert_eq!(paged, counts(store));
+    }
+
+    /// Run `estimate` while this thread holds the writer: it finishes only if it never needs it.
+    fn estimate_without_the_writer(store: &Store, day: &[(u64, u64, u64, u64)]) -> Value {
+        std::thread::scope(|scope| {
+            let held = store.connection.write_background();
+            let estimate = scope.spawn(|| estimate_days(store, day).unwrap());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !estimate.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(estimate.is_finished(), "the estimate waited for the writer");
+            drop(held);
+            estimate.join().unwrap()
+        })
+    }
+
+    #[test]
+    fn background_pages_count_a_large_history_so_the_first_estimate_never_takes_the_writer() {
+        let store = Store::open_memory("node").unwrap();
+        let history = 4 * BACKFILL_PAGE + 7;
+        send_history(&store, "old", history);
+        withdraw_counts(&store);
+        let mut counted = 0;
+        let mut pages = 1;
+        while !store.advance_agent_message_days().unwrap() {
+            // One writer turn counts at most one page of sends.
+            let now = counts(&store).0.len();
+            assert!(now - counted <= BACKFILL_PAGE, "page {pages} counted {} sends", now - counted);
+            assert!(!counts_ready(&store));
+            counted = now;
+            if pages == 2 {
+                // Writes between pages: a new send past the cursor, a later duplicate send of a
+                // counted message, and the removal of one counted and one uncounted message.
+                send_history(&store, "new", 3);
+                store.connection.batched(|tx| {
+                    append_claim_record_tx(tx, "node", "message/old-00000", "message.sent", None,
+                        &json!({"fields": {"from":"agent/alder", "to":"agent/cedar", "status":"sent"}}), &[], None)?;
+                    tx.execute("DELETE FROM claims WHERE subject='message/old-00001'", [])?;
+                    tx.execute(&format!("DELETE FROM claims WHERE subject='message/old-{:05}'", history - 1), [])?;
+                    flush(tx)
+                }).unwrap().unwrap();
+            }
+            pages += 1;
+        }
+        assert_eq!(pages, history.div_ceil(BACKFILL_PAGE));
+        assert!(counts_ready(&store));
+        let day = [(0, u64::MAX / 2, 1_000_000, 0)];
+        let estimate = estimate_without_the_writer(&store, &day);
+        assert_eq!(estimate["days"][0]["messages"], history - 2 + 3);
+        assert_counts_match_a_full_rebuild(&store);
+    }
+
+    #[test]
+    fn the_backfill_resumes_after_a_restart_and_an_early_estimate_completes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resume.sqlite3");
+        let store = Store::open(&path, "node").unwrap();
+        send_history(&store, "old", 3 * BACKFILL_PAGE + 3);
+        withdraw_counts(&store);
+        assert!(!store.advance_agent_message_days().unwrap());
+        assert_eq!(counts(&store).0.len(), BACKFILL_PAGE);
+        drop(store);
+        // Opening the store neither restarts the backfill nor finishes it.
+        let store = Store::open(&path, "node").unwrap();
+        assert!(!counts_ready(&store));
+        assert_eq!(counts(&store).0.len(), BACKFILL_PAGE);
+        assert!(!store.advance_agent_message_days().unwrap());
+        assert_eq!(counts(&store).0.len(), 2 * BACKFILL_PAGE, "the second page continues from the first");
+        // An estimate before the last page completes the rest itself, in one transaction.
+        send_history(&store, "new", 2);
+        let day = [(0, u64::MAX / 2, 1_000_000, 0)];
+        assert_eq!(estimate_days(&store, &day).unwrap()["days"][0]["messages"], 3 * BACKFILL_PAGE + 5);
+        assert!(counts_ready(&store));
+        assert!(store.advance_agent_message_days().unwrap());
+        assert_counts_match_a_full_rebuild(&store);
     }
 
     #[test]

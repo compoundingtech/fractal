@@ -1,6 +1,6 @@
 import { nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
-import { buildEnv, fullHistoryCheckoutSteps, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { buildEnv, fractalWebRunnerStep, fullHistoryCheckoutSteps, macosRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
 
 // The load jobs, defined once. The daily long lanes run them on main (daily-perf-load, daily-perf-load-hog,
 // daily-perf-load-hog-macos), and the Performance workflow (perf.yml) runs them by manual dispatch on any
@@ -10,8 +10,11 @@ import { buildEnv, fullHistoryCheckoutSteps, macosRunner, performanceRunner, rea
 const snapshotAttempt = "!cancelled() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (steps.load.outcome == 'success' || steps.load.outcome == 'failure')"
 const snapshotPublished = "!cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.publish == 'true'"
 
-// The checkout, snapshots, Nix and scratch space every Linux load job starts from.
+// The checkout, snapshots, Nix and scratch space every Linux load job starts from. The first step logs the
+// runner's CPU model: Namespace's 8x16 label serves two host classes, one about 2x slower, and the job
+// header cannot tell them apart.
 const loadSetupSteps = [
+  fractalWebRunnerStep,
   ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   {
     name: 'Name compatible snapshot recipes',
@@ -43,6 +46,13 @@ printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_ST
   },
 ]
 
+// The checkout and Nix setup of a cold macOS job. The daily macOS compile check (daily-long.yml) starts
+// from the same steps as the macOS hog run.
+export const macosColdSetupSteps = [
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
+  ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+]
+
 const loadEnv = {
   ...buildEnv,
   SCCACHE_IDLE_TIMEOUT: '0',
@@ -54,10 +64,13 @@ const loadEnv = {
 export const perfLoadJobs = scopeLinuxNixSandbox({
   jobs: {
     // The release load test against main's last five reports; main's runs also publish the build and
-    // store snapshots every later run restores.
+    // store snapshots every later run restores. They publish only after a complete workload report, so a
+    // run on a new recipe must finish cold to seed it: run 39488050274 compiled for 10m38s and generated
+    // stores for 966s, and its 30-minute limit cancelled the measurement before anything was saved.
+    // 60 minutes leaves that cold run room in both workflows.
     'perf-load': {
       'runs-on': performanceRunner,
-      'timeout-minutes': 30,
+      'timeout-minutes': 60,
       defaults: { run: { shell: 'bash' } },
       env: loadEnv,
       steps: [
@@ -122,8 +135,7 @@ python3 scripts/ci-perf-cache pack`,
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, SCCACHE_IDLE_TIMEOUT: '0' },
       steps: [
-        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
-        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        ...macosColdSetupSteps,
         {
           name: 'Isolate test state',
           run: `home="$RUNNER_TEMP/test-home"

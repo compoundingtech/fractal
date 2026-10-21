@@ -225,6 +225,22 @@
       "reason": "Fails in the Nix build sandbox while it passes in central CI (linux-tests). Measured on main 24d78d71b: run alone in the sandbox at 1 and at 4 test threads, cancellation_adopts_and_stops_gate_processes_after_daemon_restart passed alone twice but failed in 2 of 3 full-suite Nix runs (same timeout). The step that never happens is the finally-step gate (final.pid) after 'missions cancel'; the mission_cancellation sibling tests that cancel without work in flight pass. Not load alone, and not systemd (the test stubs systemctl). Root cause in the sandbox not found; excluded rather than weakened.",
       "owner": "nix-evidence (mission fleet/factory/nix-evidence)",
       "runs_instead": "central CI linux-tests shards and the wrapper path"
+    },
+    {
+      "package": "fractal",
+      "binary": "integration",
+      "test": "onboarding_eval::the_judge_accepts_a_good_play_and_rejects_each_bad_one",
+      "reason": "The eval's judge scripts start with '#!/usr/bin/env bash' and the build sandbox has no /usr/bin/env ('bad interpreter: No such file or directory'). Not a missing input; the sandbox cannot provide the path.",
+      "owner": "nix-evidence (mission fleet/factory/nix-evidence)",
+      "runs_instead": "central CI linux-tests shards and the wrapper path"
+    },
+    {
+      "package": "fractal-runtime",
+      "binary": "st_runtime",
+      "test": "pty::tests::spawn_keeps_the_runtime_registry_when_the_seat_declares_pty_root",
+      "reason": "The test hands its fake launcher PATH=/run/current-system/sw/bin:/usr/bin:/bin on purpose (host tool directories). The build sandbox has none of them, so the launcher cannot find mkdir, cat or printenv and exits 1 ('spawn PTY failed'). Not a missing input; the sandbox cannot provide those directories.",
+      "owner": "nix-evidence (mission fleet/factory/nix-evidence)",
+      "runs_instead": "central CI linux-tests shards and the wrapper path"
     }
   ]
 }

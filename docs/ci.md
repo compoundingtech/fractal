@@ -998,7 +998,12 @@ lanes that need a VM, real sockets across daemon restarts, or an older st3. Toda
 producer they consume. It also runs the cost check as `daily-perf-cost` (see
 [Performance gate](#performance-gate)) as Main upkeep runs it, and the load tests as
 `daily-perf-load`, `daily-perf-load-hog` and `daily-perf-load-hog-macos` from the job definitions
-the Performance workflow dispatches (`.github/workflows/perf-load.ts`). The others run exactly as Workspace CI runs them, because both workflows build
+the Performance workflow dispatches (`.github/workflows/perf-load.ts`). `daily-macos-check` runs
+`cargo check --workspace --all-targets --locked` (the flags clippy uses on Linux and macOS) on the same
+Namespace Mac and from the same checkout and Nix setup as `daily-perf-load-hog-macos`: macOS CI no
+longer runs on each push to `main`, so a Linux-only item that a macOS build still reaches, such as
+a test-support module that uses `api::tile_endpoint`, turns this lane red the same day. It runs no
+tests, builds cold and keeps no cache, and has 45 minutes. The others run exactly as Workspace CI runs them, because both workflows build
 the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
 `.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
 no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no
@@ -1148,7 +1153,10 @@ Cargo outputs, registry/git sources, a local sccache, and a signed Nix binary ca
 small shell closure. The build recipe includes the lockfiles, shell, manifests and Cargo config.
 Generated-store snapshots have a separate exact generator/schema key. Publication requires a
 complete real workload report, proving compilation and store generation finished; a missed latency
-budget still retains these valid caches. Cancelled and incomplete runs do not publish. Failed
+budget still retains these valid caches. Cancelled and incomplete runs do not publish, and the
+snapshot steps run after the load step, so the first run of a new recipe seeds it only by finishing
+cold within `perf-load`'s 60-minute limit (both workflows): daily run 39488050274 compiled for
+10m38s, generated stores for 966s and was cancelled at the earlier 30-minute limit. Failed
 reports never become main baselines. PRs prefer their own published snapshots, then fall back to
 trusted main artifacts. A PR snapshot must match the head
 repository and branch and a commit in the current PR; it cannot supply main's caches or anyone's
@@ -1467,8 +1475,10 @@ for the distinction between build concurrency and merge batch size.
 ## Superseded merge groups
 
 Push concurrency in Main upkeep and the public guard is scoped to protected main.
-A new main push cancels obsolete automatic work; its upkeep still probes and fills the current
-main's exact cache entries. PR groups use the PR number, rather than its head SHA, so a new head
+In the public guard a new main push cancels obsolete automatic work. Main upkeep never cancels a
+started run: main pushes share one group, GitHub keeps only the newest pending run, so a burst of
+merges coalesces into one more upkeep that probes and fills the current main's exact cache
+entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
 replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
 immutable workflow revisions can remain queued: before cancelling a backlog entry, compare its
 event, source and PR state with current main or the PR's latest head, retain its original timing

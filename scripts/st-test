@@ -268,7 +268,8 @@ def main(argv):
             lag = behind(args.base)
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
             repository = args.repository or repository_of(remote or 'origin')
-            signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, tools['evidence-sign']])
+            # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
+            signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
             rows, failed = [], False
             lanes = lane_names(args.base)
             unmaterialized = materialize_members(directory)
