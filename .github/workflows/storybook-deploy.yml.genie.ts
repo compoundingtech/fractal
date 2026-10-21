@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { defaultActionlintConfig, githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { megarepoApplyStep, readOnlyBinaryCaches } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 
 // Independent of required checks. Keep this superset of the kit's transitive inputs in
 // scripts/ci-fractal-web-changes, including the generated changelog and source-input staging.
@@ -81,7 +82,7 @@ fi`,
   },
 ]
 
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   actionlint: defaultActionlintConfig,
   name: 'Storybook deploy',
   on: {
@@ -186,4 +187,4 @@ printf '## Storybook preview removed\\n\\nStage: %s\\n' "$STAGE" >> "$GITHUB_STE
   changes: 'Reads GitHub PR file metadata only; no checkout, install or build.',
   deploy: 'Storybook uses a clean static build and read-only upstream Nix caches; no Actions build cache is configured.',
   destroy: 'Destroys remote infrastructure only; no Storybook build or build cache.',
-}))
+})))
