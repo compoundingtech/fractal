@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Give all scenario-mode story validations an explicit 20-second timeout, preserving full forbidden-read checks while allowing measured SidebarTree jsdom render costs under merge-group load.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "No product behavior change. Story validation still commits and unmounts the complete tree; its timeout now covers the measured 596–1788-row SidebarTree render rather than sharing Vitest's 5-second default." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

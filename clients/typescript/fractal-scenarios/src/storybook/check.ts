@@ -13,6 +13,13 @@ export { resolveScenarioWorld, withScenario } from './runtime.ts'
 
 export type { ScenarioMountedWindow, ScenarioStoryParameter } from './index.ts'
 
+// Full commits are required: nested virtualizer commits can contain forbidden
+// slice reads. SidebarTree's jsdom row rendering (596–1788 rows, owned by UI
+// Design) costs 2.5 s locally / 6.2 s in CI for StickyChain and 5.7 s / 7.1 s
+// for AllStates (up to 8 s observed). Merge-group load is about 2x PR load;
+// 20 s covers that bounded work without relying on Vitest's 5 s default.
+export const scenarioModeValidationTimeoutMs = 20_000
+
 type ConversationEntry = World['slices']['conversation']['state']['threads'][number]['items'][number]
 
 // Each user content entry starts a turn; an assistant-only prefix is one turn.
