@@ -1,15 +1,37 @@
 # Missions in practice
 
-Start with the worker and workspace from [getting started](getting-started.md). A **goal** says what should be true when the work is done: “README.md explains the garden and has no broken relative links.” Put instructions in a document the mission names. Keep mission files in the repository so you can review changes to the plan.
+Finish [getting started](getting-started.md) before declaring a worker. A **goal** says what should be true when the work is done: “README.md explains the garden and has no broken relative links.” Put instructions in a document the mission names. Keep mission files in the repository so you can review changes to the plan.
+
+## Declare a worker seat
+
+These examples use the invented person `ada` and a Claude seat named `garden/worker`. Use your configured person name. Install Claude Code and finish its login before applying the declaration.
+
+```sh
+mkdir -p ~/st/garden && cd ~/st/garden
+cat > worker.kdl <<EOF
+version 2
+agent "garden/worker" {
+  workspace "$PWD"
+  restart "always"
+  harness "claude" {
+    model "sonnet"
+  }
+}
+EOF
+st apply worker.kdl --as person/ada
+st terminals attach agent/garden/worker   # finish first-run prompts, then Ctrl+\\ to detach
+```
+
+The seat starts idle and waits for a message or ready mission step. If you have already declared it and stopped it, run `st agents start garden/worker --as person/ada`.
 
 ## Write, publish, then start
 
-Run these on the machine where `~/st/garden` exists. If you stopped the worker after the first guide, start it again:
+Run these in the worker workspace on the machine where you declared it:
 
 ```sh
 cd ~/st/garden
-st agents start garden/worker --as person/ada
 mkdir -p docs missions
+printf 'Willow Garden grows beans.\n' > garden-note.md
 cat > docs/readme-brief.md <<'EOF'
 Prepare README.md for the invented Willow Garden.
 Describe the garden in one paragraph and link to garden-note.md.
@@ -112,7 +134,7 @@ st agents queue agent/garden/worker
 | --- | --- |
 | One step must follow another in the same run | `depends-on`; the order of steps in the file does not set the order they run. `queue {}` is a shorter way to write a series of steps. |
 | A whole run must wait for another run | `--after RUN`; if the earlier run fails or is cancelled, the waiting run also fails. |
-| Someone must hear that a run failed, was cancelled or stalled | `report-to="agent/NAME"` on the mission, or `--report-to AGENT` when starting, or `st missions report-to RUN --agent AGENT` on a run already going. The agent gets one message for each event. See [run reports](st3/mission-graph-runtime.md#run-reports). |
+| Someone must hear that a run failed, was cancelled or stalled | `report-to="agent/NAME"` on the mission, or `--report-to AGENT` when starting, or `st missions report-to RUN --agent AGENT --as person/NAME` on a run already going. The agent gets one message for each event. See [run reports](st3/mission-graph-runtime.md#run-reports). |
 | Several independent runs share one durable seat | Its seat queue. Runs enter in the order they start. The queue skips a blocked run until it has work ready. |
 | New external events should create work | An observer watches for events. A subscription starts a separate run for each matching event. Each run finishes, and the seat queue handles them. See [repository intake](github-integration.md). |
 
@@ -127,7 +149,7 @@ Moving a run does not finish the work it must wait for. Use a **seat** to keep a
 
 ## Approve a planned human gate
 
-When `check-links` finishes, the approval appears in Ada's Home as an alert. Read it and paste the exact `step-run/.../approve` ID when asked:
+When `check-links` finishes, Now shows Ada the approval as an alert. Read it and paste the exact `step-run/.../approve` ID when asked:
 
 ```sh
 st alerts ls --as person/ada
@@ -160,16 +182,14 @@ cat > format-choice.json <<'EOF'
 EOF
 printf 'Your currently claimed step-run ID (from st work ls): '
 read -r asking_step
-asking_incarnation=$(st work show "$asking_step" --json | \
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["value"]["claim_incarnation"])')
 st work ask --for person/ada --title 'Choose the catalog format' \
-  --step "$asking_step" --incarnation "$asking_incarnation" --request format-choice.json \
+  --step "$asking_step" --request format-choice.json \
   --idempotency-key garden-catalog-format --as "$ST_AGENT"
 ```
 
 Use the same idempotency key when retrying the same question, so it is only asked once. When the agent returns to work, it reads `person_answers` with `st work show "$asking_step" --json` and uses the answer ID to choose what to do. If the seat has no claimed work, use `--new-run NAME` instead of `--step`. [Talking to agents](talking-to-agents.md) shows decision, choice, and feedback requests and how a person answers.
 
-The incarnation identifies the agent session that holds the claim. Passing it explicitly works around [a v0.3.4 Claude shell bug](https://github.com/compoundingtech/smalltalk/issues/1236). Read it from your **own current claim**, after claiming the step. Get a fresh value after a restart or a change to the plan.
+`--incarnation` defaults to the seat's `ST3_INCARNATION`. A restart or a plan change gives the claim a new incarnation, so claim again before asking.
 
 ## Traps and fixes
 
@@ -202,7 +222,7 @@ agent seats, and running a machine or fleet. `st help --all` also lists commands
 Use `st help agents new` to open a command's full help.
 
 Lists show what is happening now. Add `--all` to see history. Every command has `--help`.
-The global `--json` flag prints data in the stable format the apps use. Run `stui` to see
+The global `--json` flag prints data in the stable format the apps use. Run `st` to see
 the same information in a terminal app.
 
 For work without a mission file, `st work start "Inspect the fixture" --as agent/example/worker` opens a

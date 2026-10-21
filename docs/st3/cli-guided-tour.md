@@ -38,6 +38,14 @@ discoverable rather than surprising.
 This pass answers three questions: what is happening, what needs Alex, and how does Alex launch
 new work?
 
+### Current person context: `note`
+
+Run `st note --help`, `st note`, and `st note --json` through the trusted local Unix socket. Check author, time, optional UTC expiry, revision and a clear empty state. A person's read returns their own current note; a harness defaults to its agent identity and reads only people it works for or who own it.
+
+Inspect `st note set --help` and `st note clear --help`; exercise these only against disposable state as the configured person. Set takes nonblank text bounded to 4096 UTF-8 bytes and optional `--expires-at RFC3339`; clear removes the current note. Neither command accepts another target person, and agents cannot write. Confirm expiry removes a note from reads.
+
+Notes inform, never assign work, approve gates, answer person asks or grant authority. Slice A provides explicit reads only, without launch delivery, notifications or UI. Publishing requires anchored membership and all active members advertising `features.person_directive_note=1`; fence legacy peers from replication before enabling notes, because advertisements do not prove complete legacy-peer discovery.
+
 ### 1. `now` — one bounded operational answer
 
 Why: this should be the first command a person runs, not a dashboard assembled from five other
@@ -202,6 +210,9 @@ surface.
 st conversations --help
 st conversations ls --help
 st conversations ls person/alex
+st conversations ls person/alex --from agent/worker
+st conversations ls person/alex --from agent/worker --subject "Review ready"
+st conversations ls person/alex --from agent/worker --subject-prefix "Review" --archive --count
 st conversations sessions --help
 st conversations sessions
 st conversations read --help
@@ -212,6 +223,16 @@ st conversations timeline --help
 `conversations ls --as MAILBOX` is the same as the positional mailbox, matching `read --as`. A
 harness process with `ST_AGENT` can read, archive, send, reply, claim, and act on work only as that
 agent; a different `agent/...` actor is refused.
+
+`ls --from ACTOR` filters by sender; combine it with either `--subject TEXT` for an exact
+message subject or `--subject-prefix TEXT` for a literal prefix within that sender's messages.
+Both subject filters require `--from`: subject-only listing is out of scope because it would
+need a title index to avoid reading the whole mailbox. Both are case-sensitive and match the
+human-readable subject (`title` in JSON), not the `message/...` resource ID. They are mutually
+exclusive; `%` and `_` have no wildcard meaning. The daemon
+applies these filters before paging, including for `--archive`, `--count`, and `--json`.
+With an older daemon that ignores these query fields, the CLI filters the returned pages
+locally for the same result.
 
 Use a returned message ID for `read`/`thread` and a returned session ID for `timeline`. Inspect the
 write paths:
@@ -251,6 +272,8 @@ st agents new example --host HOST --print-kdl
 st agents suspend --help
 st agents resume --help
 st agents acknowledge-seed --help
+st agents handoff --help
+st agents handoff show AGENT
 st machines --help
 st machines
 ```
@@ -275,6 +298,10 @@ show`, and that `agents resume` reports the same session. `agents resume --host 
 or omp snapshot to another fleet host under the same seat identity. The target needs the same
 absolute workspace path, unoccupied; non-Git workspaces refuse suspend. Follow `suspension.phase`
 and the typed refusal reason in `agents show`.
+
+`agents handoff show AGENT` prints the document a seat left for its next session (see
+[seat continuity](seat-continuity.md)); it errors with `has written no handoff` for a seat that wrote
+none. `agents handoff write` and `agents handoff ready` are the seat's own mutations: run them only as that seat.
 
 `agents new --print-kdl` shows the seat declaration without applying it. Check that its workspace is
 a new directory below that host's home and that the harness defaults match the fleet's existing
@@ -371,11 +398,19 @@ converge known contradictions without rewriting history.
 st doctor --help
 st doctor
 st doctor --strict
+st doctor --developer
 st repair --help
 st repair dry-run --help
 st repair dry-run
 st repair apply --help
 ```
+
+Ordinary `st doctor` also reports the daemon's own `build-tools` check; a machine that only
+runs st can ignore its warning. `--developer` separately checks this account's login PATH for
+source-build tools, without contacting the daemon, compiling a crate, or looking up credentials.
+Use `--developer --strict` to fail when a source-build tool is absent. It cannot be combined
+with `--performance`. When the local daemon is down, a person at a terminal is told to run `st`
+or `st setup`; seats and native drivers keep their existing recovery text.
 
 Apply nothing unless the dry-run reports a real, understood plan. Check pass/warn/fail semantics,
 exit status, evidence, remediation, stable repair classes, approval token, and zero-change retry.
@@ -506,11 +541,13 @@ st blobs get --help
 st conversations send --help
 ```
 
-`put` keeps a PNG, JPEG, GIF or WebP image of at most 10 MiB on this member and prints
-`blob/<sha256>`. `conversations send --attach FILE` uploads and attaches in one step, and
+`put` keeps an image on this member and prints `blob/<sha256>`. Like `conversations send
+--attach FILE`, which uploads and attaches in one step, it renders an SVG to PNG, converts a BMP,
+and scales an image over 10 MiB down to fit; `--media-type` uploads the bytes exactly instead.
 `conversations read` lists each attachment with the `blobs get` command that reads it. Exercise
-`get` with the `--message` that carries the image. Check that an image over 10 MiB, a text file
-named `.png`, and a fifth attachment are refused in words.
+`get` with the `--message` that carries the image. Check that a large screenshot is scaled and
+says so, that an SVG marking up a screenshot beside it arrives as a PNG, and that a HEIC photo, a
+text file named `.png`, and a fifth attachment are refused in words.
 
 ### 18. `diagnostic` — an agent's authorized harness-failure path
 

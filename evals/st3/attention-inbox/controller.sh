@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 exec >controller.log 2>&1
 
 readonly REQUESTER=person/eval-requester
-readonly RUN_SUFFIX=${ST_MISSION_RUN//\//-}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+fractal_selected=${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}
+readonly RUN_SUFFIX=${fractal_selected//\//-}
 readonly REVIEWER=person/eval-attention
 
 standing_run=""
@@ -49,7 +52,7 @@ await_kind_count() {
   local output=$2
   local count
   for _attempt in $(seq 1 200); do
-    st3 --json attention ls --as "$REVIEWER" >"$output"
+    st3 --json alerts ls --as "$REVIEWER" >"$output"
     count=$(jq -r 'length' "$output")
     if [[ "$count" == "$expected" ]]; then
       return 0
@@ -59,7 +62,7 @@ await_kind_count() {
   return 1
 }
 
-st3 --json mission start eval/attention-inbox/standing \
+st3 --json missions start eval/attention-inbox/standing \
   --id "eval/attention-inbox/standing/${RUN_SUFFIX}" \
   --workspace "$PWD" \
   --as "$REQUESTER" >standing.json
@@ -68,14 +71,14 @@ owner_id="${standing_run#mission-run/}/owner"
 owner="agent/${owner_id}"
 st3 trace wait "$owner" --for running --timeout 1m >/dev/null
 
-st3 --json mission start eval/attention-inbox/human \
+st3 --json missions start eval/attention-inbox/human \
   --id "eval/attention-inbox/human/${RUN_SUFFIX}" \
   --workspace "$PWD" \
   --as "$REQUESTER" >human.json
 human_run=$(jq -er '.mission_run.subject' human.json)
 human_owner=$(jq -er '.mission_run.steps[] | select(.step == "approve") | .subject' human.json)
 
-st3 --json mission start eval/attention-inbox/revision \
+st3 --json missions start eval/attention-inbox/revision \
   --id "eval/attention-inbox/revision/${RUN_SUFFIX}" \
   --workspace "$PWD" \
   --input "owner=${owner_id}" \
@@ -113,7 +116,7 @@ st3 --json message send "$REVIEWER" \
 message_subject=$(jq -er '.subject' message.json)
 
 await_kind_count 3 attention.json
-st3 --json attention ls >all-attention.json
+st3 --json alerts ls >all-attention.json
 jq -e \
   --arg person "$REVIEWER" \
   --arg human "$human_owner" \
@@ -136,7 +139,7 @@ jq -e --arg person "$REVIEWER" '
   map(select(.person == $person)) | length == 3
 ' all-attention.json >/dev/null
 
-st3 attention ls --as "$REVIEWER" >attention.txt
+st3 alerts ls --as "$REVIEWER" >attention.txt
 grep -F '3 waiting' attention.txt >/dev/null
 grep -F '[human-gate]' attention.txt >/dev/null
 grep -F '[planning-approval]' attention.txt >/dev/null

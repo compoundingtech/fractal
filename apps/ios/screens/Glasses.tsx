@@ -21,6 +21,7 @@ function openPane(navigation: Navigation, pane: PaneTarget) {
   if (pane.kind === 'agent') navigation.navigate('Conversation', { target: pane.id, title: pane.title });
   else if (pane.kind === 'mission') navigation.navigate('Mission', { id: pane.id, title: pane.title });
   else if (pane.kind === 'terminal') navigation.navigate('Terminal', { terminalId: pane.id, title: pane.title });
+  else if (pane.kind === 'resource') navigation.navigate('Resource', { id: pane.id, title: pane.title });
   else if (pane.kind === 'usage') navigation.navigate('Usage');
   else if (pane.kind === 'machine') navigationRef.navigate('Fleet', { screen: 'FleetRoot' });
 }
@@ -30,13 +31,13 @@ function paneGlyph(pane: PaneTarget): { glyph: string; color: string } {
   if (pane.needsYou) return { glyph: '◆', color: theme.person };
   // Agents and missions are marked as in their own lists: working, idle, broken…
   if (pane.status) return pane.status;
-  const glyphs: Record<PaneTarget['kind'], string> = { agent: '●', mission: '◇', machine: '▣', terminal: '⌨', usage: '$', other: '·' };
+  const glyphs: Record<PaneTarget['kind'], string> = { agent: '●', mission: '◇', machine: '▣', terminal: '⌨', usage: '$', resource: '◇', other: '·' };
   return { glyph: glyphs[pane.kind], color: theme.subtext0 };
 }
 
 function paneDetail(pane: PaneTarget): string {
   if (pane.gone) return 'gone';
-  if (pane.needsYou) return `${pane.kind} · needs you`;
+  if (pane.needsYou) return `${pane.kind} · alert`;
   if (pane.status) return `${pane.kind} · ${pane.status.word}`;
   return pane.kind === 'other' ? 'this app cannot show it yet' : pane.kind;
 }
@@ -47,9 +48,9 @@ function useLists(): GlassLists {
 }
 
 function Notes() {
-  const { glassesGranted, glassesIssue } = useStore();
+  const { glassesGranted, glassesIssue, status } = useStore();
   return <>
-    {!glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in stui appear here once it does.</Note> : null}
+    {status === 'online' && !glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in stui appear here once it does.</Note> : null}
     {glassesIssue ? <Note tone="fault">{glassesIssue}</Note> : null}
   </>;
 }
@@ -86,6 +87,7 @@ export function SpaceScreen({ route, navigation }: RootScreen<'Space'>) {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingVertical: 8, paddingBottom: 32 }}>
+      <StatusLine />
       <Notes />
       {!glass ? <Empty text="This space is gone." /> : null}
       {glass?.body && panes.length > 1 ? <SpaceMap layout={glass.body.layout} titles={panes.map(pane => pane.tabs[0]?.title ?? '')} /> : null}

@@ -1,5 +1,16 @@
 # Checkpoints and trimming
 
+`st replication checkpoint status` shows each participant's `machine_version` advertised at
+its last daemon start, including its source revision and dirty marker. This is startup metadata,
+which may differ from the build that produced a checkpoint seal. A daemon republishes its version
+on every start; status selects its latest own-origin `daemon.started` claim in canonical order.
+Older or unstamped members advertise only the package version and show `not advertised` for the
+revision. JSON status includes a `machine_version` map of participants with advertised revisions,
+omitted when none are available. Pending checkpoint `builds` still names each member's seal build.
+Agreement inputs and proof identities are unchanged. Startup revisions replicate to every fleet
+member and contain no secret. Native Cargo, archive release and Nix stamp generators reject identities longer than
+128 bytes before producing a release binary. Startup also checks that bound as a defensive guard.
+
 A fleet's replicated claim log only grows, because every node holds every claim. Most of what it
 holds is old observation: a seat's state a minute ago, a diagnostic that has since repeated, a usage
 reading that a later reading includes. A checkpoint is how every node of a fleet agrees to delete
@@ -7,8 +18,10 @@ that history together, without changing the graph, what any reader returns, or w
 each other holds.
 
 This document explains how a checkpoint works and what trimming drops, with examples. It describes
-the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim) and
-`crates/st3/src/store/checkpoint_rules.rs` (the rules for st's own claim kinds). Operating commands
+the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim),
+`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for st's own claim
+kinds; see [Retention](retention.md)) and `crates/fractal-store/src/store/checkpoint_rules.rs` (the planner
+functions those rules name). Operating commands
 are in [Fleet replication](replication.md#checkpoints). Read this before changing a rule, the
 agreement, or the trim.
 
@@ -58,6 +71,14 @@ reaches a live store. If they match, the node publishes one `checkpoint.verified
 digests of the drops, the kept claims, the graph and the readers' answers. A node verifies a
 checkpoint once.
 
+The sealed set, the plan and the proof's answers live on disk, not in memory. The node captures the
+sealed set a page at a time into a staging file in its checkpoint scratch directory, committing its
+cursor with each page, and plans from that file one slot or seat at a time. The file is named for
+the cut and seal row and carries the capture epoch, the rules digest and the executable's identity,
+so the pass after a restart resumes it and anything else captures again. One pass holds the
+directory under a lock. The trim reads its tombstones from the same file in pages, then deletes it.
+A pass holds a fixed working set plus the claims of one slot, whatever the size of the history.
+
 Failed proof identities are recorded in the checkpoint's local detail. An identical input is
 not copied or replayed again, including after a restart or after switching away from and back
 to an earlier input. The identity includes the sealed claims and admission state, drop/retained
@@ -65,16 +86,13 @@ and rules digests, protocol, and executable identity. A genuinely changed input 
 ten minutes after the last failure before another proof. Normal later observations outside the
 sealed set do not invalidate this record; fixing a rule or reader changes its identity.
 
-The rules identity covers projection inputs and replay as well as retention. Version 11 includes
-`arrangements` and `arrangement_registers`, even when empty, and rebuilds them from sealed claims.
-Version 12 ages out the sekrets claims written before they became local observations.
-Version 13 makes status-history retention use the reader's source selection, excluding stamped
-heartbeats before finding transitions. Legacy transitions that the reader exposes remain retained.
-Different builds' rules digests must match exactly, not by version ordering: a mixed-version
-fleet waits at sealing until its participants use compatible rules, including during rollback.
-Verification also refuses seal terms whose rules digest differs from the running build, without
-consuming the node's first verification. The normal step replaces terms only for the newest due
-cut; quiet retries there do not establish verification of an older cut.
+The rules identity covers projection inputs and replay as well as retention: the graph proof includes
+`arrangements` and `arrangement_registers`, even when empty, and replay rebuilds them from sealed claims.
+Different builds' rules digests must match exactly, not by version ordering: a mixed-version fleet waits
+at sealing until its participants use the same rules, including during rollback. Verification also
+refuses seal terms whose rules digest differs from the running build, without consuming the node's first
+verification. The normal step replaces terms only for the newest due cut; quiet retries there do not
+establish verification of an older cut.
 
 A status-history proof mismatch logs bounded source diagnostics from the same scratch proof reads:
 the checkpoint, seal row, cut, build and rules/drop identities, array lengths and first differing
@@ -104,7 +122,7 @@ sealing, and since every participant must seal, that stops trimming for the whol
 
 ## What a rule may drop
 
-A checkpoint does not decide what is old. The rules in `checkpoint_rules.rs` do, and a rule exists
+A checkpoint does not decide what is old. The rules in the retention policy do, and a rule exists
 only for a kind that was audited against every reader of that kind. Everything else is kept.
 
 ### Slots and witnesses
@@ -112,7 +130,8 @@ only for a kind that was audited against every reader of that kind. Everything e
 A **slot** is the part of a claim that one reader answer depends on, such as (subject, incarnation)
 for a harness observation, or (subject, request) for a subscription deferral. Within a slot the
 claims form a sequence in **canonical order**: accepted time, writer, batch sequence, position in
-the batch, claim ID. The order never depends on when a claim reached a node.
+the batch, claim ID. The order never depends on when a claim reached a node, and removing a claim
+or record never renumbers a survivor's position (see `claim_positions` in schema.md).
 
 For each slot the rule names the claims to keep. Everything else in the slot is a candidate. A
 candidate is dropped only if it has a **witness**: a later claim of the slot that is kept and sets
@@ -123,8 +142,12 @@ what the fold ends with only by replacing the witness, which is also what it wou
 dropped claim. A kind that clears all of its fields on every update (a state transition) is
 witnessed by any later kept claim of its slot.
 
-Every rule of every kind except `loop.state` also keeps the newest claim carrying each field, so a
-field set only once still has its last value.
+The harness question rule compacts only redundant observations a day after resolution.
+The newest observation and resolution remain indefinitely, so the compact record and receipt
+continue to answer readers and prevent re-observation from reopening the question.
+
+Every rule of every kind except `loop.state` and the harness question rule also keeps the newest
+claim carrying each field, so a field set only once still has its last value.
 
 ### Guards
 
@@ -153,13 +176,15 @@ what lets every node compute the same plan.
 
 ### The rules
 
-`RULES_DESCRIPTION` in `checkpoint_rules.rs` is the canonical list. Its hash, with the rule engine
-version, is the `rules_digest` in every seal, so nodes agree on a checkpoint only when they run the
-same rules. In summary:
+The `[[rules]]` of `crates/fractal-schema/retention.toml` are the canonical list. Each renders one line
+of the rules description (`rules_description` in `checkpoint_rules.rs`), followed by the engine's
+own terms. Its hash, with the rule engine version, is the `rules_digest` in every seal, so nodes
+agree on a checkpoint only when they run the same rules. In summary:
 
 | Kind | Slot | Kept |
 |---|---|---|
-| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field |
+| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode |
+| observed seat status history (`harness.observed` transitions and runtime resets) | seat | the last 200 transitions and runtime resets within seven days before the cut, ignoring stamped heartbeats; for each incarnation the transition before its first visible one, even when older; the start of the current state |
 | `harness.timeline` | subject, incarnation | the newest; only claims dated at least five days before the cut go |
 | `loop.state` | subject | the first and last claim of each run of equal (status, round); the first claim carrying the loop's items |
 | `subscription.mission-deferred` | subject, request | every claim while the request is open; once a start, failure, cancellation or release closes it, the newest |
@@ -167,10 +192,17 @@ same rules. In summary:
 | `resource.observed` written by an observer | subject | the newest |
 | `runtime.action.*` with no actor, `render.applied`, `runtime.readiness-deadline-reached` | subject (and action, incarnation, status) | the newest; only claims dated at least five days before the cut go |
 | `sekret.called`, `sekret.exited`, `sekret.refused`, `sekret.changed` written before they became local observations | subject | the newest; only claims dated at least five days before the cut go |
-| `harness.limits` | subject | the newest |
+| `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |
+| `harness.todo.observed` | subject | the newest (a rule that predates its description line) |
+| `runtime.reconcile-decision` | subject, decision key | the newest of each key; the reconciler asks whether a key was recorded, reads the newest member-reconcile decision and the subject's newest |
+| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut (rules version 18, following #1473's allocated 17); the resolution is durable (see [Harness questions](harness-questions.md)) |
 | `harness.usage`, response rollups | subject, incarnation, model, account, run, step, host | the last snapshot of each UTC hour in the seven days before the cut, the newest snapshot before that window, and the newest of all |
 | `harness.usage`, session cumulative | subject, incarnation | the newest and the last claim of the largest total |
 | `harness.usage`, context occupancy | subject, incarnation | the newest |
+
+Trimming never resets a seat's `since` or clears a held credential refusal: the start of the current
+state and of the current credential episode are always kept. The client read separately enforces its own
+seven-day / 200-item bound.
 
 Kinds the rules do not name are never dropped: missions, runs, steps, work claims, gates, messages,
 attention, membership, desired state, checkpoint claims themselves and every durable fact. The same
@@ -187,7 +219,7 @@ A later claim is not a witness that makes these facts dispensable. No special re
 rule-version change is needed.
 
 The regression `first_native_launch_receipt_binding_and_acknowledgement_survive_checkpoint_trim`
-in `crates/st3/src/store/checkpoint_tests.rs` proves the plan and applies the real tombstone and
+in `crates/fractal-store/src/store/checkpoint_tests.rs` proves the plan and applies the real tombstone and
 row-deletion path: old observations are removed while the receipt, acknowledgement, binding and
 incomplete-launch notice retain their IDs and bodies, and native continuation still selects the
 bound session.
@@ -197,6 +229,15 @@ already forgets after seven days. A claim is dropped from the replicated log onl
 least five days older than the cut, and a checkpoint is due two days after its cut, so it is at
 least seven days old by then.
 
+**Why `harness.limits` keeps an hour per account.** The account fold reads, for each account
+group, every reading measured within an hour of the group's newest, and picks the highest weekly
+percentage in the newest reset window among them; it also reads each seat's newest reading to know
+which seats use the account. A group's newest measurement only moves forward, so a reading more
+than an hour older than the newest the sealed set holds is never read again, whatever arrives
+later. Seats report limits every few minutes and repeat them unchanged, so this drops almost all
+of them. Because the answer folds every seat's readings, the proof also compares the account
+limits across the whole fleet, refolded from the copy's claims before and after the drop.
+
 **Why `work.renewed` is not in the table.** It is the case that taught the rules what "witness"
 costs. A late step claim can land between any two lease renewals, so no renewal has a witness that
 holds for every arrival order, and the step-timing fold needs every renewal. Every renewal stays.
@@ -204,7 +245,7 @@ holds for every arrival order, and the step-timing fold needs every renewal. Eve
 ## Worked examples
 
 The names here are invented. Each example's outcome is checked against the planner by a test in
-`crates/st3/src/store/checkpoint_tests.rs`: `the_documented_examples_drop_what_the_document_says`
+`crates/fractal-store/src/store/checkpoint_tests.rs`: `the_documented_examples_drop_what_the_document_says`
 for the harness observation, the renewals and the guard, and
 `usage_rollups_keep_hourly_ends_in_the_window_and_one_baseline_before_it` for the usage rollup.
 
@@ -278,16 +319,32 @@ second as evidence, the evidence guard would keep that one too.
 
 A stable checkpoint is trimmed in two steps, and a crash between them is safe.
 
-1. **Tombstones, in one transaction.** For every dropped envelope and claim the node records a
-   tombstone: writer, sequence, hash and, for a claim, its ID, subject, kind, actor, predecessors,
-   operation and request digest. It marks the checkpoint `trimming`. The tombstones, not the
-   deleted rows, are now what the node's replication inventory lists for those envelopes.
+1. **Tombstones, in chunks.** The node marks the checkpoint `recording`, then for every dropped
+   envelope and claim records a tombstone: writer, sequence, hash and, for a claim, its ID,
+   subject, kind, actor, predecessors, operation and request digest. Each transaction stops
+   recording after 20 ms (`TRIM_CHUNK_BUDGET`). When every tombstone is recorded it marks the
+   checkpoint `trimming`. The tombstones, not the deleted rows, are now what the node's
+   replication inventory lists for those envelopes; a tombstone and the envelope it stands for
+   have one identity, so the inventory is the same while both exist.
 2. **Deletions, in chunks.** For each dropped envelope the node deletes its claims, their events,
-   records, signatures, operations and the envelope row. After the last chunk it marks the
-   checkpoint `trimmed`.
+   records, operations, the envelope's signatures and the envelope row, and each claim's signature
+   and cached verdict rows (`claim_signatures`, `claim_verdicts`, `claim_verdict_links` and the
+   verdict queues). After the last chunk it marks the checkpoint `trimmed`.
 
-A crash leaves either nothing recorded, in which case the next pass starts again, or every
-tombstone recorded with some rows still present, in which case the next pass deletes what is left.
+The signature and verdict rows are local caches outside every digest. A nonce counts as used before only
+by a claim the store still holds, and no kind a rule drops is a delegation another verdict relies on, so
+nothing reads them once their claim is gone. Each checkpoint pass sweeps any such rows left from an
+earlier trim once, walking the claim tombstones in order one claim at a time, in transactions that stop
+deleting after 20 ms (`SWEEP_CHUNK_BUDGET`). It then records `checkpoint_trimmed_claim_rows_swept = done`
+in `meta` so later passes read one row.
+
+A crash while the checkpoint is `recording` leaves some tombstones recorded and every row still
+present. A sealed set never reads the tombstones of a checkpoint that is `recording`, so the next
+pass plans exactly the drop it verified, records what is missing (recording a tombstone again
+changes nothing) and goes on. If its own rows no longer give that drop (a repair arrived in
+between), it first deletes the tombstones it recorded, newest first and in the same 20 ms chunks,
+and then adopts the manifest from a peer like a node that did not take part. A crash after that leaves every tombstone recorded with some rows
+still present, and the next pass deletes what is left.
 At every point the node's inventory, authority digest and graph are the same, so peers cannot tell a
 node mid-trim from one that has not started.
 
@@ -347,83 +404,47 @@ participants, then the smallest drop digest. A node that applied the other adopt
 manifest, so every node ends with the same tombstones. See [Fleet replication](replication.md)
 for what that forgets.
 
-## The 2026-10-03 lesson: unindexed foreign keys
+## The trim budget
 
-The first stable checkpoint on a real fleet, `checkpoint/2026-10-01`, dropped 147,245 claims. Two
-members stalled every write for about an hour while they trimmed it. Replication receives timed out
-and exchanges stopped, and a restart made it worse, because a restart runs the trim again at
-startup. Two causes, fixed in two changes:
+A trim shares the store with live writes. Recording tombstones and deleting rows both stop adding work
+to a transaction after 20 ms (`TRIM_CHUNK_BUDGET`); the commit then writes and syncs the changed pages.
+Cursors carry each tombstone scan across chunks. Every foreign key column leads an index, because
+deleting a claim looks up every row that references it. `every_foreign_key_column_leads_an_index` in
+`crates/fractal-store/src/store/tests.rs` fails otherwise, so add the index in the same change as the foreign key.
 
-- **Unindexed foreign keys (#1103).** Foreign keys are on, so deleting a claim looks up every row
-  that still references it. `operations`, `desired`, `mission_revisions` and `mission_definitions`
-  had no index on the referencing column, so each claim delete read every operation: 148,025 on one
-  member, 25.7 ms per claim instead of 0.05 ms. The four columns, and the three other unindexed
-  foreign keys, now have indexes, and a test fails if any foreign key column does not lead an index.
-  Add the index in the same change as any new foreign key.
-- **Chunks too large for the writer (#1104).** Each trim chunk deleted up to 2,000 envelopes in one
-  transaction, and with `checkpoint_claims` also unindexed by envelope, a chunk held the writer for
-  about 85 s. Every write waited behind it. A chunk now deletes one envelope at a time and commits
-  once it has run for 50 ms (`TRIM_CHUNK_BUDGET`), so the writes queued behind it run before the
-  next chunk takes the writer. Cursors carry each tombstone scan across chunks, so the trim reads
-  every tombstone once, and `checkpoint_claims` is indexed by envelope.
+`a_trim_never_makes_a_write_wait_long` in `crates/fractal-store/src/store/tombstones_tests.rs` trims a production-sized
+history (150,000 claims and operations) with every row made slow and fails without the budget: no
+chunk deletes more than budget / row cost envelopes, however loaded the machine, and writes run
+throughout the trim;
+`production_history_has_bounded_journal_writes` bounds that setup's journal writes; and
+`a_trim_that_stops_anywhere_finishes_the_same_after_a_restart` in `checkpoint_agreement_tests.rs` stops
+part way through recording and deleting.
 
-The rule that follows: **a trim shares the store with live writes, so no transaction in it may hold
-the writer for longer than the budget, whatever a row costs to delete.** The time budget, not the
-row count, is the bound. The test `a_trim_never_makes_a_write_wait_long` in
-`crates/st3/src/store/tombstones_tests.rs` trims a production-sized history (150,000 claims and
-operations) with every row made slow, and fails without the budget.
-Its setup inserts the history in two bulk statements: inserting each row separately in one growing
-transaction repeatedly spilled SQLite statement journals and sustained 42–51 MB/s of temporary
-writes before the trim even started (#1145). The Linux regression
-`production_history_has_bounded_journal_writes` forces spill with a small cache and bounds the
-setup's write-syscall bytes, without reducing the production-sized trim proof.
+## The checkpoint working set
+
+Capture, planning, proof and trimming work from staged data on disk. The
+`checkpoint_memory` regression runs a full pass at two history sizes four times apart and
+requires each measured stage to stay within 8 MiB and grow by less than half when the history
+quadruples. Restart resumes the saved capture rather than loading the sealed history again.
 
 ## Where the proof lives
 
 | What | Where |
 |---|---|
 | Due time, names, the dry-run plan | `crates/smallclaims/src/store/checkpoint.rs` |
+| The staging file: capture, cursor, plan marks, tombstone pages | `crates/smallclaims/src/store/checkpoint_staging.rs` |
 | Participants, seals, verifications, stability, excusal, attention timing | `crates/smallclaims/src/store/checkpoint_agreement.rs` |
 | Tombstones, trim, manifest adoption | `crates/smallclaims/src/store/checkpoint_trim.rs` |
-| The rules, the guards, the planner, the reader digest | `crates/st3/src/store/checkpoint_rules.rs` |
-| Rule examples as tests | `crates/st3/src/store/checkpoint_tests.rs` |
-| Trim, tombstone and replication tests | `crates/st3/src/store/tombstones_tests.rs` |
-| Agreement and convergence tests | `crates/st3/src/store/checkpoint_agreement_tests.rs` |
+| The rules, each kind's class and window | `crates/fractal-schema/retention.toml` |
+| The guards, the planner, the reader digest | `crates/fractal-store/src/store/checkpoint_rules.rs` |
+| The planner over a staging file | `crates/fractal-store/src/store/checkpoint_rules/staged.rs` |
+| A pass's memory budget | `crates/fractal/tests/checkpoint_memory.rs` |
+| Rule examples as tests | `crates/fractal-store/src/store/checkpoint_tests.rs` |
+| Trim, tombstone and replication tests | `crates/fractal-store/src/store/tombstones_tests.rs` |
+| Agreement and convergence tests | `crates/fractal-store/src/store/checkpoint_agreement_tests.rs` |
 
-A new rule changes the rules digest, so it takes effect only once every participant runs it. Before
-adding one, list every reader of the kind, give each kept claim a reason in terms of a reader's
-answer, and add a test in `checkpoint_tests.rs` that names the dropped and the kept claims, as the
-examples above do.
+What a checkpoint pass may hold in memory, and how the capture resumes after a restart, is in
+[Checkpoint capture in bounded memory](checkpoint-capture.md).
 
-The observed seat status history rule (rules version 9) preserves the last 200 canonical
-transition and runtime reset sources per seat within seven days before the cut, across runtime
-incarnations. It also preserves the start of the current observed state, including idle or
-blocked states older than that window, so trimming cannot reset `since`. Existing operational
-witnesses can retain other claims; the client read independently enforces its seven-day/200-item
-bound. Checkpoint tombstones make unprovable completeness explicit instead of treating deleted
-observations as evidence of continuity.
-
-Rules version 14 additionally retains the transition preceding the first visible entry for
-each incarnation in that bounded history, even when the witness predates seven days. A kept
-unstamped legacy row can otherwise stop emitting when trimming removes its preceding state:
-an older retained idle can replace a newer retained idle at the 200-item boundary. These
-context witnesses do not expand the reader's bound. The reader and preservation proof are
-unchanged; proof success and supported old-cut verification remain required.
-
-Rules version 10 also treats native credential refusal and recovery as observed status
-transitions within the same seven-day / 200-transition cap. It preserves the beginning
-of the current credential episode and its latest native evidence fields, so trimming
-cannot clear a login refusal or reset its start time. Checkpoint participants must run
-matching rules before verifying a new certificate.
-
-During a rules-v9 to rules-v10 rollout, participants on different versions can seal
-identical inventories with different rules digests. They cannot verify that cut together,
-so checkpoint verification and trimming stall fleet-wide until all participants use v10.
-Replication and ordinary work continue; the mismatch does not authorize dropping data.
-Coordinate the participant upgrades before resuming checkpoint verification. Previously
-verified certificate terms stay unchanged.
-
-The first observation on upgrade can reset `since` once when the legacy snapshot has no
-`provider_auth` field and its successor explicitly records null. That is an evidence-shape
-change, not proof that a login succeeded or that a runtime restarted. Later unchanged
-observations preserve `since`; a held credential refusal persists until positive recovery.
+A new rule changes the rules digest, so it takes effect only once every participant runs it. See
+[Retention](retention.md) for how to add one.

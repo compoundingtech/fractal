@@ -18,6 +18,7 @@ from unittest.mock import patch
 import uuid
 
 HERE = Path(__file__).resolve().parent
+from script_process import signal_private
 def load(name, path):
     loader = SourceFileLoader(name, str(path))
     module = module_from_spec(spec_from_loader(name, loader))
@@ -76,6 +77,8 @@ class FakeApi:
             return {"peers": [{"peer": "cobalt", "status": "up" if self.online else "last-seen"}]}
         if path.startswith("/v1/claims"):
             return {"claims": self.records}
+        if path.startswith("/v1/documents?"):
+            return {"items": []}
         if path.startswith("/v1/messages/read/") and self.advanced:
             return {"status": "closed", "to": "agent/probe/amber"}
         raise AssertionError(path)
@@ -104,6 +107,192 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.monitor.lock.close()
         self.directory.cleanup()
+
+    async def test_notice_episode_survives_same_nonce_flaps_restart_and_new_probe_cycles(self):
+        self.config["alert_agent"] = "agent/operations/amber"
+        self.restart_monitor()
+        await self.monitor.route(self.target)
+        original = self.monitor.state["routes"][self.target]
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        episode = dict(original["notice_episode"])
+        for _ in range(3):
+            self.monitor.api.online = False
+            await self.monitor.route(self.target)
+            self.assertEqual(self.monitor.report()["routes"][0]["status"], "last-seen")
+            self.assertFalse(self.alert_posts("delivery-probe-recovery"))
+            self.restart_monitor()
+            self.monitor.api.online = True
+            await self.monitor.route(self.target)
+            current = self.monitor.state["routes"][self.target]
+            self.assertEqual(current["nonce"], original["nonce"])
+            self.monitor.measuring[self.target] -= 61_000_000_000
+            await self.monitor.route(self.target)
+        current = self.monitor.state["routes"][self.target]
+        current["started_at_unix_ms"] -= self.monitor.interval
+        self.monitor.persist()
+        await self.monitor.route(self.target)
+        current = self.monitor.state["routes"][self.target]
+        self.assertNotEqual(current["nonce"], original["nonce"])
+        self.assertEqual(current["notice_episode"]["message"], episode["message"])
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        self.assertEqual(len(self.alert_posts("delivery-probe-alert")), 1)
+        self.assertEqual(len(self.alert_posts("delivery-probe-paused")), 1)
+        self.monitor.api.records = [{"kind": "message.delivered", "actor": self.target},
+                                    {"kind": "message.read", "actor": "agent/wrong"}]
+        await self.monitor.route(self.target)
+        self.assertFalse(self.alert_posts("delivery-probe-recovery"))
+        self.monitor.api.records = [{"kind": "message.read", "actor": self.target,
+                                     "accepted_at_unix_ms": 3}]
+        await self.monitor.route(self.target)
+        await self.monitor.route(self.target)
+        self.assertEqual(len(self.alert_posts("delivery-probe-recovery")), 1)
+        self.assertNotIn("notice_episode", current)
+        self.assertEqual(len(self.alert_posts("delivery-probe-alert")), 1)
+
+    async def test_same_nonce_flaps_do_not_repeat_outage_notice(self):
+        for agent_notice in (False, True):
+            with self.subTest(agent_notice=agent_notice):
+                self.monitor.state["routes"] = {}
+                self.monitor.api = FakeApi()
+                if agent_notice:
+                    self.config["alert_agent"] = "agent/operations/amber"
+                self.monitor.persist()
+                self.restart_monitor()
+                await self.monitor.route(self.target)
+                original = self.monitor.state["routes"][self.target]
+                for _ in range(3):
+                    self.monitor.measuring[self.target] -= 61_000_000_000
+                    await self.monitor.route(self.target)
+                    self.monitor.api.online = False
+                    await self.monitor.route(self.target)
+                    self.restart_monitor()
+                    self.monitor.api.online = True
+                    await self.monitor.route(self.target)
+                current = self.monitor.state["routes"][self.target]
+                self.assertEqual(current["message"], original["message"])
+                self.assertEqual(current["nonce"], original["nonce"])
+                notices = (self.alert_posts("delivery-probe-alert") if agent_notice else
+                           [body for path, body in self.monitor.api.posts if path == "/v1/work/ask"])
+                self.assertEqual(len(notices), 1)
+                self.assertFalse(self.alert_posts("delivery-probe-recovery"))
+
+    async def test_paused_notice_and_recovery_retry_exact_bodies_after_ambiguous_responses(self):
+        self.config["alert_agent"] = "agent/operations/amber"
+        self.restart_monitor()
+        await self.monitor.route(self.target)
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        post = self.monitor.api.post
+        lost = {"delivery-probe-paused", "delivery-probe-recovery"}
+        async def lost_once(path, body):
+            result = await post(path, body)
+            tags = set(body.get("tags", [])) & lost
+            if tags:
+                lost.difference_update(tags)
+                raise TimeoutError("committed; response lost")
+            return result
+        self.monitor.api.post = lost_once
+        self.monitor.api.online = False
+        with self.assertRaises(TimeoutError):
+            await self.monitor.route(self.target)
+        self.restart_monitor()
+        await self.monitor.route(self.target)
+        pauses = self.alert_posts("delivery-probe-paused")
+        self.assertEqual(len(pauses), 2)
+        self.assertEqual(pauses[0], pauses[1])
+        self.monitor.api.online = True
+        self.monitor.api.records = [{"kind": "message.read", "actor": self.target,
+                                     "accepted_at_unix_ms": 3}]
+        with self.assertRaises(TimeoutError):
+            await self.monitor.route(self.target)
+        self.restart_monitor()
+        # A different clock/message interval cannot mutate a committed recovery intent.
+        self.monitor.state["routes"][self.target]["next_at_unix_ms"] = 0
+        await self.monitor.route(self.target)
+        recoveries = self.alert_posts("delivery-probe-recovery")
+        self.assertEqual(len(recoveries), 2)
+        self.assertEqual(recoveries[0], recoveries[1])
+        self.assertEqual(len(self.alert_posts("delivery-probe-alert")), 1)
+        self.assertNotIn("notice_episode", self.monitor.state["routes"][self.target])
+
+    async def test_reviewer_episode_cancel_retries_and_read_is_the_only_reset(self):
+        await self.monitor.route(self.target)
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        original = self.monitor.state["routes"][self.target]
+        notice = next(body for path, body in self.monitor.api.posts if path == "/v1/work/ask")
+        post = self.monitor.api.post
+        lost = True
+        async def lost_cancel(path, body):
+            nonlocal lost
+            result = await post(path, body)
+            if path == "/v1/work/cancel-ask" and lost:
+                lost = False
+                raise TimeoutError("cancel committed; response lost")
+            return result
+        self.monitor.api.post = lost_cancel
+        self.monitor.api.online = False
+        with self.assertRaises(TimeoutError):
+            await self.monitor.route(self.target)
+        self.restart_monitor()
+        await self.monitor.route(self.target)
+        cancels = [body for path, body in self.monitor.api.posts if path == "/v1/work/cancel-ask"]
+        self.assertEqual(cancels[0], cancels[1])
+        for _ in range(2):
+            self.monitor.api.online = True
+            await self.monitor.route(self.target)
+            self.monitor.measuring[self.target] -= 61_000_000_000
+            await self.monitor.route(self.target)
+            self.monitor.api.online = False
+            await self.monitor.route(self.target)
+            self.restart_monitor()
+        self.assertEqual(sum(path == "/v1/work/ask" for path, _ in self.monitor.api.posts), 1)
+        self.monitor.api.online = True
+        self.monitor.api.records = [{"kind": "message.read", "actor": self.target,
+                                     "accepted_at_unix_ms": 3}]
+        await self.monitor.route(self.target)
+        current = self.monitor.state["routes"][self.target]
+        self.assertTrue(current["late"], "same pending message retains its measured deadline miss")
+        self.assertGreater(current["latency_ms"], self.monitor.deadline)
+        self.assertNotIn("notice_episode", current)
+        cancels = [body for path, body in self.monitor.api.posts if path == "/v1/work/cancel-ask"]
+        self.assertEqual(len(cancels), 3)
+        self.assertIn("recovered", cancels[-1]["idempotency_key"])
+        self.monitor.api.records = []
+        current["next_at_unix_ms"] = 0
+        await self.monitor.route(self.target)
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        asks = [body for path, body in self.monitor.api.posts if path == "/v1/work/ask"]
+        self.assertEqual(len(asks), 2)
+        self.assertNotEqual(asks[-1]["idempotency_key"], notice["idempotency_key"])
+        self.assertNotEqual(self.monitor.state["routes"][self.target]["nonce"], original["nonce"])
+
+    async def test_active_legacy_notice_migrates_lazily_without_new_notice(self):
+        self.config["alert_agent"] = "agent/operations/amber"
+        self.restart_monitor()
+        await self.monitor.route(self.target)
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        route = self.monitor.state["routes"][self.target]
+        alert = dict(route["agent_alert"])
+        route.pop("notice_episode")
+        self.monitor.persist()
+        self.restart_monitor()
+        self.monitor.api.online = False
+        await self.monitor.route(self.target)
+        self.restart_monitor()
+        self.monitor.api.online = True
+        await self.monitor.route(self.target)
+        self.monitor.measuring[self.target] -= 61_000_000_000
+        await self.monitor.route(self.target)
+        route = self.monitor.state["routes"][self.target]
+        self.assertEqual(route["notice_episode"]["agent_alert"], alert)
+        self.assertEqual(len(self.alert_posts("delivery-probe-alert")), 1)
+        self.assertEqual(set(route["notice_episode"]["clears"]), {"absent"})
+        self.assertEqual(self.monitor.state["receipts"], {})
 
     async def test_channel_stderr_flood_keeps_native_stdout_and_exit_context(self):
         child = Path(self.directory.name) / "channel"
@@ -193,9 +382,9 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         child = Path(self.directory.name) / "channel"
         descendant = Path(self.directory.name) / "descendant-pid"
         child.write_text("#!" + sys.executable + "\n" +
-                         "import subprocess, sys\n"
+                         "import os, subprocess, sys\n"
                          "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
-                         "stdout=subprocess.DEVNULL)\n"
+                         f"stdout=subprocess.DEVNULL, env={{**os.environ, 'SCRIPT_TEST_OWNER': {self.directory.name!r}}})\n"
                          f"open({str(descendant)!r}, 'w').write(str(descendant.pid))\n"
                          "sys.stderr.write('st: startup refused before hello\\n')\n"
                          "sys.exit(2)\n")
@@ -236,7 +425,8 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
             tracking.stop()
             if descendant.exists():
                 try:
-                    os.kill(int(descendant.read_text()), signal.SIGKILL)
+                    signal_private(int(descendant.read_text()), signal.SIGKILL,
+                                   environment={"SCRIPT_TEST_OWNER": self.directory.name})
                 except ProcessLookupError:
                     pass
 
@@ -345,7 +535,12 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         await self.monitor.route(self.target)
         alert = self.alert_posts("delivery-probe-alert")[0]
         self.assertEqual(alert["to"], self.config["alert_agent"])
-        for hint in (self.monitor.actor, self.target, original["nonce"], original["message"], "st doctor --json"):
+        for hint in (self.monitor.actor, self.target, original["nonce"], original["message"],
+                     "Report this route, nonce, message, missed deadline",
+                     "Reporting does not require st doctor --json to return",
+                     "report that timeout; do not repeat the call",
+                     "A Doctor timeout does not establish that the daemon stopped",
+                     "Fresh probes continue; a real recipient read sends a recovery note"):
             self.assertIn(hint, alert["content"])
         self.assertFalse(any(path == "/v1/work/ask" for path, _ in self.monitor.api.posts))
         original["started_at_unix_ms"] -= self.monitor.interval
@@ -539,6 +734,84 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.alert_posts("delivery-probe-alert"))
         self.assertNotIn("attention", self.monitor.state["routes"][self.target])
 
+    def set_route(self, status, message, **fields):
+        fields.setdefault("started_at_unix_ms", probe.now_ms())
+        self.monitor.state["routes"][self.target] = {"target": "cobalt", "to": self.target, "status": status,
+                                                     "message": message, **fields}
+
+    async def test_an_ordinary_probe_cycle_publishes_no_new_report(self):
+        self.set_route("read", "message/one", read_at_unix_ms=2, latency_ms=40)
+        self.assertTrue(self.monitor.publish_due(probe.now_ms()))
+        await self.monitor.publish()
+        published = len(self.monitor.api.posts)
+        start = self.monitor.last_publish
+        # A new send, then its read with another latency, is the same outcome.
+        self.set_route("sending", None)
+        self.assertFalse(self.monitor.publish_due(start + 1))
+        self.set_route("pending", "message/two")
+        self.assertFalse(self.monitor.publish_due(start + 2))
+        self.set_route("read", "message/two", read_at_unix_ms=3, latency_ms=900)
+        self.assertFalse(self.monitor.publish_due(start + 3))
+        # An overdue result, a late read and an alert each publish at once.
+        self.set_route("overdue", "message/three")
+        self.assertTrue(self.monitor.publish_due(start + 4))
+        self.set_route("read", "message/three", read_at_unix_ms=4, latency_ms=70_000, late=True)
+        self.assertTrue(self.monitor.publish_due(start + 5))
+        self.set_route("read", "message/three", read_at_unix_ms=4, latency_ms=40, attention="step-run/probe/ask")
+        self.assertTrue(self.monitor.publish_due(start + 6))
+        self.assertEqual(len(self.monitor.api.posts), published)
+
+    async def test_a_heartbeat_waits_for_results_in_flight_for_at_most_a_deadline(self):
+        self.set_route("read", "message/one", read_at_unix_ms=2, latency_ms=40)
+        await self.monitor.publish()
+        start = self.monitor.last_publish
+        heartbeat, deadline = self.monitor.heartbeat, self.monitor.deadline
+        self.assertFalse(self.monitor.publish_due(start + heartbeat - 1))
+        self.assertTrue(self.monitor.publish_due(start + heartbeat))
+        self.set_route("pending", "message/two", started_at_unix_ms=start + heartbeat - 1)
+        self.assertFalse(self.monitor.publish_due(start + heartbeat))
+        self.assertTrue(self.monitor.publish_due(start + heartbeat + deadline))
+
+    async def test_a_published_result_in_flight_is_replaced_once_it_resolves(self):
+        self.set_route("pending", "message/one")
+        await self.monitor.publish()
+        start = self.monitor.last_publish
+        self.assertFalse(self.monitor.publish_due(start + 1))
+        self.set_route("read", "message/one", read_at_unix_ms=2, latency_ms=40)
+        self.assertTrue(self.monitor.publish_due(start + 2))
+        await self.monitor.publish()
+        self.assertFalse(self.monitor.publish_due(self.monitor.last_publish + 1))
+
+    async def test_a_failing_send_past_its_deadline_publishes_its_alert_and_then_recovery(self):
+        self.set_route("read", "message/one", read_at_unix_ms=2, latency_ms=40, late=False, next_at_unix_ms=0)
+        await self.monitor.publish()
+        # The next send is not accepted; it keeps its key and retries.
+        self.monitor.api.fail_send = True
+        await self.monitor.route(self.target)
+        route = self.monitor.state["routes"][self.target]
+        self.assertEqual(route["status"], "sending")
+        self.assertFalse(self.monitor.publish_due(probe.now_ms()), "within its deadline it is in flight")
+        # Past its deadline the retrying send raises the alert, still as `sending`.
+        route["started_at_unix_ms"] -= self.monitor.deadline + 1
+        self.monitor.measuring.pop(self.target, None)
+        self.assertTrue(self.monitor.publish_due(probe.now_ms()), "a send past its deadline is overdue")
+        await self.monitor.route(self.target)
+        route = self.monitor.state["routes"][self.target]
+        self.assertEqual(route["status"], "sending")
+        self.assertTrue(route.get("attention"))
+        self.assertTrue(self.monitor.publish_due(probe.now_ms()))
+        await self.monitor.publish()
+        self.assertFalse(self.monitor.publish_due(probe.now_ms()))
+        report = json.loads(bytes(self.monitor.api.posts[-1][1]["bytes"]))
+        published = next(item for item in report["routes"] if item["to"] == self.target)
+        self.assertEqual((published["status"], published["message"]), ("sending", route["message"]))
+        # The send goes through and its read arrives: the recovery publishes at once.
+        self.monitor.api.fail_send = False
+        self.monitor.api.records = [{"kind": "message.read", "actor": self.target, "accepted_at_unix_ms": probe.now_ms()}]
+        await self.monitor.route(self.target)
+        self.assertEqual(self.monitor.state["routes"][self.target]["status"], "read")
+        self.assertTrue(self.monitor.publish_due(probe.now_ms()))
+
     async def test_routes_share_one_replication_status_read_while_it_is_fresh(self):
         reads = []
         get = self.monitor.api.get
@@ -680,7 +953,8 @@ class NativeProbeTests(unittest.IsolatedAsyncioTestCase):
                    "LOGNAME": os.environ.get("USER", "eval"), "SHELL": "/bin/bash", "LANG": "C.UTF-8"}
             if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
                 env["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]
-            nodes = [faults.Node(directory, host, BINARY, env, binary_directory) for host in ("amber", "cobalt")]
+            # The fault eval's default phase bound for node startup and each CLI call.
+            nodes = [faults.Node(directory, host, BINARY, env, binary_directory, 60) for host in ("amber", "cobalt")]
             if publication_gap:
                 # Hold the launcher's return after the real PTY is published. The
                 # native channel can already see its local incarnation while the
@@ -737,7 +1011,7 @@ agent "operations/amber" {{
   harness "omp" {{}}
 }}
 ''')
-                    await node.cli("agents", "apply", str(declaration), "--as", "person/eval")
+                    await node.cli("apply", str(declaration), "--no-gate-check", "--as", "person/eval")
                     async def operations_ready():
                         card = await node.api("/v1/client/agents/agent/operations/amber")
                         return card if card and card.get("driver") and card.get("state") == "running" else None
@@ -759,7 +1033,7 @@ agent "probe/{node.name}" {{
   argv {' '.join(json.dumps(arg) for arg in argv)}
 }}
 ''')
-                await node.cli("agents", "apply", str(node.root / "seat.kdl"), "--as", "person/eval")
+                await node.cli("apply", str(node.root / "seat.kdl"), "--no-gate-check", "--as", "person/eval")
 
             async def route(node):
                 path = node.root / "probe/latest.json"
@@ -805,7 +1079,11 @@ agent "probe/{node.name}" {{
                 if unavailable:
                     self.assertIn("agent/operations/amber", blocked["alert_warning"])
                     self.assertIn("Falling back", blocked["alert_warning"])
-            doctor = json.loads(await nodes[0].cli("doctor", "--json"))
+            # cli(check=True) discards the report a failed check is named in. Read it, then
+            # refuse the same failure with the failed checks shown.
+            doctor = json.loads(await nodes[0].cli("doctor", "--json", check=False))
+            self.assertNotEqual(doctor["status"], "fail",
+                                [check for check in doctor["checks"] if check["status"] == "fail"])
             self.assertTrue(any(check["name"] == "delivery-probes" and check["status"] == "warn" for check in doctor["checks"]))
             # This probe is seconds old and was never offered while its recipient was
             # stopped. Restart must recover it once, as well as reading new live probes.
@@ -813,7 +1091,7 @@ agent "probe/{node.name}" {{
             self.assertFalse(any(claim["kind"] in ("message.staged", "message.delivered", "message.read")
                                  for claim in before["claims"]))
             restarted_at = time.time_ns() // 1_000_000
-            await nodes[1].cli("agents", "apply", str(nodes[1].root / "seat.kdl"), "--as", "person/eval")
+            await nodes[1].cli("apply", str(nodes[1].root / "seat.kdl"), "--no-gate-check", "--as", "person/eval")
 
             async def recovered():
                 row = await route(nodes[0])

@@ -14,8 +14,6 @@ An explicit [owned set](owned-sets.md), published with `st apply --set NAME`, gi
 responsibility for a complete membership list. Its successful publication retires omitted members
 with source and revision fences, and requires confirmation for mass retirement.
 
-The removed wrapper keyword is an error. There is no compatibility form.
-
 `st apply FILE... --as ACTOR` previews and publishes exact authored KDL: seats, missions,
 schedules, and other supported root declarations. Multiple files are bundled into one atomic
 publication, with references resolved across the bundle. Every file starts with `version 2`;
@@ -38,11 +36,16 @@ the plain-file preview snapshot as it does for publication.
 Publication checks exec gates by default and refuses broken commands (exit codes other than 0
 or 1). A gate that answers "not yet" (exit 1) does not block publication, just as with
 `st missions check`. Use `--no-gate-check` to skip this check. Dry runs without `--check`
-run no commands.
+run no commands. Publication, dry-run checks, and `missions check` check ordinary mission
+and step exec gates, including per-round steps. Loop `until` scripts are listed as
+"not checked, they run after each round", with that reason shown. A running loop still
+evaluates them at every round boundary, after the round has produced its outputs.
 
-`st agents apply` and `st missions publish` remain legacy commands. Each prints a one-line
-notice on stderr naming `st apply` as its replacement. Both accept `--dry-run` and `--preview`.
-The agent command keeps its previous behavior of publishing without gate checks.
+`st agents apply` and `st missions publish` are legacy commands. Each prints a one-line notice on stderr
+naming `st apply` as its replacement and accepts `--dry-run` (alias `--preview`). `st agents apply` publishes
+without gate checks, so its equivalent is `st apply FILE --no-gate-check`; `st missions publish` is
+equivalent to `st apply FILE` with the same options. Seat publication through `st apply` adds
+`published_missions` to the JSON receipt.
 
 ## Definitions do not start work
 
@@ -333,11 +336,12 @@ A human-protected revision creates a durable revision proposal. The named operat
 
 ## Free mode
 
-Within a fleet, an agent may do anything the person who runs the fleet may do. This is free mode,
-and it is the rule within a fleet until principals and grants land
-([#867](https://github.com/compoundingtech/smalltalk/issues/867),
-[#882](https://github.com/compoundingtech/smalltalk/issues/882)). Every seat in a fleet runs as
-that person's Unix user, so per-agent checks were never a security boundary there.
+Within a fleet, an agent may do anything the person who runs the fleet may do. This is free mode, the
+default. Every seat in a fleet runs as that person's Unix user, so per-agent checks are not a security
+boundary there. A person can restrict what agents may write with `st rules`: `st rules lockdown --as person/NAME`
+sets the preset rules in audit mode, `st rules audit` lists the writes they would have refused, and
+`st rules mode` turns one off or enforces it. Signed principals and grants are not built
+([#867](https://github.com/compoundingtech/smalltalk/issues/867), [#882](https://github.com/compoundingtech/smalltalk/issues/882)).
 
 An agent publishes, starts, revises, cancels, and retires missions in any namespace, sets a run's
 outcome, retries and wakes any step, applies, starts, and stops any seat (including its own), moves
@@ -497,16 +501,16 @@ gate "the operator approves deployment" type="human" {
 The mission pauses at the gate. A later review command records the decision against the exact gate request. Editing and republishing the mission does not forge a decision.
 
 ```sh
-st attention ls --as person/operator
-st attention approve step-run/RELEASE_GENERATION/deploy \
+st alerts ls --as person/operator
+st alerts approve step-run/RELEASE_GENERATION/deploy \
   --as person/operator \
   --reason "the exact release result is accepted"
 ```
 
-`st attention ls --as person/operator` lists the current person-owned inbox, including pending KDL
+`st alerts ls --as person/operator` lists the current person-owned inbox, including pending KDL
 human gates. Human authority is required and never inferred from an environment variable.
 
-The decision target is the gate's `attention/...` ID that `st attention ls` prints, or the mission
+The decision target is the gate's `attention/...` ID that `st alerts ls` prints, or the mission
 run, step run or loop run (`loop-run/GENERATION/PATH`, for a loop's `until` or `on-exhausted`
 gate) that owns it. The command binds the decision to the exact current request. A target that
 names no gate is refused with `review-target-unknown`. A gate with nothing pending is refused
@@ -514,8 +518,8 @@ with `review-not-requested`, which says why: who already answered it and how, or
 since it was asked (a new attempt, revision or generation, or a finished step or run). A card ID
 the gate has replaced names the card that asks now.
 
-Human gates default to `mode="approve"`: `st attention approve` passes the gate and
-`st attention reject --reason TEXT` fails it with the reviewer's reason. A worker-owned step
+Human gates default to `mode="approve"`: `st alerts approve` passes the gate and
+`st alerts reject --reason TEXT` fails it with the reviewer's reason. A worker-owned step
 can instead use `mode="feedback"`:
 
 ```kdl
@@ -525,16 +529,16 @@ gate "review the draft" type="human" mode="feedback" {
 }
 ```
 
-That review offers approve and request changes. Run `st attention request-changes
+That review offers approve and request changes. Run `st alerts request-changes
 step-run/GENERATION/draft --reason "Add the missing source." --as person/operator` to send
 feedback to the step's worker. The step starts a new attempt without entering `failed`, and its
 goals include `Reviewer feedback: Add the missing source.` The worker must claim and complete that
 new attempt; the next review is a distinct request. Feedback gates require a worker-owned step.
 Mission-level, loop, and agentless gates use approve mode.
 
-## Human attention
+## Person alerts
 
-`st attention ls --as person/NAME` reads current source state: ready person steps, human
+`st alerts ls --as person/NAME` reads current source state: ready person steps, human
 gates, valid launch previews, outstanding proposal reviews, unread person messages/reminders,
 and failures whose current source needs a person. Priority precedes waiting age. Each card's
 identity includes its source, recipient and waiting episode. A cancelled or retired owner,
@@ -542,7 +546,7 @@ removed source, replacement generation or changed attempt removes the card befor
 Failed sources can retain their own repair fault. Held subscription requests do not appear.
 
 ```sh
-st attention ls --as person/operator
+st alerts ls --as person/operator
 st work ask --for person/operator --title "Choose a release date" \
   --reason "The release needs a date" --step step-run/release/prepare \
   --as agent/release/operator --idempotency-key release-date
@@ -552,12 +556,13 @@ st work done step-run/release/ask-ID --as person/operator --summary "Friday"
 An ask creates a person-assigned runtime step in the live owning generation. Its origin waits in
 `waiting-person`, without a lease or time/retry consumption. Only the assigned person can
 complete it. The response resumes the same origin attempt with a new readiness epoch. A requester
-can use `st work cancel-ask STEP --as AGENT --summary TEXT`. An unclaimed live requester can
-use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the same source.
+can cancel its ask with `st work cancel-ask STEP --as AGENT --summary TEXT`. When asking, an
+unclaimed live requester passes `st work ask --new-run NAME`; claimed work must pass `--step`. Repeating an
+`--idempotency-key` returns the same source.
 
 A person message leaves on read or archive, without an age expiry. A launch needs its current
 valid preview. Faults describe source recovery and inspection; they have no independent dismiss
-state. Legacy `attention request`, `resolve` and `withdraw` return `attention-migrated`.
+state. Legacy `st alerts request`, `resolve` and `withdraw` return `attention-migrated`.
 Historical attention claims remain audit data; only provably live agent asks are imported as
 person steps. `st doctor` reads the same snapshot for attention age checks.
 
@@ -651,15 +656,6 @@ publish a new revision with new provenance. Earlier revisions keep their earlier
 `st missions show`, `st launch preview` and `st work revise` show the block. Launch approval
 also commits the displayed provenance. Querying revisions by source commit is deferred.
 
-The `mission.provenance` sidecar claim uses `mission/ID@REVISION` as its subject and has once
-cardinality and durable retention. `Once` is registry metadata; `validate_publication` enforces
-immutability on publication. Ingest validates the sidecar's shape and revision binding but does
-not enforce cardinality; reads choose the earliest claim in canonical order. It is written
-atomically with the ordinary `mission.published` claim. It stays outside `MissionSpec`, so
-existing mission and step hashes and revision bodies remain unchanged. Older daemons receive
-and project the ordinary revision and can start its work, retain the unknown sidecar for upgrade,
-and show no provenance. They cannot apply provenance-bearing KDL themselves; publish that KDL
-through an upgraded node. Older clients accept the added read fields.
-The sidecar reads directly from the claim log: no new projection table, checkpoint drop rule,
-retention window, or `RULES_VERSION` change is needed. Existing checkpoint rules preserve kinds
-without a drop slot and once claims; authenticated unknown records also remain retained.
+Provenance is stored as a `mission.provenance` claim on `mission/ID@REVISION`, written atomically with
+`mission.published`; it never changes mission or step hashes. Publish provenance-bearing KDL through an
+upgraded node.

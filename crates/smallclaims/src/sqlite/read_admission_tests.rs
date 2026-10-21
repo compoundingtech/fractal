@@ -326,6 +326,33 @@ fn bare_snapshots_reenter_the_outer_store_transaction_below_another_store() {
     assert!(second.readers.get().is_autocommit());
 }
 
+#[test]
+fn cancelled_child_budget_does_not_poison_a_pinned_snapshot() {
+    for parented in [false, true] {
+        let store = with_read_limit_for_test(1, || Store::open_memory("nested", Arc::new(Plain))).unwrap();
+        let outer = parented.then(|| ReadBudget::new("/outer", Duration::from_secs(30)));
+        read_budget::with(outer.clone(), || store.read_snapshot(|cut| {
+            let reader = store.readers.get();
+            let child = outer.as_ref().map_or_else(
+                || ReadBudget::new("/child", Duration::from_secs(30)),
+                |outer| outer.child(Duration::from_secs(30)),
+            );
+            child.cancel();
+            let error = read_budget::with(Some(child), ||
+                reader.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))).unwrap_err();
+            assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+                if code.code == rusqlite::ErrorCode::OperationInterrupted));
+            // The same connection and transaction survive the child scope. Its next read
+            // consults the restored live parent, or no budget, rather than the old cancellation.
+            assert!(!reader.is_autocommit());
+            assert_eq!(reader.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(store.read_snapshot(Ok)?, cut);
+            Ok(())
+        })).unwrap();
+        assert_eq!(store.readers.usage().opened, 1);
+    }
+}
+
 #[tokio::test]
 async fn queued_cancellation_and_parent_cancellation_never_obtain_a_connection() {
     for cancel_parent in [false, true] {
@@ -436,7 +463,7 @@ fn synchronous_admission_is_cancellable_without_a_tokio_runtime() {
 fn panic_error_and_cancelled_transaction_return_clean_capacity() {
     let (_directory, pool) = pool(1);
     let panic = catch_unwind(AssertUnwindSafe(|| pool.request_read(|| {
-        pool.get().execute_batch("BEGIN").unwrap();
+        pool.get().execute_batch(/* sqlite-large-value: allow-for-now lv-h491af119020d owner=smallclaims::sqlite::read_admission_tests TODO=trace-statement-and-value-representation */ "BEGIN").unwrap();
         panic!("request panic");
     })));
     assert!(panic.is_err());
@@ -448,7 +475,7 @@ fn panic_error_and_cancelled_transaction_return_clean_capacity() {
 
     let budget = ReadBudget::new("/transaction", Duration::from_secs(30));
     let error = read_budget::with(Some(budget.clone()), || pool.request_read(|| {
-        pool.get().execute_batch("BEGIN").unwrap();
+        pool.get().execute_batch(/* sqlite-large-value: allow-for-now lv-h851eb4364e69 owner=smallclaims::sqlite::read_admission_tests TODO=trace-statement-and-value-representation */ "BEGIN").unwrap();
         budget.cancel();
         read_budget::check()
     })).unwrap().unwrap_err();

@@ -70,7 +70,7 @@ mission "fixture/network-smoke" state="ready" {
 }
 KDL
 st3 --endpoint "$socket" publish network.kdl --as person/fixture >/dev/null
-run_id="$(st3 --endpoint "$socket" --json mission start fixture/network-smoke --workspace "$PWD" --as person/fixture | jq -er .mission_run.id)"
+run_id="$(st3 --endpoint "$socket" --json missions start fixture/network-smoke --workspace "$PWD" --as person/fixture | jq -er .mission_run.id)"
 agent="agent/$run_id/net.dev"
 for _ in $(seq 1 100); do st3 --endpoint "$socket" agents --json | jq -e --arg agent "$agent" '.[] | select(.subject == $agent and .actual.status == "running")' >/dev/null 2>&1 && break; sleep 0.05; done
 st3 --endpoint "$socket" agents --json | jq -e --arg agent "$agent" '.[] | select(.subject == $agent and .actual.status == "running")' >/dev/null

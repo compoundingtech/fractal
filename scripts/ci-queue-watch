@@ -21,8 +21,11 @@ def decision(jobs, ref_status, ref, sha):
     return "wait"
 
 
-def watch(api, repository, run_id, queue_ref, sha, pause=time.sleep):
+def watch(api, repository, run_id, queue_ref, sha, pause=time.sleep,
+          dependencies=None, clock=time.monotonic, alert=print):
     stale = 0
+    blocked_since, warned = {}, set()
+    dependencies = dependencies or {}
     while True:
         status, payload = api(f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100")
         # Check completion first: deletion after a successful merge must retain the run result.
@@ -32,12 +35,42 @@ def watch(api, repository, run_id, queue_ref, sha, pause=time.sleep):
             return "Required checks finished; queue watchdog completed normally."
         # A job lookup failure cannot establish that cancellation is still needed.
         if status != 200:
+            blocked_since.clear()
             stale = 0
             pause(15)
             continue
         ref_status, ref = api(f"repos/{repository}/git/ref/{quote(queue_ref.removeprefix('refs/'), safe='/')}")
         result = decision(payload.get("jobs", []), ref_status, ref, sha)
         stale = stale + 1 if result == "superseded" else 0
+        if ref_status == 200 and ref.get("object", {}).get("sha") == sha:
+            try:
+                # Start a monotonic interval only once the generated dependencies finish.
+                # A five-minute alert observes missing owned capacity; it never cancels a current ref.
+                by_name = {job['name']: job for job in payload.get('jobs', [])}
+                eligible = {name for name, job in by_name.items()
+                            if name in dependencies and job.get('status') == 'queued'
+                            and not job.get('runner_id') and 'ci1-priority' in (job.get('labels') or [])
+                            and all(by_name.get(dep, {}).get('status') == 'completed' for dep in dependencies[name])}
+                now = clock()
+                blocked_since = {name: since for name, since in blocked_since.items() if name in eligible}
+                for name in sorted(eligible):
+                    since = blocked_since.setdefault(name, now)
+                    if now - since >= 300 and name not in warned:
+                        alert(f'::warning::Merge run {run_id}: {name} has no assigned ci1-priority runner '
+                              f'for at least {int(now - since)}s after its dependencies finished. '
+                              'Check owned runner availability; current work is preserved.')
+                        warned.add(name)
+            except Exception as error:
+                # Optional diagnostics must not interrupt the current-ref cancellation guard.
+                # Retain no timing evidence through malformed or unavailable alert metadata.
+                blocked_since.clear()
+                problem = f'{type(error).__name__}: {error}'
+                if problem not in warned:
+                    alert(f'::warning::Runner-wait observation failed ({problem}); '
+                          'superseded-ref watchdog continues. No runner-wait proof retained.')
+                    warned.add(problem)
+        else:
+            blocked_since.clear()
         if stale >= 2:
             status, _ = api(f"repos/{repository}/actions/runs/{run_id}/force-cancel", method="POST")
             if status == 202:
@@ -46,6 +79,22 @@ def watch(api, repository, run_id, queue_ref, sha, pause=time.sleep):
                 return "Workflow already completed before cancellation."
             print(f"::warning::Queue cancellation returned HTTP {status}; retrying.", flush=True)
         pause(15)
+
+
+def queue_dependencies(alert):
+    try:
+        dependencies = json.loads(os.environ.get('QUEUE_DEPENDENCIES', '{}'))
+        if not isinstance(dependencies, dict) or any(
+            not isinstance(name, str) or not isinstance(needs, list)
+            or any(not isinstance(dep, str) for dep in needs)
+            for name, needs in dependencies.items()
+        ):
+            raise ValueError('dependency metadata must map job names to dependency-name lists')
+        return dependencies
+    except (TypeError, ValueError) as error:
+        alert(f'::warning::Runner-wait alerts disabled: invalid dependency metadata ({error}); '
+              'superseded-ref watchdog continues.')
+        return {}
 
 
 def main():
@@ -72,7 +121,13 @@ def main():
             return 0, {}
 
     print("Watching the current merge-group ref; API lookup failures never cancel work.", flush=True)
-    result = watch(api, repository, run_id, queue_ref, sha)
+    def alert(message):
+        print(message, flush=True)
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+            summary.write(message + '\n')
+
+    result = watch(api, repository, run_id, queue_ref, sha,
+                   dependencies=queue_dependencies(alert), alert=alert)
     print(result, flush=True)
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
         summary.write(result + "\n")

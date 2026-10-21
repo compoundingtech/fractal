@@ -2,14 +2,15 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { LaunchVariant, Mission } from '../../../clients/typescript/st3-client';
+import type { DocumentReference, LaunchVariant, Mission } from '../../../clients/typescript/fractal-client';
 import { agentName } from '../agentsView';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
-import { MISSION_LEGEND, missionRows, missionSections, missionTitle, missionWord, stepStyle, wordName, wordStyle, type MissionRow } from '../missionsView';
+import { MISSION_LEGEND, missionRows, missionSections, filterMissionRows, missionTitle, missionWord, stepStyle, wordName, wordStyle, type MissionRow } from '../missionsView';
 import type { RootParams, RootScreen } from '../navigation';
 import { missionSteps } from '../presentation';
-import { homeRows } from '@smalltalk/st3-views';
+import { homeRows, type DocumentUnavailable } from '@fractal/views';
+import { documentsServed, referencedDocuments } from '../documents';
 import { useStore, type Planner } from '../store';
 import { theme } from '../theme';
 import { Button, Field, Legend, ListRow, Markdown, Note, Screen, SectionHeader, T } from '../ui';
@@ -30,12 +31,19 @@ export function MissionsScreen() {
   useListsOnFocus(['launches']);
   useMissionsOnFocus();
   const refresh = useRefresh(['launches']);
-  const [showSystem, setShowSystem] = useState(false);
+  const [showSystem, setShowSystem] = useState(false), [filter, setFilter] = useState('');
   const list = useRef<SectionList<MissionRow>>(null);
   useDebugScroll(list as never);
   // Native bar buttons: a menu for what the list includes, and a new mission.
   useLayoutEffect(() => {
     navigation.setOptions({
+      headerSearchBarOptions: {
+        placeholder: 'Filter missions',
+        hideWhenScrolling: true,
+        autoCapitalize: 'none',
+        onChangeText: event => setFilter(event.nativeEvent.text),
+        onCancelButtonPress: () => setFilter(''),
+      },
       unstable_headerRightItems: () => [
         { type: 'menu', label: 'Options', icon: { type: 'sfSymbol', name: 'line.3.horizontal.decrease.circle' }, menu: { items: [{ type: 'action', label: 'Show system missions', state: showSystem ? 'on' : 'off', onPress: () => setShowSystem(value => !value) }] } },
         { type: 'button', label: 'New mission', icon: { type: 'sfSymbol', name: 'plus' }, onPress: () => navigation.navigate('NewMission') },
@@ -43,7 +51,7 @@ export function MissionsScreen() {
     });
   }, [navigation, showSystem]);
   const { rows, hidden } = useMemo(() => missionRows(data.missions, data.attention, data.agents, showSystem), [data.missions, data.attention, data.agents, showSystem]);
-  const sections = missionSections(rows).map(section => ({ ...section, data: section.rows }));
+  const sections = missionSections(filterMissionRows(rows, filter)).map(section => ({ ...section, data: section.rows }));
   const open = data.launches.filter(launch => launch.phase !== 'approved' && launch.phase !== 'cancelled');
   return <Screen>
     <Banners />
@@ -64,7 +72,7 @@ export function MissionsScreen() {
         second={row.progress ?? `${row.path} · ${row.age}`}
         onPress={() => navigation.navigate('Mission', { id: row.mission.id, title: row.title })}
       />}
-      ListEmptyComponent={<Empty text={loadErrors.missions ? `Missions could not be loaded: ${loadErrors.missions}` : hasSynced && missionsLoaded ? 'No missions yet.' : 'Loading missions…'} />}
+      ListEmptyComponent={<Empty text={filter ? `No mission matches “${filter}”.` : loadErrors.missions ? `Missions could not be loaded: ${loadErrors.missions}` : hasSynced && missionsLoaded ? 'No missions yet.' : 'Loading missions…'} />}
       ListFooterComponent={<View style={{ paddingBottom: 24 }}>
         {truncated.missions ? <Note tone="warning">More missions exist beyond these 200.</Note> : null}
         {hidden ? <Pressable onPress={() => setShowSystem(true)}><Note>{hidden} hidden (st's own, and failures before today) · tap to show</Note></Pressable> : null}
@@ -79,12 +87,21 @@ export function MissionsScreen() {
 
 // One mission: what finished, what is happening, what is next, and who holds each step.
 export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
-  const { data, status, actions, caps } = useStore();
+  const { data, status, actions, caps, client } = useStore();
   useMissionsOnFocus();
   const listed = data.missions.find(mission => mission.id === route.params.id);
   const [detail, setDetail] = useState<Mission | null>(null);
   useEffect(() => { let live = true; void actions.mission(route.params.id).then(found => { if (live && found) setDetail(found); }); return () => { live = false; }; }, [route.params.id, listed?.revision, status]); // eslint-disable-line react-hooks/exhaustive-deps
   const mission = detail ?? listed;
+  // The documents the mission and its latest run name (each step's own pinned documents among them).
+  const latestRun = mission?.run_details?.at(-1)?.id ?? mission?.runs.at(-1);
+  const [documents, setDocuments] = useState<{ references: DocumentReference[]; failed: DocumentUnavailable | null } | null>(null);
+  useEffect(() => {
+    if (status !== 'online' || !client || !documentsServed(caps)) return;
+    const abort = new AbortController();
+    void referencedDocuments(client, [route.params.id, ...(latestRun ? [latestRun] : [])], abort.signal).then(found => { if (!abort.signal.aborted) setDocuments(found); });
+    return () => abort.abort();
+  }, [client, caps, status, route.params.id, latestRun]);
   useLayoutEffect(() => { navigation.setOptions({ title: route.params.title ?? (mission ? missionTitle(mission) : 'Mission') }); }, [navigation, route.params.title, mission]);
   if (!mission) return <Screen><Banners /><Empty text={status === 'online' ? 'Loading this mission…' : 'This mission is not in the last loaded data.'} /></Screen>;
   const word = missionWord(mission, data.attention, data.agents);
@@ -96,13 +113,14 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 32 }}>
+      <StatusLine />
       <View style={{ padding: 12, gap: 4 }}>
         <T><T bold color={wordStyle(word).color}>{wordStyle(word).glyph} {wordName(word)}</T><T dim>  {mission.state} · {mission.runs.length} run{mission.runs.length === 1 ? '' : 's'}</T></T>
         <T dim selectable>{mission.id}</T>
         {outcome ? <T soft>set {outcome.status}{outcome.previous_status ? ` (was ${outcome.previous_status})` : ''} by {outcome.actor}: {outcome.reason}</T> : null}
       </View>
       {waiting.length ? <>
-        <SectionHeader title="needs you" count={waiting.length} color={theme.person} />
+        <SectionHeader title="alerts" count={waiting.length} color={theme.person} />
         {waiting.map(row => <ListRow
           key={row.item.id}
           glyph={row.glyph}
@@ -128,6 +146,18 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
         </View>;
       })}
       {!steps.length ? <Note>No steps are visible for this mission's runs.</Note> : null}
+      {documents?.references.length ? <>
+        <SectionHeader title="documents" count={documents.references.length} />
+        {documents.references.map(document => <ListRow
+          key={document.reference}
+          glyph="▤"
+          glyphColor={theme.lavender}
+          title={document.name}
+          second={[document.version ? `version ${document.version.slice(0, 12)}` : 'latest version', document.step ? `step ${document.step}` : null].filter(Boolean).join(' · ')}
+          onPress={() => navigation.push('Document', { reference: document.reference, trail: [document.reference] })}
+        />)}
+      </> : null}
+      {documents?.failed ? <Note tone="warning">{documents.failed === 'remote-unavailable' ? 'The host did not answer, so the documents this mission names cannot be listed now.' : 'The documents this mission names could not be listed.'}</Note> : null}
       {mission.visualization?.groups.filter(group => group.kind === 'nested-mission').map(group => <Note key={group.id}>nested mission: {group.members.join(', ')}</Note>)}
     </ScrollView>
   </Screen>;
@@ -147,7 +177,7 @@ export function NewMissionScreen({ navigation }: RootScreen<'NewMission'>) {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, paddingBottom: 48 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
-      <T soft>Say what you want. A planner turns it into a proposed mission, which appears on Home for you to approve; nothing runs before that.</T>
+      <T soft>Say what you want. A planner turns it into a proposed mission, which appears on Now for you to approve; nothing runs before that.</T>
       <Field placeholder="title" value={title} onChangeText={setTitle} />
       <Field placeholder="what should be done?" multiline value={request} onChangeText={setRequest} />
       <Field placeholder="workspace on the target machine" autoCapitalize="none" autoCorrect={false} spellCheck={false} value={workspace} onChangeText={setWorkspace} />
