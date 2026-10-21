@@ -33,7 +33,9 @@ fn state_source(writer: &str, writes: &[(u128, usize, usize, bool)]) -> Store {
     source
 }
 
-type Readings = Vec<(Option<(Value, u128)>, Option<(String, Option<u128>)>, Option<Value>)>;
+/// One subject's list and detail state, attention target state and actual-state fold.
+type Reading = (Option<(Value, u128)>, Option<(String, Option<u128>)>, Option<Value>);
+type Readings = Vec<Reading>;
 
 /// What each reader answers for each subject: the list and detail state, attention's target
 /// state, and the actual-state fold.
@@ -166,7 +168,7 @@ fn removing_a_writers_newest_state_does_change_an_answer() {
     let target = Store::open_memory("dune").unwrap();
     receive_and_project(&target, "alder", &exchange_from(&source, &ReplicationInventory::default()));
     let before = readings(&target);
-    let state = |reading: &(Option<(Value, u128)>, Option<(String, Option<u128>)>, Option<Value>)| {
+    let state = |reading: &Reading| {
         (
             reading.0.as_ref().unwrap().0["fields"]["state"].clone(),
             reading.1.as_ref().unwrap().0.clone(),
