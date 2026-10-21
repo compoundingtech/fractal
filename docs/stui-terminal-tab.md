@@ -81,8 +81,8 @@ It requires the pinned PTY version; older daemons ignore the extension. The
 [dependency decision](https://github.com/compoundingtech/pty/blob/main/docs/decisions/0016-embedded-surfaces-can-recover-input-modes.md)
 records this boundary.
 
-Ctrl+\ always detaches, including through the palette, and is never sent to the
-child. Legacy Ctrl+4 is its crossterm alias. Ctrl+K (or Command+K) opens the palette.
+Ctrl+\ is the leader, including through the palette, and is never sent to the
+child: it lists what to press next, and Ctrl+\ then c detaches (Ctrl+\ twice closes the tab). Legacy Ctrl+4 is its crossterm alias. Ctrl+K (or Command+K) opens the palette.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

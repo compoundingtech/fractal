@@ -336,7 +336,7 @@ def case_reconnect(stui):
                       "reconnecting shown")
     shown = screen(status)
     assert status["lost"] in shown, "the reason is said"
-    assert "Ctrl+\\ conversation" in shown, "the key to the conversation is named"
+    assert "Ctrl+\\ c conversation" in shown, "the key to the conversation is named"
     # Refused for a while: tries back off instead of looping.
     stui.mode = "refuse"
     refused_from = time.monotonic()
@@ -355,7 +355,8 @@ def case_reconnect(stui):
     # Down again, the conversation is one keystroke away.
     stui.cut()
     wait_for(stui.status, lambda status: status["lost"], "reconnecting again")
-    stui.send(b"\x1b[92;5u")  # Ctrl+\ as a kitty-keyboard terminal sends it
+    stui.send(b"\x1b[92;5u")  # Ctrl+\ as a kitty-keyboard terminal sends it: the leader
+    stui.send(b"c")           # then c: the conversation
     wait_for(stui.status, lambda status: status["pane"] == f"agent:{AGENT}", "Ctrl+\\ to the conversation")
     print(f"reconnect: says why and the key; {len(tries)} tries in 4s refused, gaps {[round(gap, 1) for gap in gaps]}s; back by itself; Ctrl+\\ leaves")
 

@@ -3933,7 +3933,7 @@ impl Ui {
         }
     }
 
-    fn close_tab(&mut self) {
+    pub(crate) fn close_tab(&mut self) {
         let Some(glasses) = self.glasses.as_mut() else {
             return;
         };
@@ -3975,6 +3975,134 @@ impl Ui {
         }
         self.glass_changed(&id);
         self.show_focused();
+    }
+
+    /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
+    const LEADER_KEYS: [(&'static str, &'static str); 14] = [
+        ("\\", "close this tab"),
+        ("c", "the conversation (leave the terminal)"),
+        ("t", "a new tab"),
+        ("v", "split right"),
+        ("x", "split below"),
+        ("[ ]", "previous, next tab"),
+        ("o", "zoom the split, and back"),
+        ("s", "show or hide the sidebar"),
+        ("g", "another space, or a new one"),
+        ("h", "Home"),
+        ("k", "the palette"),
+        ("?", "help"),
+        ("q", "quit stui"),
+        ("esc", "put this away"),
+    ];
+
+    /// The key after the leader: one of its list does its thing and the list goes away. A key that
+    /// is not in the list only puts it away; nothing is typed or sent to a program, and nothing
+    /// that changes anything happens by a key that was not meant for it.
+    pub(crate) fn leader_key(&mut self, key: KeyEvent) {
+        self.leader = false;
+        let held = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+        match key.code {
+            KeyCode::Esc => {}
+            // The leader twice closes the tab: Ctrl+\ held down, or the plain key.
+            KeyCode::Char('\\') => self.close_tab(),
+            KeyCode::Char('4') if key.modifiers.contains(KeyModifiers::CONTROL) => self.close_tab(),
+            _ if held => self.flash("Not a leader key · Ctrl+\\ lists them"),
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('c') => {
+                if self.terminal_focused() {
+                    self.leave_terminal();
+                } else {
+                    self.flash("Already showing the conversation");
+                }
+            }
+            KeyCode::Char(letter) if self.glasses.is_some() => match letter {
+                't' => self.open_palette(None, Open::Tab),
+                'v' => self.split_group(Side::Right),
+                'x' => self.split_group(Side::Below),
+                'k' => self.open_palette(None, Open::Here),
+                's' => self.toggle_sidebar(),
+                'g' => self.open_glasses_palette(),
+                'h' => {
+                    if self.home_open() {
+                        self.close_home();
+                    } else {
+                        self.open_home();
+                    }
+                }
+                'o' => {
+                    if let Some(glasses) = self.glasses.as_mut() {
+                        glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
+                    }
+                }
+                '[' | ']' => self.step_tab(letter == ']'),
+                _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
+            },
+            _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
+        }
+    }
+
+    /// The next or previous tab in the focused split.
+    fn step_tab(&mut self, forward: bool) {
+        let Some(glasses) = self.glasses.as_ref() else {
+            return;
+        };
+        let glass = glasses.glass();
+        let tabs = glass.count(glass.focus).max(1);
+        let current = glass.layout.groups()[glass.focus].current;
+        self.show_tab(if forward { (current + 1) % tabs } else { (current + tabs - 1) % tabs });
+    }
+
+    /// The leader's list, over the bottom of the screen: what to press next.
+    pub(super) fn draw_leader(&self, buf: &mut Buffer, area: Rect) {
+        let rows = Self::LEADER_KEYS.len() as u16;
+        let width = 46.min(area.width.saturating_sub(2));
+        let height = (rows + 2).min(area.height.saturating_sub(1));
+        if width < 20 || height < 3 {
+            return;
+        }
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + area.height - height - 1,
+            width,
+            height,
+        };
+        buf.set_style(rect, Style::default().bg(theme::MANTLE));
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                buf[(x, y)].set_symbol(" ");
+            }
+        }
+        buf.set_stringn(
+            rect.x + 1,
+            rect.y,
+            " Ctrl+\\ then…",
+            rect.width.saturating_sub(2) as usize,
+            theme::strong(theme::ACCENT).bg(theme::MANTLE),
+        );
+        for (offset, (key, meaning)) in Self::LEADER_KEYS
+            .iter()
+            .take(height.saturating_sub(2) as usize)
+            .enumerate()
+        {
+            let y = rect.y + 1 + offset as u16;
+            buf.set_stringn(
+                rect.x + 2,
+                y,
+                format!("{key:<4}"),
+                4,
+                theme::strong(theme::ACCENT).bg(theme::MANTLE),
+            );
+            buf.set_stringn(
+                rect.x + 7,
+                y,
+                meaning,
+                rect.width.saturating_sub(8) as usize,
+                theme::text().bg(theme::MANTLE),
+            );
+        }
     }
 
     fn show_glass(&mut self, index: usize) {
@@ -5159,11 +5287,13 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::CloseTerminal))
         );
-        // In it every key is the terminal's, Ctrl+W too; Ctrl+\ turns the tab back into the
-        // conversation and lets the terminal go.
+        // In it every key is the terminal's, Ctrl+W too; Ctrl+\ then c turns the tab back into
+        // the conversation and lets the terminal go.
         ctrl(&mut ui, 'w');
         assert!(ui.terminal.is_some(), "Ctrl+W went to the terminal");
         ctrl(&mut ui, '\\');
+        assert!(ui.terminal.is_some(), "the leader alone leaves nothing");
+        press(&mut ui, KeyCode::Char('c'), KeyModifiers::NONE);
         assert_eq!(tabs(&ui).2[0], vec![ATLAS.to_owned()]);
         assert!(ui.terminal.is_none());
         assert!(
@@ -5200,6 +5330,77 @@ mod tests {
     }
 
     #[test]
+    fn the_leader_lists_what_to_press_and_the_terminal_never_sees_those_keys() {
+        let mut ui = glass();
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert!(ui.terminal_focused());
+        ui.effects.clear();
+        // Ctrl+\ opens the list; nothing is sent to the program and nothing is left.
+        ctrl(&mut ui, '\\');
+        assert!(ui.leader);
+        let shown = screen(&ui);
+        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit stui"] {
+            assert!(shown.contains(wanted), "{wanted}: {shown}");
+        }
+        assert!(ui.terminal_focused());
+        // Esc, or a key that is not in the list, only puts it away: nothing is typed to the program.
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.leader && ui.terminal_focused() && !ui.quit);
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(!ui.leader && ui.terminal_focused() && !ui.quit);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::CloseTerminal)));
+        // A mouse press puts it away too.
+        ctrl(&mut ui, '\\');
+        ui.mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!ui.leader);
+        // t opens the new-tab palette, q quits.
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert!(ui.glasses.as_ref().is_some_and(|glasses| glasses.palette_open()));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(ui.quit);
+    }
+
+    #[test]
+    fn the_leader_twice_closes_the_tab_and_lets_the_terminal_go() {
+        let mut ui = glass();
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert!(ui.terminal_focused());
+        ui.effects.clear();
+        ctrl(&mut ui, '\\');
+        ctrl(&mut ui, '\\');
+        assert!(!ui.leader);
+        assert!(ui.terminal.is_none());
+        assert!(tabs(&ui).2.iter().all(|group| group.iter().all(|tab| !tab.starts_with("terminal:"))));
+        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::CloseTerminal)));
+        // The legacy encoding of Ctrl+\ (Ctrl+4) is the leader too, and the plain key after it closes.
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        press(&mut ui, KeyCode::Char('4'), KeyModifiers::CONTROL);
+        assert!(ui.leader);
+        press(&mut ui, KeyCode::Char('\\'), KeyModifiers::NONE);
+        assert!(!ui.leader);
+    }
+
+    #[test]
     fn a_shell_opens_in_a_tab_detaches_in_place_and_attaches_itself_not_the_selected_agent() {
         let mut ui = glass();
         // The agents list has a selection of its own, which a shell's keys must never reach.
@@ -5215,8 +5416,9 @@ mod tests {
             Some(shell)
         );
         assert!(screen(&ui).contains("shell"));
-        // Ctrl+\ leaves it a shell tab, detached.
+        // Ctrl+\ then c leaves it a shell tab, detached.
         ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('c'), KeyModifiers::NONE);
         ui.terminal = None;
         assert_eq!(tabs(&ui).2, vec![vec![format!("terminal:{shell}")]]);
         // Ctrl+] attaches this shell again, not whichever agent the list has selected.
