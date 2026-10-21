@@ -6,7 +6,7 @@
 // Rendering both through their adapters is the parity check: whatever differs on screen is a real
 // difference between the sources.
 
-import { decodeUnknownSync, TimelineEntry, TimelineEntryId } from '@smalltalk/st3-client/schema'
+import { decodeUnknownSync, TimelineEntry, TimelineEntryId } from '@fractal/client/schema'
 
 import type { ConversationPage } from '../data/source.ts'
 import {
@@ -566,7 +566,7 @@ Exit code 1`,
 }
 
 const gatewayPatch = `*** Begin Patch
-*** Update File: crates/st3-client/src/envelope.rs
+*** Update File: crates/fractal-client/src/envelope.rs
 @@
 -pub mod unstable {
 -    pub use crate::wire::SubjectEnvelope;
@@ -600,9 +600,9 @@ const gatewaySchemaScript: Script = {
         command: ['bash', '-lc', 'rg -n "unstable::SubjectEnvelope" crates'],
         workdir: gatewaySchema.session.cwd,
       },
-      output: `crates/st3-gateway/src/collections.rs:14:use st3_client::unstable::SubjectEnvelope;
-crates/st3-gateway/src/actions.rs:9:use st3_client::unstable::SubjectEnvelope;
-crates/st3-codegen/src/ts.rs:31:    emit::<st3_client::unstable::SubjectEnvelope>(&mut out);`,
+      output: `crates/fractal-gateway/src/collections.rs:14:use fractal_client::unstable::SubjectEnvelope;
+crates/fractal-gateway/src/actions.rs:9:use fractal_client::unstable::SubjectEnvelope;
+crates/fractal-codegen/src/ts.rs:31:    emit::<fractal_client::unstable::SubjectEnvelope>(&mut out);`,
     },
     {
       kind: 'tool',
@@ -611,7 +611,7 @@ crates/st3-codegen/src/ts.rs:31:    emit::<st3_client::unstable::SubjectEnvelope
       id: 'call_02apply_patch',
       name: 'apply_patch',
       input: { input: gatewayPatch },
-      output: 'Success. Updated the following files:\nM crates/st3-client/src/envelope.rs',
+      output: 'Success. Updated the following files:\nM crates/fractal-client/src/envelope.rs',
     },
     {
       kind: 'say',
@@ -1156,8 +1156,8 @@ export interface StateFixture {
 
 const longLog = Array.from({ length: 640 }, (_, index) =>
   (index + 1) % 97 === 0
-    ? `warning: unused variable \`frame\` --> crates/st3-client/src/collections.rs:${index + 1}:9`
-    : `   Compiling st3-client v0.1.0 (${gatewaySchema.session.cwd}/crates/st3-client)`,
+    ? `warning: unused variable \`frame\` --> crates/fractal-client/src/collections.rs:${index + 1}:9`
+    : `   Compiling st3-client v0.1.0 (${gatewaySchema.session.cwd}/crates/fractal-client)`,
 ).join('\n')
 const stateFrames = ({
   steps,
@@ -1297,7 +1297,7 @@ export const allStates: ReadonlyArray<StateFixture> = [
         {
           kind: 'say',
           t: 76,
-          text: 'Build is green. Six unused-variable warnings in crates/st3-client/src/collections.rs.',
+          text: 'Build is green. Six unused-variable warnings in crates/fractal-client/src/collections.rs.',
         },
         { kind: 'status', t: 77, status: 'completed' },
       ],

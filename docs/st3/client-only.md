@@ -89,8 +89,8 @@ local profile makes the terminal UI select local mode again but does not revoke 
 ## Isolated verification
 
 ```sh
-cargo test -p st3 --locked --test integration client_only
-cargo run -p st3-client-codegen --locked -- --check
+cargo test -p fractal --locked --test integration client_only
+cargo run -p fractal-client-codegen --locked -- --check
 ```
 
 The `client_only` end-to-end test launches the actual st binary in a PTY with an isolated

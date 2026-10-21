@@ -185,7 +185,7 @@ real Cargo and benign stand-in commands; it compiles no Rust.
   selects the gate scope (see [gate scope](#gate-scope));
 - `linux-clippy`: `cargo clippy --workspace --all-targets --locked`, the standalone conversation
   model check, the [warning ratchet](#clippy-warning-ratchet), then
-  `cargo run --locked -p st3-client-codegen -- --check`;
+  `cargo run --locked -p fractal-client-codegen -- --check`;
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
   previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
   metadata before running it; it does not rebuild the baseline or its PTY dependency.
@@ -310,16 +310,16 @@ environment variable that enables this behavior, even if the executable is renam
 Fixture command helpers clear inherited `ST_AGENT`/`ST3_*`; temporary-repository Git helpers
 isolate global/system config, hooks, signing and author identity on each command. Real
 repository commits keep the host's Git policy. Run the same suite from an agent seat with
-`nix develop --command cargo nextest run -p st3 -p st3-daemon --locked --profile ci --retries 0`.
+`nix develop --command cargo nextest run -p fractal -p fractal-daemon --locked --profile ci --retries 0`.
 Provider fixtures that load st3 extensions publish their isolated hook set with
-`st3::hooks::ensure_installed`, preserving every declared asset and relative import.
+`fractal_daemon::hooks::ensure_installed`, preserving every declared asset and relative import.
 
 Boot, delivery-probe and messaging-fault fixtures put large executable copies in Cargo's target scratch
 directory, keeping their Unix sockets in short temporary paths. This avoids exhausting a
 host's temporary-filesystem quota when debug binaries are copied by parallel cases.
 
 On Linux, tests that launch isolated daemons, drivers, PTYs or long-lived CLI children call
-`st3::test_support::supervise_test()` before creating their fixtures. It runs that exact test
+`fractal_daemon::test_support::supervise_test()` before creating their fixtures. It runs that exact test
 under `scripts/st3_test_process.py`, a detached subreaper watching pidfds for the Rust runner
 and its launcher. Success, failure, panic, timeout, SIGTERM and SIGKILL of the runner all
 end the owned process tree. Each test has its own process group; detached children are
@@ -432,13 +432,13 @@ short socket/runtime roots with that guardian; failures keep diagnostics in
 `target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
 
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
-required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
+required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p fractal-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
 
 ### Clippy warning ratchet
 
 `linux-clippy` reuses JSON diagnostics from its existing workspace and standalone
-`st3-conversation-ui` Clippy runs. `.github/clippy-baseline.json` records warning counts per
+`fractal-conversation-ui` Clippy runs. `.github/clippy-baseline.json` records warning counts per
 workspace crate and lint, with sorted keys and the compiler/Clippy versions supplied by the
 `flake.lock`-pinned devShell. It includes Rust warnings as well as Clippy warnings, ignores
 dependencies outside the workspace, and counts each source diagnostic once when Cargo repeats
@@ -451,9 +451,12 @@ Removing warnings also requires lowering the baseline in the same pull request, 
 change cannot spend the removed warnings. CI checks that the committed counts do not increase
 relative to the event's immutable base SHA (PR base, merge-group base, or preceding main commit).
 When a crate is split out of another one, the new crate's warnings are the origin's: list it in
-`.github/clippy-splits.json` (`{"st3-daemon": "st3"}`), and against a base that lacks the new crate the
+`.github/clippy-splits.json` (`{"fractal-daemon": "st3"}`), and against a base that lacks the new crate the
 two are compared together, so the split can move warnings between them and never add any. Once the base has the
 new crate it is an ordinary crate and the entry has no effect; `--update` applies the same rule.
+A source package rename uses the same one-to-one ancestry rule, for example
+`{"fractal-daemon": "st3-daemon"}`. Historical edges retain the names stored in
+older Git baselines. They are not Cargo aliases, and they do not permit extra warnings.
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
@@ -481,13 +484,13 @@ still cannot increase. Run the ratchet's focused regression proofs with
 The gate covers st3 and the code st3 uses. The `ci` profile's `default-filter` in
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
-- every test of the other workspace crates: st3, st3-client, st3-client-codegen, st3-schema,
-  st3-migrate, stui (the terminal UI library), st-runtime, st-drivers (the harness drivers, channels, hooks, messages,
+- every test of the other workspace crates: st3, fractal-client, fractal-client-codegen, fractal-schema,
+  fractal-migrate, stui (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
   harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
 - st2's integration test files, apart from those below.
 
 It leaves out st2-only tests: st2's own unit tests (none of its remaining modules is used by
-st3), the st-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
+st3), the fractal-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
 `catalog_*`, `nomad_survival`, `event_e2e`, `eval_run_e2e`, `resync*`, `supervisor_auto_archive`
 and `resource_profile_supervisor_e2e` tests. No CI job runs these. Clippy still checks the whole
 workspace. List the selection with `bash scripts/ci-nextest list`.
@@ -523,7 +526,7 @@ existing scope.
 ### Current-product boundary
 
 Every required Linux stage runs `scripts/check-st-boundary-test` and
-`scripts/check-st-boundary`. The source guard rejects `st2::` imports and `extern crate st2`
+`scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
 in st3/stui, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
@@ -600,8 +603,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
-  `clients/typescript/st3-views/**`, `clients/typescript/st3-scenarios/**` and `fixtures/**`.
-  Within `clients/typescript/st3-client`, only the consumed export graph (`index.ts`,
+  `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
+  Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
@@ -826,7 +829,7 @@ negative step attempts are rejected, while person assignees are valid actor refe
 
 The SDK unit lane uses an injected clock to guard task yielding and bounded decode/order
 work deterministically, including the >150KB roster burst. `SDK frame CPU budgets`
-runs separately with `apps/fractal-web/packages/st3-sdk/vitest.perf.config.ts`: after
+runs separately with `apps/fractal-web/packages/fractal-sdk/vitest.perf.config.ts`: after
 warming, seven fixed observations guard the median worst task below 16ms of calling-thread
 CPU, total burst CPU below 50ms, and a one-row delta below 16ms. These are not retries.
 Calling-thread CPU excludes host descheduling and unrelated Node worker-thread CPU.
@@ -981,7 +984,7 @@ To build and test with the assertions (what the daily run does), set both lines:
 What only exists or only means something with them:
 
 - The `ST2_TEST_*` fault and pause seams of the st2 catalog, event, message and agent publish code
-  (`crates/st-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
+  (`crates/fractal-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
   them carry `#[cfg_attr(not(debug_assertions), ignore = "...")]`: they are listed as ignored in the
   default profile and run in the assertions profile (`tests/agent_presentation.rs`,
   `tests/agent_publish.rs`, `tests/agent_resource.rs`, `tests/message_cli.rs`,
@@ -989,7 +992,7 @@ What only exists or only means something with them:
   `tests/event_e2e.rs`).
 - The daemon benchmark and load tests (`daemon_bench`, `first_sync`, `daemon_load`) skipped in any
   build that was not optimized by testing `cfg!(debug_assertions)`; they now ask
-  `st3::test_support::optimized_build()` (the executable is under `target/release/`).
+  `fractal_daemon::test_support::optimized_build()` (the executable is under `target/release/`).
 - Tests already behind `#[cfg(debug_assertions)]` (`ding/tests.rs`, `empty_authority_guard.rs`)
   run only in the assertions profile.
 
@@ -1085,7 +1088,7 @@ The existing `perf-cost-logs` upload (`daily-perf-cost-logs` in the daily run) r
 its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
 leave partial evidence; an uploaded directory is not a completed-test verdict.
 
-`perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every `main` push (Main
+`perf-cost` runs `daemon_cost::` (`crates/fractal/tests/daemon_cost.rs`) on every `main` push (Main
 upkeep) and once a day as `daily-perf-cost` in the [daily long lanes](#daily-long-lanes), whose
 report shows its time and failures. It does not run on pull requests or merge-queue entries. On
 pull requests it took a 15.3-minute median on Namespace; on a quiet 24-thread machine it takes
@@ -1176,7 +1179,7 @@ only for the exact saved Git SHA with a clean checkout, so a retry does not rebu
 unchanged sources merely because checkout refreshed their timestamps. Changed or dirty sources
 still take Cargo's normal validation path; the embedded source revision remains real.
 For a clean checkout Performance passes its actual full SHA as `AGENT_SPEC_REVISION`.
-The build-identity script (crates/st-build-stamp, which only the st2 and st3 binaries depend on,
+The build-identity script (crates/fractal-build-stamp, which only the st2 and st3 binaries depend on,
 so no library rebuilds for a new commit) tracks that explicit value instead of unrelated Git
 index/ref timestamps. The CLI stamp still derives its real revision and commit time from Git.
 Dirty checkouts continue to derive their identity from Git.
@@ -1198,8 +1201,8 @@ continues using the Actions cache with the same generator/schema keys.
 Run either locally with `TMPDIR=/var/tmp`; `ST_BENCH_DIR` keeps the generated stores between runs:
 
 ```sh
-cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads 1
-ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
+cargo test -p fractal --test integration daemon_cost:: -- --nocapture --test-threads 1
+ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p fractal --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
 #### The daemon beside a seat-priority hog
@@ -1224,7 +1227,7 @@ not, until `ST_LOAD_HOG_STRICT=1`.
 
 ```sh
 ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
-  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+  -p fractal --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
 nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
 ```
 

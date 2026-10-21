@@ -1,5 +1,5 @@
-import type { ClientDiagnosticEvent, ClientDiagnosticsAck, ClientDiagnosticsBatch } from '../../clients/typescript/st3-client';
-import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
+import type { ClientDiagnosticEvent, ClientDiagnosticsAck, ClientDiagnosticsBatch } from '../../clients/typescript/fractal-client';
+import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
 import { redactDiagnosticEvent } from './diagnosticsRedaction';
 
 export const DIAGNOSTICS_KEY = 'st3.client-diagnostics.v1';

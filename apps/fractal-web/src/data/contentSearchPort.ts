@@ -1,11 +1,11 @@
-import type { St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+import type { FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 
 import { conversationPortFailure, hasConversationCapability } from './conversationPort.ts'
 import type { ContentSearchPort } from './source.ts'
 
 /** One native search page; cursors, excerpts and indexing metadata remain the daemon's values. */
-export const gatewayContentSearch = (client: St3Client): ContentSearchPort => ({
+export const gatewayContentSearch = (client: FractalClient): ContentSearchPort => ({
   search: async ({ text, ...options }) => {
     try {
       const capabilities = Native.decodeUnknownSync(Native.Capabilities)((await client.capabilities()).value)

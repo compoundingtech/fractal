@@ -71,7 +71,7 @@ for field, value in [('head_branch', 'example-branch'), ('conclusion', 'failure'
 assert module.trusted_snapshot(dict(run, conclusion='failure'))
 assert not module.trusted_snapshot(dict(run, conclusion='cancelled'))
 # Use the producer's declared serialized names rather than a shortened mock label.
-producer = (root / 'crates/st3/tests/daemon_load.rs').read_text()
+producer = (root / 'crates/fractal/tests/daemon_load.rs').read_text()
 def producer_regime(variant):
     name = re.search(r'Self::' + variant + r' => "([^"\n]+)"', producer)
     assert name is not None, f'missing producer regime {variant}'

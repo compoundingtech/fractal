@@ -8,17 +8,17 @@ harness transcript files.
 
 Proposed changes extensions (not implemented): [per-turn files, patches, and branch Changes scope](turn-diff-design.md).
 
-The reusable Rust package is [`crates/st3-client`](../../../crates/st3-client) and supports both the
+The reusable Rust package is [`crates/fractal-client`](../../../crates/fractal-client) and supports both the
 local Unix socket and authenticated paired HTTP over Tailscale or optional Fabric. The Swift package is
-[`clients/swift/St3Client`](../../../clients/swift/St3Client). The Expo TypeScript client is
-[`clients/typescript/st3-client`](../../../clients/typescript/st3-client). Regenerate all three
-clients' contract tables with `cargo run -p st3-client-codegen`;
-CI and local verification use `cargo run -p st3-client-codegen -- --check` for byte stability.
+[`clients/swift/FractalClient`](../../../clients/swift/FractalClient). The Expo TypeScript client is
+[`clients/typescript/fractal-client`](../../../clients/typescript/fractal-client). Regenerate all three
+clients' contract tables with `cargo run -p fractal-client-codegen`;
+CI and local verification use `cargo run -p fractal-client-codegen -- --check` for byte stability.
 No digest of the contract is committed: a line every schema change rewrites made any two of them
 conflict, and `--check` already fails when any generated file differs from its source. When generated
 client files conflict in a merge, resolve the schema and template files, take either side of every
-generated file (`git checkout --theirs -- clients crates/st3-client/src/contract.rs
-crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
+generated file (`git checkout --theirs -- clients crates/fractal-client/src/contract.rs
+crates/fractal-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.
 
 Client transport receivers accept the deployed `st3.client.*` names and matching
@@ -76,7 +76,7 @@ observation, even across payload kinds. Diagnostics observations have a 7-day lo
 retention window; server retry/deduplication receipts remain for 30 days independently
 of observation trimming. Admission allows 256 new events per device per minute;
 retries do not consume that allowance. These observations never replicate desired
-state. Their Local retention is declared in `crates/st3-schema/retention.toml`,
+state. Their Local retention is declared in `crates/fractal-schema/retention.toml`,
 alongside the other node-local observations; schema registration reads that shared
 policy. This distinction does not change either retention window or runtime behavior.
 
@@ -764,7 +764,7 @@ capability (version 1) says a daemon serves all three. Documents are read-only h
   documents, `source: step`), or a `mission/…` or `mission-run/…` (its steps' pinned documents,
   each once, with `step`). `complete` is false when a message's text lives on a machine that
   did not answer; its references then come from the preview. Links are found as
-  `st3_ui_model::documents::document_links` finds them.
+  `fractal_ui_model::documents::document_links` finds them.
 
 Rust has `document_get`, `documents_list(prefix, history, cursor, limit)` and
 `document_references_get(subject)`; Swift `documentGet(name:)`, `documentsList(prefix:history:cursor:limit:)`
@@ -775,7 +775,7 @@ and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
 for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
-crate sends what `st3_client::set_client_name` was given; the TypeScript client takes `client` in
+crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
 its options, and Swift `client:` in its initializer. The header is optional, and st shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
 version.
@@ -1528,7 +1528,7 @@ authoritative grant, revocation, expiry, exact scope, policy revision and releva
 binding. Revocation between handler preflight and the writer transaction denies the synchronous
 write. Agent recipient existence remains required; allowlist membership is not checked.
 
-`crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
+`crates/fractal-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
 Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
 The adapter holds only a scoped bearer, never an approval key. The current HTTP frontend is
 loopback/no-auth for the recorded personal-tunnel dogfood exception; OAuth is the next
@@ -1544,7 +1544,7 @@ The shared `checks.st3` suite includes the adapter's Rust tests.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p st3-client-codegen && cargo build -j 2 -p st-chatgpt -p st3 --features st3/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p st-chatgpt && cargo test -j 2 -p st3 --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,
@@ -1729,8 +1729,8 @@ shape and paging behavior, including legacy cursors; they do not receive the new
 SQL cuts or byte-bounded paging behavior. Gateways preserve the negotiation when relaying
 message lists. Generated Rust, Swift and TypeScript clients default to the legacy contract:
 regenerating a client alone does not opt in. Enable the per-client option explicitly with
-Rust `.with_messages_paging(true)`, Swift `St3Client(..., messagesPaging: true)`, or
-TypeScript `new St3Client({ ..., messagesPaging: true })`. This choice applies to HTTP
+Rust `.with_messages_paging(true)`, Swift `FractalClient(..., messagesPaging: true)`, or
+TypeScript `new FractalClient({ ..., messagesPaging: true })`. This choice applies to HTTP
 and every WebSocket transport; the default (`false`) omits only the messages-paging token
 while preserving existing feature tokens. Clients without the token keep the old contract unchanged.
 
@@ -1855,7 +1855,7 @@ as DATA. Older PTY daemons ignore this extension.
 Raw clients cannot issue PTY lifecycle/CAS or ancestry-management commands through this capability.
 Bounded chunks and socket backpressure preserve every byte; slow consumers do not skip output.
 
-`st3-client::Client::raw_terminal_attachment` obtains the capability and
+`fractal-client::Client::raw_terminal_attachment` obtains the capability and
 `raw_terminal_stream` returns a Tokio `UnixStream`. A terminal renderer can run its own PTY
 parser, mode-aware paste, and geometry negotiation over it without learning about the fleet.
 Each reconnect obtains a fresh capability for the same explicitly chosen incarnation; the
@@ -2183,10 +2183,10 @@ Swift exposes `arrangementsList`, `arrangementsGet`, `arrangementEdit`, and
 All three arrangements stream helpers accept an optional `subject`; Rust takes
 `subject: Option<&str>` after `limit`, TypeScript takes `subject?: ArrangementId`
 after `limit`, and Swift takes `subject: String? = nil`.
-Rust operations reuse `st3_schema::arrangements::Operation`; TypeScript and Swift have
+Rust operations reuse `fractal_schema::arrangements::Operation`; TypeScript and Swift have
 typed operation unions, not arbitrary JSON bodies. Regenerate all clients with
-`cargo run -p st3-client-codegen`; verify freshness with
-`cargo run -p st3-client-codegen -- --check`.
+`cargo run -p fractal-client-codegen`; verify freshness with
+`cargo run -p fractal-client-codegen -- --check`.
 
 Fractal migration is client-owned: discover capability, pause legacy writers, fold old
 `custom.fractal.sidebar` HLC history once, and durably stage the snapshot, target ID,
@@ -2420,7 +2420,7 @@ must still use the existing incarnation-fenced attachment routes to attach.
 The real-daemon mixed-build regression is a **manual proof**, not a CI gate: run
 
 ```sh
-ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p st3 --test integration fleet::terminal_owner_filters_are_safe_across_mixed_builds -- --ignored --exact
+ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p fractal --test integration fleet::terminal_owner_filters_are_safe_across_mixed_builds -- --ignored --exact
 ```
 
 Choose a binary built before these terminal filters. The fake legacy-server refusal

@@ -85,11 +85,11 @@
       "sample_one_in": 5,
       "inputs": [
         "apps/fractal-web/package.json",
-        "apps/fractal-web/packages/st3-sdk/package.json",
+        "apps/fractal-web/packages/fractal-sdk/package.json",
         "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",
-        "crates/stui/tests/fixtures/quality-hour.json",
+        "crates/fractal-tui/tests/fixtures/quality-hour.json",
         "docs/st3/client-v0/fixtures",
         "fixtures/clients",
         "flake.lock",
