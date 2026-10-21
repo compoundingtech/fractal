@@ -594,7 +594,10 @@ fn measure_mission_projection_upgrade_on_disposable_copy() {
     let elapsed = started.elapsed();
     assert_eq!(store.index().unwrap(), frontier, "opening must append no source claims");
     let digests = projection_digest::tables(&store.readers.get()).unwrap();
+    let mission_projection_digests = ["mission_runs", "run_generations", "step_runs"]
+        .into_iter()
+        .map(|table| (table, digests[table].clone()))
+        .collect::<BTreeMap<_, _>>();
     println!("{}", json!({"opening_seconds":elapsed.as_secs_f64(),"frontier":frontier,
-        "mission_projection_digests": ["mission_runs","run_generations","step_runs"].into_iter()
-            .map(|table| (table,digests[table].clone())).collect::<BTreeMap<_,_>>()}));
+        "mission_projection_digests": mission_projection_digests}));
 }
