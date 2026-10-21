@@ -1591,13 +1591,13 @@ impl Store {
                     .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9b345496e02d owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_verdict_queue WHERE claim_id=?1")?
                     .execute(/* sqlite-large-value: allow-for-now lv-h29105e98503c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
                 // A signature can arrive for a claim a checkpoint has since dropped.
-                if claim_row(&transaction, claim_id)?.is_none() {
+                let Some(row) = claim_row(&transaction, claim_id)? else {
                     continue;
-                }
+                };
                 let (result, used) = judging::advance(
                     &transaction,
                     &roots,
-                    claim_id,
+                    &row,
                     &memo,
                     CANDIDATE_PAGE - candidates_judged,
                 )?;
