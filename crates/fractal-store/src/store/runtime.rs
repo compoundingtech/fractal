@@ -514,7 +514,7 @@ impl Runtime for SmalltalkRuntime {
         self.wake_read_roster();
     }
 
-    fn projection_advanced(&self) {
+    fn projection_advanced(&self, caught_up: bool) {
         // Readers keep the roster they had while it refolds from nothing: keep it before the
         // caches it lives in are cleared.
         {
@@ -539,11 +539,15 @@ impl Runtime for SmalltalkRuntime {
         self.forget_reductions();
         // The missions, work, attention, glasses and arrangements lists read the projection
         // frontier and refold what it newly covers on their own; they keep serving meanwhile.
-        // The runtimes list folds by cut alone, so it refolds from nothing, still serving.
         self.summary_list.forget();
-        self.published_runtimes.refold();
         self.published_views.invalidate();
-        self.wake_read_roster();
+        // The runtimes list and the roster fold from nothing, which takes seconds on a large
+        // store. Folding them after every chunk of a long backlog kept a busy node folding the
+        // whole time; readers keep the rows they had until the backlog is in, then one refold.
+        if caught_up {
+            self.published_runtimes.refold();
+            self.wake_read_roster();
+        }
     }
 
     fn digest_tables(&self) -> &'static [(&'static str, &'static [&'static str])] {

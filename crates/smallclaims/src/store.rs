@@ -7659,8 +7659,8 @@ impl Store {
                         self.runtime.forget_views();
                     } else if chunked {
                         // Only more of the admitted claims projected: published lists keep
-                        // serving what readers had until they refold, chunk after chunk.
-                        self.runtime.projection_advanced();
+                        // serving what readers had until they refold once the backlog is in.
+                        self.runtime.projection_advanced(through >= target);
                     }
                     if through < target {
                         between();

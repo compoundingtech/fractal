@@ -79,6 +79,8 @@ fn a_chunked_catch_up_refreshes_cut_keyed_reductions_and_keeps_readers_served() 
     );
     assert_eq!(runtimes_at(&store, admitted), RUNTIMES);
     assert!(!store.smalltalk.subject_cache.lock().unwrap().statuses.is_empty());
+    // As the refresher's next fold would, take up the forget from receiving the backlog.
+    let _ = runtimes.base();
     let mut chunks = 0;
     assert!(store
         .project_replication_backlog_with_yield(|| {
@@ -95,11 +97,14 @@ fn a_chunked_catch_up_refreshes_cut_keyed_reductions_and_keeps_readers_served() 
             assert_eq!((cut, cards[0]["name"].as_str()), (admitted, Some("before the catch-up")));
             assert!(store.smalltalk.agent_resources_cache.lock().unwrap().is_empty(), "never a fold base");
             assert!(matches!(runtimes.current(), ListRead::Served(..)), "the runtimes list stays served");
+            // A fold from nothing after every chunk kept a busy node folding for the whole
+            // backlog: the runtimes list refolds once, when the last chunk is in.
+            assert!(runtimes.base().0.is_some(), "chunk {chunks} asked the runtimes list to refold");
         })
         .unwrap());
     assert!(chunks >= 2, "the backlog projected in {chunks} chunk(s)");
     assert!(store.smalltalk.subject_cache.lock().unwrap().statuses.is_empty(), "the last chunk too");
-    // The runtimes list folds from nothing next, at the same cut.
+    // The last chunk asks it once: the runtimes list folds from nothing next, at the same cut.
     assert!(runtimes.base().0.is_none());
     // A refold replaces what readers kept.
     publish_roster(&store, "after the catch-up");
