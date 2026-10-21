@@ -234,12 +234,14 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
     if (handle !== null) await expect(getComputedStyle(handle).color).not.toBe(probe(canvasElement).color)
     const trigger = element.querySelector<HTMLElement>('button[data-mission-trigger="info"]')!
     await expect(trigger).toContainElement(pill)
-    // Named from its content; on touch layouts the queue's "+N" sits inside the same button.
-    await expect(trigger).toHaveAccessibleName(missionName(...retained.name, ...(touch ? retained.touchQueue : []), retained.reason))
+    // The queue belongs to the mission's one target on every pointer type.
+    await expect(trigger).toHaveAccessibleName(missionName(...retained.name, ...retained.touchQueue, retained.reason))
     await userEvent.click(trigger)
     const dialog = await waitFor(() => { const found = infoDialog(); expect(found).not.toBeNull(); expect(found).toBeVisible(); return found! })
     await expect(dialog.querySelector('[data-mission-info-note]')!.textContent).toBe(retained.note)
     await expect(dialog.querySelectorAll('time')).toHaveLength(retained.updatedAt === undefined ? 0 : 1)
+    await expect(dialog).not.toHaveTextContent('just now')
+    if (retained.updatedAt !== undefined) await expect(dialog.querySelector('time')).toHaveAttribute('datetime', new Date(retained.updatedAt).toISOString())
     await expect(dialog.querySelector('button')).toBeNull()
     await waitFor(() => expect(dialog).toHaveFocus())
     await userEvent.keyboard('{Escape}')
@@ -256,7 +258,7 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
 export const MissionRows: Story = { tags: ['critical'], name: 'Mission pill · every case · live default width', play: missionRowsPlay }
 export const MissionRowsLight: Story = { ...MissionRows, name: 'Mission pill · every case · live default width · light', args: { scheme: 'light' } }
 
-const queuedTrigger = (canvasElement: HTMLElement) => within(designedRow(canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: '+2 more missions queued' })
+const queuedTrigger = (canvasElement: HTMLElement) => within(designedRow(canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+2 more missions queued') })
 const queuedDialog = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Queued missions"]')
 
 /** "+N" opens an accessible dialog popover on press, never on hover; Escape closes it and returns focus. Ends open for the a11y check. */
@@ -264,6 +266,10 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const trigger = queuedTrigger(canvasElement)
   await expect(trigger).toHaveTextContent('+2')
   await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  const missionRow = trigger.closest('[data-milestone-row]')!
+  await expect(trigger).toContainElement(missionRow.querySelector('[data-mission-pill]')!)
+  await expect(rect(trigger.querySelector('[data-queued-count]')!).left).toBeGreaterThanOrEqual(rect(trigger.querySelector('[data-mission-pill]')!).right)
+  await expect(rect(trigger).right).toBeLessThanOrEqual(rect(missionRow.querySelector('[data-line2-slot="step"]')!).left)
   // Plain text, not a box.
   await expect(getComputedStyle(trigger).backgroundColor).toBe('rgba(0, 0, 0, 0)')
   await expect(getComputedStyle(trigger).borderTopWidth).toBe('0px')

@@ -68,7 +68,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
-  const touchMission = mission !== undefined && touch && missionLineHasTrigger(mission, row.missionInfo, touch)
+  const touchMission = mission !== undefined && touch && missionLineHasTrigger(mission, row.missionInfo)
   const signal = row.needsMe
     ? mission?.step._tag === 'Waiting' ? null : <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null

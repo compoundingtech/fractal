@@ -12,9 +12,8 @@
  * A Stale or Failed mission is the retained last observation: glyph, wash and text go muted, and the pill opens a
  * "Mission info" popover that says so, even with nothing queued. There is no retry: the host offers none.
  *
- * Touch layouts (a narrow host or a coarse pointer) merge the pill and "+N" into one button, `[pill +N] · step`, whose
- * box is the whole 44px line-2 track; the row grows that track (see `MilestoneAgentRow`). Fine pointers keep the
- * separate trailing "+N" text control.
+ * The pill and "+N" share one button on every layout, `[pill +N] · step`. Touch layouts grow the line-2
+ * track to 44px (see `MilestoneAgentRow`); the visible pill stays 16px on every pointer type.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -32,9 +31,9 @@ const missionHash = (slug: string) => [...slug].reduce((hash, char) => (hash * 3
 /** Stable per mission name: every row and every run of a mission gets the same hue and glyph. */
 export const missionHue = (slug: string): MissionHue => missionHues[missionHash(slug) % missionHues.length]!
 const live: SidebarMissionInfo = { _tag: 'Live' }
-/** Whether line 2 needs a mission button: on touch layouts for a queue or retained info, on fine pointers for retained info only (the queue keeps its own "+N"). */
-export const missionLineHasTrigger = (mission: Mission, info: SidebarMissionInfo = live, touch: boolean): boolean =>
-  info._tag !== 'Live' || (touch && mission.queued.length > 0)
+/** A queue or retained info gives the mission one shared popover target on every layout. */
+export const missionLineHasTrigger = (mission: Mission, info: SidebarMissionInfo = live): boolean =>
+  info._tag !== 'Live' || mission.queued.length > 0
 
 type MarkShape = 'triangle' | 'square' | 'diamond'
 const markShapes: readonly MarkShape[] = ['triangle', 'square', 'diamond']
@@ -79,12 +78,12 @@ export interface SidebarMissionLineProps {
 export function SidebarMissionLine({ mission, info = live, touch = false, now, frozen = false }: SidebarMissionLineProps) {
   const { step, queued } = mission
   const muted = info._tag !== 'Live'
-  const trigger = missionLineHasTrigger(mission, info, touch)
+  const trigger = missionLineHasTrigger(mission, info)
   const merged = touch && trigger
   return <>
     <span data-line2-slot="mission" data-mission-info={info._tag.toLowerCase()} {...stylex.props(styles.missionSlot, merged && styles.missionSlotTouch)}>
       {trigger
-        ? <MissionInfoTrigger mission={mission} info={info} queued={merged ? queued : []} touch={touch} now={now} />
+        ? <MissionInfoTrigger mission={mission} info={info} queued={queued} touch={touch} now={now} />
         : <MissionPill mission={mission} info={info} />}
     </span>
     {step._tag !== 'Unknown' && <>
@@ -98,7 +97,6 @@ export function SidebarMissionLine({ mission, info = live, touch = false, now, f
           </>}
       </span>
     </>}
-    {!merged && queued.length > 0 && <QueuedMissions queued={queued} />}
   </>
 }
 
@@ -131,7 +129,7 @@ function MissionInfoTrigger({ mission, info, queued, touch, now }: { readonly mi
 /** Retained info says why, with its real update time when reported (never an invented one), then any queue. */
 function MissionInfoBody({ info, queued }: { readonly info: SidebarMissionInfo; readonly queued: Mission['queued'] }) {
   const updated = info._tag !== 'Live' && info.updatedAt !== undefined
-    ? <> Updated <HumanTime at={info.updatedAt} data-testid="mission-info-updated" />.</>
+    ? <> Updated <HumanTime at={info.updatedAt} kind="elapsed" maxUnits={1} suffix=" ago" data-testid="mission-info-updated" />.</>
     : null
   return <>
     {info._tag === 'Stale' && <p data-mission-info-note="stale" {...stylex.props(styles.note)}>Mission info may be out of date.{updated}</p>}
@@ -146,16 +144,6 @@ function QueuedList({ queued }: { readonly queued: Mission['queued'] }) {
   </li>)}</ul>
 }
 
-/** Fine pointers: "+N" as plain text at the end of line 2, not a box; the focus ring is its only outline. */
-function QueuedMissions({ queued }: { readonly queued: Mission['queued'] }) {
-  const noun = queuedNoun(queued.length)
-  return <DialogTrigger>
-    <Button data-queued-missions={queued.length} {...stylex.props(styles.more)}>+{queued.length}<VisuallyHidden> more {noun} queued</VisuallyHidden></Button>
-    <Popover placement="bottom end">
-      <Dialog aria-label={`Queued ${noun}`} {...stylex.props(styles.queued)}><QueuedList queued={queued} /></Dialog>
-    </Popover>
-  </DialogTrigger>
-}
 
 const styles = stylex.create({
   // The mission side stops at 56% of line 2, so after the separator the step keeps the rest.
@@ -185,11 +173,6 @@ const styles = stylex.create({
   handle: { flexShrink: 0, color: tone.attention, fontFamily: t.fontMono, fontSize: t.microSize, fontWeight: t.weightMedium, whiteSpace: 'nowrap' },
   frozenInk: { color: ink.fgSoft },
   count: { flexShrink: 0, color: { default: ink.fgSoft, ':hover': ink.fg }, fontSize: t.denseSize, lineHeight: '16px', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
-  more: {
-    flexShrink: 0, display: 'inline-flex', alignItems: 'center', height: '16px', marginInlineStart: 'auto', paddingInline: s.xs2, borderWidth: 0, borderRadius: r.keyboard,
-    backgroundColor: surface.transparent, color: { default: ink.fgSoft, ':hover': ink.fg }, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: '16px', fontVariantNumeric: 'tabular-nums',
-    cursor: 'pointer', outline: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '1px' },
-  },
   queued: { outline: 'none', maxWidth: g.specimenAside, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg },
   note: { margin: 0, padding: s.sm, color: ink.fg },
   queuedList: { display: 'flex', flexDirection: 'column', gap: s.xs, margin: 0, padding: s.sm, listStyle: 'none', maxWidth: g.specimenAside },

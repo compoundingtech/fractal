@@ -17,6 +17,20 @@ describe('mission feed evidence', () => {
     expect(stale.missionUnavailable).toBe(false)
   })
 
+  it('keeps the last successful read time when a newer stale verdict arrives', () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 1_000_000 }), successAt => {
+      const value = [] as const
+      const live = { _tag: 'Observed', freshness: 'live', value } as const
+      const sync = {
+        last: Option.some({ value, observedAt: successAt }),
+        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: successAt + 720_000 },
+      } as const
+      const result = sidebarMissionFeeds({ missions: { ...live, freshness: 'stale' }, attention: live,
+        missionsSync: sync, attentionSync: { ...sync, last: Option.some({ value, observedAt: successAt + 1000 }) } })
+      expect(result.missionInfo).toEqual({ _tag: 'Stale', updatedAt: successAt })
+    }))
+  })
+
   it('distinguishes retained feed failures from failures before a value exists', () => {
     const live = { _tag: 'Observed', freshness: 'live', value: [] } as const
     const failed = sidebarMissionFeeds({ missions: {
