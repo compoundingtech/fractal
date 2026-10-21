@@ -4,7 +4,7 @@ import { createServer } from 'vite'
 
 const server = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } })
 after(() => server.close())
-const { errorReason, failedCommandSource, readableCommand, workLogTurnFromItems } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
+const { errorReason, failedCommandSource, readableCommand, workLogTurnFromItems, formatWorkDuration } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
 const at = '2026-01-15T12:30:00Z'
 const project = content => workLogTurnFromItems([{ _tag: 'ToolCall', id: 'tool/read', callId: 'call/read', name: 'read', input: {}, status: 'success', callSeen: true, at, result: { content, isError: false, at } }], { kindFor: () => 'read', running: false, failed: false, interrupted: false }).calls[0]
 
@@ -104,4 +104,34 @@ test('a run keeps its own source as the readable command, unless the failure nam
   assert.equal(readableCommand(run({ code: 'print(1)' }, timeoutTrace)), 'sleep 60')
   assert.equal(readableCommand(run({ i: 'No source' }, 'boom')), undefined)
   assert.equal(workLogTurnFromItems([{ _tag: 'ToolCall', id: 'tool/read', callId: 'call/read', name: 'read', input: { command: 'not a run' }, status: 'success', callSeen: true, at }], { kindFor: () => 'read', running: false, failed: false, interrupted: false }).calls[0].command, undefined)
+})
+
+test('duration formatting changes units at exact second, minute and hour boundaries', () => {
+  for (const [milliseconds, expected] of [[0, ''], [999, ''], [1000, '1s'], [12000, '12s'], [59999, '59s'], [60000, '1m'], [61000, '1m 01s'], [185000, '3m 05s'], [3599999, '59m 59s'], [3600000, '1h'], [3720000, '1h 02m'], [14820000, '4h 07m'], [16027000, '4h 27m']]) {
+    assert.equal(formatWorkDuration(milliseconds), expected)
+  }
+  for (const invalid of [undefined, NaN, Infinity, -1]) assert.equal(formatWorkDuration(invalid), '')
+})
+
+test('duration boundaries preserve floored seconds and compact hour/minute properties', () => {
+  for (const boundary of [1000, 60000, 185000, 3600000, 3720000, 7200000, 14820000, 86400000]) {
+    for (let offset = -1001; offset <= 1001; offset++) {
+      const milliseconds = Math.max(0, boundary + offset)
+      const seconds = Math.floor(milliseconds / 1000)
+      const formatted = formatWorkDuration(milliseconds)
+      assert.equal(formatted, formatWorkDuration(seconds * 1000))
+      if (seconds < 1) assert.equal(formatted, '')
+      else if (seconds < 60) assert.equal(formatted, `${seconds}s`)
+      else if (seconds < 3600) {
+        const match = /^(\d+)m(?: (\d{2})s)?$/.exec(formatted)
+        assert.ok(match)
+        assert.equal(Number(match[1]) * 60 + Number(match[2] ?? 0), seconds)
+      } else {
+        const match = /^(\d+)h(?: (\d{2})m)?$/.exec(formatted)
+        assert.ok(match)
+        assert.equal(Number(match[1]) * 60 + Number(match[2] ?? 0), Math.floor(seconds / 60))
+        assert.ok(Number(match[2] ?? 0) < 60)
+      }
+    }
+  }
 })

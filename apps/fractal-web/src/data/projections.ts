@@ -1,18 +1,21 @@
 /**
  * Everything wf derives from the gateway's rows, computed once for every source.
  *
- * Sources supply generated `St3.Agent` / `St3.Mission` / `St3.Attention` rows only; the fleet,
+ * Sources supply SDK-decoded `DecodedAgent` rows (generated `St3.Agent` with open leaves) and
+ * generated `St3.Mission` / `St3.Attention` rows only; the fleet,
  * mission views and workbench subjects are projected here, so fixtures and live cannot derive
- * them differently. Open attention rows are the one inbox authority: a subject needs the user
- * exactly when an open attention row names it (`source_id`, `requester_id` or `mission_id`).
+ * them differently. Native actionable asks are the needs-you authority: a subject needs an
+ * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
-import * as St3 from '@smalltalk/st3-client/schema'
+import * as St3 from '@fractal/client/schema'
+import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/effect'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
 import * as Schema from 'effect/Schema'
 
 import type { MissionView, ProposedMissionFields } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
+import { isWaitingForAnswer } from './attention.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
 
 const isAgentId = Schema.is(St3.AgentId)
@@ -24,20 +27,24 @@ export function terminalSubjectForAgent(id: string): string | undefined {
   return isAgentId(id) ? `terminal/${id.slice('agent/'.length)}` : undefined
 }
 
+/** The wire word of an open leaf: generated `Unknown` and SDK `Unrecognized` both keep `raw`. */
+export const leafText = (value: string | { readonly raw: unknown }): string =>
+  typeof value === 'string' ? value : String(value.raw)
+
 const harnesses = ['omp', 'claude', 'codex'] as const
 
 /** `host/<id>` → `<id>`; an agent without a host row runs on the gateway's own host. */
-const hostName = (agent: St3.Agent) =>
+const hostName = (agent: DecodedAgent) =>
   Option.match(agent.host_id, { onNone: () => 'local', onSome: (id) => id.slice('host/'.length) })
 
 /** The daemon can reach the agent's runtime now. */
-const isConnected = (agent: St3.Agent) =>
+const isConnected = (agent: DecodedAgent) =>
   agent.reachability === 'local' ||
   agent.reachability === 'remote' ||
   agent.reachability === 'reachable'
 
-const activityOf = (agent: St3.Agent): Agent['activity'] => {
-  if (agent.state === 'failed' || Option.isSome(agent.fault)) return 'errored'
+const activityOf = (agent: DecodedAgent): Agent['activity'] => {
+  if (agent.state === 'failed' || agent.state === 'down' || Option.isSome(agent.fault)) return 'errored'
   if (agent.state === 'waiting' || Option.getOrUndefined(agent.blocked_on) === 'human')
     return 'waiting'
   const harnessState = Option.getOrUndefined(agent.harness_state)
@@ -47,18 +54,21 @@ const activityOf = (agent: St3.Agent): Agent['activity'] => {
   return 'idle'
 }
 
-const statusOf = (agent: St3.Agent): string => {
+const statusOf = (agent: DecodedAgent): string => {
   const work = agent.current_work?.[0]
   const title = work === undefined ? undefined : Option.getOrUndefined(work.title)
   return (
     Option.getOrUndefined(agent.fault) ??
+    (agent.state === 'down'
+      ? `down · no session since ${Option.getOrUndefined(agent.down_since) ?? 'unknown'}`
+      : undefined) ??
     (Option.getOrUndefined(agent.blocked_on) === 'human'
       ? `waiting for you${Option.match(agent.ask, { onNone: () => '', onSome: (ask) => ` (${ask})` })}`
       : undefined) ??
     title ??
     Option.getOrUndefined(agent.reason) ??
-    Option.getOrUndefined(agent.harness_state) ??
-    (typeof agent.state === 'string' ? agent.state : agent.state.raw)
+    Option.match(agent.harness_state, { onNone: () => undefined, onSome: leafText }) ??
+    leafText(agent.state)
   )
 }
 
@@ -66,7 +76,14 @@ const unknown = { _tag: 'Unknown' } as const
 const fromOption = <T>(value: Option.Option<T>): Known<T> =>
   Option.match(value, { onNone: () => unknown, onSome: (value) => ({ _tag: 'Known', value }) })
 
-const lifecycleOf = (row: St3.Agent): Agent['lifecycle'] => {
+/** An unrecognized aggregation makes every dependent figure unknown: omitted, never guessed. */
+const usageOf = (row: DecodedAgent): Known<DecodedUsageSummary> =>
+  Option.match(row.usage, {
+    onNone: () => unknown,
+    onSome: (usage) => typeof usage.aggregation === 'object' ? unknown : { _tag: 'Known', value: usage },
+  })
+
+const lifecycleOf = (row: DecodedAgent): Agent['lifecycle'] => {
   switch (row.lifecycle) {
     case 'standing': return { _tag: 'Standing' }
     case 'owner': return { _tag: 'Owner' }
@@ -76,7 +93,7 @@ const lifecycleOf = (row: St3.Agent): Agent['lifecycle'] => {
   }
 }
 
-const agentFromRow = (row: St3.Agent): Agent => {
+const agentFromRow = (row: DecodedAgent): Agent => {
   const driver = Option.getOrUndefined(row.driver)
   const harness = harnesses.find((candidate) => candidate === driver)
   const mission = row.current_work?.[0]?.mission_id
@@ -98,9 +115,9 @@ const agentFromRow = (row: St3.Agent): Agent => {
     ...(harness === undefined ? {} : { harness }),
     activity: activityOf(row),
     status: statusOf(row),
-    state: typeof row.state === 'string' ? row.state : row.state.raw,
+    state: leafText(row.state),
     ...(description === undefined ? {} : { description }),
-    usage: fromOption(row.usage),
+    usage: usageOf(row),
     checkout: fromOption(row.checkout),
     workspace: fromOption(row.workspace),
     startedAt: unknown,
@@ -115,7 +132,7 @@ const agentFromRow = (row: St3.Agent): Agent => {
 }
 
 /** Hosts from `host_id`, `connected` from `reachability`, activity words from `state`/`blocked_on`. */
-export const fleetFromAgents = (rows: readonly St3.Agent[]): Fleet => {
+export const fleetFromAgents = (rows: readonly DecodedAgent[]): Fleet => {
   const agents = rows.map(agentFromRow)
   const hosts = new Map<string, Host>()
   for (const agent of agents) {
@@ -143,7 +160,7 @@ export const missionViews = ({
     proposed: proposed?.[mission.id],
   }))
 
-/** Refs an open attention row is about: what raised it, who asked and the mission it serves. */
+/** Open-card linkage for unread ownership, including informational/non-answerable cards. */
 export const attentionRefs = (attention: readonly St3.Attention[]): ReadonlySet<string> =>
   new Set(
     attention
@@ -196,7 +213,7 @@ export const subjectList = ({
   readonly missions?: readonly St3.Mission[]
   readonly attention?: readonly St3.Attention[]
 }): SubjectSummary[] => {
-  const needsYou = attention === undefined ? undefined : attentionRefs(attention)
+  const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
   return [
     ...(fleet?.agents.flatMap((agent) =>
       agentSubjectPair({ agent, needsYou: needsYou?.has(agent.ref) === true }),
@@ -216,7 +233,7 @@ export const subjectList = ({
         title: item.title,
         detail: `${item.attention_kind} · ${item.state}`,
         icon: 'attention',
-        ...(item.state === 'open' ? { attention: true } : {}),
+        ...(isWaitingForAnswer(item) ? { attention: true } : {}),
       }),
     ) ?? []),
   ]
@@ -228,7 +245,6 @@ const sameItems = <T>(left: readonly T[], right: readonly T[]): boolean =>
 
 const sameKnown = <T>(left: Known<T>, right: Known<T>, equivalent: (left: T, right: T) => boolean = Object.is): boolean =>
   left._tag === 'Unknown' ? right._tag === 'Unknown' : right._tag === 'Known' && equivalent(left.value, right.value)
-const sameUsage = Schema.toEquivalence(St3.UsageSummary)
 const sameCheckout = Schema.toEquivalence(St3.AgentCheckout)
 
 // oxlint-disable-next-line overeng/named-args -- Retained Agent projection comparator; fixed positional Equivalence shape.
@@ -247,7 +263,7 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   sameKnown(a.lastActivityAt, b.lastActivityAt) &&
   sameKnown(a.startedAt, b.startedAt) &&
   sameKnown(a.endedAt, b.endedAt) &&
-  sameKnown(a.usage, b.usage, sameUsage) &&
+  sameKnown(a.usage, b.usage, decodedUsageEquivalence) &&
   sameKnown(a.checkout, b.checkout, sameCheckout) &&
   sameKnown(a.workspace, b.workspace) &&
   sameKnown(a.blockedOn, b.blockedOn) &&
@@ -266,12 +282,12 @@ export const createProjections = (): {
   readonly missionViews: typeof missionViews
   readonly subjectList: typeof subjectList
 } => {
-  const agents = new WeakMap<St3.Agent, Agent>()
+  const agents = new WeakMap<DecodedAgent, Agent>()
   const views = new WeakMap<St3.Mission, MissionView>()
   const agentSubjects = new WeakMap<Agent, readonly SubjectSummary[]>()
   const missionSubjects = new WeakMap<St3.Mission, SubjectSummary>()
   const attentionSubjects = new WeakMap<St3.Attention, SubjectSummary>()
-  let previousRows: readonly St3.Agent[] | undefined
+  let previousRows: readonly DecodedAgent[] | undefined
   let previousFleet: Fleet | undefined
   let previousViews: MissionView[] = []
   let previousSubjects: SubjectSummary[] = []
@@ -342,7 +358,7 @@ export const createProjections = (): {
       return previousViews
     },
     subjectList: ({ fleet, missions, attention }) => {
-      const needsYou = attention === undefined ? undefined : attentionRefs(attention)
+      const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
       const next: SubjectSummary[] = []
       for (const agent of fleet?.agents ?? []) {
         let subjects = agentSubjects.get(agent)
@@ -378,7 +394,7 @@ export const createProjections = (): {
             title: item.title,
             detail: `${item.attention_kind} · ${item.state}`,
             icon: 'attention',
-            ...(item.state === 'open' ? { attention: true } : {}),
+            ...(isWaitingForAnswer(item) ? { attention: true } : {}),
           }
           attentionSubjects.set(item, subject)
         }

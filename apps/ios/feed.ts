@@ -1,5 +1,8 @@
-import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type St3Client, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/st3-client';
-import type { ConversationHeader, HeaderField } from '@smalltalk/st3-views';
+import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import type { InventoryName } from '@fractal/views';
+import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
+import type { HeartbeatSocketFactory } from './collectionSocket';
+import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
 
 // The app holds three windows on one collections socket. It needs no work window: missions carry
@@ -17,7 +20,7 @@ export const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 
 export type FeedHandlers = {
   /** A window's whole ordered list, after each frame that changed it. */
-  onWindow: <K extends FeedWindow>(name: K, items: FeedLists[K], hasMore: boolean, snapshot: Snapshot) => void;
+  onWindow: <K extends FeedWindow>(name: K, items: FeedLists[K], hasMore: boolean, snapshot: Snapshot, received: number) => void;
   /** `live` once a socket delivers its first snapshot; `reconnecting` while a dropped one waits. */
   onConnection: (state: 'connecting' | 'live' | 'reconnecting', issue?: string) => void;
   /** The server refused a window; the others keep going. */
@@ -42,23 +45,22 @@ export type ArrangementsHandlers = {
   onIssue: (issue: string) => void;
 };
 
-export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasMore: boolean; sessionId?: string; header?: ConversationHeader };
+export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasMore: boolean; sessionId?: string; olderCursor?: string; header?: ConversationHeader };
 export type ConversationHandlers = {
   /** `replace` carries the newest page; otherwise the entries changed since the last frame. */
   onEntries: (frame: ConversationFrame) => void;
   /** A problem to show; an empty string clears it. `stopped`: st refused for good, so nothing
    * asks again until the person follows the conversation again. */
   onIssue: (issue: string, stopped?: boolean) => void;
+  /** Typed, content-free refusal for local quality accounting. */
+  onQualityError?: (code?: string) => void;
 };
 
-type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'> & Partial<Pick<St3Client, 'capabilities'>>;
-/** How often a live socket is checked, and how long one check may take. */
-const PROBE_EVERY_MS = 10_000, PROBE_WAIT_MS = 5_000, QUIET_BEFORE_PROBE_MS = 10_000;
-
-/** Whether st is asked anything: not while frames arrive, only once the stream has been quiet. */
-export function shouldProbe(lastFrameAt: number, now: number): boolean {
-  return now - lastFrameAt >= QUIET_BEFORE_PROBE_MS;
-}
+type Client = Pick<FractalClient, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
+// Three missed eight-second protocol heartbeats bound a blackholed connection.
+export const HEARTBEAT_WAIT_MS = 24_000;
+/** How long opening the collections socket may take before it counts as a failed try (a half-dead route can hang for minutes). */
+export const OPEN_WAIT_MS = 15_000;
 type Follow = { close(): void };
 
 function errorCode(error: unknown): string | undefined {
@@ -124,9 +126,8 @@ export class Feed {
   private missionUsers = 0;
   private missionsLeave: ReturnType<typeof setTimeout> | undefined;
   private readonly missionsGraceMs: number;
-  private probe: ReturnType<typeof setInterval> | undefined;
-  /** When a frame last arrived on the open socket. */
-  private lastFrameAt = Date.now();
+  private heartbeat: ReturnType<typeof setTimeout> | undefined;
+  private readonly inventory: InventoryFeed;
   private readonly unsubscribe: () => void;
   private readonly client: Client;
   private readonly handlers: FeedHandlers;
@@ -134,7 +135,8 @@ export class Feed {
   private readonly newActionId: () => string;
   private readonly retryDelaysMs: readonly number[];
 
-  constructor(client: Client, handlers: FeedHandlers, foreground: Foreground, newActionId: () => string, retryDelaysMs: readonly number[] = RETRY_DELAYS_MS, reportAfterMs = 1000, followMissions = true, missionsGraceMs = 30_000) {
+  constructor(client: Client, handlers: FeedHandlers, foreground: Foreground, newActionId: () => string, retryDelaysMs: readonly number[] = RETRY_DELAYS_MS, reportAfterMs = 1000, followMissions = true, missionsGraceMs = 30_000, private readonly socket?: HeartbeatSocketFactory) {
+    this.inventory = new InventoryFeed(missionsGraceMs);
     this.reportAfterMs = reportAfterMs;
     this.missionsGraceMs = missionsGraceMs;
     this.missions = followMissions;
@@ -161,6 +163,7 @@ export class Feed {
     if (this.closed) return;
     clearTimeout(this.missionsLeave);
     this.terminal?.close();
+    this.inventory.close();
     this.closed = true;
     this.suspend();
     this.unsubscribe();
@@ -217,7 +220,7 @@ export class Feed {
     } };
   }
 
-  private suspend(): void {
+  private suspend(unexpected = false): void {
     this.attempt++;
     clearTimeout(this.timer);
     this.timer = undefined;
@@ -225,38 +228,33 @@ export class Feed {
     this.stream = undefined;
     this.live = false;
     this.windows = {};
-    this.stopProbing();
+    clearTimeout(this.heartbeat);
+    this.heartbeat = undefined;
+    this.inventory.suspend();
     for (const retry of Object.values(this.retries)) clearTimeout(retry?.timer);
     this.retries = {};
     for (const report of Object.values(this.reports)) clearTimeout(report);
     this.reports = {};
-    this.terminal?.socketLost();
+    this.terminal?.socketLost(unexpected);
     open?.close();
   }
 
-  /**
-   * A socket can stay open and silent while st is wedged or the network blackholed it, and the
-   * app would say live with old data. Nothing is asked of st while the stream speaks: any frame
-   * is proof of life. Only once it has been quiet for 10 s is st asked something small; a slow
-   * answer is asked again at once, and only two misses in a row drop the socket.
-   */
-  private startProbing(): void {
-    const capabilities = this.client.capabilities?.bind(this.client);
-    if (this.probe || !capabilities) return;
-    const current = this.attempt;
-    const once = () => Promise.race([capabilities().then(() => true, () => false), new Promise<boolean>(resolve => setTimeout(() => resolve(false), PROBE_WAIT_MS))]);
-    this.probe = setInterval(() => {
-      if (!shouldProbe(this.lastFrameAt, Date.now())) return;
-      void (async () => {
-        if (await once() || await once()) return;
-        if (current === this.attempt && !this.closed) this.dropped(new Error('st stopped answering'));
-      })();
-    }, PROBE_EVERY_MS);
+  /** A received frame or native protocol ping resets the deadline without sending a read. */
+  private heard(): void {
+    if (!this.socket) return; // Node fakes or Expo Go do not expose protocol control frames.
+    clearTimeout(this.heartbeat);
+    this.heartbeat = setTimeout(() => this.dropped(new Error('st stopped answering')), HEARTBEAT_WAIT_MS);
   }
 
-  private stopProbing(): void {
-    clearInterval(this.probe);
-    this.probe = undefined;
+  setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
+  watchInventory<K extends InventoryName>(name: K, handlers: InventoryHandlers<K>, hours?: 24 | 168 | 720): () => void {
+    return this.inventory.watch(name, handlers, hours);
+  }
+  refreshInventories(names?: readonly InventoryName[]): void { this.inventory.refresh(names); }
+  /** Explicit pull to refresh asks the held base windows for fresh snapshots too. */
+  refresh(): void {
+    for (const name of Object.keys(FEED_WINDOWS) as FeedWindow[]) this.subscribeWindow(name);
+    this.inventory.refresh();
   }
 
   /** Ask again for a window st stopped sending, after a wait that grows; say so the first time only. */
@@ -280,17 +278,31 @@ export class Feed {
 
   private async connect(): Promise<void> {
     this.suspend();
+    this.inventory.setGranted(false);
     const current = this.attempt;
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
-      const opened = await this.client.collectionStream({
-        onFrame: frame => { if (!stale()) { this.lastFrameAt = Date.now(); this.frame(frame); } },
+      let waiting: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('st did not answer')), OPEN_WAIT_MS); });
+      const attempt = this.client.collectionStream({
+        ...(this.socket ? { socket: (url, protocols, headers) => {
+          const socket = this.socket!(url, protocols, headers);
+          socket.onping = () => { if (!stale()) this.heard(); };
+          return socket;
+        } } : {}),
+        onFrame: frame => { if (!stale()) { const received = performance.now(); this.heard(); this.frame(frame, received); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
+      let opened: Awaited<typeof attempt>;
+      try { opened = await Promise.race([attempt, timeout]); }
+      // A socket that opens after its try was given up on is closed, never used.
+      catch (error) { void attempt.then(late => late.close(), () => {}); throw error; }
+      finally { clearTimeout(waiting); }
       if (stale()) { opened.close(); return; }
-      this.lastFrameAt = Date.now();
       this.stream = opened;
+      this.heard();
+      this.inventory.open(opened);
       for (const name of Object.keys(FEED_WINDOWS) as FeedWindow[]) if (name !== 'missions' || this.missions) this.subscribeWindow(name);
       if (this.conversation) opened.subscribeConversation(CONVERSATION, this.conversation.target);
       if (this.glasses) { this.glasses.window = undefined; opened.subscribeGlasses(GLASSES); }
@@ -340,11 +352,7 @@ export class Feed {
   }
 
   private dropped(error: unknown): void {
-    this.stream = undefined;
-    this.live = false;
-    this.windows = {};
-    this.stopProbing();
-    this.terminal?.socketLost();
+    this.suspend(true);
     if (!this.foreground.active) return;
     const delay = this.retryDelaysMs[Math.min(this.failures, this.retryDelaysMs.length - 1)];
     this.failures++;
@@ -352,7 +360,8 @@ export class Feed {
     this.timer = setTimeout(() => { void this.connect(); }, delay);
   }
 
-  private frame(frame: CollectionFrame): void {
+  private frame(frame: CollectionFrame, received: number): void {
+    if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
@@ -382,14 +391,14 @@ export class Feed {
       this.loaded(name);
       if (frame.kind === 'snapshot') {
         this.failures = 0;
-        if (!this.live) { this.live = true; this.handlers.onConnection('live'); this.startProbing(); }
+        if (!this.live) { this.live = true; this.handlers.onConnection('live'); }
       }
       const items = next.items.filter(item => item.kind === KINDS[name]) as FeedLists[typeof name];
-      this.handlers.onWindow(name, items, next.hasMore, next.snapshot);
+      this.handlers.onWindow(name, items, next.hasMore, next.snapshot, received);
     } else if (frame.kind === 'resync') {
       // st keeps a conversation's subscription and retries it itself; it says why, so the last
       // copy shown can say it is stale (the owner's host is away).
-      if (id === CONVERSATION && this.conversation) { if (frame.message) this.conversation.handlers.onIssue(`${plainMessage(frame.code, frame.message)} · trying again`); }
+      if (id === CONVERSATION && this.conversation) { this.conversation.handlers.onQualityError?.(frame.code); if (frame.message) this.conversation.handlers.onIssue(`${plainMessage(frame.code, frame.message)} · trying again`); }
       else if (frame.id === ARRANGEMENTS && this.arrangements) { if (!frame.retryable) { this.arrangements.window = undefined; this.stream?.subscribeArrangements(ARRANGEMENTS, this.arrangements.person); } }
       else if (frame.id === GLASSES && this.glasses) { this.glasses.window = undefined; this.stream?.subscribeGlasses(GLASSES); }
       else if (frame.id in FEED_WINDOWS) {
@@ -408,12 +417,13 @@ export class Feed {
         this.conversation.failures = 0;
         this.conversation.handlers.onIssue('');
         this.handlers.onConversationFrame?.(frame.items.length, frame.replace);
-        this.conversation.handlers.onEntries({ replace: frame.replace, items: frame.items, hasMore: !!frame.has_more, sessionId: frame.session_id, header: conversationHeader(frame) });
+        this.conversation.handlers.onEntries({ replace: frame.replace, items: frame.items, hasMore: !!frame.has_more, sessionId: frame.session_id, olderCursor: frame.older_cursor, header: conversationHeader(frame) });
       }
     } else if (frame.kind === 'error') {
       if (id === TERMINAL) this.terminal?.failed(frame.code, frame.message);
       else if (id === CONVERSATION && this.conversation) {
         const follow = this.conversation;
+        follow.handlers.onQualityError?.(frame.code);
         // st keeps no start for this transcript: asking again cannot help, so say st's reason
         // once and stop, as stui does.
         if (!conversationMayClear(frame.code)) {
@@ -464,6 +474,7 @@ class TerminalFollow {
   private incarnation = '';
   private attempt = 0;
   private failures = 0;
+  private attached = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly client: Client;
   private readonly terminalId: string;
@@ -486,6 +497,7 @@ class TerminalFollow {
 
   async attach(): Promise<void> {
     this.cancel();
+    this.handlers.onQuality?.('attempt');
     const current = this.attempt;
     const stale = () => this.closed || current !== this.attempt;
     try {
@@ -502,11 +514,14 @@ class TerminalFollow {
       });
       if (stale()) return;
       const attachment = result.value.terminal_attachment;
-      if (!attachment?.stream_capability) { this.stop('The gateway returned no terminal stream.'); return; }
+      if (!attachment?.stream_capability) { this.handlers.onQuality?.('error'); this.stop('The gateway returned no terminal stream.'); return; }
       // A socket that dropped meanwhile attaches again when it reconnects.
+      this.attached = true;
+      this.handlers.onQuality?.('attached');
       this.stream()?.subscribeTerminal(TERMINAL, this.terminalId, attachment.runtime_incarnation ?? this.incarnation, attachment.stream_capability);
     } catch (error) {
       if (stale()) return;
+      this.handlers.onQuality?.('error');
       const code = errorCode(error);
       if (error instanceof Error && error.message === TERMINAL_RESTARTED) this.stop(TERMINAL_RESTARTED);
       // The attach lost the race with a busy store (its fence is the store's whole index): try again.
@@ -533,7 +548,7 @@ class TerminalFollow {
   }
 
   /** The socket closed: whatever was in flight belongs to it. */
-  socketLost(): void { this.cancel(); }
+  socketLost(unexpected = false): void { if (unexpected) this.dead(); else this.attached = false; this.cancel(); }
 
   close(): void {
     if (this.closed) return;
@@ -547,7 +562,10 @@ class TerminalFollow {
     }).catch(() => {});
   }
 
+  private dead(): void { if (this.attached) { this.attached = false; this.handlers.onQuality?.('dead'); } }
+
   private retry(issue: string): void {
+    this.dead();
     const delay = this.retryDelaysMs[Math.min(this.failures, this.retryDelaysMs.length - 1)];
     this.failures++;
     this.handlers.onIssue(`Terminal stream interrupted; reconnecting (${issue}).`);
@@ -566,6 +584,7 @@ class TerminalFollow {
     this.cancel();
     this.released();
     if (!wasClosed && issue) {
+      this.dead();
       this.stream()?.unsubscribe(TERMINAL);
       this.handlers.onIssue(issue);
     }

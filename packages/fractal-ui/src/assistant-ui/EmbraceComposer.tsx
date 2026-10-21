@@ -5,9 +5,11 @@ import {
   Autocomplete, Button, Focusable, Header, ListBox, ListBoxItem, ListBoxSection, Menu, MenuItem, MenuTrigger, Popover, Text, Token, TokenField, TokenInput, Tooltip, TooltipTrigger,
   type Key,
 } from 'react-aria-components'
-import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 import { readingColumnStyles } from './reading-column.stylex'
 import { Icon } from './composition/Icons'
+import { StopRunButton } from './composition/StopRunButton'
+import { NarrowLayoutContext } from './composition/NarrowLayout'
 import { EffortPicker } from './embrace-composer/EffortPicker'
 import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
@@ -27,6 +29,8 @@ export interface EmbraceComposerProps {
   /** Structured drafts parallel to `history`; recall restores chips instead of re-parsing text. */
   readonly tokenHistory?: readonly Draft[]
   readonly targetLabel?: string
+  /** Distinguishes composer landmarks when a host renders multiple conversations. */
+  readonly conversationLabel?: string
   readonly disabledReason?: string
   /** Shown on the C3 cancel control when the runtime cannot cancel the active run. */
   readonly cancelUnavailableReason?: string
@@ -58,7 +62,17 @@ export interface EmbraceComposerProps {
   readonly sendDisabled?: boolean
   /** Overrides the empty-field guidance; keyboard instructions stay in the footer, never here. */
   readonly placeholder?: string
+  /** Why the host could not stop the active run; shown beside Stop, which becomes pressable again. Clear it when the next Stop starts. */
+  readonly stopRefusal?: string
 }
+
+/**
+ * Inside a narrow (phone) host (`NarrowLayoutContext`), the composer's control sizes resolve to 44px touch targets,
+ * its field text to 16px so iOS does not zoom the page on focus, and the field grows to at most a third of the dynamic
+ * viewport so an open keyboard never pushes Send off screen. Popovers render outside this subtree and opt in separately.
+ */
+const narrowGeometry = stylex.createTheme(g, { controlMd: g.touchTarget, controlLg: g.touchTarget })
+const narrowType = stylex.createTheme(t, { bodySize: t.touchInputSize })
 
 const styles = stylex.create({
   root: {
@@ -67,6 +81,9 @@ const styles = stylex.create({
     position: 'relative', padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0,
     backdropFilter: `blur(${g.blur})`,
   },
+  cold: { flexDirection: 'row', alignItems: 'center', padding: s.sm, gap: s.sm, borderRadius: r.full },
+  coldField: { flex: '1 1 0', minWidth: 0 },
+  coldInput: { minHeight: g.controlLg, maxHeight: g.controlLg },
   input: {
     display: 'block',
     width: '100%', boxSizing: 'border-box', minHeight: g.editorMin, maxHeight: g.editorMax,
@@ -93,17 +110,26 @@ const styles = stylex.create({
   help: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted },
   helpVisibility: { display: 'none' },
   availableReason: { display: 'block' },
+  coldFooter: { flexShrink: 0 },
   cancelVisibility: { display: { default: 'inline-flex', ':disabled': 'none' } },
   warning: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: status.attention },
+  stopRefusal: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: status.attention },
   button: {
     minHeight: g.controlMd, flexShrink: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder,
     borderRadius: r.control, backgroundColor: surface.controlFill, color: text.fg,
     paddingBlock: s.xs, paddingInline: s.md, fontFamily: t.fontSans, fontSize: t.metaSize,
     cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   primary: { backgroundColor: accent.primary, color: accent.onPrimary },
-  submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.controlMd, paddingInline: s.xs },
+  submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
+  historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlMd, height: g.controlMd, minHeight: g.controlMd, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover } },
+  // Narrow hosts: an icon-only control is never narrower than it is tall; menu and suggestion rows are touch rows.
+  touchControl: { minWidth: g.touchTarget },
+  touchRow: { height: 'auto', minHeight: g.touchTarget },
+  // The composer owns the left/right safe-area insets; the narrow host owns top and bottom.
+  narrowInsets: { paddingInlineStart: 'env(safe-area-inset-left, 0px)', paddingInlineEnd: 'env(safe-area-inset-right, 0px)' },
+  narrowInput: { maxHeight: `min(${g.editorMax}, calc(var(--wf-phone-height, 100dvh) / 3))` },
   menu: {
     backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline,
     borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.base,
@@ -135,7 +161,7 @@ const styles = stylex.create({
   targetCompact: { maxWidth: '72px', paddingInline: s.xs, gap: s.xs2 },
   targetIcon: { width: g.controlMd, minWidth: g.controlMd, maxWidth: g.controlMd, paddingInline: s.xs, justifyContent: 'center' },
   readoutCompact: { maxWidth: '72px', fontSize: t.denseSize },
-  readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outline: `${g.focusRing} solid ${accent.primary}`, outlineOffset: g.focusOffset } },
+  readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outline: `${g.focusRing} solid ${interaction.focusRing}`, outlineOffset: g.focusOffset } },
   iconCompact: { paddingInline: s.xs },
   targetPopup: { maxWidth: 'min(400px,90vw)', maxHeight: g.commandMaxHeight, overflowY: 'auto', backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize },
   targetTooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', padding: s.sm, borderRadius: r.sm, backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
@@ -150,6 +176,7 @@ const groupPreviewLimit = 4
 /** Requires the same assistant-ui thread/runtime provider as the transcript. */
 export function EmbraceComposer(props: EmbraceComposerProps) {
   const runtimeText = useAuiState(state => state.composer.text)
+  const narrow = React.useContext(NarrowLayoutContext)
   const root = React.useRef<HTMLDivElement>(null)
   const [wrapped, setWrapped] = React.useState(false)
   const [cramped, setCramped] = React.useState(false)
@@ -158,13 +185,14 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   const density = Math.max(pillLayout ? 1 : 0, footerDensity)
   const compact = density > 0
   const iconOnly = density === 2
-  const densityMinimums = React.useRef<number[] | null>(null)
+  // Per-density footer minimums; touch-sized controls invalidate them.
+  const densityMinimums = React.useRef<{ readonly narrow: boolean; readonly values: number[] } | null>(null)
   const densityContext = React.useMemo(() => ({ compact, iconOnly }), [compact, iconOnly])
   React.useLayoutEffect(() => {
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
     const surface = footer?.closest('form')
     if (!footer || !surface) return
-    const minimums = densityMinimums.current ?? (densityMinimums.current = [])
+    const minimums = densityMinimums.current?.narrow === narrow ? densityMinimums.current.values : (densityMinimums.current = { narrow, values: [] }).values
     const measure = () => {
       const css = getComputedStyle(surface)
       const inner = surface.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight)
@@ -192,7 +220,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       observer.disconnect()
       document.fonts.removeEventListener('loadingdone', measure)
     }
-  }, [density, iconOnly, pillLayout, props.toolbar, props.actions])
+  }, [density, iconOnly, pillLayout, props.toolbar, props.actions, narrow])
   React.useLayoutEffect(() => {
     const field = root.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
@@ -240,12 +268,12 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   const composerProps = {
     ...props,
     style: [styles.adaptiveRoot, stacked ? styles.slab : props.variant === 'C3' ? styles.focusSlab : styles.pill, props.style],
-    inputStyle: [styles.input, styles.growingEditor, props.inputStyle],
+    inputStyle: [styles.input, styles.growingEditor, narrow && styles.narrowInput, props.inputStyle],
     fieldStyle: [stacked ? styles.field : styles.fieldRow, props.fieldStyle],
     footerStyle: [styles.adaptiveFooter, props.footerStyle],
-    submitIcon: compact ? <Icon name="send" /> : props.submitIcon,
+    submitIcon: props.submitIcon ?? <Icon name="send" />,
   }
-  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
+  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" data-narrow={narrow || undefined} {...stylex.props(props.readingColumn === true && readingColumnStyles.column, narrow && narrowGeometry, narrow && narrowType, narrow && styles.narrowInsets)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
   </div></CompactComposerContext.Provider>
 }
@@ -262,6 +290,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
   readonly effort: Omit<React.ComponentProps<typeof EffortPicker>, 'compact'>
 }) {
   const { compact, iconOnly } = React.useContext(CompactComposerContext)
+  const narrow = React.useContext(NarrowLayoutContext)
   const running = useAuiState(state => state.thread.isRunning)
   const readoutName = target.model === undefined ? target.label : `${target.label} · ${target.model}`
   return <>
@@ -274,7 +303,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.label}</Tooltip>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption)}>{choice.label}</MenuItem>)}</Menu></Popover>
+        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption, narrow && styles.touchRow)}>{choice.label}</MenuItem>)}</Menu></Popover>
       </MenuTrigger> : <TooltipTrigger delay={150} closeDelay={0}>
         <Focusable><span tabIndex={0} role="img" aria-label={target.model === undefined ? 'Recipient' : 'Recipient and model'} data-composer-target-readout={readoutName} data-composer-readout={!iconOnly ? true : undefined} {...stylex.props(styles.readout, compact && styles.readoutCompact)}>{iconOnly ? <Icon name="message" /> : target.label}</span></Focusable>
         <Tooltip {...stylex.props(styles.targetTooltip)}>{readoutName}</Tooltip>
@@ -287,57 +316,82 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.model ?? 'Model'}</Tooltip>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption)}>{model}</MenuItem>)}</Menu></Popover>
+        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption, narrow && styles.touchRow)}>{model}</MenuItem>)}</Menu></Popover>
       </MenuTrigger>}
       <EffortPicker {...effort} compact={compact} />
     </div>
-    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
-    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
+    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
+    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
   </>
 }
 
-function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
+function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const readOnly = disabledReason !== undefined || isDisabled
   const helpId = React.useId()
   const guidanceId = React.useId()
+  const reason = disabledReason ?? (isDisabled ? 'This conversation is read-only.' : undefined)
+  const guidance = reason ?? placeholder
   const canSend = useAuiState(s => s.composer.canSend)
   const runtimeText = useAuiState(s => s.composer.text)
+  const cold = readOnly && runtimeText === ''
   const composing = React.useRef(false)
   const { compact } = React.useContext(CompactComposerContext)
+  // Stop sits beside Send for the whole run; Escape in the composer stops too. Hosts with their own `actions`
+  // own their stop. A pressed Stop reads "Stopping…" until the runtime reports the run ended or the host
+  // says why it could not stop it.
+  const aui = useAui()
+  const canCancel = useAuiState(s => s.composer.canCancel)
+  const canStop = actions === undefined && canCancel
+  const [stopping, setStopping] = React.useState(false)
+  const stopPending = React.useRef(false)
+  stopPending.current = stopping
+  const [seenRefusal, setSeenRefusal] = React.useState(stopRefusal)
+  if (seenRefusal !== stopRefusal) { setSeenRefusal(stopRefusal); if (stopRefusal !== undefined) setStopping(false) }
+  if (!canCancel && stopping) setStopping(false)
+  const stop = () => { if (stopPending.current) return; stopPending.current = true; setStopping(true); aui.composer.cancel() }
   return (
     <ComposerPrimitive.Root
-      {...stylex.props(styles.root, style)}
+      tabIndex={-1}
+      aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`}
+      {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={event => { if (readOnly || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly) onRequestSubmit?.(false) }}
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
       onKeyDownCapture={event => {
+        const imeKey = event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229
+        // An Escape that dismisses an IME composition belongs to the IME, never to the run.
+        if (event.key === 'Escape' && canStop && !imeKey) { event.preventDefault(); stop(); return }
         if (event.key !== 'Enter') return
         const target = event.target
         if (!(target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT'))) return
-        if (event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229) { event.stopPropagation(); return }
+        if (imeKey) { event.stopPropagation(); return }
         if (event.repeat) { event.preventDefault(); event.stopPropagation(); return }
         if (onRequestSubmit !== undefined && !event.shiftKey && !(window.matchMedia('(pointer: coarse) and (not (any-pointer: fine))').matches && !event.metaKey && !event.ctrlKey)) {
           event.preventDefault(); event.stopPropagation(); if (!readOnly) onRequestSubmit(event.metaKey || event.ctrlKey)
         }
       }}
     >
-      <div {...stylex.props(styles.fieldWrap, fieldStyle)}>
-      {runtimeText === '' ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{placeholder}</span> : null}
-      {input !== undefined ? input(inputStyle ?? styles.input, [helpId, runtimeText === '' ? guidanceId : undefined].filter(Boolean).join(' ')) : <ComposerPrimitive.Input
+      <div {...stylex.props(styles.fieldWrap, fieldStyle, cold && styles.coldField)}>
+      {runtimeText === '' ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{guidance}</span> : null}
+      {input !== undefined ? input(cold ? [inputStyle ?? styles.input, styles.coldInput] : inputStyle ?? styles.input, [helpId, runtimeText === '' && reason === undefined ? guidanceId : undefined].filter(Boolean).join(' ')) : <ComposerPrimitive.Input
         aria-label={targetLabel === undefined ? 'Message' : `Message to ${targetLabel}`}
-        aria-describedby={[helpId, runtimeText === '' ? guidanceId : undefined].filter(Boolean).join(' ')}
+        aria-describedby={[helpId, runtimeText === '' && reason === undefined ? guidanceId : undefined].filter(Boolean).join(' ')}
         placeholder=""
+        // Without host `actions`, Escape-to-stop is handled once above (with its IME guard); the primitive's own Escape would cancel a second time.
+        cancelOnEscape={actions !== undefined}
         disabled={readOnly}
-        {...stylex.props(styles.input, inputStyle)}
+        {...stylex.props(styles.input, inputStyle, cold && styles.coldInput)}
       />}
       </div>
-      <div data-testid="composer-footer" {...stylex.props(styles.footer, footerStyle)}>
-        <div id={helpId} {...stylex.props(styles.help, styles.helpVisibility, (disabledReason !== undefined || isDisabled) && styles.availableReason)}>
-          {disabledReason ?? (isDisabled ? 'This conversation is read-only.' : targetLabel === undefined ? undefined : `To ${targetLabel}`)}
+      <div data-testid="composer-footer" {...stylex.props(styles.footer, footerStyle, cold && styles.coldFooter)}>
+        <div id={helpId} data-testid="composer-reason" {...stylex.props(styles.help, styles.helpVisibility, reason !== undefined && runtimeText !== '' && styles.availableReason)}>
+          {reason ?? (targetLabel === undefined ? undefined : `To ${targetLabel}`)}
         </div>
         {toolbar}
         <div {...stylex.props(styles.grow)} />
+        {canStop && stopRefusal !== undefined && !stopping ? <span role="status" title={stopRefusal} {...stylex.props(styles.stopRefusal)}>{stopRefusal}</span> : null}
+        {canStop ? <StopRunButton onStop={stop} pending={stopping} /> : null}
         {actions !== undefined ? actions(compact) : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send> : <Button isDisabled={readOnly || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
       </div>
     </ComposerPrimitive.Root>
@@ -360,6 +414,7 @@ function TokenComposer({
   placeholder = 'Message, @ to mention, / for commands',
 }: EmbraceComposerProps) {
   const aui = useAui()
+  const narrow = React.useContext(NarrowLayoutContext)
   const composerStateNow = () => aui.composer.__internal_getRuntime?.().getState() ?? aui.composer.getState()
   const runtimeText = useAuiState((s) => s.composer.text)
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
@@ -456,12 +511,13 @@ function TokenComposer({
     inputRef.current?.focus()
   }
   const isEmpty = draft.segments.every((segment) => segment.type === 'text' && segment.text === '')
+  const cold = readOnly && isEmpty && !hasAttachments
   const canSubmit = !readOnly && !sendDisabled && !tooLarge && (serialized.content !== '' || hasAttachments) && (!isRunning || canQueue)
 
   return (
     <ComposerPrimitive.Root
       ref={formRef}
-      {...stylex.props(styles.root, style)}
+      {...stylex.props(styles.root, style, cold && styles.cold)}
       onSubmit={(event) => { event.preventDefault(); if (!open) submit() }}
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
@@ -490,14 +546,14 @@ function TokenComposer({
       }}
     >
       <Autocomplete>
-        <div {...stylex.props(styles.fieldWrap, fieldStyle)}>
+        <div {...stylex.props(styles.fieldWrap, fieldStyle, cold && styles.coldField)}>
           {/* Input asChild/render still imposes a string value, target.value/selectionStart,
               HTMLTextAreaElement ref and setSelectionRange. RAC TokenInput is contenteditable
               with TokenFieldValue segment/caret state. It cannot implement that native contract.
               This is the real app TokenField inside Root, bridged explicitly to composer text. */}
           <TokenField<Draft>
             aria-label={targetLabel === undefined ? 'Message with mentions and commands' : `Message to ${targetLabel}`}
-            aria-describedby={[helpId, isEmpty ? guidanceId : undefined].filter(Boolean).join(' ')}
+            aria-describedby={[helpId, isEmpty && disabledReason === undefined && !isDisabled ? guidanceId : undefined].filter(Boolean).join(' ')}
             value={draft}
             onChange={(next) => {
               if (readOnly) return
@@ -520,10 +576,10 @@ function TokenComposer({
               }
             }}
           >
-            {isEmpty ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{placeholder}</span> : null}
+            {isEmpty ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{disabledReason ?? (isDisabled ? 'This conversation is read-only.' : placeholder)}</span> : null}
             <TokenInput<Draft>
               ref={inputRef}
-              className={() => stylex.props(styles.input, inputStyle).className ?? ''}
+              className={() => stylex.props(styles.input, inputStyle, cold && styles.coldInput).className ?? ''}
             >
               {(segment) => <Token className={({ isSelected }) => stylex.props(styles.token, isSelected && styles.selectedToken).className ?? ''}>
                 {segment.value === undefined ? segment.text : renderToken?.(segment.value) ??
@@ -535,11 +591,11 @@ function TokenComposer({
             onOpenChange={(next) => { if (!next) setDismissed(triggerKey) }} {...stylex.props(styles.menu)}>
             <ListBox autoFocus="first" aria-label={trigger.kind === '@' ? 'Mention a subject' : 'Commands'} items={previewedGroups} {...stylex.props(styles.menuList)}
               onAction={pick} disabledKeys={options.filter((option) => option.unavailable !== undefined).map((option) => option.id)}
-              renderEmptyState={() => <div {...stylex.props(styles.option)}>No matches</div>}>
+              renderEmptyState={() => <div {...stylex.props(styles.option, narrow && styles.touchRow)}>No matches</div>}>
               {(group) => <ListBoxSection id={group.id}>
                 <Header {...stylex.props(styles.menuHeader)}>{group.label}{group.hidden > 0 ? ` · ${group.options.length + group.hidden}` : ''}</Header>
                 {group.options.map(option => <ListBoxItem key={option.id} id={option.id} textValue={option.label}
-                  className={({ isFocused, isDisabled: optionDisabled }) => stylex.props(styles.option, isFocused && styles.focusedOption, optionDisabled && styles.unavailable).className ?? ''}>
+                  className={({ isFocused, isDisabled: optionDisabled }) => stylex.props(styles.option, narrow && styles.touchRow, isFocused && styles.focusedOption, optionDisabled && styles.unavailable).className ?? ''}>
                   <Text slot="label" {...stylex.props(styles.optionLabel)}>{option.label}</Text>
                   <Text slot="description" {...stylex.props(styles.helpVisibility)}>{option.unavailable ?? option.description}</Text>
                   {option.token._tag === 'Mention' ? option.hint !== undefined && <span aria-hidden="true" data-mention-hint {...stylex.props(styles.description)}>{option.hint}</span> : <span aria-hidden="true" {...stylex.props(styles.description, styles.commandDescription)}>{option.unavailable ?? option.description}</span>}
@@ -549,18 +605,18 @@ function TokenComposer({
           </Popover> : null}
         </div>
       </Autocomplete>
-      <div id={helpId} {...stylex.props(styles.help, styles.helpVisibility, (disabledReason !== undefined || isDisabled) && styles.availableReason)}>
+      <div id={helpId} data-testid="composer-reason" {...stylex.props(styles.help, styles.helpVisibility, (disabledReason !== undefined || isDisabled) && !isEmpty && styles.availableReason)}>
         {disabledReason ?? (isDisabled ? 'This conversation is read-only.' :
           `${targetLabel === undefined ? '' : `To ${targetLabel} · `}Enter to ${variant === 'C3' && isRunning && canQueue ? 'queue' : 'send'} · Shift+Enter for a new line${variant === 'C3' ? ` · ↑ on empty recalls history${canCancel ? ' · Esc cancels' : ''}` : ''}`)}
       </div>
       {tooLarge ? <div role="status" {...stylex.props(styles.warning)}>Message exceeds the {maxContentBytes} byte inline limit. Your draft is kept; shorten it to send.</div> : null}
       {variant === 'C3' && isRunning && !canQueue ? <div {...stylex.props(styles.warning)}>This runtime does not support queuing. Cancel the active run before sending.</div> : null}
-      <div data-testid="composer-footer" {...stylex.props(styles.footer, footerStyle)}>
+      <div data-testid="composer-footer" {...stylex.props(styles.footer, footerStyle, cold && styles.coldFooter)}>
         {toolbar}
         <div {...stylex.props(styles.grow)} />
         {variant === 'C3' && toolbar === undefined ? <>
           <Button isDisabled={readOnly || history.length === 0} onPress={() => recallHistory('previous')}
-            aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button)}><Icon name="clock" /></Button>
+            aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button, styles.historyIcon)}><Icon name="clock" /></Button>
           <ComposerPrimitive.Cancel disabled={readOnly || !canCancel} title={canCancel ? undefined : cancelUnavailableReason} {...stylex.props(styles.button, styles.cancelVisibility)}>Cancel run</ComposerPrimitive.Cancel>
         </> : null}
         {/* A controlled TokenField can contain a draft before runtime text is bridged.

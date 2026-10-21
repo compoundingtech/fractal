@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Test only: the trim write-interleaving test trims 100 diagnostics over 5,000 history rows per pull request and the production-sized 1,500 over 150,000 in the daily full-scale run",
+  "replay": {
+    "status": "none",
+    "detail": "Test change only; no replay or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or persistent data changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or coordinated upgrade changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No protocol or API change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new swap-back restrictions."
+  }
+}

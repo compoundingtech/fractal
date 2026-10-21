@@ -1,7 +1,5 @@
 # st eval audit
 
-Status: reviewed on 2026-09-08.
-
 This table records the purpose and the prompt boundary for every st eval.
 
 | Eval | Audit result |
@@ -9,6 +7,7 @@ This table records the purpose and the prompt boundary for every st eval.
 | `agent-migration-rehearsal` | Keep. It proves a start with no startup prompt and no `.st3` directory, an exact rendered migration document, assigned work, and cleanup. |
 | `automatic-github-intake` | Keep. It proves that one durable resource event starts one isolated, pinned review mission. |
 | `claude-skill-inheritance` | Keep. It proves native Claude skill inheritance without an authored runtime prompt. |
+| `codex-minimal-access` | Keep. A paid black-box eval: a Codex seat declared with only a model, in an `access_mode = "auto"` daemon, edits and pushes from its workspace, reaches git and gh over https, installs a package, searches the web, and is refused a write to the home directory. Held-out gates check each result; the runner checks the provider argv for the `st-managed` profile with no bypass and the transcript for a web search call. |
 | `constraint-inheritance` | Keep. It proves that mission constraints reach nested steps. |
 | `context-resource-continuity` | Keep. It proves durable context across runtime replacement. |
 | `continuous-stewardship` | Rewrite. A real schedule now creates claimable finite mission runs. |
@@ -19,8 +18,6 @@ This table records the purpose and the prompt boundary for every st eval.
 | `ghost-bug` | Keep. It proves a multi-agent investigation with graph products. |
 | `license-mit` | Keep. It proves delegated implementation and verification. |
 | `local-file-refresh` | Keep. It proves explicit local file observation. |
-| `loop-best-of-n` | Retired. Best-of-N is composed from explicit mission steps and a gated selector. |
-| `loop-for-each` | Retired. Collections are composed from explicit mission steps or queues. |
 | `loop-until-green` | Keep. It proves the supported sequential-until loop reaches a gate and terminates. |
 | `mission-document-lift` | Keep. It proves immutable mission documents. |
 | `mission-inputs` | Keep. It proves text and resource inputs. |

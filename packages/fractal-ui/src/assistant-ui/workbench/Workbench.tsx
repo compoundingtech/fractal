@@ -7,7 +7,7 @@ import {
   surfaceVars as sf,
   textVars as tx,
   borderVars as bd,
-  accentVars as ac,
+  interactionVars as interaction,
   typeVars as t,
   radiusVars as r,
   spaceVars as s,
@@ -494,7 +494,7 @@ function ThreadPane({ pane, resources, workspaceId }: { pane: WorkbenchPane; res
     </div>
     <div data-testid="workbench-composer-dock" {...stylex.props(styles.composerDock, dockTheme)}>
       <div {...stylex.props(styles.composerLane)}>
-        <Composer agent={title} running={thread.runtime.isRunning === true} folder={controls?.folder} branch={controls?.branch} onSend={controls?.onSend} onSteer={controls?.onSteer} onStop={controls?.onStop} draftKey={`workbench.${workspaceId}.${paneKey(pane)}`} />
+        <Composer agent={title} conversationLabel={`${title}, ${landmarkContext ?? workspaceId}, ${paneKey(pane)}`} running={thread.runtime.isRunning === true} folder={controls?.folder} branch={controls?.branch} onSend={controls?.onSend} onSteer={controls?.onSteer} onStop={controls?.onStop} draftKey={`workbench.${workspaceId}.${paneKey(pane)}`} />
       </div>
     </div>
   </EmbraceRuntimeProvider>
@@ -543,12 +543,12 @@ const fillTheme = stylex.createTheme(g, { lane: '100%', proseMax: '90ch' })
 const dockTheme = stylex.createTheme(g, { blur: '0px' })
 
 const styles = stylex.create({
-  root: { display: 'flex', width: '100%', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', backgroundColor: sf.canvas, color: tx.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  root: { display: 'flex', width: '100%', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', backgroundColor: sf.canvas, color: tx.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, WebkitFontSmoothing: 'antialiased', MozOsxFontSmoothing: 'grayscale' },
   split: { display: 'flex', flexDirection: 'row', flexGrow: 1, minWidth: 0, minHeight: 0 },
   splitBelow: { flexDirection: 'column' },
   splitPane: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', flexBasis: 'calc(var(--split-ratio) * 100%)', flexGrow: 0, flexShrink: 0 },
   splitPaneGrow: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', flexGrow: 1, flexBasis: 0 },
-  separatorBase: { position: 'relative', zIndex: 1, flexShrink: 0, touchAction: 'none', backgroundColor: bd.borderStrong, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: `calc(-1 * ${g.focusOffset})` } },
+  separatorBase: { position: 'relative', zIndex: 1, flexShrink: 0, touchAction: 'none', backgroundColor: bd.borderStrong, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusOffset})` } },
   separatorV: { width: g.hairline, alignSelf: 'stretch', cursor: 'col-resize', '::after': { content: '""', position: 'absolute', insetInline: `calc(-1 * ${g.separatorHitSlop})`, insetBlock: 0 } },
   separatorH: { height: g.hairline, width: '100%', cursor: 'row-resize', '::after': { content: '""', position: 'absolute', insetInline: 0, insetBlock: `calc(-1 * ${g.separatorHitSlop})` } },
   group: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
@@ -573,23 +573,23 @@ const styles = stylex.create({
   dialogActions: { display: 'flex', justifyContent: 'flex-end', gap: s.sm },
   // Inside the modal, focus is always shown: the dialog moves focus to Cancel programmatically, which
   // a pointer-opened dialog would otherwise leave without a ring.
-  dialogButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlMd, width: 'auto', paddingInline: s.md, flexShrink: 0, whiteSpace: 'nowrap', fontSize: t.metaSize, fontFamily: t.fontSans, lineHeight: t.metaLeading, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.borderStrong, borderRadius: r.control, backgroundColor: sf.controlFill, color: tx.fg, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover }, ':focus': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: g.hairline } },
+  dialogButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlMd, width: 'auto', paddingInline: s.md, flexShrink: 0, whiteSpace: 'nowrap', fontSize: t.metaSize, fontFamily: t.fontSans, lineHeight: t.metaLeading, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.borderStrong, borderRadius: r.control, backgroundColor: sf.controlFill, color: tx.fg, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover }, ':focus': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
   destructive: { color: st.dangerFg, borderColor: st.danger, ':hover': { color: st.dangerFg, backgroundColor: st.dangerMuted } },
   tabList: { display: 'flex', alignItems: 'center', gap: s.xs2, flexGrow: 0, minWidth: 0, maxWidth: '100%' },
-  tab: { height: g.controlSm, maxWidth: g.tabMax, display: 'inline-flex', alignItems: 'center', gap: s.xs2, paddingInline: s.sm, borderWidth: 0, backgroundColor: sf.transparent, color: tx.fgMuted, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: g.focusOffset } },
+  tab: { height: g.controlSm, maxWidth: g.tabMax, display: 'inline-flex', alignItems: 'center', gap: s.xs2, paddingInline: s.sm, borderWidth: 0, backgroundColor: sf.transparent, color: tx.fgMuted, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   tabOn: { backgroundColor: sf.washSubtle, color: tx.fg },
   tabLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   groupActions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: s.xs2, flexShrink: 0 },
-  ghostMd: { width: g.controlMd, height: g.controlMd, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: sf.transparent, color: tx.fgMuted, borderRadius: r.control, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover, color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: g.focusOffset } },
+  ghostMd: { width: g.controlMd, height: g.controlMd, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: sf.transparent, color: tx.fgMuted, borderRadius: r.control, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover, color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   tabPanel: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', outlineStyle: 'none' },
   pane: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   paneScroll: { flexGrow: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' },
   paneCenter: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm },
   threadFrame: { flex: '1 1 0', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
-  composerDock: { flexShrink: 0, paddingBlock: s.lg, backgroundColor: sf.canvas },
+  composerDock: { flexShrink: 0, paddingBlock: s.sm, backgroundColor: sf.canvas },
   composerLane: { width: '100%', maxWidth: g.lane, boxSizing: 'border-box', paddingInline: s.lg, marginInline: 'auto' },
   placeholderUri: { fontFamily: t.fontMono, fontSize: t.codeSize, color: tx.fgMuted },
-  placeholderHint: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tx.fgFaint },
+  placeholderHint: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tx.fgMuted },
   placeholderMeta: { display: 'flex', gap: s.xs },
-  chip: { fontFamily: t.fontMono, fontSize: t.denseSize, color: tx.fgFaint, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.border, borderRadius: r.sm, paddingInline: s.xs2 },
+  chip: { fontFamily: t.fontMono, fontSize: t.denseSize, color: tx.fgMuted, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.border, borderRadius: r.sm, paddingInline: s.xs2 },
 })

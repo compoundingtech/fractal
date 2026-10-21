@@ -120,4 +120,4 @@ configuration, or other local caches. Protect the file like the original graph: 
 bytes can contain private information. A restored standalone graph can be inspected immediately;
 running seats and fleet transport require fresh local setup.
 
-The format deliberately uses sync records. A receive-only continuous backup peer is future work.
+The format uses sync records.

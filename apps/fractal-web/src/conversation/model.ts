@@ -63,17 +63,42 @@ export type NoticeKind = typeof NoticeKind.Type
  * Local send lifecycle, not a streaming revision or a server delivery acknowledgement.
  * `Sent`: the gateway action completed authoritatively while the message's own mailbox
  * echo is outside the loaded conversation window; it is kept (never duplicated) until
- * the window shows it.
+ * the window shows it. `Unconfirmed`: st may have taken the send and has not confirmed it
+ * yet; resending the identical request is safe and returns st's first answer.
  */
 export const SendState = Schema.TaggedUnion({
   Pending: {},
   Sent: {},
+  Unconfirmed: { detail: Schema.String },
   Failed: {
     reason: Schema.Literals(['rejected', 'ungranted', 'invalid', 'failed', 'stale-fence', 'snapshot-unavailable']),
     detail: Schema.String,
   },
 })
 export type SendState = typeof SendState.Type
+
+/** Harness facts retained by the q101 app stopgap until adapters emit typed TimelineBlocks. */
+export const HarnessNotice = Schema.TaggedUnion({
+  SubagentResult: {
+    taskId: Schema.String, agent: Schema.String, status: Schema.String, duration: Schema.String,
+    payload: Schema.String, raw: Schema.String,
+    lines: Schema.optional(Schema.Int), size: Schema.optional(Schema.String),
+    fullOutput: Schema.optional(Schema.String), abortReason: Schema.optional(Schema.String),
+    error: Schema.optional(Schema.String), mergeSummary: Schema.optional(Schema.String),
+    followUp: Schema.optional(Schema.String),
+  },
+  Irc: {
+    from: Schema.String, to: Schema.optional(Schema.String), replyTo: Schema.optional(Schema.String),
+    payload: Schema.String, raw: Schema.String,
+  },
+  BackgroundJob: {
+    jobId: Schema.String, label: Schema.optional(Schema.String), state: Schema.Literal('completed'),
+    duration: Schema.optional(Schema.String),
+    payload: Schema.String, raw: Schema.String,
+  },
+  Compaction: { payload: Schema.String, raw: Schema.String },
+})
+export type HarnessNotice = typeof HarnessNotice.Type
 
 /** Shared renderer contract for live timeline entries and imported session history. */
 export const ConversationItem = Schema.TaggedUnion({
@@ -155,11 +180,12 @@ export const ConversationItem = Schema.TaggedUnion({
   /** Known structured harness events, never displayed as a raw JSON transcript. */
   Event: {
     id: Schema.String,
-    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result']),
+    kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result', 'irc', 'background-job', 'compaction']),
     title: Schema.String,
     text: Schema.String,
     sender: Sender,
     data: Schema.Unknown,
+    notice: Schema.optional(HarnessNotice),
     at: Schema.optional(Schema.String),
   },
   /** Forward-compatible compact row with explicit type and an inspectable structured payload. */
@@ -167,6 +193,8 @@ export const ConversationItem = Schema.TaggedUnion({
     id: Schema.String,
     eventType: Schema.String,
     data: Schema.Unknown,
+    /** Mixed visibility needs a visible disclosure until blocks carry separable prose. */
+    mixedContent: Schema.optional(Schema.Boolean),
     sender: Schema.optional(Sender),
     at: Schema.optional(Schema.String),
   },

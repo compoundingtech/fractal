@@ -2,8 +2,8 @@ import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
-import type { UsagePeriod } from '../../../clients/typescript/st3-client';
-import { plainError } from '../../../clients/typescript/st3-client';
+import type { UsagePeriod } from '../../../clients/typescript/fractal-client';
+import { plainError } from '../../../clients/typescript/fractal-client';
 import { agentName } from '../agentsView';
 import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';
@@ -12,21 +12,20 @@ import { theme } from '../theme';
 import { accounts, byOf, cost, groups, label, limitLine, nextBy, PERIODS, periodName, tokens, totalOf, type By, type Names, type Tone } from '../usage';
 import { Button, ListRow, Note, Screen, SectionHeader, T } from '../ui';
 
-// Usage: spend and its API-equivalent cost over a period, from st's usage read, as stui's Usage
-// tab shows it. st keeps no stream of usage, so it is read on focus, again each minute while the
-// tab is shown, and at once over a new period.
-const READ_EVERY_MS = 60_000;
+// A focused usage screen follows its selected period. Fleet's card and a detail screen share
+// the same period window; older members read on focus and explicit pull without a timer.
 const tone: Record<Tone, string> = { ok: theme.idle, warning: theme.waiting, fault: theme.fault, quiet: theme.overlay0 };
 // The last read, so a detail screen shows what the list showed.
 let last: { hours: number; period: UsagePeriod } | null = null;
 
-export function useUsage(hours: number) {
-  const { client } = useStore();
+export function useUsage(hours: typeof PERIODS[number]) {
+  const { client, feed, inventoryGranted } = useStore();
   const [period, setPeriod] = useState<UsagePeriod | null>(last?.hours === hours ? last.period : null);
   const [issue, setIssue] = useState('');
   const [reading, setReading] = useState(false);
   const read = useCallback(async () => {
-    if (!client) return;
+    if (inventoryGranted && feed) { setReading(true); feed.refreshInventories(['usage']); return; }
+    if (!client || inventoryGranted !== false) return;
     setReading(true);
     try {
       const result = await client.usagePeriod({ since_ms: Date.now() - hours * 3_600_000 });
@@ -40,12 +39,19 @@ export function useUsage(hours: number) {
     } finally {
       setReading(false);
     }
-  }, [client, hours]);
+  }, [client, hours, feed, inventoryGranted]);
   useFocusEffect(useCallback(() => {
-    void read();
-    const timer = setInterval(() => void read(), READ_EVERY_MS);
-    return () => clearInterval(timer);
-  }, [read]));
+    setPeriod(last?.hours === hours ? last.period : null);
+    if (inventoryGranted && feed) return feed.watchInventory('usage', {
+      onRows: rows => {
+        const next = rows[0]?.value ?? null;
+        if (next) last = { hours, period: next };
+        setPeriod(next); setReading(false);
+      },
+      onIssue: message => { setIssue(message); if (message) setReading(false); },
+    }, hours);
+    if (inventoryGranted === false) void read();
+  }, [read, feed, inventoryGranted, hours]));
   return { period, issue, reading, read };
 }
 
@@ -60,7 +66,7 @@ export function useNames(): Names {
 
 export function UsageScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<StackParams>>();
-  const [hours, setHours] = useState<number>(PERIODS[0]);
+  const [hours, setHours] = useState<typeof PERIODS[number]>(PERIODS[0]);
   const [by, setBy] = useState<By>('agent');
   const { period, issue, reading, read } = useUsage(hours);
   const names = useNames();
@@ -112,7 +118,7 @@ export function UsageScreen() {
 export function UsageDetailScreen() {
   const route = useRoute<RouteProp<StackParams, 'UsageDetail'>>();
   const { id, hours } = route.params;
-  const { period, issue } = useUsage(hours);
+  const { period, issue } = useUsage(PERIODS.find(period => period === hours) ?? PERIODS[0]);
   const names = useNames();
   const navigation = useNavigation<NativeStackNavigationProp<StackParams>>();
   const now = Date.now();

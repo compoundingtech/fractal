@@ -174,8 +174,8 @@ export function formatWorkDuration(milliseconds: number | undefined): string {
   const seconds = Math.floor(milliseconds / 1000)
   if (seconds < 1) return ''
   if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60 === 0 ? '' : ` ${seconds % 60}s`}`
-  return `${Math.floor(seconds / 3600)}h${Math.floor(seconds / 60) % 60 === 0 ? '' : ` ${Math.floor(seconds / 60) % 60}m`}`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60 === 0 ? '' : ` ${String(seconds % 60).padStart(2, '0')}s`}`
+  return `${Math.floor(seconds / 3600)}h${Math.floor(seconds / 60) % 60 === 0 ? '' : ` ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}m`}`
 }
 const outputMediaLanguages: Readonly<Record<string, string>> = {
   'application/json': 'json', 'text/json': 'json', 'text/markdown': 'markdown',

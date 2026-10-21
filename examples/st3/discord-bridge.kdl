@@ -1,6 +1,7 @@
 version 2
 
-// Invented placement, paths and subjects. Adapt before previewing and applying.
+// Invented placement, paths and subjects. Adapt the Python and daemon socket paths
+// before previewing and applying; argv entries do not expand shell variables.
 // This is a Python program seat; no model harness or secret value is declared.
 agent "example/discord-bridge" {
   name "Discord bridge"
@@ -8,5 +9,5 @@ agent "example/discord-bridge" {
   workspace "/srv/example/smalltalk"
   restart "always"
   tags st3.adapter.sources="external/discord/user/404,external/discord/user/606" st3.adapter.target="agent/example/discord-test"
-  argv "/usr/bin/python3" "-I" "/srv/example/smalltalk/scripts/st3-discord-bridge" "run" "--agent" "agent/example/discord-test" "--route" "/srv/example/discord/trial.json" "--allow-user" "606" "--token-file" "/srv/example/discord/bot.env"
+  argv "/usr/bin/python3" "-I" "/srv/example/smalltalk/scripts/st3-discord-bridge" "run" "--agent" "agent/example/discord-test" "--socket" "/run/user/1000/st3.sock" "--route" "/srv/example/discord/trial.json" "--allow-user" "606" "--token-file" "/srv/example/discord/bot.env"
 }

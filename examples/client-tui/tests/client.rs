@@ -5,9 +5,9 @@ use axum::{
 };
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
-use st3_client::{Client, Resource, Snapshot};
-use st3_client_tui::{App, send};
-use st3_feed::{Command, Update, Window};
+use fractal_client::{Client, Resource, Snapshot};
+use fractal_client_tui::{App, send};
+use fractal_feed::{Command, Update, Window};
 use std::{
     sync::{Arc, Mutex, mpsc},
     time::Duration,
@@ -21,6 +21,7 @@ fn agent(id: &str) -> Resource {
 }
 fn agents(app: &mut App, ids: &[&str]) -> Option<Command> {
     app.update(Update::Window {
+        received: std::time::Instant::now(),
         window: Window::Agents,
         snapshot: snapshot(),
         items: ids.iter().map(|id| agent(id)).collect(),
@@ -62,7 +63,7 @@ fn failed_send_retries_same_recipient_body_and_idempotency_key() {
     let first = app.submit().unwrap();
     assert!(app.select(1).is_none());
     assert!(app.submit().is_none());
-    app.sent(Err(st3_client::ClientError::Transport(
+    app.sent(Err(fractal_client::ClientError::Transport(
         "response lost".into(),
     )));
     // Removing the recipient from a bounded window must not retarget an uncertain send.
@@ -115,7 +116,7 @@ async fn real_feed_follows_and_typed_client_submits_fenced_send() {
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
         let (updates, incoming) = mpsc::channel();
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let feed = tokio::spawn(st3_feed::run(client, updates, receiver));
+        let feed = tokio::spawn(fractal_feed::run(client, updates, receiver));
         let mut app = App::default();
         while app.timeline.items.is_empty() {
             while let Ok(update) = incoming.try_recv() {

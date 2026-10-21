@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-from release_notes import FIELDS, ImpactError, check_pull_request, collect, render, validate
+from release_notes import FIELDS, ImpactError, check_pull_request, collect, render, validate, version
 
 ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('release_daily', str(ROOT / 'scripts/release-smalltalk-daily'))
@@ -42,7 +42,7 @@ class ReleaseNotes(unittest.TestCase):
         self.git('config', 'commit.gpgsign', 'false')
         self.git('config', 'core.hooksPath', '/dev/null')
         self.write('crates/smallclaims/src/store.rs', 'pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 16;";')
-        self.write('crates/st3/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 10;')
+        self.write('crates/fractal-store/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 10;')
         self.write('docs/st3/binary-releases.md', '# Pinned install guide\n')
         self.base = self.commit('Base')
         self.git('tag', 'v0.3.0')
@@ -54,6 +54,24 @@ class ReleaseNotes(unittest.TestCase):
         path = self.repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
+
+    def test_rules_version_reads_the_path_it_had_before_the_library_moved(self):
+        current = 'crates/fractal-store/src/store/checkpoint_rules.rs'
+        for legacy in (
+            'crates/st3-store/src/store/checkpoint_rules.rs',
+            'crates/st3-daemon/src/store/checkpoint_rules.rs',
+            'crates/st3/src/store/checkpoint_rules.rs',
+        ):
+            with self.subTest(path=legacy):
+                (self.repo / legacy).parent.mkdir(parents=True, exist_ok=True)
+                self.git('mv', current, legacy)
+                before_move = self.commit(f'Library still in {legacy}')
+                self.assertEqual(version(self.repo, before_move, 'rules'), 10)
+                self.assertEqual(version(self.repo, self.base, 'rules'), 10)
+                current = legacy
+        self.git('rm', '-q', current)
+        with self.assertRaisesRegex(ImpactError, 'is missing'):
+            version(self.repo, self.commit('No rules file anywhere'), 'rules')
 
     def add_fragment(self, name='change', value=None):
         self.write(f'release-notes/{name}.json', json.dumps(value or fragment()))
@@ -260,7 +278,7 @@ class ReleaseNotes(unittest.TestCase):
         with self.assertRaisesRegex(ImpactError, 'invalid JSON'):
             check_pull_request(self.repo, self.base, source)
         self.git('reset', '--hard', self.base)
-        self.write('crates/st3/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
+        self.write('crates/fractal-store/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
         self.add_fragment()
         source = self.commit('Missing rules transition')
         with self.assertRaisesRegex(ImpactError, 'rules version 10 -> 11'):
@@ -268,7 +286,7 @@ class ReleaseNotes(unittest.TestCase):
 
     def test_pr_accepts_explicit_unknown_and_matching_version_transitions(self):
         self.write('crates/smallclaims/src/store.rs', 'pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 17;";')
-        self.write('crates/st3/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
+        self.write('crates/fractal-store/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
         value = fragment()
         value['replay'] = {'status': 'unknown', 'detail': 'Replay on populated state has not been measured; wait for API readiness.'}
         value['schema'] = {'status': 'changed', 'detail': 'Forward migration; preserve backup.', 'transitions': [[16, 17]]}
@@ -276,6 +294,38 @@ class ReleaseNotes(unittest.TestCase):
         self.add_fragment(value=value)
         source = self.commit('Classified contract change')
         self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 2)
+
+    def test_shared_storage_version_is_read_from_the_pinned_tree(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+        value = fragment()
+        value['schema'] = {'status': 'changed', 'detail': 'Forward migration.', 'transitions': [[16, 19]]}
+        self.add_fragment(value=value)
+        source = self.commit('Shared version migration')
+        self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 1)
+        # Neither a later working-tree version nor an undeclared transition may pass.
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 20;')
+        self.assertEqual(len(check_pull_request(self.repo, self.base, source)['version_changes']), 1)
+        later = self.commit('Later version increment')
+        self.assertEqual(version(self.repo, later, 'schema'), 20)
+        self.write('crates/fractal-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = unknown;')
+        malformed = self.commit('Malformed shared version')
+        with self.assertRaisesRegex(ImpactError, 'cannot identify schema version'):
+            version(self.repo, malformed, 'schema')
+
+    def test_storage_crate_rename_preserves_historical_version_discovery(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/st-storage-version/src/lib.rs', 'pub const STORAGE_VERSION: u32 = 19;')
+        before = self.commit('Historical storage crate')
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        (self.repo / 'crates/fractal-storage-version/src').mkdir(parents=True)
+        self.git('mv', 'crates/st-storage-version/src/lib.rs', 'crates/fractal-storage-version/src/lib.rs')
+        after = self.commit('Rename storage crate without a schema change')
+        self.assertEqual(version(self.repo, before, 'schema'), 19)
+        self.assertEqual(version(self.repo, after, 'schema'), 19)
 
     def test_explicit_source_backfill_and_source_pinning(self):
         self.write('fix.rs', '// Direct fix\n')
@@ -293,16 +343,42 @@ class ReleaseNotes(unittest.TestCase):
         self.assertNotIn('Uncommitted wrong guide', expected)
 
     def test_rules_change_needs_matching_classification(self):
-        self.write('crates/st3/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
+        self.write('crates/fractal-store/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
         self.add_fragment()
         source = self.commit('Unclassified rules change')
         with self.assertRaisesRegex(ImpactError, 'rules version 10 -> 11'):
             collect(self.repo, self.base, source)
 
+    def test_shared_storage_version_is_read_from_the_exact_candidate(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs',
+                   'pub const STORAGE_VERSION: u32 = 19;')
+        value = fragment()
+        value['schema'] = {'status': 'changed', 'detail': 'Shared version; forward migration.',
+                           'transitions': [[16, 19]]}
+        self.add_fragment(value=value)
+        source = self.commit('Move the schema version to its shared crate')
+        self.write('crates/fractal-storage-version/src/lib.rs',
+                   'pub const STORAGE_VERSION: u32 = 99;')
+        report = check_pull_request(self.repo, self.base, source)
+        self.assertEqual(report['version_changes'][0]['to'], 19)
+        self.assertEqual(collect(self.repo, self.base, source)['versions']['schema'], [16, 19])
+
+    def test_shared_storage_version_change_requires_its_transition(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/fractal-storage-version/src/lib.rs',
+                   'pub const STORAGE_VERSION: u32 = 19;')
+        self.add_fragment()
+        source = self.commit('Unclassified shared schema transition')
+        with self.assertRaisesRegex(ImpactError, 'schema version 16 -> 19'):
+            check_pull_request(self.repo, self.base, source)
+
     def test_intermediate_schema_and_rules_changes_are_preserved(self):
         for schema, rules, name, transitions in [(17, 11, 'first', [16, 17, 10, 11]), (16, 12, 'second', [17, 16, 11, 12])]:
             self.write('crates/smallclaims/src/store.rs', f'pub const SCHEMA_VERSION: &str = "PRAGMA user_version = {schema};";')
-            self.write('crates/st3/src/store/checkpoint_rules.rs', f'pub const RULES_VERSION: u32 = {rules};')
+            self.write('crates/fractal-store/src/store/checkpoint_rules.rs', f'pub const RULES_VERSION: u32 = {rules};')
             value = fragment(name)
             value['schema'] = {'status': 'changed', 'detail': f'Schema migration {name}; roll forward.', 'transitions': [transitions[:2]]}
             value['rules'] = {'status': 'changed', 'detail': 'Coordinate all members.', 'transitions': [transitions[2:]]}
@@ -417,6 +493,10 @@ class ReleaseNotes(unittest.TestCase):
             commands.append(args)
             if args[:2] == ('git', 'rev-parse'):
                 return self.base
+            if args[:2] == ('git', 'diff'):
+                return 'unclassified.rs'
+            if args[0] == 'python3' and args[2:] == ('check', '--source', source, '--require-latest'):
+                return ''
             raise AssertionError(f'Unexpected command before classification: {args}')
         with patch.object(sys, 'argv', ['release-smalltalk-daily']), \
              patch.object(daily, 'newest_verified_main_run', return_value=(1, source)), \

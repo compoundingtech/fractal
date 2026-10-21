@@ -1,10 +1,17 @@
 # Talking to agents
 
-Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker from [getting started](getting-started.md), restarting it if you stopped it.
+Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat), starting it again if you stopped it.
 
 ## From the terminal UI or phone
 
-Run `stui`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
+Run `st`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Fractal messages alongside the harness's transcript and tool calls.
+
+If a conversation fails to open, its error card offers **Ctrl+R** to retry opening it
+without closing the tab. Leave the message box with **Esc** first. On a failed-open
+card this retries only the focused conversation, never an outgoing message; otherwise
+**Ctrl+R** resends a message that was not sent. **Ctrl+Y** speaks into the message box.
+A permanent refusal is not retried automatically: after access or availability changes,
+use **Ctrl+R** to ask again. Your draft is kept.
 
 On the phone, open **Agents**, select the worker, and use its composer. [Build and run the iOS app](ios-app.md) covers local installation first. A phone reads and acts through a paired member; it does not become a replica or run a seat. To begin pairing on your daemon machine:
 
@@ -38,6 +45,15 @@ inside an opened tool bundle; loading the last call does not replace the other c
 
 ## In the web conversation
 
+The web agent sidebar shows your folder hierarchy, with unfiled agents in **Unfiled**.
+Each nested level is indented. Use **Right** to expand a folder or enter its first
+child, and **Left** to collapse it or return to its parent. Folder collapse state is
+saved for the gateway; searching temporarily expands matching folders.
+
+Press **/** to search the sidebar and **ArrowDown** to move into the results. Free text
+matches agent names and IDs; `repo:`, `state:` and `tool:` match reported facts, and
+`machine:build-1` or `host:build-1,build-2` filter by host prefix.
+
 Tool rows show a short description rather than raw commands or infrastructure paths.
 Protocol events are hidden by default; the conversation menu can show payload-free
 event notices for inspection. Process and agent senders use readable captions.
@@ -66,7 +82,40 @@ st conversations ls person/ada
 
 `send` and `reply` safely recognize a retry with the same content. If a send times out, check its status or retry it; do not assume it failed. An agent's answer belongs in the conversation where you asked it.
 
-Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
+Claude's native permission, question and review dialogs hold new Fractal channel
+notifications outside the harness. Mail remains durable and releases in mailbox
+order once Claude applies the native answer or the dialog is dismissed; a later session cannot inherit
+the previous session's hold or answer. Native transcript receipt recovery still
+runs for mail already offered, so this hold does not erase delivery/read proof or
+replay uncertain handoffs. An unavailable or stale observation keeps new offers
+held until current evidence returns.
+
+A permission hook's answer-poll timeout does **not** mean the dialog timed out:
+Claude can still be waiting for a terminal answer after that hook stops polling.
+The hold remains while that dialog is open. Merely recording an answer in Fractal
+cannot release mail: an expired hook no longer receives that answer. Claude must
+apply the decision or its terminal must show the dialog has closed. A native timeout
+that closes the prompt releases it on that same positive evidence; an ended session
+leaves its mail for its successor. Stale or indeterminate observations never count
+as native closure, including after a fresh heartbeat restores the same episode.
+
+Esc dismissals do not need a remembered dialog: st reads the current native input
+box and idle shortcuts footer after observing the prompt, and checks that the
+runtime and prompt have not changed. This re-derives closure after a daemon restart
+or a dismissal between screen polls. A box shown while Claude is working is not
+idle evidence, and an unreadable screen cannot release the hold.
+
+A body or attachment preparation failure also holds that message and later mail
+in mailbox order. The sender's existing delivery reason explains the preparation
+blocker without exposing raw errors or internal paths. st retains and retries
+the mail, clearing that reason when preparation succeeds, including after a
+channel reconnect. Healthy mail does not add preparation diagnostics. Waiting and
+recovery reports cite the stored message-creation claim, so each FIFO blocker and
+its clear remain tied to the same durable message.
+
+Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
+the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
+and says when it changed a file. HEIC, AVIF, TIFF and PDF are refused with a way to convert them.
 
 ```sh
 printf 'Path to an image to share with the worker: '
@@ -138,6 +187,8 @@ st work ask --for person/ada --title 'Review the garden README' \
   --idempotency-key garden-readme-decision --as "$ST_AGENT"
 ```
 
+To show the person an image with the question, add `--attach FILE` (up to four PNG, JPEG, GIF or WebP images of at most 10 MiB each): the person sees each on the card.
+
 Use `--step` for a currently claimed step instead of `--new-run`, as [missions in practice](missions-in-practice.md#ask-for-a-decision-that-comes-up-during-work) shows. Name why the person is needed and the exact subject/revision they are reviewing. The agent finishes all work it can do independently before asking.
 
 For feedback, the agent can instead write:
@@ -206,7 +257,7 @@ message may have landed: the error prints its key and the command that tells whe
 `st conversations status --idempotency-key KEY`. Running the same command again is safe.
 
 `st conversations sessions` lists harness sessions and `st conversations timeline SESSION`
-shows one conversation as stui shows it: messages, Smalltalk, and tool calls folded to a line
+shows one conversation as the terminal UI shows it: messages, Fractal, and tool calls folded to a line
 or two. `--raw` prints every stored entry instead (message boundaries, tool input and output in
 full), and `--json` prints the page.
 

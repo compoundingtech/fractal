@@ -1,7 +1,20 @@
-import type { Arrangement, ArrangementOperation } from '../../clients/typescript/st3-client';
+import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementOperation } from '../../clients/typescript/fractal-client';
 
+/** What a person reads when their Sidebar was removed and no older one exists to edit. */
+export const SIDEBAR_RETIRED = 'This Sidebar was removed; restoring a removed Sidebar is not available yet.';
+/** Whether st refused to create the Sidebar because the person retired it. Retired arrangements
+ *  leave the window, so this refusal is how the phone learns it. */
+export function sidebarRetired(error: unknown): boolean { return error instanceof ClientError && error.response.code === 'arrangement-retired'; }
+
+/** The subject of a person's one Sidebar (#2043); concurrent creates converge on it. */
+export function sidebarSubject(person: string): string { return `arrangement/${person}/${SIDEBAR_ARRANGEMENT_UUID}`; }
+
+/** The reserved subject whatever its name, else the oldest live arrangement named "Sidebar",
+ *  which clients created before the reserved id. Every client picks the same one. */
 export function sidebarArrangement(arrangements: Arrangement[]): Arrangement | undefined {
-  return [...arrangements].filter(a => !a.deleted).sort((a, b) => Number(a.body.name.value !== 'Sidebar') - Number(b.body.name.value !== 'Sidebar') || compare(a.id, b.id))[0];
+  const live = arrangements.filter(a => !a.deleted);
+  return live.find(a => a.id.endsWith(`/${SIDEBAR_ARRANGEMENT_UUID}`))
+    ?? live.filter(a => a.body.name.value === 'Sidebar').sort((a, b) => compare(a.id, b.id))[0];
 }
 const digits = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 const integerLength = (key: string) => key[0] >= 'a' ? key.charCodeAt(0) - 95 : 92 - key.charCodeAt(0);

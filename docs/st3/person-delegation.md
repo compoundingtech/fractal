@@ -24,7 +24,7 @@ default policy, and old policy references cannot authorize new actions after rep
 | `record-go-stop` | Approve or reject an approve-mode human gate for the exact episode and revision the person decided on. |
 
 An unanswered ask cannot be dismissed as an informational update. Attention is derived from
-its source: `st attention resolve --for` closes only an informational update. Other attention
+its source: `st alerts resolve --for ... --outcome resolved` closes only an informational update. Other attention
 requires answering or remedying its source. Authored person steps, feedback changes, launch
 approvals, mission revision approvals, and other operations are outside this initial list.
 Existing free-mode actions remain recorded as the agent itself.
@@ -39,7 +39,7 @@ st work done step-run/example/ask --as agent/example/helper \
 ```
 
 The same proof flags work on `st conversations archive` (one message at a time),
-`st attention resolve`, `st attention approve`, and `st attention reject`. Use the original
+`st alerts resolve`, `st alerts approve`, and `st alerts reject`. Use the original
 `message.sent` claim ID for an archive, the update's `work.person-asked` ID for a closure,
 or the exact `gate.requested` ID for a review. `st work done --answer ID --text TEXT` retains
 structured answer validation. A delegated cancellation is refused.

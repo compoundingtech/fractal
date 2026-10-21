@@ -1,18 +1,20 @@
-import { ClientError, St3Client, isTransient } from '@smalltalk/st3-client'
-import { Runtime, Snapshot, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { Agent, Attention, Mission, TerminalScreen } from '@smalltalk/st3-client/schema'
+import { ClientError, FractalClient, isTransient } from '@fractal/client'
+import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
+import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   St3,
   St3Live,
   AttachFailure,
   type FollowEvent,
   type FollowSpec,
+  type DecodedAgent,
+  type Undecodable,
   type ConnectionState,
   followKey,
   type St3Options,
   type SyncStatus,
   syncStatusFromFailure,
-} from '@st3/sdk/effect'
+} from '@fractal/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -30,6 +32,10 @@ import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
 import { gatewayTerminalInput } from '../terminal/terminal-input-port.ts'
 import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
+import { gatewayAgentControls } from '../agents/agent-control-port.ts'
+import { gatewayPromptAnswers } from '../conversation/alerts/prompt-answer-port.ts'
+import { gatewayAlertActions } from '../conversation/alerts/alert-action-port.ts'
+import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
@@ -45,11 +51,14 @@ import {
 import {
   type ConversationPage,
   type AttachmentPort,
+  type AttachmentSendRequest,
   type ConversationPortResult,
   type DataSource,
   type NetworkReachability,
   type Feed,
   type Grants,
+  type RosterDecode,
+  decodedRoster,
   observed,
   unavailable,
   waiting,
@@ -153,7 +162,7 @@ export const liveSource = ({
   // Each sync-status consumer is owned by the corresponding follow fiber.
   let freshnessConsumers = 0
   setDebug('Wf.freshnessConsumers', 0)
-  const client = new St3Client({
+  const client = new FractalClient({
     baseUrl,
     // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
     fetchImpl: fetch,
@@ -228,6 +237,12 @@ export const liveSource = ({
           case 'Decode':
             setDebug('Wf.decodeMs', event.elapsedMs)
             break
+          case 'ResourceDecode':
+            // Cumulative per session, resource and path; never row contents.
+            setDebug(`Wf.resourceDecode.${event.resource}.${event.path}`, event.count)
+            setDebug(`Wf.resourceDecode.${event.resource}.${event.path}.Rejected`, event.rejectedCount)
+            setDebug(`Wf.resourceDecode.${event.resource}.${event.path}.Degraded`, event.degradedCount)
+            break
         }
         options.onDiagnostics?.(event)
       },
@@ -282,6 +297,8 @@ export const liveSource = ({
     onCommit,
     explicitInterest = false,
     onVisibilityChange,
+    observedFreshness,
+    prepareObservation,
     telemetryKind = 'window',
   }: {
     readonly resolve: (get: Atom.AtomContext) => Effect.Effect<TSpec, AttachFailure>
@@ -291,6 +308,10 @@ export const liveSource = ({
     }) => Stream.Stream<FollowEvent<A>>
     /** A published fallback after transport failure or a stalled first snapshot, never a parallel bootstrap read. */
     readonly initialRead?: (st3: St3['Service']) => Effect.Effect<{ readonly value: A; readonly hasMore: boolean }, AttachFailure>
+    /** Freshness of a decoded frame; a frame retaining last-good rows is stale, not live. */
+    readonly observedFreshness?: (value: A) => 'live' | 'stale'
+    /** Applied only after the observation's authority/ordering guard accepts it. */
+    readonly prepareObservation?: (value: A, previous: Feed<A>) => A
     readonly keepAlive?: boolean
     readonly onCommit?: (value: A) => void
     readonly explicitInterest?: boolean
@@ -404,6 +425,7 @@ export const liveSource = ({
             initialReadFiber = runtime.runFork(initialRead(st3).pipe(
               Effect.tap(({ value, hasMore }) => Effect.sync(() => {
                 if (!active || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
+                value = prepareObservation?.(value, latest) ?? value
                 // HTTP is last-published evidence, not proof that the live subscription is ready.
                 latest = {
                   ...observed({ value, freshness: 'stale' }),
@@ -469,8 +491,9 @@ export const liveSource = ({
                 if (event._tag === 'Observed') {
                   initialReadDeadlineFiber?.interruptUnsafe()
                   initialReadDeadlineFiber = undefined
-                  latest = observed({ value: event.value })
-                  syncLatest = observeFeedSync(syncLatest, event.value, Date.now())
+                  const value = prepareObservation?.(event.value, latest) ?? event.value
+                  latest = observed({ value, freshness: observedFreshness?.(value) ?? 'live' })
+                  syncLatest = observeFeedSync(syncLatest, value, Date.now())
                 } else if (event._tag === 'Failed') {
                   const failure = syncStatusFromFailure(event.error)
                   syncLatest = transitionFeedSync(syncLatest, failure, Date.now())
@@ -639,19 +662,46 @@ export const liveSource = ({
     return retained
   }
 
-  const agentsRetained = retain<readonly Agent[], Extract<FollowSpec, { _tag: 'Window' }>>({
+  const rosterDecode = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
+  /** Decode metadata belongs to an observation and is published only with its accepted rows. */
+  const rosterEvidence = new WeakMap<readonly DecodedAgent[], RosterDecode>()
+  const sameUndecodable = (left: readonly Undecodable[], right: readonly Undecodable[]) =>
+    left.length === right.length && left.every((entry, index) => {
+      const other = right[index]!
+      return entry._tag === other._tag && entry.id === other.id && entry.path === other.path && entry.reason === other.reason
+    })
+  const recordRosterDecode = (next: RosterDecode) => {
+    const current = registry.get(rosterDecode)
+    if (current.decodeStale === next.decodeStale && sameUndecodable(current.undecodable, next.undecodable)) return
+    registry.set(rosterDecode, next.undecodable.length === 0 && !next.decodeStale ? decodedRoster : next)
+  }
+  const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
-    initialRead: (st3) => st3.readAgents,
+    initialRead: (st3) => st3.readAgents.pipe(
+      Effect.map(({ value, hasMore, undecodable, decodeStale }) => {
+        const rows = [...value]
+        rosterEvidence.set(rows, { undecodable, decodeStale })
+        return { value: rows, hasMore }
+      }),
+    ),
+    prepareObservation: (value, previous) => {
+      const evidence = rosterEvidence.get(value) ?? decodedRoster
+      if (!evidence.decodeStale || value.length > 0 || previous._tag !== 'Observed') return value
+      const retained = [...previous.value]
+      rosterEvidence.set(retained, evidence)
+      return retained
+    },
+    onCommit: (value) => recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster),
+    observedFreshness: (value) => rosterEvidence.get(value)?.decodeStale ? 'stale' : 'live',
     follow: ({ st3, spec }) =>
       st3.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter((row): row is Agent => row.kind === 'agent'),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is DecodedAgent => row.kind === 'agent')
+          rosterEvidence.set(value, { undecodable, decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const agents = agentsRetained.atom
@@ -723,6 +773,9 @@ export const liveSource = ({
     // Until smalltalk#1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
+    // st deduplicates a key by its whole request except the fence. Each key's first action
+    // id and parameters are what every Resend of it repeats, even after its row retires.
+    const sentActions = new Map<string, Pick<AttachmentSendRequest, 'id' | 'parameters'>>()
     let lastSendId: string | undefined
     let painted = false
     let publishedItems: ConversationPage['items'] = []
@@ -785,11 +838,13 @@ export const liveSource = ({
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
       const id = `pending/${idempotencyKey}`
+      const action = sentActions.get(idempotencyKey) ?? { id: request.id, parameters: request.parameters }
+      sentActions.set(idempotencyKey, action)
       const local: PendingSend = {
         item: {
           _tag: 'Text', id, role: 'user',
-          text: request.parameters.content ?? '',
-          attachments: request.parameters.attachments.map((attachment) => ({
+          text: action.parameters.content ?? '',
+          attachments: action.parameters.attachments.map((attachment) => ({
             id: attachment.blob,
             mediaType: attachment.media_type,
             // The encoded wire side carries `name: null`; the view model has no null names.
@@ -818,9 +873,9 @@ export const liveSource = ({
           return submitMessage({
             api_version: request.api_version,
             type: request.type,
-            id: request.id,
+            id: action.id,
             fence: { snapshot_id: current.value, subject_revisions: {} },
-            parameters: request.parameters,
+            parameters: action.parameters,
             idempotency_key: idempotencyKey,
           })
         }
@@ -834,7 +889,9 @@ export const liveSource = ({
         if (result._tag === 'Success' && result.value.status === 'rejected') {
           local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
         } else if (result._tag === 'Refused') {
-          local.item = { ...local.item, sendState: { _tag: 'Failed', reason: result.reason, detail: result.detail } }
+          local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
+            ? { _tag: 'Unconfirmed', detail: result.detail }
+            : { _tag: 'Failed', reason: result.reason, detail: result.detail } }
         } else if (result._tag === 'Success' && result.value.status === 'completed') {
           const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
           if (affected.length > 0) timeline.keepOwnSendId(affected, id)
@@ -1070,6 +1127,8 @@ export const liveSource = ({
         if (!disposed && sdk !== undefined) runtime.runFork(sdk.reconnectSockets)
       },
       agents,
+      rosterDecode,
+      retryAgents: () => agentsRetained.retry(),
       missions,
       attention,
       conversation,
@@ -1092,10 +1151,14 @@ export const liveSource = ({
         if (feed._tag === 'Unavailable' && feed.retryable === true) retainTerminal(ref).retry()
       },
       terminalResize: gatewayTerminalResize(client),
+      agentControls: gatewayAgentControls(client),
+      prompts: gatewayPromptAnswers(client),
+      alertActions: gatewayAlertActions(client),
+      documents: gatewayDocuments(client),
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.
-        connect: (fetchImpl) => new St3Client({ baseUrl, fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl }),
         transport: fetch,
         snapshot: async () => {
           const current = await messageSnapshot()

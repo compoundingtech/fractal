@@ -1,39 +1,41 @@
 import { defineConfig } from 'vite'
-import { execFileSync } from 'node:child_process'
+import { createBuildIdentityPlugin } from '@overeng/utils/node/vite-build-identity'
 import react from '@vitejs/plugin-react'
-import { createStylexVitePlugins } from './scripts/stylex.mjs'
+import { createStylexVitePlugins, deferBuiltStylesheets } from './scripts/stylex.mjs'
 import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
 import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
+import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
+import { fractalDevReplay } from './scripts/vite-replay.mjs'
+
 export default defineConfig({
   root: 'src/web',
   plugins: [
     fractalContentSecurityPolicy(),
+    fractalDevReplay(),
     {
-      name: 'fractal-build-identity',
-      resolveId(id) {
-        if (id === 'virtual:build-identity') return '\0fractal-build-identity'
-      },
-      load(id) {
-        if (id !== '\0fractal-build-identity') return
-        const rev = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-        return (
-          'export const buildIdentity=' +
-          JSON.stringify({ baseVersion: '0.1.0', machineVersion: '0.1.0+' + rev.slice(0, 12), gitRev: rev }) +
-          ';export const deploymentId=undefined;'
-        )
+      // The root is src/web, so Vite watches other app and kit modules file by file; such a watch
+      // can be lost when a write replaces the file (git, formatters, atomic saves). Directory watches
+      // keep HMR following those writes.
+      name: 'fractal:workspace-watch',
+      apply: 'serve',
+      configureServer(server) {
+        server.watcher.add([new URL('./src', import.meta.url).pathname, new URL('../../packages/fractal-ui/src', import.meta.url).pathname])
       },
     },
+    createBuildIdentityPlugin({ baseVersion: '0.1.0', buildStamp: '__CLI_BUILD_STAMP__' }),
     extensionBuild({ entry: '../src/extensions/app-public.ts', privateBuild: false }),
     ...createStylexVitePlugins({
-      externalPackages: ['@smalltalk/fractal-ui'],
+      externalPackages: ['@fractal/ui', '@overeng/devbar', '@overeng/meters', '@overeng/stylex-tokens'],
       entries: [new URL('./src/web/main.tsx', import.meta.url).pathname],
     }),
+    deferBuiltStylesheets(),
     react(),
     webfractalGateway(),
+    fractalCssAssets(),
   ],
   server: { strictPort: true, host: '127.0.0.1', allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',') },
-  resolve: { dedupe: ['effect', 'react', 'react-dom'] },
+  resolve: { dedupe: ['effect', 'react', 'react-dom', '@stylexjs/stylex'] },
   build: {
     outDir: '../../dist/web',
     emptyOutDir: true,

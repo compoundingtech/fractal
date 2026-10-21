@@ -8,10 +8,10 @@ import urllib.request
 import time
 
 PATHS = (
-    'crates/**', 'vendor/**', 'nix/**', 'build.rs', 'scripts/ci-test-paths.rs',
+    'crates/**', 'vendor/**', 'nix/**', 'scripts/ci-test-paths.rs',
     'Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'flake.nix', 'flake.lock',
     'docs/st3/schema.md', 'scripts/ci-perf*', 'scripts/ci-nix-cache',
-    '.github/workflows/perf.yml*',
+    '.github/workflows/perf.yml*', '.github/workflows/perf-load.ts',
 )
 
 

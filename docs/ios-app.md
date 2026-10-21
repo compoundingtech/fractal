@@ -1,6 +1,6 @@
 # Build and run the iOS app
 
-The Smalltalk iOS app is a client for your fleet: it shows Home, Agents, Missions, and Fleet, and lets you talk to seats. It connects through a paired gateway; the phone does not run an agent or replicate the graph.
+The Fractal iOS app is a client for your fleet: it shows Now, Resources, Fleet, and Spaces, and lets you talk to seats. It connects through a paired gateway; the phone does not run an agent or replicate the graph.
 
 Use a Mac with **full Xcode**, its command-line tools selected, and an installed iOS Simulator runtime. This walkthrough uses Xcode 27; [Expo's simulator setup](https://docs.expo.dev/workflow/ios-simulator/) shows where to select the tools and download a runtime. Open Xcode once and finish its first-run setup. The native Xcode, CocoaPods, simulator, and device steps are **not yet verified on a fresh Mac**.
 
@@ -64,7 +64,7 @@ st devices --as person/ada pair --full-control 'Garden iPhone'
 
 In the app, enter the gateway URL, pairing ID, and code. Use HTTPS, or a gateway bound to the daemon's Tailscale IPv4 address with `http://100.x.y.z:port`; Tailscale encrypts that route. Private LAN and `.local` HTTP routes also work, but carry credentials and data without transport encryption. The app explains this when you choose one. The gateway needs to accept both HTTP requests and WebSockets.
 
-Open **Agents**, select `garden/worker`, and send a message. Home shows what needs you. If pairing succeeds but controls are unavailable, check that you paired with `--full-control`; re-pair a previously limited device. A dropped connection shows offline/reconnect state; reconnect before sending an action. See [the phone connection guide](../apps/ios/README.md#connect) for scopes and client details.
+Declare the worker in [missions in practice](missions-in-practice.md#declare-a-worker-seat), then open **Resources**, select `garden/worker`, and send a message. **Now** shows what needs you. If pairing succeeds but controls are unavailable, check that you paired with `--full-control`; re-pair a previously limited device. A dropped connection shows offline/reconnect state; reconnect before sending an action. See [the phone connection guide](../apps/ios/README.md#connect) for scopes and client details.
 
 ## Put it on your iPhone
 

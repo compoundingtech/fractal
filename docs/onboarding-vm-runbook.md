@@ -3,15 +3,12 @@
 `scripts/onboarding-vm-test` uses the same runner as `scripts/onboarding-e2e`.
 It supports baseline and setup, with Incus or an existing command transport.
 Real-machine backends refuse CI environments. Nothing schedules them in CI.
-An agent invokes them on a disposable machine with no real Smalltalk state for ada.
+An agent invokes them on a disposable machine with no real Fractal state for ada.
 
 ## Agent host preparation
 
-Run the Linux passes on hetz2 under the separate onboarding-passes mission.
-Operations owns Incus, QEMU/KVM, storage, network and agent account access through
-that host's declarative NixOS configuration. The runner consumes that provisioned
-host; it does not install host packages, initialize Incus, change groups, request
-sudo or wait for a person to prepare the machine.
+Use a disposable host where your account can already use Incus and KVM. The runner
+does not install host packages, initialize Incus, change groups or use sudo.
 
 Before starting, the agent verifies its own session can use the local Incus
 service and KVM, and that the configured default profile supplies a root disk
@@ -37,13 +34,9 @@ an immutable x86_64 Linux candidate archive with its expected SHA256. Copy the
 candidate bytes to hetz2 through an authorized transport or download its pinned
 URL; paths under another host's /var/tmp are not shared. Use the same archive
 for both releases. Native Ubuntu22 requires an archive built for its libc
-baseline; the host-linked Ubuntu24-only expert/cache proof archives do not
-establish that compatibility. Neither provider credentials nor a host Smalltalk
+baseline; the host-linked Ubuntu24-only assistant/cache proof archives do not
+establish that compatibility. Neither provider credentials nor a host Fractal
 store are needed for the setup/service/UI pass.
-
-This repository's retained evidence remains container evidence until the
-separate VM mission publishes actual Incus receipts. An agent starts these runs
-outside CI; “manual” means deliberately invoked, not a request for a person.
 
 ## Managed disposable guest
 
@@ -112,15 +105,13 @@ archive/version checks. `--require-wrap-up` additionally requires a genuinely
 completed mission; ordinary fixtures cannot supply that evidence. Details and
 scenario limits are in [onboarding-e2e.md](onboarding-e2e.md).
 
-Docker restart is a container restart. Incus boot, polkit, guest kernel/cgroups,
-SSH login behavior and host provisioning remain untested until the separate VM
-mission runs the passes and publishes their receipts. The macOS variant and
-Tart backend are prepared in [onboarding-mac-runbook.md](onboarding-mac-runbook.md).
-Native launchd, privacy, signing, app-bundle and reboot checks remain untested
-until the Mac pass.
+Docker restart is a container restart, so it does not prove guest boot or host provisioning.
+The macOS variant and Tart backend are described in
+[the Mac runbook](onboarding-mac-runbook.md). Retain actual VM or Mac receipts when claiming
+Incus boot, guest kernel/cgroups, SSH login, launchd, privacy, signing, or reboot behavior.
 
 Publish every report.md and result.json as st documents, retaining the returned
-immutable name@hash references. Run these as the VM mission seat with its own
+immutable name@hash references. Run these from the seat doing the pass with its own
 ST_AGENT; the names below are examples for one run and must be unique per attempt:
 
 ```sh

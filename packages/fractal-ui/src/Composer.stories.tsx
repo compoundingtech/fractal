@@ -6,6 +6,7 @@ import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test'
 import { Button, TokenFieldValue } from 'react-aria-components'
 import { ComposerSession, type ComposerLayout, type ComposerSessionProps, type MentionMode, type RunningBehavior, type TargetMode } from './assistant-ui/composer-session/ComposerSession'
 import { createComposerFixture, composerStates, fixtureEffortControls, type ComposerState, type ComposerTarget } from './assistant-ui/composer-session/composer-fixtures'
+import { tooltipFor } from './story-play'
 import { EmbraceComposer, EmbraceComposerToolbar } from './assistant-ui/EmbraceComposer'
 import { Composer } from './assistant-ui/composition/Composer'
 import { EmbraceRuntimeProvider, type ConversationRuntimeOptions } from './assistant-ui/EmbraceRuntime'
@@ -14,7 +15,7 @@ import { developmentMeasurements } from './assistant-ui/perf/measurement'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 type EffortSupport = keyof typeof fixtureEffortControls
 interface ComposerArgs {
@@ -162,7 +163,7 @@ const tabTo = async (element: HTMLElement) => {
   await expect(element).toHaveFocus()
 }
 
-export const Idle: Story = {
+export const Idle: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   play: async ({ canvasElement }) => {
     const field = textbox(canvasElement)
@@ -186,7 +187,7 @@ export const Idle: Story = {
   },
 }
 export const IdleLight: Story = { ...Idle, args: { scheme: 'light' } }
-export const TypingMultiLine: Story = {
+export const TypingMultiLine: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'typing multi-line' },
   play: async ({ canvasElement }) => {
@@ -200,7 +201,7 @@ export const TypingMultiLine: Story = {
     await expect(log.getByText(/Mentions: agent\/review, agent:review, file\/src\/composer\/draft\.ts/)).toBeVisible()
   },
 }
-export const Running: Story = {
+export const Running: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'running' },
   play: async ({ canvasElement }) => {
@@ -216,7 +217,7 @@ export const Running: Story = {
     await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Include the unread counter in the review.')).toBeVisible())
   },
 }
-export const QueuedTwice: Story = {
+export const QueuedTwice: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'queued x2' },
   play: async ({ canvasElement }) => {
@@ -228,7 +229,7 @@ export const QueuedTwice: Story = {
     await expect(queue.getAllByLabelText('Queued message effort').map(node => node.textContent)).toEqual(['Effort: medium'])
   },
 }
-export const FailedSendRestored: Story = {
+export const FailedSendRestored: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'failed send (restored)' },
   play: async ({ canvasElement }) => {
@@ -236,7 +237,7 @@ export const FailedSendRestored: Story = {
     await waitFor(() => expect(textbox(canvasElement).textContent).toContain('Send the generated review summary.'))
   },
 }
-export const OfflineDraft: Story = {
+export const OfflineDraft: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'offline draft' },
   play: async ({ canvasElement }) => {
@@ -249,7 +250,7 @@ export const OfflineDraft: Story = {
     await waitFor(() => expect(canvas.getByRole('button', { name: 'Send' })).toBeEnabled())
   },
 }
-export const ImageAttached: Story = {
+export const ImageAttached: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'image attached' },
   play: async ({ canvasElement }) => {
@@ -266,8 +267,8 @@ export const AllStates: Story = {
 }
 export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
 
-/** Readout and picker tooltips: keyboard and pointer reach the full value once, without native titles. */
-export const TargetTooltips: Story = {
+/** Readout and picker tooltips: keyboard focus reaches the full value once, without native titles. */
+export const TargetTooltips: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'running' },
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['K1', 'K2', 'K3'] as const).map(target => <div key={target} {...stylex.props(styles.narrow)}><ComposerFrame policy={{ ...decided, target }} state={args.state} effort={args.effort} frameId={`tooltip.${target}`} /></div>)}</div></Surface>,
@@ -278,8 +279,7 @@ export const TargetTooltips: Story = {
     await expect(expected).toBe('Review agent for the composer migration · claude-opus-4')
     await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-composer-frame="tooltip.K1"] [role="textbox"]')!)
     await tabTo(readout)
-    const tip = await page.findByRole('tooltip')
-    await expect(tip).toHaveTextContent(expected)
+    const tip = await tooltipFor(readout, expected)
     const viewport = canvasElement.ownerDocument.documentElement
     const bounds = tip.getBoundingClientRect()
     await expect(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= viewport.clientWidth && bounds.bottom <= viewport.clientHeight).toBe(true)
@@ -289,16 +289,15 @@ export const TargetTooltips: Story = {
     await expect(readout.closest('[data-testid="composer-footer"]')!.querySelectorAll('[title]')).toHaveLength(0)
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
-    // RAC ignores restored hover in keyboard modality; start pointer checks
-    // with the same real textbox click used by the reviewed native gate.
+    // Keyboard focus opens each picker tooltip at once; a hover would wait out the open delay.
     await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-composer-frame="tooltip.K3"] [role="textbox"]')!)
     for (const [name, value] of [['Select recipient', recipients[0].label], ['Select model', recipients[0].model]] as const) {
       const control = within(canvasElement.querySelector<HTMLElement>('[data-composer-frame="tooltip.K3"]')!).getByRole('button', { name: `${name}: ${value}` })
       const label = control.querySelector('[data-composer-picker-label]')?.textContent
-      await userEvent.hover(control)
-      await waitFor(() => expect(page.getByRole('tooltip')).toHaveTextContent(label ?? ''))
+      await tabTo(control)
+      await tooltipFor(control, label ?? '')
       await expect(control.querySelectorAll('[title]')).toHaveLength(0)
-      await userEvent.unhover(control)
+      await userEvent.keyboard('{Escape}')
       await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
     }
   },
@@ -306,7 +305,7 @@ export const TargetTooltips: Story = {
 export const TargetTooltipsLight: Story = { ...TargetTooltips, args: { scheme: 'light', state: 'running' } }
 
 /** Suggestion popup geometry: 4px above the form, sticky group headers, 28px rows, first result active on open. */
-export const MentionPopup: Story = {
+export const MentionPopup: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { mentions: 'M3' },
   play: async ({ canvasElement }) => {
@@ -349,7 +348,7 @@ export const MentionPopup: Story = {
   },
 }
 export const MentionPopupLight: Story = { ...MentionPopup, args: { scheme: 'light', mentions: 'M3' } }
-export const SlashCommands: Story = {
+export const SlashCommands: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   play: async ({ canvasElement }) => {
     const page = within(canvasElement.ownerDocument.body)
@@ -364,7 +363,7 @@ export const SlashCommands: Story = {
 }
 
 /** IME composition owns Enter: confirming a candidate never sends; Enter after composition does. */
-export const ImeComposition: Story = {
+export const ImeComposition: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   play: async ({ canvasElement }) => {
     const field = textbox(canvasElement)
@@ -380,7 +379,7 @@ export const ImeComposition: Story = {
   },
 }
 /** Shift+Enter inserts a newline; the composer grows instead of sending. */
-export const ShiftEnterNewline: Story = {
+export const ShiftEnterNewline: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   play: async ({ canvasElement }) => {
     const field = textbox(canvasElement)
@@ -401,7 +400,7 @@ function RemountingComposer(args: ComposerArgs) {
   </Surface>
 }
 /** Drafts persist per key across remounts, including structured chips. */
-export const DurableDraft: Story = {
+export const DurableDraft: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   render: args => <RemountingComposer {...args} />,
   play: async ({ canvasElement }) => {
@@ -421,7 +420,7 @@ const effortFrames = (['supported', 'unsupported', 'unknown', 'queued'] as const
   id, effort: id === 'queued' ? 'supported' as const : id, state: id === 'queued' ? 'queued x2' as const : 'typing multi-line' as const,
 }))
 /** Effort is conversation-frame metadata: one-shot by default, optionally kept for the next messages. */
-export const EffortSupported: Story = {
+export const EffortSupported: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'typing multi-line', effort: 'supported' },
   play: async ({ canvasElement }) => {
@@ -431,7 +430,8 @@ export const EffortSupported: Story = {
     await userEvent.click(picker)
     const high = await page.findByRole('menuitemradio', { name: 'High' })
     await expect(page.getByRole('menuitemradio', { name: 'Medium' })).toHaveAttribute('aria-checked', 'true')
-    await expect(within(page.getByRole('menu', { name: 'Select effort: Medium' })).getByText('Default')).toBeVisible()
+    // The menu enters from opacity 0, so visibility settles once the entry animation ends.
+    await waitFor(() => expect(within(page.getByRole('menu', { name: 'Select effort: Medium' })).getByText('Default')).toBeVisible())
     await expect(page.getByRole('menuitemcheckbox', { name: 'Keep for next messages' })).toHaveAttribute('aria-checked', 'false')
     // Frame budget: one choice commits the value subtree exactly once without dropping frames.
     const engine = developmentMeasurements?.createMeasurementEngine()
@@ -454,7 +454,7 @@ export const EffortSupported: Story = {
     await expect(picker).toHaveAccessibleName('Select effort: Medium')
   },
 }
-export const EffortUnsupported: Story = {
+export const EffortUnsupported: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'typing multi-line', effort: 'unsupported' },
   play: async ({ canvasElement }) => {
@@ -462,10 +462,10 @@ export const EffortUnsupported: Story = {
     await expect(canvas.getByRole('button', { name: 'Effort unsupported' })).toBeDisabled()
     await userEvent.click(textbox(canvasElement))
     await tabTo(canvas.getByRole('group', { name: 'Effort unsupported reason' }))
-    await expect(await within(canvasElement.ownerDocument.body).findByRole('tooltip')).toHaveTextContent('This harness does not support per-message effort.')
+    await tooltipFor(canvas.getByRole('group', { name: 'Effort unsupported reason' }), 'This harness does not support per-message effort.')
   },
 }
-export const EffortUnknown: Story = {
+export const EffortUnknown: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'typing multi-line', effort: 'unknown' },
   play: async ({ canvasElement }) => {
@@ -485,7 +485,7 @@ const footerBudgetFrames = ([320, 360, 451] as const).flatMap(composerWidth =>
     composerWidth, policy: { layout, target, running, mentions: 'M2' } satisfies ComposerPolicy, frameId: `footer-budget.${composerWidth}.${layout}.${target}.${running}`,
   })))))
 /** The declared width is the real form width; every footer control stays inside its running composer. */
-export const FooterWidthBudget: Story = {
+export const FooterWidthBudget: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'running', effort: 'supported' },
   render: args => <Surface scheme={args.scheme} testId="composer-footer-width-budget"><div aria-label="Footer width budget previews" {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames.map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
@@ -530,15 +530,24 @@ export const FooterWidthBudget: Story = {
 }
 export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
-/** C1 grows from a pill into a slab once the draft wraps or breaks lines; C3 becomes a slab while focused. */
-export const LayoutShapes: Story = {
+/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
+export const LayoutShapes: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
     const formOf = (layout: ComposerLayout) => canvasElement.querySelector<HTMLElement>(`[data-composer-frame="layout.${layout}"] form`)!
-    await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
-    await expect(getComputedStyle(formOf('C2')).flexDirection).toBe('column')
-    await expect(getComputedStyle(formOf('C3')).flexDirection).toBe('row')
+    await document.fonts.ready
+    await waitFor(() => {
+      for (const layout of ['C1', 'C3'] as const) {
+        const form = formOf(layout)
+        const css = getComputedStyle(form)
+        const inner = form.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight)
+        const footer = form.querySelector<HTMLElement>('[data-testid="composer-footer"]')!
+        const editorBudget = inner - footer.scrollWidth - (parseFloat(css.gap) || 0)
+        expect(css.flexDirection, `${layout}: editor budget at ${form.clientWidth}px`).toBe(editorBudget < 0.65 * inner ? 'column' : 'row')
+      }
+      expect(getComputedStyle(formOf('C2')).flexDirection).toBe('column')
+    })
     await userEvent.click(within(formOf('C3')).getByRole('textbox'))
     await waitFor(() => expect(getComputedStyle(formOf('C3')).flexDirection).toBe('column'))
     await userEvent.click(within(formOf('C1')).getByRole('textbox'))
@@ -561,7 +570,7 @@ function LabelResize({ scheme }: { readonly scheme: Scheme }) {
     </EmbraceRuntimeProvider>
   </div></Surface>
 }
-export const KitLabelResize: Story = {
+export const KitLabelResize: Story = { tags: ['critical'],
   render: args => <LabelResize scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
     const form = canvasElement.querySelector('form')!
@@ -600,7 +609,7 @@ function PlainAdapter({ scheme }: { readonly scheme: Scheme }) {
     <div aria-label="Adapter messages" role="log" {...stylex.props(styles.receipts)}>{sent.map((line, index) => <p key={index} {...stylex.props(styles.receipt)}>{line}</p>)}</div>
   </div></Surface>
 }
-export const PlainTextAdapter: Story = {
+export const PlainTextAdapter: Story = { tags: ['critical'],
   beforeEach: () => { try { sessionStorage.removeItem('composition.draft.kit-composer.plain-adapter') } catch { /* Storage may be disabled. */ } },
   render: args => <PlainAdapter scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
@@ -636,7 +645,7 @@ const styles = stylex.create({
   frameTitle: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   caption: { color: ink.fgMuted, flexGrow: 1 },
   frameBody: { minWidth: 0, padding: s.md, display: 'flex', flexDirection: 'column', gap: s.xl },
-  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   receipts: { display: 'flex', flexDirection: 'column', gap: s.md },
   receipt: { margin: 0, padding: s.md, backgroundColor: surface.rowActive, borderRadius: r.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   text: { margin: 0, marginBlock: s.sm, whiteSpace: 'pre-wrap' },

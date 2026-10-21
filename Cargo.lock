@@ -62,7 +62,7 @@ version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bda177466b9524d59f1b12f0dd30b68696788e9992a7e959021c4a0ed96fcf59"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "home",
  "libc",
@@ -167,6 +167,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -238,7 +244,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -291,6 +297,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64-simd"
@@ -1016,6 +1028,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
+name = "data-url"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
+
+[[package]]
 name = "deltae"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1106,6 +1124,12 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+
+[[package]]
+name = "dyn-clone"
+version = "1.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "either"
@@ -1268,6 +1292,12 @@ dependencies = [
 
 [[package]]
 name = "float-cmp"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+
+[[package]]
+name = "float-cmp"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
@@ -1299,12 +1329,1193 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "font-types"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "fontconfig-parser"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbc773e24e02d4ddd8395fd30dc147524273a83e54e0f312d986ea30de5f5646"
+dependencies = [
+ "roxmltree 0.20.0",
+]
+
+[[package]]
+name = "fontdb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
+dependencies = [
+ "fontconfig-parser",
+ "log",
+ "memmap2",
+ "slotmap",
+ "tinyvec",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fractal"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "alacritty_terminal",
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "flate2",
+ "fractal",
+ "fractal-build-stamp",
+ "fractal-chatgpt",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "fractal-daemon",
+ "fractal-drivers",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-terminal-direct",
+ "fractal-tui",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "libghostty-vt-sys",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-pty",
+ "predicates",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "resvg",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-api-client-v0"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-api-client-v0",
+ "fractal-api-core",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-api-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-api-core",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-reconcile",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "notify",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-api-mailbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-api-core",
+ "fractal-api-mailbox",
+ "fractal-drivers",
+ "fractal-runtime",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+]
+
+[[package]]
+name = "fractal-attention"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-attention",
+ "fractal-client",
+ "fractal-kernel",
+ "fractal-schema",
+ "fractal-seats",
+ "fractal-store",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-build-stamp"
+version = "0.1.0"
+
+[[package]]
+name = "fractal-chatgpt"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fractal-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "ciborium",
+ "crossterm",
+ "fractal-schema",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "reqwest",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook 0.3.18",
+ "smallclaims",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "fractal-client-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "fractal-client-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "crossterm",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "fractal-feed",
+ "ratatui",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fractal-conversation-ui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fractal-client",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "fractal-daemon"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "alacritty_terminal",
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "flate2",
+ "fractal-api-client-v0",
+ "fractal-api-core",
+ "fractal-api-mailbox",
+ "fractal-attention",
+ "fractal-client",
+ "fractal-daemon",
+ "fractal-delivery",
+ "fractal-drivers",
+ "fractal-evidence",
+ "fractal-github",
+ "fractal-kernel",
+ "fractal-missions",
+ "fractal-peer",
+ "fractal-reconcile",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-seats",
+ "fractal-store",
+ "fractal-telemetry",
+ "fractal-terminal-direct",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "libghostty-vt-sys",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-pty",
+ "predicates",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "resvg",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-delivery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "ciborium",
+ "fractal-delivery",
+ "fractal-kernel",
+ "fractal-schema",
+ "fractal-secrets",
+ "fractal-store",
+ "futures-util",
+ "hex",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-delivery-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fractal-client",
+ "fractal-delivery-base",
+ "fractal-drivers",
+ "fractal-secrets",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
+name = "fractal-drivers"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "anyhow",
+ "fractal-resource-protocol",
+ "fractal-resource-providers",
+ "fractal-resource-wasip2",
+ "fractal-schema",
+ "fractal-wire",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "tungstenite 0.30.0",
+ "wat",
+]
+
+[[package]]
+name = "fractal-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "fractal-client",
+ "fractal-daemon",
+ "fractal-feed",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "ring",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
+name = "fractal-evidence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-attention",
+ "fractal-evidence",
+ "fractal-kernel",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-fabric-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "fractal-feed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "fractal-evidence",
+ "fractal-github",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fractal-github-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-drivers",
+ "fractal-github-base",
+ "fractal-runtime",
+ "fractal-secrets",
+ "futures-util",
+ "hex",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-github-issue-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-github-pr-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-terminal-direct",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-legacy-runner"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "fractal-build-stamp",
+ "fractal-drivers",
+ "fractal-resource-protocol",
+ "fractal-resource-providers",
+ "fractal-resource-wasip2",
+ "fractal-wire",
+ "kdl",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "fractal-migrate"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "anyhow",
+ "clap",
+ "fractal-daemon",
+ "fractal-drivers",
+ "hex",
+ "kdl",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-missions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "fractal-delivery",
+ "fractal-kernel",
+ "fractal-missions",
+ "fractal-schema",
+ "fractal-store",
+ "hex",
+ "kdl",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-missions-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fractal-missions-base",
+ "fractal-schema",
+ "fractal-secrets",
+ "hex",
+ "kdl",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+]
+
+[[package]]
+name = "fractal-peer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "fractal-client",
+ "fractal-github",
+ "fractal-peer",
+ "futures-util",
+ "hex",
+ "jsonschema",
+ "notify",
+ "parking_lot",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-pty-stats-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-reconcile"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-peer",
+ "fractal-reconcile",
+ "fractal-runtime",
+ "fractal-schema",
+ "futures-util",
+ "hex",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-resource-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "fractal-resource-providers"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fractal-resource-protocol",
+ "fractal-resource-wasip2",
+ "hickory-resolver",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wasmtime",
+]
+
+[[package]]
+name = "fractal-resource-wasip2"
+version = "0.1.0"
+dependencies = [
+ "fractal-resource-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
+name = "fractal-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+ "pty-client",
+ "pty-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "fractal-schema"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fractal-storage-version",
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "fractal-seats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-kernel",
+ "fractal-missions",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-seats",
+ "fractal-secrets",
+ "fractal-store",
+ "hex",
+ "kdl",
+ "libc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-seats-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-seats-base",
+ "fractal-secrets",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-secrets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-kernel",
+ "fractal-secrets",
+ "fractal-telemetry",
+ "fractal-terminal-direct",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-storage-version"
+version = "0.1.0"
+
+[[package]]
+name = "fractal-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "flate2",
+ "fractal-client",
+ "fractal-delivery-base",
+ "fractal-drivers",
+ "fractal-github-base",
+ "fractal-kernel",
+ "fractal-missions-base",
+ "fractal-runtime",
+ "fractal-schema",
+ "fractal-seats-base",
+ "fractal-secrets",
+ "fractal-store",
+ "fractal-telemetry",
+ "fractal-terminal-direct",
+ "fractal-ui-model",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "kdl",
+ "libc",
+ "notify",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "fractal-telemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "fractal-client",
+ "fractal-drivers",
+ "fractal-kernel",
+ "futures-util",
+ "hex",
+ "libc",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-terminal-direct"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pty-core",
+ "serde",
+ "serde_json",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "fractal-tui"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "crossterm",
+ "flate2",
+ "fractal-client",
+ "fractal-conversation-ui",
+ "fractal-daemon",
+ "fractal-feed",
+ "fractal-schema",
+ "fractal-terminal-direct",
+ "fractal-ui-model",
+ "image",
+ "libc",
+ "portable-pty",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "ratatui",
+ "ratatui-image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook 0.3.18",
+ "smallclaims",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "unicode-width 0.2.0",
+ "uuid",
+]
+
+[[package]]
+name = "fractal-ui-model"
+version = "0.1.0"
+dependencies = [
+ "fractal-client",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fractal-vista-component"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "fractal-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1340,6 +2551,7 @@ checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -1499,6 +2711,18 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "zerocopy",
+]
+
+[[package]]
+name = "harfrust"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
+dependencies = [
+ "bitflags 2.13.1",
+ "bytemuck",
+ "read-fonts",
+ "smallvec",
 ]
 
 [[package]]
@@ -1746,7 +2970,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -1942,6 +3166,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2035,7 +3265,7 @@ version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2126,7 +3356,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d46662859bc5f60a145b75f4632fbadc84e829e45df6c5de74cfc8e05acb96b5"
 dependencies = [
  "ahash",
- "base64",
+ "base64 0.22.1",
  "bytecount",
  "email_address",
  "fancy-regex 0.16.2",
@@ -2186,6 +3416,18 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
+]
+
+[[package]]
+name = "kurbo"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b60dfc32f652b926df6192e55525b16d186c69d47876c3ead4da5cc9f8450e2"
+dependencies = [
+ "arrayvec",
+ "euclid",
+ "polycool",
+ "smallvec",
 ]
 
 [[package]]
@@ -2365,6 +3607,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad38eb12aea514a0466ea40a80fd8cc83637065948eb4a426e4aa46261175227"
 dependencies = [
  "rustix 1.1.4",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -2764,7 +4015,7 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e046fd7660710fe5a05e8748e70d9058dc15c94ba914e7c4faa7c728f0e8ddc"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "hex",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -2871,6 +4122,12 @@ dependencies = [
  "smallvec",
  "windows-link 0.2.1",
 ]
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "percent-encoding"
@@ -2991,6 +4248,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pico-args"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3058,6 +4321,15 @@ dependencies = [
  "pin-project-lite",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "polycool"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50596ddc09eb5ad5f75cacd40209568e66df71baf86e1499a0e99c4cff12a5a6"
+dependencies = [
+ "arrayvec",
 ]
 
 [[package]]
@@ -3131,7 +4403,7 @@ checksum = "ada8f2932f28a27ee7b70dd6c1c39ea0675c55a36879ab92f3a715eaa1e63cfe"
 dependencies = [
  "anstyle",
  "difflib",
- "float-cmp",
+ "float-cmp 0.10.0",
  "normalize-line-endings",
  "predicates-core",
  "regex",
@@ -3240,7 +4512,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=1ae8c187301034d2b343b6ec638f2b74c009f92e#1ae8c187301034d2b343b6ec638f2b74c009f92e"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libc",
  "pty-core",
@@ -3251,7 +4523,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=1ae8c187301034d2b343b6ec638f2b74c009f92e#1ae8c187301034d2b343b6ec638f2b74c009f92e"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "indexmap",
  "libc",
@@ -3259,13 +4531,14 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=1ae8c187301034d2b343b6ec638f2b74c009f92e#1ae8c187301034d2b343b6ec638f2b74c009f92e"
+source = "git+https://github.com/compoundingtech/pty?rev=e237afa8587fb953cc589c35e0c9a252f7192444#e237afa8587fb953cc589c35e0c9a252f7192444"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -3637,6 +4910,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "read-fonts"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
+dependencies = [
+ "bytemuck",
+ "font-types",
+ "once_cell",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3729,7 +5013,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -3772,6 +5056,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e061d1b48cb8d38042de4ae0a7a6401009d6143dc80d2e2d6f31f0bdd6470c7"
 
 [[package]]
+name = "resvg"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67e3803f97b999e80cbf7c6ecdd07a8102204d92e1633cf48783720c521196bd"
+dependencies = [
+ "bytemuck",
+ "gif",
+ "image-webp",
+ "log",
+ "pico-args",
+ "rgb",
+ "svgtypes",
+ "tiny-skia",
+ "usvg",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3783,6 +5094,66 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmcp"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab5023804cbe0304cbe06197ac16e645a0a0d0ffa2953bf735c15c2fa0213350"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "indexmap",
+ "pastey",
+ "pin-project-lite",
+ "rand 0.10.2",
+ "rmcp-macros",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sse-stream",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-service",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rmcp-macros"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1da498700030856ba63114bceefa30ba21f5e278cb975e5b9de3529fe842b40"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 3.0.4",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -3935,6 +5306,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
+dependencies = [
+ "chrono",
+ "dyn-clone",
+ "ref-cast",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3980,6 +5377,17 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4171,10 +5579,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "simplecss"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9c6883ca9c3c7c90e888de77b7a5c849c779d25d74a1269b0218b14e8b136c"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
+name = "skrifa"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
+dependencies = [
+ "bytemuck",
+ "read-fonts",
+]
 
 [[package]]
 name = "slab"
@@ -4183,20 +5610,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slotmap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
+dependencies = [
+ "version_check",
+]
+
+[[package]]
 name = "smallclaims"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "ciborium",
  "data-encoding",
  "flate2",
+ "fractal-storage-version",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
  "hmac",
+ "hyper",
  "libc",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -4205,6 +5643,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -4235,387 +5674,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "st-decision-fold"
-version = "0.1.0"
+name = "sse-stream"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
 dependencies = [
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "st-drivers"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "kdl",
- "libc",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "st-resource-protocol",
- "st-wire",
- "st2-resource-providers",
- "st2-resource-wasip2",
- "st3-schema",
- "tempfile",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tungstenite 0.30.0",
- "wat",
-]
-
-[[package]]
-name = "st-resource-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "st-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "portable-pty",
- "pty-client",
- "pty-core",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "st-wire"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "st2"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "clap",
- "clap_complete",
- "kdl",
- "libc",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "st-drivers",
- "st-resource-protocol",
- "st-wire",
- "st2-resource-providers",
- "st2-resource-wasip2",
- "tempfile",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tungstenite 0.30.0",
- "wat",
-]
-
-[[package]]
-name = "st2-github-issue-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st2-github-pr-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st2-pty-stats-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st2-resource-providers"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hickory-resolver",
- "libc",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "st-resource-protocol",
- "st2-resource-wasip2",
- "tempfile",
- "tokio",
- "wasmtime",
-]
-
-[[package]]
-name = "st2-resource-wasip2"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "st-resource-protocol",
- "tempfile",
- "wasmtime",
- "wat",
-]
-
-[[package]]
-name = "st2-vista-component"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "wit-bindgen",
-]
-
-[[package]]
-name = "st3"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "assert_cmd",
- "axum",
- "base64",
- "chrono",
- "chrono-tz",
- "ciborium",
- "clap",
- "clap_complete",
- "data-encoding",
- "flate2",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "hmac",
- "http-body-util",
- "hyper",
- "hyper-util",
- "jsonschema",
- "kdl",
- "libc",
- "libghostty-vt",
- "libghostty-vt-sys",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "portable-pty",
- "predicates",
- "proptest",
- "pty-client",
- "pty-core",
- "pty-terminal",
- "reqwest",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "smallclaims",
- "st-drivers",
- "st-runtime",
- "st3",
- "st3-client",
- "st3-conversation-ui",
- "st3-schema",
- "st3-terminal-direct",
- "st3-ui-model",
- "tar",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tower",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "st3-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
  "bytes",
- "ciborium",
- "crossterm",
  "futures-util",
- "hex",
+ "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "opentelemetry",
- "opentelemetry_sdk",
- "reqwest",
- "ring",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook 0.3.18",
- "smallclaims",
- "st3",
- "st3-schema",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite 0.27.0",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "st3-client-codegen"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "st3-client-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "crossterm",
- "ratatui",
- "serde_json",
- "st3-client",
- "st3-conversation-ui",
- "st3-feed",
- "tokio",
-]
-
-[[package]]
-name = "st3-conversation-ui"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ratatui",
- "serde",
- "serde_json",
- "st3-client",
- "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "st3-feed"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "st3",
- "st3-client",
- "st3-conversation-ui",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "st3-migrate"
-version = "0.1.0"
-dependencies = [
- "agent-spec",
- "anyhow",
- "clap",
- "hex",
- "kdl",
- "serde",
- "serde_json",
- "sha2",
- "st2",
- "st3",
- "tempfile",
- "walkdir",
-]
-
-[[package]]
-name = "st3-schema"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
-name = "st3-terminal-direct"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "pty-core",
- "serde",
- "serde_json",
- "smallclaims",
- "tokio",
-]
-
-[[package]]
-name = "st3-ui-model"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "st3-client",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -4629,6 +5697,15 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "strict-num"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+dependencies = [
+ "float-cmp 0.9.0",
+]
 
 [[package]]
 name = "strsim"
@@ -4658,49 +5735,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "stui"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "axum",
- "base64",
- "chrono",
- "crossterm",
- "flate2",
- "image",
- "libc",
- "portable-pty",
- "pty-client",
- "pty-core",
- "pty-terminal",
- "ratatui",
- "ratatui-image",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook 0.3.18",
- "smallclaims",
- "st3",
- "st3-client",
- "st3-conversation-ui",
- "st3-feed",
- "st3-schema",
- "st3-terminal-direct",
- "st3-ui-model",
- "tempfile",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "unicode-width 0.2.0",
- "uuid",
-]
-
-[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svgtypes"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
+dependencies = [
+ "kurbo",
+ "siphasher",
+]
 
 [[package]]
 name = "syn"
@@ -4874,7 +5922,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4676b37242ccbd1aabf56edb093a4827dc49086c0ffd764a5705899e0f35f8f7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "fancy-regex 0.11.0",
  "filedescriptor",
@@ -4978,6 +6026,32 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "tiny-skia"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "png",
+ "tiny-skia-path",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
 
 [[package]]
 name = "tinystr"
@@ -5086,6 +6160,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -5160,7 +6235,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "http",
  "http-body",
@@ -5377,10 +6452,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-script"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
 
 [[package]]
 name = "unicode-segmentation"
@@ -5398,6 +6485,12 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.0",
 ]
+
+[[package]]
+name = "unicode-vo"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
 
 [[package]]
 name = "unicode-width"
@@ -5440,6 +6533,34 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "usvg"
+version = "0.48.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
+dependencies = [
+ "base64 0.23.1",
+ "data-url",
+ "flate2",
+ "fontdb",
+ "harfrust",
+ "imagesize",
+ "kurbo",
+ "log",
+ "pico-args",
+ "roxmltree 0.21.1",
+ "simplecss",
+ "siphasher",
+ "skrifa",
+ "strict-num",
+ "svgtypes",
+ "tiny-skia-path",
+ "unicode-bidi",
+ "unicode-script",
+ "unicode-vo",
+ "xmlwriter",
+]
 
 [[package]]
 name = "utf-8"
@@ -6619,6 +7740,12 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
+
+[[package]]
+name = "xmlwriter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yoke"

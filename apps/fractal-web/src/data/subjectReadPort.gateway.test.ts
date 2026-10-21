@@ -1,4 +1,4 @@
-import type { ClientOptions } from '@smalltalk/st3-client'
+import type { ClientOptions } from '@fractal/client'
 import { DateTime, Effect } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it } from 'vitest'

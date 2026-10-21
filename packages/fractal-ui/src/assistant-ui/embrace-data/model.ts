@@ -24,6 +24,19 @@ export type ToolResult = {
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
 export type NoticeKind = 'error' | 'redaction' | 'truncation' | 'event' | 'unknown'
 
+/** Typed harness facts; app-owned recognition never runs in the kit. */
+export type HarnessNotice =
+  | { readonly _tag: 'SubagentResult'; readonly taskId: string; readonly agent: string; readonly status: string; readonly duration: string; readonly payload: string; readonly raw: string; readonly lines?: number; readonly size?: string; readonly fullOutput?: string; readonly abortReason?: string; readonly error?: string; readonly mergeSummary?: string; readonly followUp?: string }
+  | { readonly _tag: 'Irc'; readonly from: string; readonly to?: string; readonly replyTo?: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'BackgroundJob'; readonly jobId: string; readonly label?: string; readonly state: 'completed'; readonly duration?: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'Compaction'; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'Interjection'; readonly from: string; readonly to?: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'SkillInvocation'; readonly skill: string; readonly by: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'Delivery'; readonly from: string; readonly to: string; readonly subject?: string; readonly payload: string; readonly raw: string }
+
+/** Visual weight of a harness event; the transcript default is one line in HarnessNotice. */
+export type HarnessWeight = 'row' | 'card'
+
 export type ConversationItem =
   | {
       readonly _tag: 'Text'
@@ -104,11 +117,12 @@ export type ConversationItem =
   | {
       readonly _tag: 'Event'
       readonly id: string
-      readonly kind: 'resource-observed' | 'harness-message' | 'subagent-result'
+      readonly kind: 'resource-observed' | 'harness-message' | 'subagent-result' | 'irc' | 'background-job' | 'compaction' | 'interjection' | 'skill-invocation' | 'delivery'
       readonly title: string
       readonly text: string
       readonly sender: Sender
       readonly data: unknown
+      readonly notice?: HarnessNotice
       readonly at?: string
     }
   | {
@@ -116,6 +130,8 @@ export type ConversationItem =
       readonly id: string
       readonly eventType: string
       readonly data: unknown
+      /** A message containing both visible content and internal records; body inspection is opt-in. */
+      readonly mixedContent?: boolean
       readonly sender?: Sender
       readonly at?: string
     }
@@ -135,3 +151,5 @@ export type SendState =
   | { readonly _tag: 'Sent' }
   | { readonly _tag: 'Pending' }
   | { readonly _tag: 'Failed'; readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }; readonly detail?: string }
+  /** st may have taken the send and has not confirmed it yet; sending it again is safe. */
+  | { readonly _tag: 'Unconfirmed'; readonly detail?: string }
