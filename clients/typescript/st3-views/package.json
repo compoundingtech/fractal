@@ -15,7 +15,8 @@
     "./clientName": "./clientName.ts",
     "./time": "./time.ts",
     "./syncNotice": "./syncNotice.ts",
-    "./slo": "./slo.ts"
+    "./slo": "./slo.ts",
+    "./documentView": "./documentView.ts"
   },
   "scripts": {
     "test": "node --experimental-transform-types --test tests/*.test.mjs",

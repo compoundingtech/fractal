@@ -81,7 +81,6 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/request-latency",
             get(request_latency),
         )
-        .route("/v1/client/documents/content", get(document_get))
         .route("/v1/client/usage", get(usage_period))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
@@ -2552,38 +2551,6 @@ pub async fn agent_declaration(
     });
     if let Some(person) = accountable { value["accountable"] = json!(person); }
     Ok(Json(value))
-}
-
-#[derive(Deserialize)]
-pub struct ClientDocumentQuery {
-    name: String,
-}
-
-pub async fn document_get(
-    State(state): State<AppState>,
-    Extension(session): Extension<ClientSession>,
-    Query(query): Query<ClientDocumentQuery>,
-) -> Result<Json<Value>, ApiError> {
-    require_scope(&session, "read.projections")?;
-    let (name, hash) = query.name.rsplit_once('@').ok_or_else(|| {
-        ApiError::bad(St3Error::new(
-            "invalid-document-reference",
-            "a document name needs `@HASH`",
-        ))
-    })?;
-    if name.is_empty() || hash.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
-            "invalid-document-reference",
-            "a document name needs `@HASH`",
-        )));
-    }
-    let store = state.store.clone();
-    let name = name.to_owned();
-    let hash = hash.to_owned();
-    let bytes = blocking_store(move || store.get_document(&name, &hash))
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("document `{}` is not stored", query.name)))?;
-    Ok(Json(json!({ "reference": query.name, "bytes": bytes })))
 }
 
 #[derive(Deserialize)]
