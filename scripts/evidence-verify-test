@@ -1535,6 +1535,55 @@ class InputKeyed(unittest.TestCase):
         self.assertEqual(document['source_inputs'], self.key(self.f.git('rev-parse', 'HEAD^{tree}')))
 
 
+class PartialClone(InputKeyed):
+    """The gate's checkout is a partial clone (it deepens with blob:none) and a record found by input key names another tree's
+    commit, which the checkout lacks. Nothing the verifier reads may be fetched lazily: each such fetch has no negotiation, so it
+    brings the commit's whole history (about 3.4 s each on a runner; 34 of them took a verify past the gate's 30 s)."""
+
+    def clone(self):
+        server = self.f.root / 'server.git'
+        run('git', 'clone', '-q', '--bare', '--mirror', str(self.f.repo), str(server))
+        run('git', '-C', str(server), 'config', 'uploadpack.allowFilter', 'true')
+        run('git', '-C', str(server), 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+        client = self.f.root / 'client'
+        run('git', 'clone', '-q', '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
+        return client
+
+    def lazy_fetches(self, action):
+        trace = self.f.root / f'trace-{self.f.counter}'
+        self.f.counter += 1
+        saved = os.environ.get('GIT_TRACE')
+        os.environ['GIT_TRACE'] = str(trace)
+        try:
+            value = action()
+        finally:
+            os.environ.pop('GIT_TRACE')
+            if saved is not None:
+                os.environ['GIT_TRACE'] = saved
+        text = trace.read_text() if trace.exists() else ''
+        return value, text.count('fetch.negotiationAlgorithm=noop')
+
+    def test_a_record_of_another_tree_and_a_projection_need_no_lazy_fetch(self):
+        self.f.git('branch', '-q', '-M', 'main')
+        old_commit, old_tree = self.commit, self.tree
+        self.f.git('checkout', '-q', '-b', 'other')
+        other, other_tree = self.commit_files({'docs/readme.txt': 'only docs'})  # same key, another tree, on a branch the clone lacks
+        key = self.key(other_tree)
+        record = self.observed(other, other_tree, key)
+        self.f.git('checkout', '-q', 'main')
+        head, head_tree = self.commit_files({'docs/readme.txt': 'main docs', 'src/a.txt': 'a'})
+        self.assertEqual(self.key(head_tree), key)
+        client = self.clone()
+        ref = f'refs/notes/evidence-input/unit/{key}/{record}'
+        run('git', '-C', str(client), 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{ref}:{ref}')
+        self.assertNotEqual(subprocess.run(['git', '-C', str(client), 'cat-file', '-e', other], env=dict(os.environ, GIT_NO_LAZY_FETCH='1'),
+                                           capture_output=True).returncode, 0, 'the record\'s subject commit is not in the clone')
+        result, fetches = self.lazy_fetches(lambda: evidence_verify.verify(str(client), head_tree, 'unit', str(self.f.keys), None, rules=self.rules))
+        self.assertEqual((result['record'], result['match'], fetches), (record, 'inputs', 0), result)
+        projected, fetches = self.lazy_fetches(lambda: evidence_verify.project(str(client), old_tree, tuple(self.PATHS)))
+        self.assertEqual((projected, fetches), (self.key(old_tree), 0), 'an old tree whose blobs the clone lacks projects to the same key')
+
+
 class Sha256Repository(unittest.TestCase):
     def test_sha256_object_ids_work_in_both_layouts_including_the_stale_tree_scan(self):
         for layout, missing in (('legacy', 'stale_tree'), ('tree', 'no_record')):
