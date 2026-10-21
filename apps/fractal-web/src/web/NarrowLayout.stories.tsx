@@ -188,6 +188,12 @@ const press = async (target: HTMLElement, via: Press) => {
 const openReportedDetails = async (row: HTMLElement, via: Press) => {
   const trigger = within(row).getByRole('button', { name: /^Actions for / })
   const title = trigger.getAttribute('aria-label')!.replace(/^Actions for /, '')
+  // RAC disables pointer events while its virtualizer settles the selected row into view.
+  await waitFor(() => {
+    expect(getComputedStyle(trigger).pointerEvents).not.toBe('none')
+    const box = trigger.getBoundingClientRect()
+    expect(trigger.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2))).toBe(true)
+  })
   await press(trigger, via)
   const menu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${title}` }))
   await press(within(menu).getByRole('menuitem', { name: 'Reported agent details' }), via)

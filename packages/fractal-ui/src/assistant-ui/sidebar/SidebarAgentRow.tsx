@@ -167,8 +167,12 @@ export function AgentRowActions({ row, now, actions, onOpen, onMarkRead, anchorR
   return <>
     <DialogTrigger isOpen={detailsOpen} onOpenChange={open => {
       setDetailsOpen(open)
-      // The originating menu item unmounts; restore its persistent trigger after RAC releases dialog containment.
-      if (!open) requestAnimationFrame(() => menuTriggerRef.current?.focus())
+      // The menu item unmounts, so RAC falls back to its tree row. Restore the persistent trigger without stealing a newer focus.
+      if (!open) requestAnimationFrame(() => {
+        const trigger = menuTriggerRef.current
+        const active = trigger?.ownerDocument.activeElement
+        if (active === trigger?.ownerDocument.body || active === anchorRef.current || active === anchorRef.current?.closest('[role="row"]')) trigger?.focus()
+      })
     }}>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover
       triggerRef={compactDetails ? menuTriggerRef : anchorRef}
       placement={compactDetails ? 'bottom end' : 'right'}
