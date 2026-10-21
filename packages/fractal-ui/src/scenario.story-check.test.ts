@@ -342,18 +342,19 @@ const configuredStoryFiles = (globs: string[], directory = storybookDirectory) =
     if (stat.isSymbolicLink()) throw new Error(`Symlink in configured Storybook inventory: ${path}`)
     return stat
   }
-  const walk = (path: string, includeDependencies: boolean) => {
+  const walk = (path: string) => {
     if (!rejectSymlink(path).isDirectory()) return
     for (const name of readdirSync(path)) {
-      if (includeDependencies || name !== 'node_modules') walk(nodePath.join(path, name), includeDependencies)
+      if (name !== 'node_modules') walk(nodePath.join(path, name))
     }
   }
   const files = new Set<string>()
   for (const glob of globs) {
-    // Storybook commonGlobOptions disables its dependency ignore for the entire
-    // configured pattern when that pattern explicitly mentions node_modules.
-    const includeDependencies = glob.includes('node_modules')
-    const roots = new Set(expandBraces(glob).map(expanded => {
+    const expandedGlobs = expandBraces(glob)
+    if (glob.includes('node_modules') || expandedGlobs.some(expanded => expanded.includes('node_modules'))) {
+      throw new Error(`Unsupported node_modules segment in configured Storybook pattern: ${glob}; extend the scenario inventory check before loading dependency stories`)
+    }
+    const roots = new Set(expandedGlobs.map(expanded => {
       if (/[()!\\]/.test(expanded)) return unsupported(glob)
       const segments = expanded.split('/')
       const magic = segments.findIndex(segment => /[*?[]/.test(segment))
@@ -368,9 +369,9 @@ const configuredStoryFiles = (globs: string[], directory = storybookDirectory) =
         if (parent === nodePath.dirname(parent)) break
       }
       for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
-      walk(root, includeDependencies)
+      walk(root)
     }
-    for (const file of globSync(glob, { cwd: directory, exclude: includeDependencies ? [] : ['**/node_modules/**'] })) {
+    for (const file of globSync(glob, { cwd: directory, exclude: ['**/node_modules/**'] })) {
       files.add(nodePath.resolve(directory, file))
     }
   }
@@ -416,9 +417,7 @@ test('configured inventory rejects directory and file symlinks without following
     symlinkSync(directory, nodePath.join(dependencies, 'ignored'), 'dir')
     expect(configuredStoryFiles(globs, directory)).toEqual([story])
     expect(() => configuredStoryFiles(['src/node_modules/**/*.stories.tsx'], directory))
-      .toThrow(`Symlink in configured Storybook inventory: ${nodePath.join(dependencies, 'ignored')}`)
-    expect(() => configuredStoryFiles(['src/{node_modules,other}/**/*.stories.tsx'], directory))
-      .toThrow(`Symlink in configured Storybook inventory: ${nodePath.join(dependencies, 'ignored')}`)
+      .toThrow('Unsupported node_modules segment in configured Storybook pattern: src/node_modules/**/*.stories.tsx; extend the scenario inventory check')
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
