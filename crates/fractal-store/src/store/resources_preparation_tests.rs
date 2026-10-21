@@ -258,10 +258,6 @@ fn preparation_tracks_canonical_batch_positions_and_repaired_replica_records() {
             /* sqlite-large-value: allow-for-now lv-h74a6ba4022f5 owner=fractal_store::store::resources_preparation_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE record_ref='record/example-preparation'",
             [],
         ).unwrap();
-        transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h7cbf8f6d01f5 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
-            [&first],
-        ).unwrap();
     });
     // Both repair markers describe the same retained original, as real replay does.
     change(&store, "restore repaired retained wire copy", |transaction| {
@@ -293,7 +289,7 @@ fn preparation_matches_after_each_real_reverse_envelope_delivery() {
             actor: None,
             fields: BTreeMap::from([
                 ("kind".into(), json!("vcs.pull-request")),
-                ("facts".into(), json!({"state":state,"nullable":null})),
+                ("facts".into(), json!({"state":state})),
             ]),
             evidence: Vec::new(),
             expected_subject: None,
