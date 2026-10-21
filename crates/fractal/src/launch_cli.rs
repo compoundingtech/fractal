@@ -382,6 +382,9 @@ pub(super) async fn run_mission_view(
     json_output: bool,
 ) -> Result<()> {
     match command {
+        MissionViewCommand::RenameId(args) => {
+            run_identity_rename(endpoint, args, false, json_output).await
+        }
         MissionViewCommand::Tree => {
             let view: Value = client.get("/v1/client/missions-tree").await?;
             if json_output {

@@ -1245,7 +1245,7 @@ breaks a scenario fails in the same pull request.
 
 | Consumer | Owner | Contract |
 | --- | --- | --- |
-| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries. Exemptions list their reasons and have a pinned count. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
+| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons and have a pinned count. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
 | `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
@@ -1264,11 +1264,21 @@ breaks a scenario fails in the same pull request.
 
 ## Acceptance
 
-- Every fractal-ui story declares `slices`, `contract-fixture` or `primitive` in
-  `parameters.scenario`, with a reason for either exemption. The check enforces declarations
-  and slice consumption in both directions, reports exemptions with a pinned count, and
-  rejects stale or growing blocked-file ratchet entries. The Scenario toolbar switches slice
-  stories. Contract-fixture stories convert once scenario data can express them.
+- Every story in every CSF loaded by the fractal-ui kit Storybook, including app CSFs,
+  declares `slices`, `contract-fixture` or `primitive` in `parameters.scenario`, with a reason
+  for either exemption. The check enforces declarations and slice consumption in both
+  directions, reports exemptions with a pinned count, and rejects stale or growing blocked-file
+  ratchet entries. The separate app deferral list, owned by fractal-web-app, is a reviewed
+  shrink-only pin of undeclared app story ids with its own count, independently of the
+  blocked-PR ratchet. Review must reject replacement ids or growth; count and membership
+  checks alone do not establish that history. Declaring a mode or removing a story requires
+  removing its app deferral; new app stories must declare modes. Deferred app CSFs still
+  pass the runtime import-graph check.
+  Vite's `?raw` and `?url` imports are leaves only when their base file exists.
+  The `?inline` and `?no-inline` flags are leaves only for recognized non-code assets;
+  executable modules fail closed. Forbidden domain roots and primitive fixture paths remain
+  forbidden even as raw assets. Unknown queries fail closed. The Scenario toolbar switches
+  slice stories. Contract-fixture stories convert once scenario data can express them.
 - Mounted conversation stories declare the real consumer mount policy and pass marker/contrast
   checks within it; kit tests reject missing mounted markers and vacuous windows and preserve
   the unwindowed rule. Browser plays separately prove history reveal and held-back replies.

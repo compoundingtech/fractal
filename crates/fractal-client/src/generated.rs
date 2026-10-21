@@ -63,6 +63,11 @@ pub struct ErrorEnvelope {
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
     RecipientRetired,
+    IdentityCycle,
+    IdentityOccupied,
+    IdentityRetiredSource,
+    IdentityCrossKind,
+    IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
     AttentionMigrated,

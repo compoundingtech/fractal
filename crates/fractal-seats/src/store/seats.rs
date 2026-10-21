@@ -8,6 +8,10 @@ use super::*;
 pub use fractal_missions::store::seats::*;
 pub use fractal_missions::store::seats::{EndedDeclaration};
 
+#[cfg(test)]
+#[path = "identity_boundary_tests.rs"]
+mod identity_boundary_tests;
+
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
 
@@ -1237,7 +1241,9 @@ impl SeatsStore for Store {
     }
 
     fn seat_queue(&self, agent: &str) -> Result<SeatQueueView> {
-        let agent = normalize_seat(agent);
+        let agent = fractal_store::store::identities::resolve_reference_conn(
+            &self.readers.get(), &normalize_seat(agent),
+        )?;
         let (inputs, order) = {
             let connection = self.readers.get();
             let mut inputs = seat_queue_inputs_tx(&connection, Some(&agent))?;
@@ -1554,6 +1560,8 @@ impl SeatsStore for Store {
             revision: Option<&str>,
         ) -> Result<Option<(String, Value)>> {
         let connection = self.readers.get();
+        let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
+        let subject = subject.as_str();
         let row: Option<(String, String)> = connection
             .query_row(
                 "SELECT c.id, c.body FROM claims c
@@ -1575,6 +1583,8 @@ impl SeatsStore for Store {
 
     fn agent_declaration_revisions(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
+        let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
+        let subject = subject.as_str();
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he9f0b095e150 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &format!(
             "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind='intent.desired'
              ORDER BY {CANONICAL_ORDER_DESC}"
@@ -1590,6 +1600,8 @@ impl SeatsStore for Store {
             name: Option<&str>,
             idempotency_key: &str,
         ) -> Result<ApplyResponse, St3Error> {
+        let subject = fractal_store::store::identities::resolve_reference_conn(&self.readers.get(), subject)?;
+        let subject = subject.as_str();
         if name == Some("") {
             return Err(St3Error::new("invalid-agent-name", "a seat label must be a non-empty string"));
         }
@@ -1763,6 +1775,8 @@ impl SeatsStore for Store {
 
     fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
+        let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
+        let subject = subject.as_str();
         let Some(row) = current_desired_row(&connection, subject)? else {
             return Ok(Vec::new());
         };
@@ -1778,6 +1792,10 @@ impl SeatsStore for Store {
             actor: &str,
         ) -> Result<ClaimRecord, St3Error> {
         self.connection.batched(|transaction| {
+            let subject = fractal_store::store::identities::resolve_reference_conn(transaction, subject)?;
+            let subject = subject.as_str();
+            let actor = fractal_store::store::identities::resolve_reference_conn(transaction, actor)?;
+            let actor = actor.as_str();
             let current = current_desired_row_tx(transaction, subject).map_err(internal)?
                 .ok_or_else(|| St3Error::new("stale-fence", "seat declaration disappeared"))?;
             let current_claim = claim_by_id_tx(transaction, &current.claim_id).map_err(internal)?.unwrap();
@@ -2116,6 +2134,8 @@ impl SeatsStore for Store {
     }
 
     fn native_mail_boot_floor(&self, subject: &str) -> Result<Option<(u128, u64)>> {
+        let subject = fractal_store::store::identities::resolve_reference_conn(&self.readers.get(), subject)?;
+        let subject = subject.as_str();
         let runtime = self.latest_claim(subject, Some("runtime.observed"))?;
         let Some(incarnation) = runtime.as_ref().and_then(|claim| {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
@@ -2149,12 +2169,16 @@ impl SeatsStore for Store {
         // it must be revisited when one arrives.
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
+        let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
+        let subject = subject.as_str();
         Ok(harness_fold_at(&connection, subject, Some(at_index), true, false, true)?
             .filter(|harness| harness.state == "ended"))
     }
 
     fn harness_was_ready(&self, subject: &str, incarnation: &str) -> Result<bool> {
         let connection = self.readers.get();
+        let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
+        let subject = subject.as_str();
         let found: i64 = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM claims
              WHERE subject=?1 AND kind='harness.observed'

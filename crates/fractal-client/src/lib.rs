@@ -7,12 +7,15 @@ mod checkout;
 pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
+pub mod follow;
 mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
 pub use contract::*;
 pub use generated::*;
+mod identities;
+pub use identities::*;
 
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -985,6 +988,11 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::InvalidArrangementKey
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
+        | ErrorCode::IdentityCycle
+        | ErrorCode::IdentityOccupied
+        | ErrorCode::IdentityRetiredSource
+        | ErrorCode::IdentityCrossKind
+        | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
         | ErrorCode::MessageSelectorsNotReady

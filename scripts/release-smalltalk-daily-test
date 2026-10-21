@@ -52,24 +52,26 @@ def build_dist(dist, source):
     dist.mkdir()
     sums = []
     for target in TARGETS:
-        package = f'smalltalk-{target}'
-        with tarfile.open(dist / f'{package}.tar.gz', 'w:gz') as archive:
-            def add(name, data=b'', mode=0o755, link=None):
-                info = tarfile.TarInfo(f'{package}/{name}')
-                info.mode = mode
-                if link:
-                    info.type, info.linkname = tarfile.SYMTYPE, link
-                    archive.addfile(info)
-                else:
-                    info.size = len(data)
-                    archive.addfile(info, io.BytesIO(data))
-            add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
-            add('bin/st3', b'st3'); add('bin/pty', b'pty'); add('bin/st', link='st3')
-            add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
-        digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
-        line = f'{digest}  {package}.tar.gz\n'
-        (dist / f'{package}.tar.gz.sha256').write_text(line)
-        sums.append(line)
+        for prefix in ('fractal', 'smalltalk'):
+            package = f'{prefix}-{target}'
+            with tarfile.open(dist / f'{package}.tar.gz', 'w:gz') as archive:
+                def add(name, data=b'', mode=0o755, link=None):
+                    info = tarfile.TarInfo(f'{package}/{name}')
+                    info.mode = mode
+                    if link:
+                        info.type, info.linkname = tarfile.SYMTYPE, link
+                        archive.addfile(info)
+                    else:
+                        info.size = len(data)
+                        archive.addfile(info, io.BytesIO(data))
+                add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
+                add('bin/st3', b'st3'); add('bin/pty', b'pty')
+                add('bin/st', link='st3'); add('bin/fractal', link='st3')
+                add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
+            digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
+            line = f'{digest}  {package}.tar.gz\n'
+            (dist / f'{package}.tar.gz.sha256').write_text(line)
+            sums.append(line)
     (dist / 'SHA256SUMS').write_text(''.join(sums))
 
 

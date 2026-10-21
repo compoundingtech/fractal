@@ -17,6 +17,62 @@ parameters, and manually paired action discriminators are private implementation
 Mutation callers pass the latest response snapshot and exact resource fences. `ClientError::Api`
 preserves stable error codes such as `stale-fence`, `runtime-not-local`, and `cursor-gap`.
 
+## Retained typed collection follows
+
+`follow::FollowClient::connect(client.clone()).await?` owns one collections socket and
+one reconnect loop. Clone that handle, rather than connecting for each model:
+
+```rust
+use fractal_client::follow::{AttentionDescriptor, FollowClient};
+use futures_util::StreamExt;
+
+let follows = FollowClient::connect(client.clone()).await?;
+let mut attention = follows.watch(AttentionDescriptor::default(), 100).await?;
+while let Some(state) = attention.next().await {
+    // Inspect state.freshness and state.error separately from the retained value.
+    if let Some(window) = &state.value {
+        for item in &window.items {
+            println!("{}", item.title);
+        }
+    }
+}
+```
+
+`current()` reads the latest retained state without waiting. Receiver clones share
+the subscription and immutable `Arc` rows; dropping the last receiver unsubscribes.
+The stream coalesces intermediate states for slow readers, retaining one state rather
+than an event queue. A window contains the server's ordered rows, snapshot and
+`has_more`; it is not complete history. Limits are 16 subscriptions per connection,
+1–200 rows per window, 16 pending watch requests, and 32 queued socket writes plus one
+in-flight command. Selectors must fit within the 16 KiB command budget including its
+reserved envelope. `AttentionDescriptor.person` selects the authorized person.
+
+Writes are polled alongside admission and lifecycle signals, never awaited by a
+blocking worker branch. Dropping a watcher during a blocked send cancels the socket
+instead of stranding cleanup; remaining watches rejoin on one fresh connection.
+Queue overflow likewise reconnects rather than retaining more commands. Dropping
+the last `FollowClient` handle shuts down immediately, without waiting for the peer
+to read or acknowledge a close handshake; retained receiver streams then end.
+The write liveness contract matches the server's eight-second collection send
+deadline: if any command, including cleanup's unsubscribe, cannot flush in eight
+seconds, the client drops the socket and reconciles retained watches on reconnect.
+Pending cleanup remains tracked until its unsubscribe flushes or the socket resets,
+even after the subscription leaves the routing table. Reset is the terminal release
+action for a stuck unsubscribe, because only delivery or socket loss releases the
+server-side subscription.
+
+Reconnect and resync retain the last window as stale until a new snapshot arrives.
+Each resubscribe uses a new wire ID so queued frames from older generations cannot
+overwrite current state. Transport loss is stale without a subscription error;
+server subscription failures and malformed rows remain explicit errors. A successful
+snapshot clears the error. Missing order rows fail the update atomically rather than
+silently yielding an incomplete fresh window.
+
+Implement `follow::Descriptor` to pair an existing collection selector with a typed
+raw-row decoder (`decode_row` supports generated Serde models). No resource-to-JSON
+round trip is needed. Descriptors do not add server collections or capabilities;
+unsupported selectors still fail through the normal subscription error.
+
 ## Raw PTY connectors
 
 `raw_terminal_attachment(terminal_id, runtime_incarnation, RawTerminalMode::Attach)` acquires

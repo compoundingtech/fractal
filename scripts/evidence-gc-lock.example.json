@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "unlock": ["gh", "api", "--method", "PUT", "repos/compoundingtech/smalltalk/rulesets/RULESET_ID", "-f", "enforcement=disabled"],
+  "relock": ["gh", "api", "--method", "PUT", "repos/compoundingtech/smalltalk/rulesets/RULESET_ID", "-f", "enforcement=active"],
+  "check": ["gh", "api", "repos/compoundingtech/smalltalk/rulesets/RULESET_ID", "--jq",
+            "if .enforcement == \"active\" then \"on\" else error(\"the evidence tag ruleset is \" + .enforcement) end"]
+}
