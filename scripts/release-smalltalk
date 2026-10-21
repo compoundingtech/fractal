@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-# Build and verify a native Smalltalk archive. Never installs or restarts a service.
+# Build and verify a native Fractal archive. Never installs or restarts a service.
 # Usage: scripts/release-smalltalk [--dry-run] TARGET OUTPUT_DIRECTORY
 set -Eeuo pipefail
 
@@ -26,7 +26,9 @@ if $dry_run; then
   # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
   printf 'link bin/st -> st3\n'
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-  printf 'archive %s/smalltalk-%s.tar.gz\n' "$out" "$target"
+  printf 'archive %s/fractal-%s.tar.gz\n' "$out" "$target"
+  # arn:lmig:smalltalk:2026-10-20-release-artifact-aliases — sunset 2026-11-01 (#3032).
+  printf 'compatibility archive %s/smalltalk-%s.tar.gz\n' "$out" "$target"
   printf 'verify manifest, install in isolated destination, run st ui PTY smoke\n'
   exit 0
 fi
@@ -40,7 +42,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-package="smalltalk-$target"
+package="fractal-$target"
 mkdir -p "$work/$package/bin"
 
 # The runtime pin is the Nix package's PTY input, not the distinct pty-core library pin.
@@ -165,9 +167,15 @@ env -u FRACTAL_AGENT -u ST_AGENT HOME="$work/install-home" XDG_CONFIG_HOME="$wor
   XDG_CACHE_HOME="$work/install-home/.cache" XDG_STATE_HOME="$work/install-home/.local/state" \
   FRACTAL_PERSON=person/release-smoke ST3_PERSON=person/release-smoke FRACTAL_ENDPOINT="$work/absent.sock" ST3_ENDPOINT="$work/absent.sock" \
   python3 crates/fractal-tui/tests/pty_smoke.py "$work/installed/st" --ui --no-panic
-python3 - "$archive" <<'PY'
+# arn:lmig:smalltalk:2026-10-20-release-artifact-aliases — sunset 2026-11-01 (#3032).
+# Retain the historical root directory as well as the asset name for old installers.
+legacy="smalltalk-$target"
+mv "$work/$package" "$work/$legacy"
+tar -C "$work" -czf "$out/$legacy.tar.gz" "$legacy"
+python3 - "$archive" "$out/$legacy.tar.gz" <<'PY'
 import hashlib, pathlib, sys
-p = pathlib.Path(sys.argv[1])
-p.with_name(p.name + '.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n')
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    p.with_name(p.name + '.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n')
 PY
-printf 'verified %s\n' "$archive"
+printf 'verified %s (compatibility archive %s)\n' "$archive" "$out/$legacy.tar.gz"
