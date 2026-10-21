@@ -56,6 +56,17 @@ class BundleTests(unittest.TestCase):
             self.run_loader()
         download.assert_called_once_with(self.pin["bundles"][self.target]["url"], timeout=60)
 
+    def test_a_local_archive_is_read_instead_of_downloading_and_is_checked_the_same(self):
+        local = self.root / "bundle.tar.gz"
+        with patch.dict(module.os.environ, {"COMPAT_BASELINE_ARCHIVE": str(local)}), \
+             patch.object(module.urllib.request, "urlopen", side_effect=AssertionError("no download")):
+            self.pin["bundles"][self.target]["url"] = "https://invalid.example/never-fetched.tar.gz"
+            self.run_loader()
+            self.assertTrue((self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3").is_file())
+            self.pin["bundles"][self.target]["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                self.run_loader()
+
     def test_download_timeout_does_not_publish(self):
         with patch.object(module.urllib.request, "urlopen", side_effect=TimeoutError("download timed out")):
             with self.assertRaisesRegex(TimeoutError, "download timed out"):

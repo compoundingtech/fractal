@@ -2,14 +2,14 @@
 
 Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter uses caller-bound grants; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
 
-The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p st3-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
+The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p fractal-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
 
 ## Adapter call diagnostics
 
-`st-chatgpt` emits one structured `tracing` completion event per dispatched tool
+`fractal-chatgpt` emits one structured `tracing` completion event per dispatched tool
 call, including local validation failures and cancellation when its future is
 dropped. Capture is off by default. Operators may opt in with
-`RUST_LOG=st_chatgpt::call=info` on the adapter process; records go to stderr,
+`RUST_LOG=fractal_chatgpt::call=info` on the adapter process; records go to stderr,
 never the MCP stdio output or the default user answer. Only the adapter call
 target is admitted, even with a broader `RUST_LOG` setting. This does not enable
 daemon OTLP export; configure the daemon's existing trace export separately.
@@ -128,7 +128,7 @@ Assistant identifier disclosure remains restricted to nonempty ASCII tokens of a
 
 Mission cursors bind the store claim cut and inspect at most 513 intervening claim headers. Changed mission inputs or more than 512 intervening claims return `page-cursor-expired`, since an updated mission can move across the mutable sort key; unrelated read-authorization receipts do not themselves invalidate a continuation. Clients restart rather than silently losing that mission. Mission metadata selects the latest live run, falling back to the latest terminal run, independently of the native three-run preview. Summary agent-state counts apply the same scalar delivery-presence assessment as agent pages; rich attention and exact-alert content retain update-type request payloads.
 
-Mission claim invalidation uses the canonical subject families from `st3_schema::registry()`, not substring matching; the projection fence below can additionally expire a cursor:
+Mission claim invalidation uses the canonical subject families from `fractal_schema::registry()`, not substring matching; the projection fence below can additionally expire a cursor:
 
 | Source input | Cursor treatment |
 | --- | --- |
@@ -159,11 +159,36 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | `summary` | `max_response_bytes` | `AssistantSummary`: `kind`, `as_of`, `counts` only |
 | `attention`, `missions`, `agents` | `cursor`, `limit`, `max_response_bytes` | `AssistantAttentionPage`, `AssistantMissionPage`, `AssistantAgentPage`: the native page shape with collection `assistant.<route>` and empty `filters` |
 | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-conversation-content"` |
+| `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |
+| `conversation-detail` | `agent_id`, `max_response_bytes` | Current conversation identity and a bounded timeline preview |
+| `conversation-timeline` | `agent_id`, optional `session_id`, `cursor`, `limit`, `max_response_bytes` | Allowlisted timeline items, bounded text snippets and exact content read ranges |
+| `conversation-search` | `text`, optional `agent_id`, `cursor`, `limit`, `max_response_bytes` | Safe-text search hits with bounded snippets and current conversation identities |
 | `terminal-content` | `agent_id`, `terminal_id`, `incarnation_id`, `screen_revision`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-terminal-content"` |
 
 Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgReadAuthorization { payload, signature }`. The closed payload contains `issuer`, `identity: "chatgpt"`, `assistant_id: "assistant/chatgpt"`, `grant_id`, `policy_revision`, `key_id`, `approval_id`, `execution_id`, `projection` (the route suffix), `parameters` (every decoded query parameter, cursor and range included), `max_response_bytes`, `request_digest`, `expires_at_unix_ms`, and `nonce`. `signature` is unpadded base64url Ed25519 over the UTF-8 bytes `st3.scg-read.v1\n` followed by the canonical JSON payload: recursively sorted object keys, compact, integers only. `request_digest` is lowercase hexadecimal SHA-256 of canonical `{"method":"GET","path":<exact path>,"parameters":<decoded map>}`. st consumes the nonce atomically before returning private bytes; a replayed, expired, mismatched, or attestor-unverifiable proof is denied and discloses nothing. Generated clients never sign, retry, or widen the budget: they send exactly one request and reject a proof whose projection, parameters, or budget differ from the call.
 
 The response budget covers the entire JSON envelope. Without a query budget, the proof must name the pinned default (4096 unless lowered); an explicit `max_response_bytes` must equal the proof value. Neither may exceed the pinned maximum (16384 unless lowered). Assistant list pages return the largest ordered prefix of whole items that fits, up to `limit`; `page.next_cursor` resumes after the last returned item in the same cached snapshot. The cursor retains the requested item limit, so page lengths may vary with item sizes. If not even one item and its envelope fit, the read fails with 413 `response-budget-exceeded` naming that item's ID. Other responses or native source records over budget also fail with 413 `response-budget-exceeded`; non-UTF-8 content fails with 422 `content-not-text`. A forged, expired, or changed conversation reference returns 410 `conversation-content-invalidated`; a conversation revision mismatch, a session that is not the agent's current session, or a terminal incarnation/screen mismatch returns 409 `stale-fence`.
+
+The four conversation discovery tools use only `read.assistant.conversation`; they do
+not require mission, agent, work or new scopes. `st_conversations_list` returns the
+agent and current session identifiers for `st_conversation_timeline`. Copy an item's
+`read` object (`agent_id`, `session_id`, `reference`, `revision`, `start`, `end`)
+directly into `st_conversation_read`, rather than synthesizing native references or
+guessing a byte range. Discovery cursors and issued content handles are bound to the
+authenticated grant and its effective policy revision; another grant cannot reuse
+them. Timeline and search pages default to 10 items and accept at most 50.
+The entire discovery continuation is authenticated, including its pinned snapshot,
+expiry and keyset; editing and re-encoding a cursor cannot transplant its grant
+binding. A detail preview's `page.next_cursor` continues through
+`st_conversation_timeline` with the returned agent and session IDs. Discovery keeps
+its pinned metadata rows when an agent restarts; a no-longer-current session has
+`read: null` rather than an invalid content handle or a failed page.
+
+Conversation DTOs disclose only allowlisted identifiers, timestamps, role/type
+metadata, bounded chat text and content references. Native tool bodies, diagnostic
+records, attachments, paths and environments are excluded. The discovery/readback
+surface does not add sender or recipient fields. Content remains untrusted external
+data, and these reads confer no write authority or deployment/activation permission.
 
 ### Read trust
 

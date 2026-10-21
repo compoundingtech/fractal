@@ -80,12 +80,16 @@ pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 mod document_pages;
+pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
+pub mod repair_ledger;
 pub mod retired;
+pub mod retired_facts;
 pub mod runtime;
 pub mod transport_observation_index;
+pub mod writer_heads;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 
@@ -762,7 +766,7 @@ pub const SCHEMA: &str = core_schema!("", "");
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
+pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -790,6 +794,8 @@ pub struct Store {
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
+    /// Fixed local schema identity, initialized lazily before the first admission pass.
+    admission_schema_digest: std::sync::OnceLock<String>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
     /// Read-only sealed view; never populated with the client's local-signer fallback.
@@ -981,11 +987,19 @@ impl Store {
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f86346fb38f owner=smallclaims::store TODO=trace-statement-and-value-representation */ if fresh { FRESH_SCHEMA } else { SCHEMA })?;
+        repair_ledger::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ab5d0e4a39c owner=smallclaims::store TODO=trace-statement-and-value-representation */ canonical::POSITION_SCHEMA).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
+        })?;
+        claim_ranges::install(connection)?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1ef8ba031b42 owner=smallclaims::store TODO=trace-statement-and-value-representation */ writer_heads::SCHEMA).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
@@ -1088,6 +1102,7 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             admission: Mutex::new(()),
+            admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
@@ -1445,7 +1460,7 @@ impl PeerSyncProgress {
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
             .is_some_and(|(since, compared)| {
-                compared.saturating_sub(since) >= REPLICATION_DIVERGED_AFTER_MS
+                compared.saturating_sub(since) >= replication_settle_intervals_ms().1
             });
         Some(sync)
     }
@@ -1857,13 +1872,17 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
     Ok(transaction.last_insert_rowid() as u64)
 }
 
-/// The next sequence for a local batch: one past the writer's highest batch, and past the
-/// writer floor this store took when it joined under a name the fleet had used before.
+/// The next sequence for a local batch: one past the writer's highest batch, including one a
+/// trim has deleted (`writer_heads`, or an envelope tombstone from before that ledger), and past
+/// the writer floor this store took when it joined under a name the fleet had used before.
 pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Result<u64> {
     transaction
         .prepare_cached(
             "SELECT MAX(
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
+                 COALESCE((SELECT sequence FROM writer_heads WHERE writer=?1), 0),
+                 COALESCE((SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1), 0),
+                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0),
                  COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
              ) + 1",
         )?
@@ -1871,10 +1890,16 @@ pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Res
         .map_err(Into::into)
 }
 
+/// The hash of the writer's highest batch, including one a trim has deleted.
 pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Result<Option<String>> {
     transaction
         .prepare_cached(
-            "SELECT hash FROM batches WHERE origin=?1 ORDER BY replica_sequence DESC LIMIT 1",
+            "SELECT hash FROM (
+                 SELECT replica_sequence AS sequence, hash FROM
+                     (SELECT replica_sequence, hash FROM batches WHERE origin=?1
+                      ORDER BY replica_sequence DESC LIMIT 1)
+                 UNION ALL SELECT sequence, hash FROM writer_heads WHERE writer=?1
+             ) ORDER BY sequence DESC LIMIT 1",
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-ha390580f8e24 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
         .optional()
@@ -4082,6 +4107,53 @@ pub fn peer_up(last_success_at: Option<u128>, failed_since: bool, now: u128) -> 
 /// so a shorter difference can still settle by itself.
 pub const REPLICATION_DIVERGED_AFTER_MS: u128 = 2 * CATCH_UP_PROJECTION_INTERVAL_MS as u128;
 
+/// The catch-up projection interval and the divergence window in force, in milliseconds:
+/// `CATCH_UP_PROJECTION_INTERVAL_MS` and `REPLICATION_DIVERGED_AFTER_MS`, unless
+/// `ST3_WORKER_INTERVAL_MS` caps worker timers (tests of several nodes on one machine). The
+/// window stays twice the catch-up interval under any cap, so a catching-up peer's deferred
+/// projection still settles before the pair counts as diverged.
+pub fn replication_settle_intervals_ms() -> (u64, u128) {
+    replication_settle_intervals_for(crate::sync::worker_timer_cap())
+}
+
+fn replication_settle_intervals_for(cap: Option<std::time::Duration>) -> (u64, u128) {
+    let catch_up = crate::sync::capped(
+        std::time::Duration::from_millis(CATCH_UP_PROJECTION_INTERVAL_MS),
+        cap,
+    );
+    // At least a millisecond, so a zero cap still leaves the window longer than the deferral.
+    let catch_up = u64::try_from(catch_up.as_millis()).unwrap_or(u64::MAX).max(1);
+    (catch_up, 2 * u128::from(catch_up))
+}
+
+#[cfg(test)]
+mod settle_interval_tests {
+    use super::*;
+
+    #[test]
+    fn unset_the_intervals_are_the_thirty_and_sixty_second_defaults() {
+        assert_eq!(replication_settle_intervals_for(None), (30_000, 60_000));
+        assert_eq!(
+            replication_settle_intervals_for(None),
+            (CATCH_UP_PROJECTION_INTERVAL_MS, REPLICATION_DIVERGED_AFTER_MS)
+        );
+        if std::env::var_os("ST3_WORKER_INTERVAL_MS").is_none() {
+            assert_eq!(replication_settle_intervals_ms(), (30_000, 60_000));
+        }
+    }
+
+    #[test]
+    fn under_any_cap_divergence_waits_twice_the_catch_up_deferral() {
+        for cap_ms in [0, 1, 300, 29_999, 30_000, 30_001, 120_000] {
+            let cap = std::time::Duration::from_millis(cap_ms);
+            let (catch_up, diverged) = replication_settle_intervals_for(Some(cap));
+            assert_eq!(catch_up, cap_ms.clamp(1, CATCH_UP_PROJECTION_INTERVAL_MS), "cap {cap_ms}");
+            assert_eq!(diverged, 2 * u128::from(catch_up), "cap {cap_ms}");
+            assert!(diverged > u128::from(catch_up), "cap {cap_ms}");
+        }
+    }
+}
+
 /// Sequences per compact inventory range. A range digest lets two peers skip every range they
 /// already share, so an exchange lists only the identities in ranges that differ.
 pub const REPLICATION_BUCKET_WIDTH: u64 = 256;
@@ -5662,6 +5734,46 @@ impl Store {
         document_pages::read(self, name, prefix, history, after, limit)
     }
 
+    /// One version of a document, as `list_documents_page` lists it: `hash`, or the name's
+    /// latest version without one.
+    pub fn document_version(&self, name: &str, hash: Option<&str>) -> Result<Option<DocumentVersion>> {
+        let Some(hash) = hash else {
+            return Ok(self.list_documents_page(Some(name), None, false, None, 1)?.pop());
+        };
+        let connection = self.readers.get();
+        connection
+            .query_row(
+                "SELECT d.name, d.hash, b.size, d.created_index,
+                        d.hash=(SELECT n.hash FROM documents n
+                    WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1),
+                        d.binding_claim_id, c.accepted_at_unix_ms, c.actor, c.origin
+                 FROM documents d JOIN blobs b ON b.hash=d.hash
+                 JOIN claims c ON c.id=d.binding_claim_id
+                 WHERE d.name=?1 AND d.hash=?2",
+                params![name, hash],
+                |row| {
+                    Ok(DocumentVersion {
+                        name: row.get(0)?,
+                        hash: row.get(1)?,
+                        size: row.get(2)?,
+                        created_index: row.get(3)?,
+                        latest: row.get::<_, i64>(4)? != 0,
+                        binding_claim_id: row.get(5)?,
+                        created_at_unix_ms: row.get::<_, String>(6)?.parse().map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        owner: row.get::<_, Option<String>>(7)?.or(row.get(8)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn claim_by_id(&self, id: &str) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         connection
@@ -6374,6 +6486,9 @@ impl Store {
                 ..if same {
                     ReplicationInventory {
                         digest: snapshot.inventory.digest.clone(),
+                        // Equality is only true for this snapshot. Keep range proofs so a
+                        // concurrent write cannot turn this answer into a full-inventory query.
+                        buckets: snapshot.buckets.clone(),
                         ..Default::default()
                     }
                 } else {
@@ -6628,7 +6743,7 @@ impl Store {
         // Only a response to our own dial is carrier evidence for a locally initiated
         // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
         if asks {
-            self.record_replication_exchange_transport(relay, true, received_at, carrier);
+            self.record_replication_exchange_transport(relay, true, received_at, carrier, None);
         }
         drop(timing);
         self.replication_timers
@@ -6865,7 +6980,10 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let _timing = time_stage(&self.replication_timers.admission);
-        let (retry_hash_mismatches, envelopes) = {
+        let schema_digest = self
+            .admission_schema_digest
+            .get_or_init(|| self.runtime.schema_digest());
+        let (retry_hash_mismatches, retry_subject_references, envelopes) = {
             // This query does not mutate source or authority. Fetch the pending payloads on a
             // reader and release its lease before queueing any admission writer transaction.
             let connection = self.readers.get();
@@ -6879,7 +6997,19 @@ impl Store {
                 )
                 .optional()?
                 .is_none();
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h55b8fe49e68a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &admission_retry_query(retry_hash_mismatches))?;
+            // Historical validators rejected references to subject families added by a newer
+            // registry. Recheck that narrow error class once per local schema identity, using
+            // the same meta completion pattern as the legacy hash retry. A missing marker
+            // includes databases last opened by builds that did not record this identity.
+            let retry_subject_references = connection
+                .query_row(
+                    "SELECT 1 FROM meta WHERE key='subject_reference_retry_schema' AND value=?1",
+                    [schema_digest],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_none();
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0305bf110f81 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &admission_retry_query(retry_hash_mismatches, retry_subject_references))?;
             let envelopes = statement
                 .query_map([], |row| {
                     Ok((
@@ -6903,7 +7033,7 @@ impl Store {
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            (retry_hash_mismatches, envelopes)
+            (retry_hash_mismatches, retry_subject_references, envelopes)
         };
         let mut outcome = ReplicationAdmission::default();
         // Prepare the authority fold off the writer in one reader snapshot. A generation
@@ -7004,6 +7134,23 @@ impl Store {
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
+                        // A historical degraded receipt selected by a schema retry must remain
+                        // discoverable after that retry's marker completes. Waiting for verified
+                        // authority uses the ordinary pending lifecycle, not another schema scan.
+                        if retry_subject_references {
+                            pass.execute(
+                                /* sqlite-large-value: allow-for-now lv-hf42544a3dbab owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
+                                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                                   AND receipt_state='degraded'
+                                   AND EXISTS (
+                                       SELECT 1 FROM replica_records
+                                       WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                                         AND state='invalid' AND error_code='invalid-replicated-claim'
+                                         AND error_message LIKE '%violates invalid-subject-reference:%'
+                                   )",
+                                params![envelope.writer, envelope.sequence, envelope.hash],
+                            )?;
+                        }
                         held.push((envelope.clone(), row));
                         continue;
                     }
@@ -7062,13 +7209,21 @@ impl Store {
         self.replication_timers
             .verify
             .fetch_add(outcome.verify.as_nanos() as u64, Ordering::Relaxed);
-        if retry_hash_mismatches {
+        if retry_hash_mismatches || retry_subject_references {
             let mut connection = self.connection.write_background();
             let transaction = connection.transaction()?;
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h61f70922c425 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
-                [now_ms().to_string()],
-            )?;
+            if retry_hash_mismatches {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h61f70922c425 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
+                    [now_ms().to_string()],
+                )?;
+            }
+            if retry_subject_references {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h954536850f67 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('subject_reference_retry_schema', ?1)",
+                    [schema_digest],
+                )?;
+            }
             transaction.commit()?;
         }
         // Admitted claims, and any change to membership's trust roots, get their verdicts once
@@ -7092,7 +7247,7 @@ impl Store {
             self.last_replication_projection_unix_ms
                 .load(Ordering::Acquire),
         );
-        if since < CATCH_UP_PROJECTION_INTERVAL_MS && self.replication_catching_up() {
+        if since < replication_settle_intervals_ms().0 && self.replication_catching_up() {
             self.defer_replication_projection();
             return Ok(None);
         }
@@ -7710,11 +7865,12 @@ impl Store {
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<bool> {
         let failed_at = now_ms();
         let changed = self.record_peer_failure(peer, status, error)?;
         if let Some(carrier) = carrier {
-            self.record_replication_exchange_transport(peer, false, failed_at, carrier);
+            self.record_replication_exchange_transport(peer, false, failed_at, carrier, failure);
         }
         Ok(changed)
     }
@@ -8091,6 +8247,7 @@ impl Store {
         success: bool,
         at_unix_ms: u128,
         carrier: crate::replication::ReplicationCarrier,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) {
         let mut peers = self
             .replication_sync
@@ -8106,9 +8263,13 @@ impl Store {
             .as_ref()
             .is_none_or(|previous| previous.at_unix_ms <= at_unix_ms)
         {
-            *record = Some(crate::replication::ReplicationExchangeTransport::new(
+            let mut transport = crate::replication::ReplicationExchangeTransport::new(
                 at_unix_ms, carrier,
-            ));
+            );
+            if !success {
+                transport.failure = failure.cloned();
+            }
+            *record = Some(transport);
         }
     }
 
@@ -8671,12 +8832,21 @@ pub fn normalize_actor(value: &str, default_kind: &str) -> String {
 /// or failed for a reason a newer build may fix. One index seek per branch. A single
 /// `WHERE state='unknown' OR (state='invalid' ...)` made SQLite scan every replica record, and the
 /// join then scanned every envelope: seconds on the writer, on every receive, with nothing
-/// pending. The hash-mismatch branch exists only until its one-time retry has run.
-pub fn admission_retry_query(retry_hash_mismatches: bool) -> String {
+/// pending. Historical reference failures are retried only after the local schema changes;
+/// hash mismatches only until their one-time retry has run. Neither branch relaxes validation.
+pub fn admission_retry_query(retry_hash_mismatches: bool, retry_subject_references: bool) -> String {
     let hash_mismatches = if retry_hash_mismatches {
         "UNION
              SELECT writer, sequence, envelope_hash FROM replica_records
              WHERE state='invalid' AND error_code='claim-hash-mismatch'"
+    } else {
+        ""
+    };
+    let subject_references = if retry_subject_references {
+        "UNION
+             SELECT writer, sequence, envelope_hash FROM replica_records
+             WHERE state='invalid' AND error_code='invalid-replicated-claim'
+               AND error_message LIKE '%violates invalid-subject-reference:%'"
     } else {
         ""
     };
@@ -8692,6 +8862,7 @@ pub fn admission_retry_query(retry_hash_mismatches: bool) -> String {
              WHERE state='invalid' AND error_code='invalid-replicated-claim'
                AND error_message LIKE '%violates unknown-claim-field:%'
              {hash_mismatches}
+             {subject_references}
          )
          SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
                 envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload,

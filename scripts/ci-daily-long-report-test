@@ -37,7 +37,57 @@ text = report.table(rows)
 assert '| [daily-test-build](https://example.invalid/job/1) | ✅ success | 21m 05s | Compile (19m 00s) | — |' in text, text
 assert '| daily-mail-redelivery-canaries | ❌ missing | n/a | n/a | none recorded |' in text, text
 assert report.duration(7) == '7s' and report.duration(None) == 'n/a'
+unfinished = [dict(jobs[1], completed_at=None)]
+assert report.rows({'isolation-vm': 'daily-isolation-vm'}, needs, unfinished)[0]['seconds'] == 480, 'a job without completed_at ends at its last step'
 print('passed: rows, order, durations and red lanes')
+
+# The generated report covers every lane it waits for, the cost check included.
+workflow = (ROOT / '.github/workflows/daily-long.yml').read_text()
+reporter = workflow.split('\n  daily-report:\n', 1)[1]
+needed = reporter.split('    needs:\n', 1)[1].split('\n    if:', 1)[0].split('\n')
+declared = json.loads(reporter.split("LANES: '", 1)[1].split("'\n", 1)[0])
+assert [line.removeprefix('      - ') for line in needed] == list(declared), (needed, declared)
+assert declared.get('perf-cost') == 'daily-perf-cost' and '\n  perf-cost:\n    name: daily-perf-cost\n' in workflow, declared
+print('passed: the report covers every lane it needs, including daily-perf-cost')
+
+# The load jobs run here once a day on main, unconditionally, from the definitions Performance dispatches
+# (perf-load.ts): same runners, artifacts and snapshot restore. No continue-on-error, so a red one is red in
+# `needs` and reaches the report and its issue.
+import re
+blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split('\njobs:\n', 1)[1]))
+performance = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", (ROOT / '.github/workflows/perf.yml').read_text().split('\njobs:\n', 1)[1]))
+for job, artifact in (('perf-load', 'perf-load-logs'), ('perf-load-hog', 'perf-load-hog-logs'), ('perf-load-hog-macos', 'perf-load-hog-macos')):
+    assert declared.get(job) == f'daily-{job}', (job, declared)
+    block = blocks[job]
+    assert block.startswith(f"    name: daily-{job}\n    if: github.ref == 'refs/heads/main'\n    runs-on:"), (job, 'main only, on every daily run')
+    assert 'continue-on-error' not in block and 'needs:' not in block and 'workflow_dispatch' not in block, job
+    assert f'name: {artifact}\n' in block and f'name: {artifact}\n' in performance[job], (job, 'same artifact in both workflows')
+    shared = performance[job].split('\n    runs-on:', 1)[1]
+    assert block.split('\n    runs-on:', 1)[1].startswith(shared.split('\n      - name: Report job cache coverage', 1)[0]), (job, 'one definition')
+for job in ('perf-load', 'perf-load-hog'):
+    assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3' in blocks[job], job
+    assert 'python3 scripts/ci-perf-cache restore' in blocks[job], job
+assert 'namespace-profile-macos-arm64' in blocks['perf-load-hog-macos']
+assert 'scripts/ci-perf-cache pack' in blocks['perf-load'], "main's daily load publishes the snapshots"
+# Snapshots publish only after the load step's complete report, so a cold new recipe (run 39488050274:
+# 10m38s compiling, 966s generating stores) must finish within the limit to seed itself; 30 minutes did not.
+for workflow_blocks in (blocks, performance):
+    assert '\n    timeout-minutes: 60\n' in workflow_blocks['perf-load'], 'a cold perf-load has room to seed'
+steps = blocks['perf-load']
+assert steps.index('scripts/ci-perf load') < steps.index('scripts/ci-perf-cache check-report') < steps.index('scripts/ci-perf-cache pack'), 'snapshots publish only after a complete report'
+print('passed: daily-perf-load, daily-perf-load-hog and daily-perf-load-hog-macos run on main every day and report red')
+
+# One cheap macOS compile check: the whole workspace and its tests type-checked on the Mac the hog run uses,
+# on main, with no tests run and no cache kept, so a macOS compile break is red the same day.
+macos_check = blocks['daily-macos-check']
+assert declared.get('daily-macos-check') == 'daily-macos-check', declared
+assert macos_check.startswith("    name: daily-macos-check\n    if: github.ref == 'refs/heads/main'\n    runs-on:"), macos_check
+assert macos_check.split('runs-on: ', 1)[1].split('\n', 1)[0] == blocks['perf-load-hog-macos'].split('runs-on: ', 1)[1].split('\n', 1)[0], 'the same Mac as the hog run'
+assert 'timeout-minutes: 45\n' in macos_check and 'CARGO_INCREMENTAL: "0"' in macos_check and 'CARGO_PROFILE_TEST_DEBUG: "0"' in macos_check
+assert 'run: nix develop -c cargo check --workspace --all-targets --locked\n' in macos_check, macos_check
+assert 'continue-on-error' not in macos_check and 'needs:' not in macos_check, 'a red check is red in needs'
+assert 'nextest' not in macos_check and 'cargo test' not in macos_check and 'actions/cache' not in macos_check, 'one check, no tests, no cache'
+print('passed: daily-macos-check type-checks the workspace on the macOS runner on main every day and reports red')
 
 
 def run(needs, issues, jobs_exit=0):

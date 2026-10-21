@@ -3,11 +3,12 @@ import * as React from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentFoldersProps, SidebarNode } from '../folders/sidebarContract.ts'
-import { SidebarAgentRow, sidebarRowAccessibleName } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import * as sidebarKit from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, sidebarRowAccessibleName } from '@fractal/ui/assistant-ui/shell'
+import * as sidebarKit from '@fractal/ui/assistant-ui/shell'
 import { sidebarRow } from '../web/sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent } from '@fractal/sdk/effect'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: Record<string, unknown>) => styles, defineVars: (vars: unknown) => vars, createTheme: () => ({}), keyframes: () => '', props: () => ({}) }))
 import { AgentFolders } from './AgentFolders.tsx'
@@ -121,7 +122,7 @@ describe('bound live folder tree', () => {
     document.body.append(host)
     const root = createRoot(host)
     const agent: SidebarNode = { _tag: 'Agent', id: 'agent/atlas', subject: 'agent/atlas', label: 'Atlas Builder' }
-    const projected = fleetFromAgents([decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/host-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })]).agents[0]!
+    const projected = fleetFromAgents([openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/atlas', name: 'Atlas Builder', host_id: 'host/host-1', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))]).agents[0]!
     const item = sidebarRow({ agent: projected, stale: false })
     const renders = vi.fn()
     const MemoContent = React.memo(() => { renders(); return <SidebarAgentRow inTree item={item} now={5000} /> })

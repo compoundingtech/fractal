@@ -2,6 +2,7 @@
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Exercise the real standalone hook and eval clear boundaries, without starting a daemon.
 set -euo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 repo=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -20,7 +21,7 @@ cat >"$work/bin/jq" <<'SH'
 cat >/dev/null
 SH
 chmod +x "$work/bin/st2" "$work/bin/st3" "$work/bin/jq"
-hook=$repo/crates/st-drivers/hooks/claude-observe.sh
+hook=$repo/crates/fractal-drivers/hooks/claude-observe.sh
 fail() { printf 'fractal-env-shell-test: %s\n' "$*" >&2; exit 1; }
 run_hook() {
   rm -f "$work/observed"
@@ -53,7 +54,7 @@ for claude_hook in claude-observe.sh claude-session-start.sh claude-statusline.s
     rm -f "$work/observed"
     if env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_ROOT="$work/catalog" \
       FRACTAL_CLAUDE_IDENTITY=private-new "ST2_CLAUDE_IDENTITY=$old" \
-      bash "$repo/crates/st-drivers/hooks/$claude_hook" ToolUse </dev/null >"$work/out" 2>"$work/err"; then
+      bash "$repo/crates/fractal-drivers/hooks/$claude_hook" ToolUse </dev/null >"$work/out" 2>"$work/err"; then
       fail "$claude_hook accepted conflicting ST2 fallback"
     fi
     test ! -e "$work/observed" || fail "$claude_hook invoked a driver for conflicting ST2 fallback"
@@ -62,7 +63,7 @@ for claude_hook in claude-observe.sh claude-session-start.sh claude-statusline.s
   done
   env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_ROOT="$work/catalog" \
     FRACTAL_CLAUDE_IDENTITY=agent/same ST_CLAUDE_IDENTITY=agent/same ST2_CLAUDE_IDENTITY=private-old \
-    bash "$repo/crates/st-drivers/hooks/$claude_hook" ToolUse </dev/null >"$work/out" 2>"$work/err" \
+    bash "$repo/crates/fractal-drivers/hooks/$claude_hook" ToolUse </dev/null >"$work/out" 2>"$work/err" \
     || fail "$claude_hook compared an unused ST2 identity"
 done
 # Eval operator reads clear BOTH inherited identities at the actual child command boundary.
@@ -84,7 +85,7 @@ printf '{"event":"fixture"}\n' >"$work/input"
 run_native_hook() {
   rm -f "$work/observed" "$work/payload"
   env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" PAYLOAD="$work/payload" "$@" \
-    bash "$repo/crates/st3-daemon/hooks/$native_hook.sh" UserPromptSubmit test-event \
+    bash "$repo/crates/fractal-daemon/hooks/$native_hook.sh" UserPromptSubmit test-event \
     <"$work/input" >"$work/out" 2>"$work/err"
 }
 for native_hook in claude-observe claude-statusline; do

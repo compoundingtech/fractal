@@ -5,12 +5,12 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
+(which pull requests and the queue do not run; the daily long lanes run it too), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
-disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
-public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
-older pushes must not keep consuming runners after their source is superseded. Manual dispatch,
-scheduled Performance controls and merge-group runs retain independent `github.run_id` groups.
+disabled. PR updates cancel obsolete runs for that PR in Workspace CI and the
+public-content guard. Main upkeep and public checks keep only the latest main push;
+older pushes must not keep consuming runners after their source is superseded. Manual dispatch
+(Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
@@ -98,10 +98,12 @@ preempting active jobs or reserving capacity. PR picking, Namespace shapes/affin
 and required checks are retained. Already queued runs retain
 the labels from their workflow revision.
 
-Performance runs on every main push, nightly schedule and manual dispatch; it does not
-start a load test for merge groups.
-Ready PR runs start for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load
-workload and its workflow, or an explicit `ci-perf` label. The metadata-only admission job
+Performance (`perf.yml`) runs only by manual dispatch, on any ref; the [daily long
+lanes](#daily-long-lanes) run its load jobs on `main` once a day. It never starts for merge groups,
+and it starts for no pull request: PR triggers were removed to reduce queue demand. Its admission
+job still decides for a pull request as before, should PR triggers return: ready PR runs would start
+for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load workload and its
+workflow, or an explicit `ci-perf` label. The metadata-only admission job
 checks the PR head before and after its bounded changed-file inventory, including rename
 sources. Only an explicit successful `run=false` skips the optional workload; malformed
 metadata, head drift or failed admission retain coverage. Unrelated label events cannot
@@ -183,7 +185,7 @@ real Cargo and benign stand-in commands; it compiles no Rust.
   selects the gate scope (see [gate scope](#gate-scope));
 - `linux-clippy`: `cargo clippy --workspace --all-targets --locked`, the standalone conversation
   model check, the [warning ratchet](#clippy-warning-ratchet), then
-  `cargo run --locked -p st3-client-codegen -- --check`;
+  `cargo run --locked -p fractal-client-codegen -- --check`;
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
   previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
   metadata before running it; it does not rebuild the baseline or its PTY dependency.
@@ -302,16 +304,16 @@ environment variable that enables this behavior, even if the executable is renam
 Fixture command helpers clear inherited `ST_AGENT`/`ST3_*`; temporary-repository Git helpers
 isolate global/system config, hooks, signing and author identity on each command. Real
 repository commits keep the host's Git policy. Run the same suite from an agent seat with
-`nix develop --command cargo nextest run -p st3 -p st3-daemon --locked --profile ci --retries 0`.
+`nix develop --command cargo nextest run -p fractal -p fractal-daemon --locked --profile ci --retries 0`.
 Provider fixtures that load st3 extensions publish their isolated hook set with
-`st3::hooks::ensure_installed`, preserving every declared asset and relative import.
+`fractal_daemon::hooks::ensure_installed`, preserving every declared asset and relative import.
 
 Boot, delivery-probe and messaging-fault fixtures put large executable copies in Cargo's target scratch
 directory, keeping their Unix sockets in short temporary paths. This avoids exhausting a
 host's temporary-filesystem quota when debug binaries are copied by parallel cases.
 
 On Linux, tests that launch isolated daemons, drivers, PTYs or long-lived CLI children call
-`st3::test_support::supervise_test()` before creating their fixtures. It runs that exact test
+`fractal_daemon::test_support::supervise_test()` before creating their fixtures. It runs that exact test
 under `scripts/st3_test_process.py`, a detached subreaper watching pidfds for the Rust runner
 and its launcher. Success, failure, panic, timeout, SIGTERM and SIGKILL of the runner all
 end the owned process tree. Each test has its own process group; detached children are
@@ -424,13 +426,13 @@ short socket/runtime roots with that guardian; failures keep diagnostics in
 `target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
 
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
-required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
+required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p fractal-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
 
 ### Clippy warning ratchet
 
 `linux-clippy` reuses JSON diagnostics from its existing workspace and standalone
-`st3-conversation-ui` Clippy runs. `.github/clippy-baseline.json` records warning counts per
+`fractal-conversation-ui` Clippy runs. `.github/clippy-baseline.json` records warning counts per
 workspace crate and lint, with sorted keys and the compiler/Clippy versions supplied by the
 `flake.lock`-pinned devShell. It includes Rust warnings as well as Clippy warnings, ignores
 dependencies outside the workspace, and counts each source diagnostic once when Cargo repeats
@@ -443,9 +445,12 @@ Removing warnings also requires lowering the baseline in the same pull request, 
 change cannot spend the removed warnings. CI checks that the committed counts do not increase
 relative to the event's immutable base SHA (PR base, merge-group base, or preceding main commit).
 When a crate is split out of another one, the new crate's warnings are the origin's: list it in
-`.github/clippy-splits.json` (`{"st3-daemon": "st3"}`), and against a base that lacks the new crate the
+`.github/clippy-splits.json` (`{"fractal-daemon": "st3"}`), and against a base that lacks the new crate the
 two are compared together, so the split can move warnings between them and never add any. Once the base has the
 new crate it is an ordinary crate and the entry has no effect; `--update` applies the same rule.
+A source package rename uses the same one-to-one ancestry rule, for example
+`{"fractal-daemon": "st3-daemon"}`. Historical edges retain the names stored in
+older Git baselines. They are not Cargo aliases, and they do not permit extra warnings.
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
@@ -473,13 +478,13 @@ still cannot increase. Run the ratchet's focused regression proofs with
 The gate covers st3 and the code st3 uses. The `ci` profile's `default-filter` in
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
-- every test of the other workspace crates: st3, st3-client, st3-client-codegen, st3-schema,
-  st3-migrate, stui (the terminal UI library), st-runtime, st-drivers (the harness drivers, channels, hooks, messages,
+- every test of the other workspace crates: st3, fractal-client, fractal-client-codegen, fractal-schema,
+  fractal-migrate, stui (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
   harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
 - st2's integration test files, apart from those below.
 
 It leaves out st2-only tests: st2's own unit tests (none of its remaining modules is used by
-st3), the st-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
+st3), the fractal-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
 `catalog_*`, `nomad_survival`, `event_e2e`, `eval_run_e2e`, `resync*`, `supervisor_auto_archive`
 and `resource_profile_supervisor_e2e` tests. No CI job runs these. Clippy still checks the whole
 workspace. List the selection with `bash scripts/ci-nextest list`.
@@ -515,7 +520,7 @@ existing scope.
 ### Current-product boundary
 
 Every required Linux stage runs `scripts/check-st-boundary-test` and
-`scripts/check-st-boundary`. The source guard rejects `st2::` imports and `extern crate st2`
+`scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
 in st3/stui, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
@@ -558,16 +563,17 @@ records the KVM probe and each phase's elapsed time.
 ### TypeScript client
 
 `typescript-client` runs on every PR and merge-group entry. Main retains the queue check;
-Main upkeep's `warm-typescript` fills the pnpm store with `pnpm fetch`. The job installs
-Node 24.18.0 through `actions/setup-node`, runs `corepack enable`, then installs the root
-workspace with `pnpm install --frozen-lockfile`. The client, shared views and iOS app share
-one root `pnpm-lock.yaml`; install scripts are disabled by the workspace configuration.
+Main upkeep's `warm-typescript` fills the pnpm store with `pnpm fetch`. The job materializes
+the pinned megarepo member, then runs both the frozen root install and the client checks
+inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack shims.
+The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
+are disabled by the workspace configuration.
 The store cache key is
 `typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
 
-After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
+After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
@@ -577,6 +583,11 @@ for generated-client consumers. The main ruleset requires `typescript-client`.
 
 The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
 workflow-level path filters. `linux-gate` does not depend on them.
+Only `fractal-web-execution` enables unprivileged user namespaces with
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral
+Ubuntu runner VM before entering the web lanes. The effect-utils Buck TypeScript
+actions require those namespaces for Bubblewrap containment (effect-utils #1784);
+their sandbox flags and declared-input boundary remain unchanged.
 
 - `fractal-web-changes` always runs, with a one-minute timeout and no checkout. Its
   embedded `scripts/ci-fractal-web-changes` fetches both commits explicitly without
@@ -586,8 +597,8 @@ workflow-level path filters. `linux-gate` does not depend on them.
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
-  `clients/typescript/st3-views/**`, `clients/typescript/st3-scenarios/**` and `fixtures/**`.
-  Within `clients/typescript/st3-client`, only the consumed export graph (`index.ts`,
+  `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
+  Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
@@ -597,14 +608,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
-  `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
+  `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
   and `.github/repo-settings.json*`.
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
-  `nix develop .#web -c bash scripts/ci-fractal-web` without evaluating the flake when the
+  `nix develop .#web -c bash scripts/ci-fractal-web` without realizing the shell's tools when the
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
@@ -657,20 +668,40 @@ workflow-level path filters. `linux-gate` does not depend on them.
   public cache) and substitute ~1.5 GB for `nix develop .#web`. `scripts/ci-web-shell fill`
   stores `nix print-dev-env .#web` and the shell's complete closure as a local `file://`
   binary cache in the Actions cache entry
-  `fractal-web-shell1-<os>-<hashFiles flake.nix, flake.lock, nix/**/*.nix, scripts/ci-web-shell>`.
-  `run` copies the closure into the store (`--no-check-sigs`) and runs the lanes in the sourced
-  `print-dev-env` script, which is the environment `nix develop -c` builds; the flake is not
-  evaluated (about 36 s including the cache download). The script writes `env.sh` and
-  `shell-path` last, so a partial fill is a miss; a miss, a failed copy or a closure that is
-  incomplete after an eviction makes `run` exec `nix develop .#web -c ...` instead, which only
-  costs time. A change to any keyed file gives a new key, so a pull request that edits one never
-  reads main's entry.
+  `fractal-web-shell3-<os>-<source-and-web-lock-inputs-digest>`.
+  `scripts/ci-web-shell key` combines `hashFiles` of `nix/web-shell.nix`,
+  `nix/web-shell-inputs.json`, `scripts/ci-web-shell` and `scripts/ci-web-shell-inputs.jq`
+  with a canonical jq projection of the declared inputs' transitive lock graph and system.
+  `web-shell-inputs.json` declares the root inputs once; the projection resolves follows,
+  includes each complete `locked` object and edges, and rejects malformed references or cycles.
+  Metadata such as `lastModified` is retained because flake `sourceInfo` exposes it to
+  derivations (including the upstream Genie's build stamp); future locked fields also affect keys.
+  Root Rust inputs and unrelated `flake.nix` edits do not invalidate the entry.
+  `nix eval --offline --json --file flake.nix inputs` reads only literal declarations;
+  the projection hashes web roots and every root referenced by their `follows`, so changed
+  web URLs, follows or flake flags invalidate even with an unchanged lock file.
+  This offline extraction never loads the flake graph, fetches inputs or evaluates IFD.
+  Its elapsed time is logged separately in every key step.
+  Declared follows must match their lock references; a stale follows lock fails closed
+  rather than omitting a newly introduced dependency from the projection.
+  Both publishers and consumers use the same exact key, with no prefix restoration.
+  `run` requires matching `cache-key` metadata and complete identity/environment records,
+  copies the closure into the store (`--no-check-sigs`) and sources `print-dev-env`.
+  Missing/mismatched metadata or a failed copy falls back to `nix develop .#web -c ...`.
+  Protected-main upkeep restores the exact entry and evaluates the current drvPath before
+  saving. A different drvPath for an existing key fails loudly, naming both paths and
+  requiring the missing path/input to be added to the hashed set and the format bumped.
+  A restored entry missing identity/environment metadata fails verification and is treated
+  as a miss for fill; only this explicit miss is recoverable, never a derivation mismatch.
+  Identity drift is checked before completeness, so missing environment metadata cannot
+  turn a recorded derivation mismatch into a recoverable miss.
+  The shell imports no repository source beyond its hashed definition: its upstream
+  Buck capability IFD reads immutable effect-utils/dependency sources covered by the lock
+  projection, not this checkout. Removing that upstream IFD is independent of cache lookup.
   Trust: the restored entry supplies store paths and a shell script that the job executes.
-  Main upkeep's `warm-fractal-web` fills the main-scoped entry. A pull request that misses saves
-  the entry under its own ref, only for `pull_request` events; this is a deliberate exception
-  to "only Main upkeep saves caches". GitHub scopes an entry to its ref, so a pull request's own
-  entry is only ever read by that pull request: no other pull request, merge group or main reads
-  it. Merge groups never save and wait for Main upkeep's entry.
+  Only protected-main upkeep's `warm-fractal-web` fills the main-scoped entry. Pull requests
+  and merge groups restore that exact entry when available and never publish shell copies.
+  A new web identity uses the cold-shell fallback until main upkeep has populated its entry.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
@@ -679,6 +710,12 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
+`scripts/ci-web-shell-test`, run in web execution, uses cheap lock/source fixtures to prove
+Rust-only flake and lock changes preserve the key while web input changes invalidate it.
+It also enforces the shell's declared argument/import/file-read boundary and upkeep's
+same-key derivation invariant. Each fractal-web job starts with one runner identity line containing
+CPU model, available core count, runner name and region when exposed by the environment
+(`unknown` otherwise).
 
 `scripts/web-skip-proof` prints the signed-skip decision for the web checks in the
 selection design's format (`check=… decision=skip|run key=… proof=… inputs_sha256=…
@@ -786,7 +823,7 @@ negative step attempts are rejected, while person assignees are valid actor refe
 
 The SDK unit lane uses an injected clock to guard task yielding and bounded decode/order
 work deterministically, including the >150KB roster burst. `SDK frame CPU budgets`
-runs separately with `apps/fractal-web/packages/st3-sdk/vitest.perf.config.ts`: after
+runs separately with `apps/fractal-web/packages/fractal-sdk/vitest.perf.config.ts`: after
 warming, seven fixed observations guard the median worst task below 16ms of calling-thread
 CPU, total burst CPU below 50ms, and a one-row delta below 16ms. These are not retries.
 Calling-thread CPU excludes host descheduling and unrelated Node worker-thread CPU.
@@ -941,7 +978,7 @@ To build and test with the assertions (what the daily run does), set both lines:
 What only exists or only means something with them:
 
 - The `ST2_TEST_*` fault and pause seams of the st2 catalog, event, message and agent publish code
-  (`crates/st-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
+  (`crates/fractal-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
   them carry `#[cfg_attr(not(debug_assertions), ignore = "...")]`: they are listed as ignored in the
   default profile and run in the assertions profile (`tests/agent_presentation.rs`,
   `tests/agent_publish.rs`, `tests/agent_resource.rs`, `tests/message_cli.rs`,
@@ -949,7 +986,7 @@ What only exists or only means something with them:
   `tests/event_e2e.rs`).
 - The daemon benchmark and load tests (`daemon_bench`, `first_sync`, `daemon_load`) skipped in any
   build that was not optimized by testing `cfg!(debug_assertions)`; they now ask
-  `st3::test_support::optimized_build()` (the executable is under `target/release/`).
+  `fractal_daemon::test_support::optimized_build()` (the executable is under `target/release/`).
 - Tests already behind `#[cfg(debug_assertions)]` (`ding/tests.rs`, `empty_authority_guard.rs`)
   run only in the assertions profile.
 
@@ -958,12 +995,26 @@ What only exists or only means something with them:
 `daily-long.yml` runs the long lanes once a day on `main` (05:07 UTC, and on dispatch): the
 lanes that need a VM, real sockets across daemon restarts, or an older st3. Today those are
 `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat`, plus the shared test
-producer they consume. Each runs exactly as Workspace CI runs it, because both workflows build
+producer they consume. It also runs the cost check as `daily-perf-cost` (see
+[Performance gate](#performance-gate)) as Main upkeep runs it, and the load tests as
+`daily-perf-load`, `daily-perf-load-hog` and `daily-perf-load-hog-macos` from the job definitions
+the Performance workflow dispatches (`.github/workflows/perf-load.ts`). `daily-macos-check` runs
+`cargo check --workspace --all-targets --locked` (the flags clippy uses on Linux and macOS) on the same
+Namespace Mac and from the same checkout and Nix setup as `daily-perf-load-hog-macos`: macOS CI no
+longer runs on each push to `main`, so a Linux-only item that a macOS build still reaches, such as
+a test-support module that uses `api::tile_endpoint`, turns this lane red the same day. It runs no
+tests, builds cold and keeps no cache, and has 45 minutes. The others run exactly as Workspace CI runs them, because both workflows build
 the jobs from the same steps (`testArchiveProducer`, `isolationVmSteps` and `linuxStageJob` in
 `.github/workflows/workspace-ci.ts`). The run uses Namespace at the lowest job priority. It has
 no `pick-runner`, because that job reads a secret, and it does no evidence signing. It writes no
 dependency cache that the warm-up jobs own. Its checks are named `daily-*`, so nothing on `main`
 looks like a required check.
+
+Two `daily-tests` shards run the whole selection the Workspace CI shards run, from the same test
+archive, with `ST_TEST_SCALE=full`. A test that keeps a smaller population, fewer proptest cases or a
+fixed seed on pull requests reads that variable and runs its original size here. Each one says in a
+comment why its invariant holds at the smaller size. Run one locally at full scale with
+`ST_TEST_SCALE=full cargo nextest run ...`.
 
 The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
 step and failed steps to the run summary. On red, it opens or comments on the one open issue
@@ -1027,15 +1078,18 @@ tests out of `linux-tests`.
 The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
 replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
 child inherits the explicit evidence parent, including when `CI_RUN_ID` is absent.
-The existing `perf-cost-logs` upload runs on failure and includes this visible tree;
+The existing `perf-cost-logs` upload (`daily-perf-cost-logs` in the daily run) runs on failure and includes this visible tree;
 its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
 leave partial evidence; an uploaded directory is not a completed-test verdict.
 
-`perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
-`main` push, on the stages' runner. It skips
-merge-queue entries, which wait only for required checks, so a queued entry needs no more runners
-than before (see [Measured concurrency](#measured-concurrency)); if it becomes required, it must
-run there too. It generates a store at scale 0.01 and one at 0.1 with the
+`perf-cost` runs `daemon_cost::` (`crates/fractal/tests/daemon_cost.rs`) on every `main` push (Main
+upkeep) and once a day as `daily-perf-cost` in the [daily long lanes](#daily-long-lanes), whose
+report shows its time and failures. It does not run on pull requests or merge-queue entries. On
+pull requests it took a 15.3-minute median on Namespace; on a quiet 24-thread machine it takes
+12.1 minutes and 45.5 core-minutes warm (69.5 cold, 12.7 GiB peak), 437 s of it the quarantined
+`link_minutes` case, against 74 core-minutes for the rest of a warm PR run: nearly 40% of PR
+compute for an optional lane. If it becomes required, it must run on pull requests and in the
+queue again. It generates a store at scale 0.01 and one at 0.1 with the
 `daemon_bench` generator, serves each from an in-process daemon, and counts the SQLite work of
 every route: virtual machine steps, steps through a table without an index, sorts and
 auto-index rows, read from each statement's counters as it finishes
@@ -1055,9 +1109,12 @@ with `opt-level = 1` only to generate the stores faster.
   8,007,288 steps for a store ten times larger) and the foreign-key columns #1103 indexed (a trim's
   work per deleted row grew 7.3 times, its full-scan steps 9.3 times).
 
-`perf-load` runs `daemon_load::` in a release build, in its own `Performance` workflow
-(`perf.yml`): on relevant `main` pushes and pull requests, nightly on `main`, and on dispatch.
-It always uses Namespace, including when Workspace CI picks ci1. It serves a store the size of a busy host's (scale 1, about 240,000 claims) to the
+`perf-load` runs `daemon_load::` in a release build once a day on `main` as `daily-perf-load` in the
+[daily long lanes](#daily-long-lanes), whose report shows its time and failures and whose issue
+reports a red run, and on any ref by dispatching the `Performance` workflow (`perf.yml`). Both
+build the jobs from `.github/workflows/perf-load.ts`. It ran on every `main` push with
+cancel-in-progress until 2026-10-20: in the 36 hours before, newer pushes cancelled 88 of 99 push
+runs and the other 11 failed, a red nobody saw. It always uses Namespace, including when Workspace CI picks ci1. It serves a store the size of a busy host's (scale 1, about 240,000 claims) to the
 request mix and rates that host's daemon reported in its busiest five-minute window (30 requests a
 second: harness events, mailbox pages, claims, desired state, delivery holds, replication rounds,
 renewals, status and work reads, and a person's reads), with the reconciler running and 30
@@ -1073,8 +1130,10 @@ main's last five reports and the corresponding slack below. The relative factor 
 route p99 and average daemon CPU; every absolute budget still applies independently, including
 the 300 ms roster budgets and 2-core CPU ceiling. The wider relative tolerance accommodates
 variation on shared runners; a passing historical comparison does not establish a paired effect
-or attribute a difference to runner noise. Each run downloads the newest five real reports from successful
-main runs' `perf-load-logs` artifacts. PR runs never supply baselines. Relative latency comparisons start once five
+or attribute a difference to runner noise. Each run downloads the newest five real reports from
+`main` runs' `perf-load-logs` artifacts whose load passed: the daily lanes' `daily-perf-load` job
+(the job's own conclusion, so a red unrelated lane does not discard it) and Performance's earlier
+`main` runs, newest first. PR runs never supply baselines. Relative latency comparisons start once five
 main reports exist; until then every path still checks its absolute p99 budget and every request
 error fails. CPU compares as soon as one main report exists, because it averages the whole run.
 Relative latency tolerates 5 ms of noise, or 50 ms when either path has fewer than 50 samples:
@@ -1089,12 +1148,15 @@ stands for one. Targets describe and never gate: the budgets and main's baseline
 
 Performance uses the small `.#perf` Nix shell and the opt-in `perf_load` test target (feature
 `perf-load`), which imports the same `daemon_load` and `daemon_bench` modules without compiling
-all integration fixtures. Completed main and PR runs retain seven-day build snapshots containing
+all integration fixtures. Completed main (daily) and PR runs retain seven-day build snapshots containing
 Cargo outputs, registry/git sources, a local sccache, and a signed Nix binary cache including the
 small shell closure. The build recipe includes the lockfiles, shell, manifests and Cargo config.
 Generated-store snapshots have a separate exact generator/schema key. Publication requires a
 complete real workload report, proving compilation and store generation finished; a missed latency
-budget still retains these valid caches. Cancelled and incomplete runs do not publish. Failed
+budget still retains these valid caches. Cancelled and incomplete runs do not publish, and the
+snapshot steps run after the load step, so the first run of a new recipe seeds it only by finishing
+cold within `perf-load`'s 60-minute limit (both workflows): daily run 39488050274 compiled for
+10m38s, generated stores for 966s and was cancelled at the earlier 30-minute limit. Failed
 reports never become main baselines. PRs prefer their own published snapshots, then fall back to
 trusted main artifacts. A PR snapshot must match the head
 repository and branch and a commit in the current PR; it cannot supply main's caches or anyone's
@@ -1111,9 +1173,9 @@ only for the exact saved Git SHA with a clean checkout, so a retry does not rebu
 unchanged sources merely because checkout refreshed their timestamps. Changed or dirty sources
 still take Cargo's normal validation path; the embedded source revision remains real.
 For a clean checkout Performance passes its actual full SHA as `AGENT_SPEC_REVISION`.
-The source-identity and shared CLI-version build scripts track that explicit value instead
-of unrelated Git index/ref timestamps. The CLI stamp still derives its real revision and
-commit time from Git.
+The build-identity script (crates/fractal-build-stamp, which only the st2 and st3 binaries depend on,
+so no library rebuilds for a new commit) tracks that explicit value instead of unrelated Git
+index/ref timestamps. The CLI stamp still derives its real revision and commit time from Git.
 Dirty checkouts continue to derive their identity from Git.
 PR snapshots also remain for seven days, outside the shared dependency-cache pool.
 The compiler-cache server stays alive during cold store generation; publication does not require
@@ -1133,8 +1195,8 @@ continues using the Actions cache with the same generator/schema keys.
 Run either locally with `TMPDIR=/var/tmp`; `ST_BENCH_DIR` keeps the generated stores between runs:
 
 ```sh
-cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads 1
-ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
+cargo test -p fractal --test integration daemon_cost:: -- --nocapture --test-threads 1
+ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p fractal --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
 #### The daemon beside a seat-priority hog
@@ -1152,26 +1214,29 @@ not past it at the start, at its lowest 5-second sample or at the end.
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
 every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
-`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
-`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+`GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
 not, until `ST_LOAD_HOG_STRICT=1`.
 
 ```sh
 ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
-  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+  -p fractal --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
 nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
 ```
 
-The Performance workflow runs it as the `perf-load-hog` job, with `continue-on-error` and its table
-in the step summary and the `perf-load-hog-logs` artifact. It runs on pushes to main and manual
-dispatch, not on pull requests: it takes a second performance runner for up to 45 minutes. It is
-no required check until its numbers are stable. "Without the hog" is
+The daily long lanes run it on `main` as `daily-perf-load-hog`, with its table in the step summary
+and the `perf-load-hog-logs` artifact; a failed request or a hog that never loaded the machine turns
+the lane red and reaches the daily issue, while a missed target only reports. The Performance
+workflow runs it as `perf-load-hog` by manual dispatch, with `continue-on-error`. It never runs on
+pull requests: it takes a second performance runner for up to 45 minutes. It is no required check
+until its numbers are stable. "Without the hog" is
 the host's load as it was: on a shared host that is not an idle machine, and the report gives the
 load average. Keep a Mac's load average under 10 outside the test window.
 
-`perf-load-hog-macos` runs the same stage on a macOS runner under `taskpolicy -b`, by manual dispatch
-only, and keeps the compiled test binary in the `perf-load-hog-macos` artifact. A Mac of the fleet
+`perf-load-hog-macos` runs the same stage on a macOS runner under `taskpolicy -b`, once a day on `main`
+as `daily-perf-load-hog-macos` and by dispatching Performance, and keeps the compiled test binary in
+the `perf-load-hog-macos` artifact. A Mac of the fleet
 runs that binary (`ST_LOAD_GATE=1 ST_LOAD_HOG=1 ./perf_load-macos-arm64 a_seat_priority_hog --nocapture`);
 nothing is built on a Mac.
 
@@ -1198,7 +1263,7 @@ the machine.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
 2-core ceiling for the daemon, with no baseline to compare. Main's relative gate (twice the worst
-of its last five reports) runs on the PR in Performance. Put on the PR the report table the run
+of its last five reports) runs when you dispatch Performance on the branch. Put on the PR the report table the run
 printed, the branch and commit, and one line saying it ran alone in the slot. For a change meant to
 make a path cheaper, put main's table beside it. Intake reviews that evidence and the merge queue
 checks the change; the slot gates nothing.
@@ -1285,9 +1350,10 @@ Apply the fifth live ruleset check after this workflow has passed on main.
 ## Generated files and existing workflows
 
 All workflow YAML and `.github/repo-settings.json` are generated from neighboring `.genie.ts`
-files. The `effect-utils` flake input supplies the generator library and CLI. The small, separate
-`genie` shell creates `repos/effect-utils` as a symlink to the exact input's Nix store path;
-`repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
+files. The `effect-utils` flake input supplies the genie CLI and the `effect-utils` member in
+`megarepo.lock` supplies the generator library: run `mr apply` first, which links
+`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/st-test` run the same command; the small,
+separate `genie` shell only warns when it is missing). `repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
 shell is not changed to depend on genie, so generation does not build its PTY/collector tools.
 
 ```sh
@@ -1308,7 +1374,7 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
-| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
+| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 
@@ -1365,8 +1431,8 @@ Namespace limits CPU and memory per platform; a workflow run is not a fixed unit
 With the current 8x16 stage runners, a merge-queue Workspace CI group initially starts four
 8-vCPU/16-GiB stage jobs and two 8-vCPU/16-GiB profile jobs: 48 vCPUs and 96 GiB at peak.
 The TypeScript client job follows generator freshness and reuses its runner slot.
-PR runs also start `perf-cost`, taking their initial peak to 56 vCPUs and 112 GiB. Main upkeep
-runs that check separately; its cache-fill jobs normally finish after their lookup-only probes.
+PR runs no longer start `perf-cost` (at this measurement it took their initial peak to 56 vCPUs
+and 112 GiB). Main upkeep and the daily long lanes run that check separately; Main upkeep's cache-fill jobs normally finish after their lookup-only probes.
 Five complete merge-queue groups need 240 vCPUs and 480 GiB, within the Linux pool limit;
 `max_entries_to_build` was 5 at this historical measurement; current capacity policy appears in [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes).
 PRs, main pushes and other workloads share that capacity; Namespace queues jobs until resources
@@ -1408,9 +1474,11 @@ for the distinction between build concurrency and merge batch size.
 
 ## Superseded merge groups
 
-Push concurrency in Main upkeep, Performance and the public guard is scoped to protected main.
-A new main push cancels obsolete automatic work; its upkeep still probes and fills the current
-main's exact cache entries. PR groups use the PR number, rather than its head SHA, so a new head
+Push concurrency in Main upkeep and the public guard is scoped to protected main.
+In the public guard a new main push cancels obsolete automatic work. Main upkeep never cancels a
+started run: main pushes share one group, GitHub keeps only the newest pending run, so a burst of
+merges coalesces into one more upkeep that probes and fills the current main's exact cache
+entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
 replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
 immutable workflow revisions can remain queued: before cancelling a backlog entry, compare its
 event, source and PR state with current main or the PR's latest head, retain its original timing

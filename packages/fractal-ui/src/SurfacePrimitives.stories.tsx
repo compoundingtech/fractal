@@ -36,7 +36,7 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     {/* LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback */}
   </main>
 }
-const meta = { title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
+const meta = { title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises selection, focus, shortcuts and surface tokens without domain state." }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
 export default meta
 type Story = StoryObj<typeof meta>
 
