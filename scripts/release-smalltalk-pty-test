@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     env = {**os.environ, 'CARGO_BUILD_BUILD_DIR': str(root / 'shared-intermediates'),
            'CARGO_ENCODED_RUSTFLAGS': '', 'CARGO_NET_OFFLINE': 'true',
-           'CARGO_INCREMENTAL': '0'}
+           'CARGO_INCREMENTAL': '0', 'CARGO_TERM_COLOR': 'never'}
     # No registry dependencies, PTY checkout, Zig or release binaries are needed.
     target = subprocess.check_output(['rustc', '-vV'], text=True).split('host: ')[1].splitlines()[0]
     for revision, symbol in [('old', 'old'), ('new', 'kill')]:
