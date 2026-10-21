@@ -1353,6 +1353,7 @@ fn comparable_peers_name_differing_tables_and_legacy_peers_keep_their_digest() {
     let source = Store::open_memory("alder").unwrap();
     write_audit_history(&source);
     let target = Store::open_memory("birch").unwrap();
+    target.capture_divergences(true);
     receive_and_project(
         &target,
         "alder",
