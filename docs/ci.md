@@ -1121,6 +1121,23 @@ renewals, status and work reads, and a person's reads), with the reconciler runn
 concurrent seat event long-polls. Quiet polls have a 31-second budget for their intentional
 30-second wait; mailbox WebSockets require authenticated native drivers and are excluded.
 The client usage endpoint has a dedicated 0.5-request/second scenario with a 300 ms p99 budget.
+
+Each regime of the budgeted run lasts 400 s, so every budgeted p99 rests on at least 300 samples;
+over fewer, a p99 is one of the run's slowest few (the replication exchange's, over 97 samples at
+120 s, was the second slowest). A kind keeps the busy host's rate where that is enough (the
+replication exchange's 0.8 a second gives 320) and is otherwise sampled just often enough: 0.75 a
+second, or 6.75 across the nine person-read paths. The 22 roster and window first snapshots are not
+a p99: each one must meet its budget. Every report also records `runner_reference_ms`, the fastest
+of three single-core sorts of 2^21 values timed before the daemon starts: runners of one Namespace
+machine type differ by about 2x, and the 1.6 to 2.1 s replication-exchange p99s of 10-16 to 10-20
+all came from the slower ones.
+
+At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
+"still being prepared", or a window's resync before its first snapshot. Today the store withdraws
+every list once per chunk while it projects a replication backlog, so these come in bursts of a
+few seconds ([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)). The report keeps
+them apart from failed requests, under `unavailable` with the seconds they spanned, and the step
+summary shows them. They fail nothing until the store fix lands and turns `AVAILABILITY_GATED` on.
 Generated usage history contains cumulative response rollups for long-lived standing sessions
 with stable attribution, so this scenario exercises many observations per series and period
 baselines and totals rather than an empty report or one series per observation.

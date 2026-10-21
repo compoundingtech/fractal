@@ -487,8 +487,11 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_unix_peer_is_bound_to_its_harness_environment() {
+    // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
+    // with this fixture's identity and bind nothing.
     let mut child = std::process::Command::new("sleep")
         .arg("10")
+        .env_remove("FRACTAL_AGENT")
         .env("ST_AGENT", "agent/fixture/worker")
         .spawn()
         .unwrap();
@@ -4592,6 +4595,7 @@ fn doctor_names_shared_tables_that_differ_at_equal_inventory() {
     state.fleet_id = Some("fleet/audit".into());
     state.configured_peers = vec!["alder".into()];
     state.store.bind_fleet("fleet/audit").unwrap();
+    state.store.capture_divergences(true);
     let source = Store::open_memory("alder").unwrap();
     source.bind_fleet("fleet/audit").unwrap();
     let original = source.export_replication_summary("fleet/audit").unwrap();

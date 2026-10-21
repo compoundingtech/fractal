@@ -3,6 +3,8 @@
 
   scripts/evidence-gc [--repo .] [--remote origin] [--fetch] [--apply] [--main origin/main]
                       [--retention FILE] [--as-of UNIX] [--head COMMIT ...] [--heads-from FILE] [--plan-out FILE]
+                      [--lock-config FILE]
+  scripts/evidence-gc --relock-only --lock-config FILE
 
 Dry run by default: it reads the records in --repo and prints the plan, changing nothing. With --fetch it first fetches
 every `refs/tags/evidence/*`, `refs/notes/evidence/*` and `refs/notes/evidence-input/*`, main's recent history and the tip
@@ -30,11 +32,22 @@ The FIRST LAYOUT (`refs/notes/evidence/<record>`, no tree in the name): its tree
 MIGRATED (the tree-prefixed ref `refs/notes/evidence/<tree>/<record>` is created, then the old name removed); in a dead tree
 it goes with its tree. Refs that are not well-formed records, and everything outside the evidence namespaces, are never touched.
 
+THE LOCK WINDOW (--lock-config FILE): a protection that refuses deleting evidence tags on the remote, such as a tag ruleset, is
+turned off only around the deletion of the plan's tags. FILE is {"version": 1, "unlock": ARGV, "relock": ARGV, "check": ARGV}: commands
+run without a shell, so moving the credential (a gh login today, a sekrets profile later) is a change of FILE alone. "check" exits 0
+only while the protection is on. The order: the migrations and the notes first (nothing protects notes); then "check" (found off:
+relock, delete no tag, exit 4); list the remote's evidence tags; "unlock"; delete the tags; "relock" in a finally that also runs on
+SIGTERM, SIGINT and SIGHUP, retried; "check" again; list again. A tag that disappeared or moved and that the plan did not name, or a
+protection still off at the end, is an alarm: exit 4. One line on stderr, and `lock` in the summary, record the window:
+  evidence-gc-lock v1 unlocked_at=... relocked_at=... window_s=... tags_deleted=N unexplained=N final=on|OFF
+--relock-only runs "relock" and "check" alone (a unit's ExecStopPost, after a kill no finally survives).
+
 FAILS CLOSED: if a commit named by --head cannot be turned into a tree, or no branch tip is known at all, --apply refuses to
 delete anything.
 
   exit 0  done (or a dry run)    exit 1  a step failed or a head could not be resolved    exit 2  usage
   exit 3  the live set alone exceeds cap_records (nothing live was deleted)
+  exit 4  the lock window raised an alarm (see THE LOCK WINDOW)
 """
 import argparse
 import base64
@@ -46,6 +59,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -326,7 +340,109 @@ def header_for_token():
     return token, ('Authorization: Basic ' + base64.b64encode(f'x-access-token:{token}'.encode()).decode() if token else None)
 
 
-def apply_remote(repo, remote, migrate, doomed):
+LOCK_KEYS = ('unlock', 'relock', 'check')
+
+
+def load_lock(path):
+    with open(path) as handle:
+        try:
+            value = json.load(handle)
+        except ValueError as error:
+            raise Usage(f'--lock-config is not valid JSON: {error}')
+    if not isinstance(value, dict) or value.get('version') != 1 or set(value) != {'version', *LOCK_KEYS} or not all(
+            isinstance(value[k], list) and value[k] and all(isinstance(a, str) for a in value[k]) for k in LOCK_KEYS):
+        raise Usage('--lock-config must be {"version": 1, "unlock": ARGV, "relock": ARGV, "check": ARGV}, each a nonempty list of strings')
+    return value
+
+
+def lock_run(lock, name):
+    """(ok, the end of its output). A command that cannot start or hangs is a failure, never an exception."""
+    try:
+        done = subprocess.run(lock[name], stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)[-300:]
+    return done.returncode == 0, (done.stdout + done.stderr).decode(errors='replace').strip()[-300:]
+
+
+def relock(lock, report):
+    for attempt in range(3):
+        ok, out = lock_run(lock, 'relock')
+        if ok:
+            break
+        report.setdefault('relock_failures', []).append(out)
+        time.sleep(2 ** attempt)
+    report['relocked_at'] = now_iso()
+    ok, out = lock_run(lock, 'check')
+    report['final'] = 'on' if ok else 'OFF'
+    if not ok:
+        report['final_check'] = out
+    return ok
+
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds')
+
+
+class Interrupted(Exception):
+    pass
+
+
+def remote_tags(repo, remote, header):
+    out = git(repo, 'ls-remote', remote, f'{TAGS}*', header=header).stdout.decode().split('\n')
+    return {line.split()[1]: line.split()[0] for line in out if len(line.split()) == 2}
+
+
+def lock_window(repo, remote, tags, push, failed, lock, header):
+    """Delete `tags` on the remote with its protection off for exactly that long; the report says what happened."""
+    report = {'tags_planned': len(tags)}
+    ok, out = lock_run(lock, 'check')
+    if not ok:
+        report['found_unlocked'] = out or 'check failed'
+        relock(lock, report)
+        return report
+    before = remote_tags(repo, remote, header)
+
+    def interrupt(number, frame):
+        raise Interrupted(signal.Signals(number).name)
+    saved = {number: signal.signal(number, interrupt) for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    started = time.monotonic()
+    try:
+        ok, out = lock_run(lock, 'unlock')
+        if not ok:
+            report['unlock_failed'] = out or 'unlock failed'
+            failed.append(f'unlock failed: {report["unlock_failed"]}')
+        else:
+            report['unlocked_at'] = now_iso()
+            push([f':{ref}' for ref in tags])
+    except Interrupted as error:
+        report['interrupted'] = str(error)
+        failed.append(f'interrupted by {error}')
+    finally:
+        for number in saved:
+            signal.signal(number, signal.SIG_IGN)  # nothing may interrupt the relock
+        relock(lock, report)
+        report['window_s'] = round(time.monotonic() - started, 1)
+        for number, handler in saved.items():
+            signal.signal(number, handler)
+    after = remote_tags(repo, remote, header)
+    planned = set(tags)
+    report['tags_deleted'] = sum(1 for ref in planned if ref in before and ref not in after)
+    report['unexplained'] = sorted(ref for ref, oid in before.items() if ref not in planned and after.get(ref) != oid)
+    return report
+
+
+def lock_line(report):
+    return ('evidence-gc-lock v1 ' + ' '.join(f'{k}={report.get(k, "-")}' for k in ('unlocked_at', 'relocked_at', 'window_s', 'tags_deleted'))
+            + f' unexplained={len(report.get("unexplained", []))} final={report.get("final", "-")}'
+            + (' found_unlocked=true' if 'found_unlocked' in report else ''))
+
+
+def lock_alarm(report):
+    return bool(report) and (report.get('final') != 'on' or bool(report.get('unexplained')) or 'found_unlocked' in report)
+
+
+def apply_remote(repo, remote, migrate, doomed, lock=None):
+    """(failures, lock report or None)."""
     token, header = header_for_token()
     failed = []
 
@@ -336,11 +452,19 @@ def apply_remote(repo, remote, migrate, doomed):
             if done.returncode != 0:
                 text = (done.stdout + done.stderr).decode(errors='replace')
                 failed.append((text.replace(token, '***') if token else text).strip()[-300:])
-    # Create the new names first, so a failure leaves both and loses nothing; then remove everything doomed and the old names.
+    # Create the new names first, so a failure leaves both and loses nothing; then remove the notes, which nothing protects, and the
+    # old names; the tags last, inside the lock window when there is one.
     push([f'{old}:{new}' for old, new in migrate])
-    if not failed:
-        push([f':{ref}' for ref in doomed] + [f':{old}' for old, _ in migrate])
-    return failed
+    if failed:
+        return failed, None
+    tags = [ref for ref in doomed if ref.startswith(TAGS)]
+    push([f':{ref}' for ref in doomed if not ref.startswith(TAGS)] + [f':{old}' for old, _ in migrate])
+    if failed or not tags:
+        return failed, None
+    if lock is None:
+        push([f':{ref}' for ref in tags])
+        return failed, None
+    return failed, lock_window(repo, remote, tags, push, failed, lock, header)
 
 
 def apply_local(repo, migrate, doomed):
@@ -365,11 +489,22 @@ def main(argv):
     parser.add_argument('--repository', default='compoundingtech/smalltalk', help='OWNER/NAME the skip policy is read for')
     parser.add_argument('--policy-from', help='revision whose .st/evidence-skip-policy.json says which checks have inputs (default --main)')
     parser.add_argument('--plan-out', help='also write the plan, with its inputs digest, to this file')
+    parser.add_argument('--lock-config', help='the unlock, relock and check commands of the protection on the remote\'s evidence tags')
+    parser.add_argument('--relock-only', action='store_true', help='run the relock and check commands of --lock-config, nothing else')
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return 2 if error.code else 0
     try:
+        lock = load_lock(args.lock_config) if args.lock_config else None
+        if args.relock_only:
+            if lock is None:
+                raise Usage('--relock-only needs --lock-config')
+            report = {}
+            relock(lock, report)
+            print(lock_line(report), file=sys.stderr)
+            print(json.dumps({'mode': 'relock-only', 'lock': report}, indent=2))
+            return 0 if report['final'] == 'on' else 4
         if args.fetch:
             if not args.remote:
                 raise Usage('--fetch needs --remote')
@@ -444,13 +579,24 @@ def main(argv):
             summary['refused'] = 'a live head could not be resolved to a tree: nothing was changed'
             status = 1
         elif args.apply and (doomed or migrate):
-            failed = apply_remote(args.repo, args.remote, migrate, doomed) if args.remote else []
+            failed, report = apply_remote(args.repo, args.remote, migrate, doomed, lock) if args.remote else ([], None)
+            if report is not None:
+                summary['lock'] = report
+                print(lock_line(report), file=sys.stderr)
             if failed:
                 summary['failed'] = failed
                 status = 1
-            else:
-                apply_local(args.repo, migrate, doomed)
+            elif report and 'found_unlocked' in report:
+                status = 4  # nothing of the tags was touched; the notes and migrations were, so the local refs follow them below
+            if not failed:
+                kept = set() if not report or 'found_unlocked' not in report else {ref for ref in doomed if ref.startswith(TAGS)}
+                apply_local(args.repo, migrate, [ref for ref in doomed if ref not in kept])
                 summary['applied'] = True
+            if lock_alarm(report):
+                summary['alarm'] = 'the lock window: ' + ('the protection was found off' if 'found_unlocked' in report else
+                                                           'the protection is not on' if report.get('final') != 'on' else
+                                                           'tags the plan did not name disappeared or moved')
+                status = 4
         if status == 0 and plan['protected_records'] > retention['cap_records']:
             summary['alert'] = f'the live set ({plan["protected_records"]} records) is over the cap ({retention["cap_records"]}); nothing live was deleted'
             status = 3

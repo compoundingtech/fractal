@@ -71,4 +71,4 @@ On your daemon machine, make a separate challenge for the phone:
 st devices --as person/ada pair --full-control 'Garden iPhone'
 ```
 
-In the app, enter the reachable gateway URL, pairing ID, and code. Open **Agents**, select your worker, and send a message. [Build and run the iOS app](ios-app.md) has the Xcode prerequisites, simulator and Debug workflow, signing details, and pairing troubleshooting.
+In the app, enter the reachable gateway URL, pairing ID, and code. Open **Agents**, select your worker, and send a message. To read a document, open **Resources**, then **Documents**: tap one in the list, or type `doc/NAME` and tap **Open**. A `doc/…` link in a message, a mission or a step opens that document; inside it, tap a link to follow it and use back to return. Documents are read-only. [Build and run the iOS app](ios-app.md) has the Xcode prerequisites, simulator and Debug workflow, signing details, and pairing troubleshooting.
