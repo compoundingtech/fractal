@@ -250,6 +250,8 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
   const warning = unavailable.querySelector<HTMLElement>('[data-mission-unavailable]')!
   await expect(warning).toHaveTextContent('Mission info unavailable')
   await expect(warning.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+  await expect(getComputedStyle(warning.querySelector('svg')!).display).toBe('inline-block')
+  await expect(rect(warning).height).toBeLessThanOrEqual(rect(line2(unavailable)).height)
   await expect(warning.closest('button')).toBeNull()
   await expect(unavailable.querySelector('[data-mission-pill], [data-mission-trigger], [data-queued-missions]')).toBeNull()
   await expect(line2(unavailable).textContent).toBe(' Mission info unavailable·build-1')

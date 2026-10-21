@@ -89,7 +89,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
       {mission !== undefined
         ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} />
         : <>{unavailable
-          ? <span data-mission-unavailable {...stylex.props(styles.unavailable)}><svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12"><path d="M6 1 11 10H1Z" fill="none" stroke="currentColor" /><path d="M6 4v3m0 1v1" stroke="currentColor" /></svg> Mission info unavailable</span>
+          ? <span data-mission-unavailable {...stylex.props(styles.unavailable)}><svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" {...stylex.props(styles.warningIcon)}><path d="M6 1 11 10H1Z" fill="none" stroke="currentColor" /><path d="M6 4v3m0 1v1" stroke="currentColor" /></svg> Mission info unavailable</span>
           : <span data-row-field="status-label">{row.statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
     {!displayOnly && <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
@@ -135,6 +135,7 @@ const styles = stylex.create({
   line2BeforeMenu: { gridColumn: '2 / -2' },
   sep: { paddingInline: s.xs, color: ink.fgMuted },
   unavailable: { color: ink.fgMuted },
+  warningIcon: { display: 'inline-block', verticalAlign: 'middle' },
   // The card mounts on pointer enter; the delayed entrance is the 150ms hover intent, so a pass across rows never flashes cards.
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationDelay: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },
 })
