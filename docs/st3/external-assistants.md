@@ -81,7 +81,7 @@ or credential permissions.
 ### Nix package and client configuration
 
 `nix build .#st-mcp` and `nix run .#st-mcp -- --socket SOCKET --credential-file TOKEN_FILE`
-select the local adapter. Both binaries build from the existing `st-chatgpt` crate
+select the local adapter. Both binaries build from the `fractal-chatgpt` crate
 in one derivation; `.#st-chatgpt` keeps `st-chatgpt` as its default program.
 Use an installed absolute executable path in client configuration.
 The neutral paths below must be replaced with local paths; they contain no secrets.
