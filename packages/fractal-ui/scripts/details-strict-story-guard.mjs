@@ -9,6 +9,9 @@ export async function strictStoryGuard(page, base) {
   originalOn('pageerror', error => errors.push({ kind: 'page', message: error.message }))
   await page.addInitScript(() => {
     window.__dt10StrictEvents = []
+    window.__kitPlayTiming = { phases: [], a11y: [] }
+    document.addEventListener('DOMContentLoaded', () => { window.__kitPlayTiming.dom = performance.now() }, { once: true })
+    window.addEventListener('kit-a11y-timing', event => { window.__kitPlayTiming.a11y.push(event.detail) })
     // A failed a11y report names its axe rules and the nodes that broke them (or the error that stopped axe),
     // so the failure message says what to fix.
     const summarize = result => result?.error ? { error: String(result.error?.message ?? result.error) } : { violations: (result?.violations ?? []).map(({ id, impact, nodes }) => ({ id, impact, nodes: nodes.map(({ target, html, failureSummary }) => ({ target, html: html.slice(0, 200), failureSummary })) })) }
@@ -16,14 +19,24 @@ export async function strictStoryGuard(page, base) {
       const channel = window.__STORYBOOK_ADDONS_CHANNEL__
       if (!channel) return
       clearInterval(timer)
-      for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status, result }) => ({ type, status, ...(status === 'passed' ? {} : { failure: summarize(result) }) })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
+      channel.on('storyRenderPhaseChanged', payload => {
+        window.__kitPlayTiming.phases.push({ storyId: payload.storyId, phase: payload.newPhase, at: performance.now() })
+      })
+      channel.on('storyFinished', payload => {
+        window.__kitPlayTiming.finished = { storyId: payload.storyId, at: performance.now() }
+      })
+      for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status, result }) => ({ type, status, ...(type === 'kit-filter-benchmark' ? { result } : {}), ...(status === 'passed' ? {} : { failure: summarize(result) }) })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
     }, 5)
   })
   const check = async () => {
     if (!page.url().includes('/iframe.html')) return
-    const events = await page.evaluate(() => window.__dt10StrictEvents ?? [])
+    const { events, timing } = await page.evaluate(() => ({
+      events: window.__dt10StrictEvents ?? [],
+      timing: window.__kitPlayTiming ? { ...window.__kitPlayTiming, observed: performance.now() } : undefined,
+    }))
     const finished = events.filter(event => event.name === 'storyFinished'), exceptions = events.filter(event => event.name !== 'storyFinished')
     const record = { url: page.url(), finished, exceptions, errors: [...errors], allowed404s: [...ignored] }
+    record.timing = timing
     if (errors.length || exceptions.length || !finished.length || finished.some(event => event.payload.status !== 'success')) throw new Error(JSON.stringify({ rule: 'strict-storybook-readiness', ...record }))
     records.push(record)
   }

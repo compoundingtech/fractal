@@ -313,7 +313,32 @@ export const FilterBehavior: Story = {
 
 export const FilterKeystrokeToPaint: Story = {
   ...FilterBehavior,
-  play: async ({ canvasElement }) => playFilterProbes(canvasElement, true),
+  play: async ({ canvasElement, reporting }) => {
+    try {
+      await playFilterProbes(canvasElement, true)
+    } finally {
+      // Read already-completed samples only after measurement. Reporting must not add
+      // instrumentation to a keystroke, change a control, or hide an assertion failure.
+      const probes = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid^="filter-probe-"]')]
+        .filter(root => root.dataset.pooledRatio !== undefined)
+        .map(root => {
+          const [theme, width] = root.dataset.testid!.slice('filter-probe-'.length).split('-')
+          const pooled = (key: 'filterSamples' | 'referenceSamples') => {
+            const samples = read(root, key)
+            return [...samples.slice(0, sampleCount), ...samples.slice(-sampleCount)]
+          }
+          return {
+            width: Number(width), theme,
+            filterP90Milliseconds: p90(pooled('filterSamples')),
+            referenceP90Milliseconds: p90(pooled('referenceSamples')),
+            pooledRatio: Number(root.dataset.pooledRatio),
+            busyControlRatio: Number(root.dataset.busyRatio),
+            threshold: ratioBudget,
+          }
+        })
+      reporting.addReport({ type: 'kit-filter-benchmark', version: 1, status: 'passed', result: { probes } })
+    }
+  },
 }
 
 const titleText = (row: HTMLElement) => row.querySelector<HTMLElement>('[data-row-column="title-text"]')!

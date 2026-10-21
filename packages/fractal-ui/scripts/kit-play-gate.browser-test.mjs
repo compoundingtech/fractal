@@ -12,13 +12,28 @@ const iframe = report => `<!doctype html><meta charset="utf-8"><title>Gate fixtu
 <script>
   const listeners = new Map()
   const manual = new URLSearchParams(location.search).get('globals') === 'a11y.manual:!true'
+  const id = new URLSearchParams(location.search).get('id')
+  const emit = (name, payload) => { for (const listener of listeners.get(name) ?? []) listener(payload) }
   window.__STORYBOOK_ADDONS_CHANNEL__ = {
     on(name, listener) {
-      listeners.set(name, listener)
-      if (name === 'storyErrored') queueMicrotask(() => listeners.get('storyFinished')({
-        storyId: new URLSearchParams(location.search).get('id'), status: ${JSON.stringify(report?.some(({ status }) => status === 'failed') ? 'error' : 'success')},
-        reporters: ${report === undefined ? "manual ? [] : [{ type: 'a11y', status: 'passed' }]" : JSON.stringify(report)},
-      }))
+      if (!listeners.has(name)) listeners.set(name, [])
+      listeners.get(name).push(listener)
+      if (name === 'storyErrored') setTimeout(async () => {
+        const phase = newPhase => emit('storyRenderPhaseChanged', { storyId: id, newPhase })
+        phase('playing')
+        await new Promise(resolve => setTimeout(resolve, 2))
+        phase('played')
+        phase('completing')
+        if (!manual) {
+          window.dispatchEvent(new CustomEvent('kit-a11y-timing', { detail: { storyId: id, phase: 'start', at: performance.now() } }))
+          await new Promise(resolve => setTimeout(resolve, 2))
+          window.dispatchEvent(new CustomEvent('kit-a11y-timing', { detail: { storyId: id, phase: 'end', at: performance.now() } }))
+        }
+        emit('storyFinished', {
+          storyId: id, status: ${JSON.stringify(report?.some(({ status }) => status === 'failed') ? 'error' : 'success')},
+          reporters: ${report === undefined ? "manual ? [] : [{ type: 'a11y', status: 'passed' }]" : JSON.stringify(report)},
+        })
+      }, 0)
     },
   }
 </script>`
@@ -79,6 +94,15 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   assert.equal(receipt.pass, true)
   assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 7, 17])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
+  for (const row of receipt.rows) {
+    assert.ok(row.timings.playMilliseconds > 0)
+    assert.ok(row.timings.a11yMilliseconds > 0)
+    const sum = ['bootstrapMilliseconds', 'playMilliseconds', 'a11yMilliseconds', 'lifecycleMilliseconds', 'completionObservationMilliseconds'].reduce((sum, name) => sum + row.timings[name], 0)
+    assert.ok(Math.abs(sum - row.timings.readinessAfterDomMilliseconds) < 0.001)
+  }
+  assert.equal(receipt.phaseMilliseconds.a11yMilliseconds.samples, receipt.cases)
+  assert.equal(receipt.topCases.length, 17)
+  assert.equal(receipt.storyFamilies.reduce((sum, family) => sum + family.cases, 0), receipt.cases)
 })
 
 test('fixture code can inject its policy through the runner parameter, not process environment', { timeout: 60000 }, async () => {
@@ -115,6 +139,7 @@ test('critical set without a11y selects tagged stories and asks addon-a11y not t
   assert.equal(code, 0)
   assert.deepEqual([receipt.set, receipt.a11y, receipt.stories, receipt.cases], ['critical', 'off', 1, 4])
   assert.ok(receipt.rows.every(row => row.id === 'kit--critical' && row.strict.every(record => record.url.includes('globals=a11y.manual'))))
+  assert.ok(receipt.rows.every(row => row.timings.a11yMilliseconds === 0))
 })
 
 test('the per-commit set refuses a build whose critical stories are not the ones it names', { timeout: 60000 }, async () => {
@@ -146,5 +171,23 @@ test('invalid options fail before any case runs', { timeout: 60000 }, async () =
     // Only the full set is sharded.
     { KIT_PLAY_SET: 'commit', KIT_PLAY_SHARD_COUNT: '2' }, { KIT_PLAY_SET: 'critical', KIT_PLAY_SHARD_INDEX: '1', KIT_PLAY_SHARD_COUNT: '2' }]) {
     await assert.rejects(() => runGate({ env }), /ENOENT/)
+  }
+})
+
+test('structured benchmark reports survive successful and failed case receipts', { timeout: 60000 }, async () => {
+  const probes = [240, 440].flatMap(width => ['dark', 'light'].map(theme => ({
+    width, theme, filterP90Milliseconds: 30, referenceP90Milliseconds: 20,
+    pooledRatio: 1.5, busyControlRatio: 4.1, threshold: 3,
+  })))
+  for (const status of ['passed', 'failed']) {
+    const { code, receipt } = await runGate({
+      env: { KIT_PLAY_SET: 'critical' },
+      report: [
+        { type: 'a11y', status, result: { violations: [] } },
+        { type: 'kit-filter-benchmark', status: 'passed', result: { probes } },
+      ],
+    })
+    assert.equal(code, status === 'passed' ? 0 : 1)
+    assert.ok(receipt.rows.every(row => JSON.stringify(row.filterBenchmark) === JSON.stringify(probes)))
   }
 })
