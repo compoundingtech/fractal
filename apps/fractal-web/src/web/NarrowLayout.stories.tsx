@@ -258,7 +258,6 @@ const closeWithEscape = async (dialog: HTMLElement, trigger: HTMLElement) => {
  * Agents drawer (320 px, less at narrower widths): details open bottom end on the row's menu trigger, fit the viewport
  * less 8 px gutters, own focus, and Escape closes only the details, returning focus to the menu trigger with the
  * drawer still open. Wider windows keep details to the right of the docked sidebar row.
- * The kit scenario checker reads only packages/fractal-ui/src stories, so this declaration has no exemption pin.
  */
 export const AgentRowDetails: Story = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'The real workspace over the existing deterministic fixture roster places one fixed row in the phone Agents drawer and the docked sidebar to verify details placement, viewport bounds, focus ownership and Escape focus return.' } },
