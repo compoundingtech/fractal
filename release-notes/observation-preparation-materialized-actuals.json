@@ -3,7 +3,7 @@
   "summary": "Read resource observation preparation from a rebuildable canonical projection instead of replaying resource and item history",
   "replay": {
     "status": "changed",
-    "detail": "Opening an existing store builds the local preparation projection from retained claims. Canonical late arrivals, repairs and ordering changes refresh affected subjects; historical at-index reads continue to use the canonical fold. Replicated claim identity and history are unchanged."
+    "detail": "Opening an existing store builds the local preparation projection from retained claims, discovering resource subjects through indexed subject-range and observation-kind searches rather than scanning the whole claim log. Canonical late arrivals, repairs and ordering changes refresh affected subjects; historical at-index reads continue to use the canonical fold. Replicated claim identity and history are unchanged."
   },
   "schema": {
     "status": "changed",

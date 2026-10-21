@@ -412,3 +412,20 @@ fn preparation_rekeys_other_subjects_legacy_siblings_after_batch_and_index_chang
         transaction.commit().unwrap();
     }
 }
+
+#[test]
+fn preparation_rebuild_subject_discovery_searches_indexes_without_scanning_claims() {
+    let store = Store::open_memory("example-preparation-plan").unwrap();
+    let connection = store.readers.get();
+    let plan = connection.prepare(
+        "EXPLAIN QUERY PLAN SELECT DISTINCT subject FROM claims
+         WHERE (claims.subject >= 'resource/' AND claims.subject < 'resource0')
+            OR claims.kind='resource.observed'",
+    ).unwrap().query_map([], |row| row.get::<_, String>(3))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    eprintln!("preparation rebuild subject discovery plan:\n{}", plan.join("\n"));
+    assert!(plan.iter().any(|step| step == "MULTI-INDEX OR"), "{plan:?}");
+    assert!(plan.iter().filter(|step| step.starts_with("SEARCH claims ")).count() >= 2,
+        "{plan:?}");
+    assert!(!plan.iter().any(|step| step.starts_with("SCAN claims")), "{plan:?}");
+}

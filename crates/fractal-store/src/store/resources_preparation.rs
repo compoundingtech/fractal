@@ -188,12 +188,14 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb74e56192d5b owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h88cfdcaabcf6 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
         INSERT INTO local_resource_preparation_dirty(subject)
-        SELECT DISTINCT subject FROM claims WHERE substr(subject,1,9)='resource/' OR kind='resource.observed';")?;
+        SELECT DISTINCT subject FROM claims
+        WHERE (claims.subject >= 'resource/' AND claims.subject < 'resource0')
+           OR claims.kind='resource.observed';")?;
     flush(transaction)
 }
 
