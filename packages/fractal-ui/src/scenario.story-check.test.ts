@@ -362,7 +362,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(316)
+  expect(exemptions).toHaveLength(324)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 

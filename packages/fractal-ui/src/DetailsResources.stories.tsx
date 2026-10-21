@@ -48,7 +48,8 @@ const presentationCases: Case[] = [
   ...widths.map(width => example(`new/${width}`, width, 'new')),
   ...(['overview', 'context', 'spend', 'resources', 'empty'] as const).flatMap(dimension => ['1', '2', '3'].map(index => example(`${dimension}/${index}`, 400, 'busy', { [dimension]: `${dimension[0]!.toUpperCase()}${index}` } as Partial<DetailsVariants>))),
 ]
-const allStatesCases = resourceCases(['R1', 'R2', 'R3'], ['busy', 'partial', 'new', 'unknown', 'idle', 'absent'], [400])
+const resourceStates = ['busy', 'partial', 'new', 'unknown', 'idle', 'absent'] as const
+const resourceStateCases = (form: DetailsVariants['resources']) => resourceCases([form], resourceStates, [400])
 interface Args extends WorkbenchProps { cases: readonly Case[]; comparison: boolean }
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', minHeight: 0, height: 560, overflow: 'hidden', backgroundColor: surface.canvas },
@@ -516,13 +517,20 @@ export const OrientationAnchor: Story = { parameters: { scenario: { _tag: 'contr
     assertAnchor()
   })
 } }
-export const AllStates: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The fixed R1/R2/R3 by busy/partial/new/unknown/idle/absent comparison retains exact trace/resource availability and compaction/spend assertions plus copy, contrast and containment negative controls.' } }, args: { cases: allStatesCases, comparison: true }, play: async ({ canvasElement, args }) => {
+const resourceStatesFixture = { scenario: { _tag: 'contract-fixture', reason: 'The fixed R1/R2/R3 by busy/partial/new/unknown/idle/absent comparison retains exact trace/resource availability and compaction/spend assertions plus copy, contrast and containment negative controls.' } } as const
+async function resourceStatesPanes(canvasElement: HTMLElement, cases: readonly Case[]) {
   await ready(canvasElement)
   const panes = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="details-pane"]')]
-  requireContract(panes.length === args.cases.length, 'AllStates omits a production Details state')
-  for (const [index, pane] of panes.entries()) { assertCraft(pane, args.cases[index]!); if (args.cases[index]!.state === 'busy') await containmentGate(pane) }
+  requireContract(panes.length === cases.length, 'Resource-state comparison omits a production Details state')
+  for (const [index, pane] of panes.entries()) { assertCraft(pane, cases[index]!); if (cases[index]!.state === 'busy') await containmentGate(pane) }
+  return panes
+}
+export const CardResourceStates: Story = { parameters: resourceStatesFixture, args: { cases: resourceStateCases('R1'), comparison: true }, play: async ({ canvasElement, args }) => {
+  const panes = await resourceStatesPanes(canvasElement, args.cases)
   await humanControl(panes[0]!); await contrastControl(panes[0]!, args.cases[0]!)
 } }
+export const DenseResourceStates: Story = { parameters: resourceStatesFixture, args: { cases: resourceStateCases('R2'), comparison: true }, play: async ({ canvasElement, args }) => { await resourceStatesPanes(canvasElement, args.cases) } }
+export const CappedResourceStates: Story = { parameters: resourceStatesFixture, args: { cases: resourceStateCases('R3'), comparison: true }, play: async ({ canvasElement, args }) => { await resourceStatesPanes(canvasElement, args.cases) } }
 
 const e3Traces: readonly { name: string; trace: TraceSeries }[] = [
   { name: 'full', trace: full }, { name: 'partial', trace: detailsTraceFixtures.partial }, { name: 'unknown', trace: detailsTraceFixtures.unknown },

@@ -236,10 +236,10 @@ export const PartialActivity: Story = {
   },
 }
 
-/** Single-scenario contracts read their pane from AllStates, which mounts every scenario exactly as a lone story would. */
-function scenarioPane(canvas: HTMLElement, name: keyof typeof scenarios): HTMLElement {
+/** Single-scenario contracts read their pane from the scenario matrix that mounts it exactly as a lone story would. */
+function scenarioPane(canvas: HTMLElement, name: ScenarioName): HTMLElement {
   const section = canvas.querySelector<HTMLElement>(`section[aria-label="${name}"]`)
-  requireContract(section, 'AllStates omitted a named scenario')
+  requireContract(section, 'Scenario matrix omitted a named scenario')
   return pane(section)
 }
 
@@ -409,14 +409,24 @@ function assertTiming(root: HTMLElement) {
   requireContract(!span.hasAttribute('aria-busy') && [...span.querySelectorAll('button')].some(button => button.textContent === '42m'), 'Known timing lost its value')
   requireContract(!paintedText(root).includes(timingGuard) && !paintedText(root).includes(timingProvenance), 'Timing guard reason repeats beneath values')
 }
-function assertAllStates(root:HTMLElement) {
- const names=Object.keys(scenarios)
+type ScenarioName = keyof typeof scenarios
+/** Every listed scenario mounts exactly one production pane, and no other pane joins its matrix. */
+function assertScenarioPanes(root:HTMLElement,names:readonly ScenarioName[]) {
  const mounted=root.querySelectorAll('[data-testid="details-pane"]')
- requireContract(mounted.length===names.length, 'AllStates omitted a production pane')
- for(const name of names)requireContract(root.querySelectorAll(`section[aria-label="${name}"] [data-testid="details-pane"]`).length===1, 'AllStates omitted a named scenario')
+ requireContract(mounted.length===names.length, 'Scenario matrix omitted a production pane')
+ for(const name of names)requireContract(root.querySelectorAll(`section[aria-label="${name}"] [data-testid="details-pane"]`).length===1, 'Scenario matrix omitted a named scenario')
  mounted.forEach(element=>requireContract(!/\bUnknown\b/.test(element.textContent??''), 'Literal Unknown escaped the fact boundary'))
+}
+function assertTracedDescendantTitle(root:HTMLElement) {
+ // Observed st rows precede the traced breakdown, so select the traced card by its session identity.
+ const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('subagent-session'))
+ requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
+}
+function assertReportedLongWindow(root:HTMLElement) {
  const period = root.querySelector<HTMLElement>('section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]')
  requireContract(period?.textContent === 'last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
+}
+function assertSubagentCounts(root:HTMLElement) {
  // A complete list needs no count: the known zero lives in the heading badge, beside the list's own window line.
  const knownZeroSection = root.querySelector<HTMLElement>('section[aria-label="knownZero"] section[aria-label="knownZero Subagents"]')
  requireContract(knownZeroSection?.querySelector('[data-details-subagent-window]')&&!knownZeroSection.querySelector('[data-details-subagent-count]'), 'Known zero subagents disappeared under E3')
@@ -430,19 +440,20 @@ function assertAllStates(root:HTMLElement) {
   requireContract(section && !section.querySelector('[data-details-subagent-count]')?.textContent?.includes('of 0')
     && section.querySelector('button[aria-expanded]')?.textContent === 'Subagents', 'Unknown traced count became zero')
  }
- // Observed st rows precede the traced breakdown, so select the traced card by its session identity.
- const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('subagent-session'))
- requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
  const boundedSection = root.querySelector('section[aria-label="boundedCount"] section[aria-label="boundedCount Subagents"]')
  requireContract(boundedSection?.querySelector('button[aria-expanded]')?.textContent === 'Subagents309', 'Reported traced total disappeared from the Subagents heading')
  requireContract(boundedSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 1 of 309 subagents', 'Traced heading total became the retained list size')
- for (const name of Object.keys(resourceScenarios)) {
+}
+function assertResourceReads(root:HTMLElement,names:readonly (keyof typeof resourceScenarios)[]) {
+ for (const name of names) {
   const resourceRoot = root.querySelector<HTMLElement>(`section[aria-label="${name}"] [data-testid="details-pane"]`)
-  requireContract(resourceRoot, 'AllStates omitted a resource-read control')
+  requireContract(resourceRoot, 'Scenario matrix omitted a resource-read control')
   assertResourceRead(resourceRoot, name, `${name} `)
  }
+}
+function assertTimingPane(root:HTMLElement) {
  const timingRoot = root.querySelector<HTMLElement>('section[aria-label="timing"] [data-testid="details-pane"]')
- requireContract(timingRoot, 'AllStates omitted the timing control')
+ requireContract(timingRoot, 'Scenario matrix omitted the timing control')
  assertTiming(timingRoot)
 }
 async function checkSession(canvasElement: HTMLElement) {
@@ -520,7 +531,7 @@ function assertInvalidCoverageSurvives(canvas:HTMLElement,prefix:string) {
 async function checkInvalidCoverage(canvasElement: HTMLElement) {
  for(const name of ['invalidNaN','invalidNegative','invalidOverflow'] as const){
   const section=canvasElement.querySelector<HTMLElement>(`section[aria-label="${name}"]`)
-  requireContract(section,'AllStates omitted a named scenario')
+  requireContract(section,'Scenario matrix omitted a named scenario')
   assertInvalidCoverageSurvives(section,`${name} `)
   const blank=section.cloneNode(true) as HTMLElement
   blank.querySelector('[data-testid="details-pane"]')?.remove()
@@ -529,32 +540,66 @@ async function checkInvalidCoverage(canvasElement: HTMLElement) {
   await rejectsControl('Invalid fraction fabricated an attribution percentage',()=>assertInvalidCoverageSurvives(percentage,`${name} `))
  }
 }
-export const AllStates: Story = {
-  render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(scenarios).map(([name, trace]) => <section key={name} aria-label={name} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
-    <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-all-${name}`} scheme={scheme}
-      renderPane={() => <DetailsLabelContext.Provider value={`${name} `}><DetailsPane {...props} {...scenarioProps(name, props)} trace={trace} pendingTrace={trace} /></DetailsLabelContext.Provider>}/></ThemePortal>
-  </section>)}</div>,
-  play:async({canvasElement})=>{
-    assertAllStates(canvasElement)
-    const wrong=canvasElement.cloneNode(true) as HTMLElement
-    const missing=wrong.querySelector('[data-testid="details-pane"]')
-    requireContract(missing,'Missing AllStates negative control target')
-    missing.remove()
-    await rejectsControl('AllStates omitted a production pane',()=>assertAllStates(wrong))
-    await rejectsControl('Reported accumulation description was shortened',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]','last 7 days')))
-    await rejectsControl('Known zero is absent from the Subagents heading',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownZero Subagents"] button[aria-expanded]','Subagents')))
-    await rejectsControl('Unknown traced count became zero',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="unknownCount Subagents"] button[aria-expanded]','Subagents0')))
-    await rejectsControl('Traced heading total became the retained list size',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 subagents')))
-    await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · subagent-session')))
-    await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertAllStates(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
-    await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.remove())))
-    await rejectsControl('Settled resource stayed pending',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.setAttribute('aria-busy','true'))))
-    await rejectsControl('Known-empty resources became unavailable',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownEmpty Workspace"] p','Unavailable')))
-    await rejectsControl('First-read timing rendered a settled value',()=>assertAllStates(mutated(canvasElement,'section[aria-label="timing"] [data-details-skeleton="duration"]',node=>node.remove())))
-    // Every scenario pane here is the state a single-scenario story would mount, so its contract runs in place.
-    for (const check of [checkCoverage, checkNotCovered, checkDescendantListWindow, checkIndependentMetricScopes, checkIndependentSummary, checkNativeWindows, checkSession, checkPartialDescendantFacts, checkContextPercentOnly, checkInvalidCoverage, checkTiming, checkFirstReadResources]) await check(canvasElement)
-  },
+/** Mounts the named scenarios side by side, each exactly as its single-scenario story would, and proves a dropped pane is caught. */
+function scenarioMatrix(names: readonly ScenarioName[], assertGroup: (root: HTMLElement) => void, checks: (canvasElement: HTMLElement, assertMatrix: (root: HTMLElement) => void) => Promise<void>): Story {
+  const assertMatrix = (root: HTMLElement) => { assertScenarioPanes(root, names); assertGroup(root) }
+  return {
+    render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{names.map(name => <section key={name} aria-label={name} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
+      <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-matrix-${name}`} scheme={scheme}
+        renderPane={() => <DetailsLabelContext.Provider value={`${name} `}><DetailsPane {...props} {...scenarioProps(name, props)} trace={scenarios[name]} pendingTrace={scenarios[name]} /></DetailsLabelContext.Provider>}/></ThemePortal>
+    </section>)}</div>,
+    play: async ({ canvasElement }) => {
+      assertMatrix(canvasElement)
+      const wrong = canvasElement.cloneNode(true) as HTMLElement
+      const missing = wrong.querySelector('[data-testid="details-pane"]')
+      requireContract(missing, 'Missing scenario matrix negative control target')
+      missing.remove()
+      await rejectsControl('Scenario matrix omitted a production pane', () => assertMatrix(wrong))
+      // Every scenario pane here is the state a single-scenario story would mount, so its contract runs in place.
+      await checks(canvasElement, assertMatrix)
+    },
+  }
 }
+const noGroupAssertion = () => {}
+/** Attribution coverage rounding, the legal 0% and the not-covered harness line. */
+export const SpendMatchingStates: Story = scenarioMatrix(['partial', 'boundary', 'boundary995', 'zeroCoverage', 'fullPartial', 'notCovered'], noGroupAssertion, async canvasElement => {
+  for (const check of [checkCoverage, checkNotCovered]) await check(canvasElement)
+})
+/** Independent native spend/token scopes, the inclusive session split and partially reported descendant facts. */
+export const SpendScopeAndSubagentStates: Story = scenarioMatrix(['independent', 'session', 'partialFacts'], assertTracedDescendantTitle, async (canvasElement, assertMatrix) => {
+  await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · subagent-session')))
+  for (const check of [checkIndependentMetricScopes, checkIndependentSummary, checkSession, checkPartialDescendantFacts]) await check(canvasElement)
+})
+/** Reported-percentage context occupancy, alone and with retained percentage samples. */
+export const ContextPercentStates: Story = scenarioMatrix(['percentOnly', 'percentSamples'], noGroupAssertion, async canvasElement => {
+  await checkContextPercentOnly(canvasElement)
+})
+/** Mixed native/reported spend windows, an unattributed total scope, invalid attribution fractions and a long reported window. */
+export const SpendWindowAndInvalidCoverageStates: Story = scenarioMatrix(['mixedWindows', 'unknownTotalScope', 'invalidNaN', 'invalidNegative', 'invalidOverflow', 'reportedLong'], assertReportedLongWindow, async (canvasElement, assertMatrix) => {
+  await rejectsControl('Reported accumulation description was shortened',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]','last 7 days')))
+  for (const check of [checkDescendantListWindow, checkNativeWindows, checkInvalidCoverage]) await check(canvasElement)
+})
+/** Known zero, unknown, bounded and observed-empty subagent counts. */
+export const SubagentCountStates: Story = scenarioMatrix(['knownZero', 'unknownCount', 'boundedCount', 'observedEmpty'], assertSubagentCounts, async (canvasElement, assertMatrix) => {
+  await rejectsControl('Known zero is absent from the Subagents heading',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="knownZero Subagents"] button[aria-expanded]','Subagents')))
+  await rejectsControl('Unknown traced count became zero',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="unknownCount Subagents"] button[aria-expanded]','Subagents0')))
+  await rejectsControl('Traced heading total became the retained list size',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 subagents')))
+})
+const firstReadResourceNames = ['firstRead', 'firstReadDense', 'firstReadCompact', 'firstReadHideEmpty', 'firstReadShowEmpty'] as const
+/** First-read resource skeletons across resource densities and empty-section policies. */
+export const FirstReadResourceStates: Story = scenarioMatrix(firstReadResourceNames, root => assertResourceReads(root, firstReadResourceNames), async (canvasElement, assertMatrix) => {
+  await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertMatrix(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
+  await checkFirstReadResources(canvasElement)
+})
+const settledResourceNames = ['settledUnavailable', 'knownEmpty'] as const
+/** Settled unavailable and known-empty resources beside first-read timing fields. */
+export const SettledResourceAndTimingStates: Story = scenarioMatrix([...settledResourceNames, 'timing'], root => { assertResourceReads(root, settledResourceNames); assertTimingPane(root) }, async (canvasElement, assertMatrix) => {
+  await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertMatrix(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.remove())))
+  await rejectsControl('Settled resource stayed pending',()=>assertMatrix(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.setAttribute('aria-busy','true'))))
+  await rejectsControl('Known-empty resources became unavailable',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="knownEmpty Workspace"] p','Unavailable')))
+  await rejectsControl('First-read timing rendered a settled value',()=>assertMatrix(mutated(canvasElement,'section[aria-label="timing"] [data-details-skeleton="duration"]',node=>node.remove())))
+  await checkTiming(canvasElement)
+})
 /** Clones the canvas and applies one mutation to every match, so the live tree stays intact. */
 function mutated(root: HTMLElement, selector: string, mutate: (node: HTMLElement) => void): HTMLElement {
   const wrong = root.cloneNode(true) as HTMLElement
