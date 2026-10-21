@@ -98,16 +98,22 @@ const LiveSidebarTreeView = React.memo((props: {
   readonly actions: SidebarActions
 }) => {
   const source = useDataSource()
+  const previousAccessibleNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const namesAtom = React.useMemo(() => {
     const mission = sidebarMissionFeedsAtom(source)
     return Atom.make(get => {
-      const observation = get(mission)
-      return new Map(props.agents.flatMap(agent => [
+      const observation = props.agents.some(agent => (agent.currentWork?.length ?? 0) > 0 || agent.mission !== undefined)
+        ? get(mission)
+        : undefined
+      const next = new Map(props.agents.flatMap(agent => [
         [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale: props.stale, needsMe: props.needsYou.has(agent.ref), ...observation }))] as const,
         ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale: props.stale }))] as const),
       ]))
-    }).pipe(Atom.withEquality<ReadonlyMap<string, string>>((a, b) =>
-      a.size === b.size && [...a].every(([ref, name]) => b.get(ref) === name)))
+      const previous = previousAccessibleNames.current
+      if (previous.size === next.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
+      previousAccessibleNames.current = next
+      return next
+    })
   }, [source, props.agents, props.stale, props.needsYou])
   const accessibleNames = useAtomValue(namesAtom)
   const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>, touchDisclosure?: React.ReactNode) =>
