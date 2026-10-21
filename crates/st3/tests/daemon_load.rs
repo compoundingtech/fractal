@@ -891,12 +891,25 @@ fn absolute_failures(report: &Report) -> Vec<String> {
 /// withdraws every list once per backlog chunk (#3553). That fix turns this on.
 const AVAILABILITY_GATED: bool = false;
 
+/// What a published list says when it is withdrawn and has not folded again, as a failure key
+/// keeps it (cut at 90 characters): the code where the client keeps it, else the message, for a
+/// code the client reports as `internal`.
+const WITHDRAWN_LIST: &[&str] = &[
+    "mission-list-not-ready",
+    "runtime-list-not-ready",
+    "the agents roster is still being prepared",
+    "the work list is still being prepared",
+    "the attention view is still being prepared",
+    "the glasses view is still being prepared",
+    "the arrangements view is still being prepared",
+    "the summary view is still being prepared",
+];
+
 /// A read the daemon refused because a published list was withdrawn and has not folded again:
-/// the list's retryable 503 ("still being prepared", or a `*-not-ready` code, which survives
-/// the report's 90-character cut), or a collection window's resync before its first snapshot.
+/// that list's retryable 503, or a collection window's resync before its first snapshot.
 fn unavailable_read(error: &str) -> bool {
-    (error.contains("503") && (error.contains("still being prepared") || error.contains("-not-ready")))
-        || error.contains("expected initial snapshot, got Some(Resync")
+    (error.contains(" 503 ") && WITHDRAWN_LIST.iter().any(|marker| error.contains(marker)))
+        || (error.starts_with("collection ") && error.contains("expected initial snapshot, got Some(Resync"))
 }
 
 fn unavailable_summary(report: &Report) -> String {
@@ -1371,6 +1384,9 @@ fn relative_tolerance_keeps_every_absolute_budget_and_correctness_check() {
         assert!(unavailable_read(refused), "{refused}");
     }
     assert!(!unavailable_read("claim: st API returned 500 internal: disk I/O error"));
+    // Another not-ready 503, as at startup, is a failure, not a withdrawn list.
+    assert!(!unavailable_read("person read: /v1/client/messages: st API returned 503 message-selectors-not-ready: the"));
+    assert!(!unavailable_read("person read: /v1/client/agents: st API returned 503 agent-roster-cut-not-ready: the"));
     report.unavailable.insert("person read: /v1/client/work: 503 still being prepared".into(), 3);
     report.unavailable_window_s = Some([313.1, 315.4]);
     assert_eq!(
