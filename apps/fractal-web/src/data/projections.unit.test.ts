@@ -331,15 +331,15 @@ test('roster fact changes update the row while structurally equal usage and chec
 
 test('retains current and bounded upcoming work and invalidates every sidebar work field', () => {
   const work = {
-    id: 'work/build-1/review', mission_id: 'mission/build-1/ship',
-    mission_run_id: 'mission-run/build-1/ship', path: 'review', title: null,
+    id: 'work/example/review', mission_id: 'mission/example/ship',
+    mission_run_id: 'mission-run/example/ship', path: 'review', title: null,
     state: 'claimed' as const, since: '2026-10-20T12:00:00Z',
   }
   const wire = {
-    kind: 'agent' as const, id: 'agent/build-1/worker', name: 'Worker', host_id: 'host/build-1',
+    kind: 'agent' as const, id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
     runtime_ids: [], reachability: 'reachable' as const, state: 'running' as const,
     revision: '1', updated_at: '2026-10-20T12:00:00Z', current_work: [work],
-    upcoming_work: [{ ...work, id: 'work/build-2/next', mission_id: 'mission/build-2/next' }],
+    upcoming_work: [{ ...work, id: 'work/example/next', mission_id: 'mission/example/next' }],
   } satisfies AgentEncoded
   const project = createProjections()
   const decode = (encoded: AgentEncoded) => openAgent(decodeUnknownSync(Agent, 'strict')(encoded))
@@ -347,13 +347,13 @@ test('retains current and bounded upcoming work and invalidates every sidebar wo
   expect(first.agents[0]).toMatchObject({
     mission: work.mission_id,
     currentWork: [{ id: work.id, missionId: work.mission_id, runId: work.mission_run_id, path: 'review', state: 'claimed' }],
-    upcomingWork: [{ missionId: 'mission/build-2/next' }],
+    upcomingWork: [{ missionId: 'mission/example/next' }],
   })
   expect(first.agents[0]?.currentWork?.[0]?.title).toBeUndefined()
   expect(project.fleetFromAgents([decode({ ...wire, revision: '2' })])).toBe(first)
   for (const change of [
     { title: 'Review changes' }, { path: 'approve' }, { state: 'waiting-person' as const },
-    { mission_run_id: 'mission-run/build-1/new' }, { id: 'work/build-1/new' },
+    { mission_run_id: 'mission-run/example/new' }, { id: 'work/example/new' },
   ]) {
     expect(project.fleetFromAgents([decode({ ...wire, current_work: [{ ...work, ...change }] })]).agents[0])
       .not.toBe(first.agents[0])
