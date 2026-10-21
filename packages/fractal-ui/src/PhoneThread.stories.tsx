@@ -2,24 +2,18 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { useScenarioSlice } from '@smalltalk/st3-scenarios/react'
+import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
+import { scenarioSections } from './scenario-transcript.story-harness'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
 import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
-import { Transcript, type TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { Transcript, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
-import type { TextItem } from './assistant-ui/embrace-data/model'
-import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { darkTheme, liveAccentTheme, liveComposerDarkTheme } from './assistant-ui/embrace-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
-
-const now = Date.parse('2026-01-15T12:04:12Z')
-const startedAt = '2026-01-15T12:00:00Z'
-const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: 'phone/prompt', role: 'user', text: 'Check the row projection on a phone-sized window.', attachments: [], streaming: false, at: startedAt, sender: { kind: 'human', label: 'Operator' } }
-const reply: TextItem = { _tag: 'Text', id: 'phone/reply', role: 'assistant', text: 'Looking at the narrow layout now.', attachments: [], streaming: false, at: '2026-01-15T12:00:10Z', sender: { kind: 'agent', label: 'Assistant' } }
-const turn: TranscriptTurn = { id: 'phone', prompt, items: [reply], work: workLogTurnFromItems([prompt, reply], { kindFor: () => 'read', running: true, failed: false, interrupted: false, startedAt, completeHistory: true }) }
-const sync = { _tag: 'Live', since: now - 5000 } as const
 
 /**
  * The thread as a phone host composes it: header, transcript and the C1 composer in one flex column sized to the
@@ -28,13 +22,17 @@ const sync = { _tag: 'Live', since: now - 5000 } as const
  * With `narrow` off the same column keeps desktop density.
  */
 function PhoneThreadStory({ scheme, narrow }: { scheme: Scheme; narrow: boolean }) {
-  const options = React.useMemo(() => ({ messages: [prompt, reply], isRunning: true, onNew: async () => {}, onCancel: async () => {} }), [])
+  const { loading, instant: now, sections } = useScenarioSlice('conversation', slice => scenarioSections(slice, 'whole-thread'))
+  const messages = React.useMemo(() => sections.flatMap(section => section.turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items])), [sections])
+  const isRunning = sections.some(section => section.turns.some(turn => turn.work.running))
+  const options = React.useMemo(() => ({ messages, isRunning, onNew: async () => {}, onCancel: async () => {} }), [messages, isRunning])
+  const sync = loading ? { _tag: 'Connecting' as const, attempt: 1, since: now } : { _tag: 'Live' as const, since: now }
   return <main aria-label="Thread" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <NarrowLayoutContext.Provider value={narrow}>
       <div data-testid="phone-column" {...stylex.props(styles.column)}>
         <EmbraceRuntimeProvider options={options}>
-          <ThreadHeader narrow={narrow} folder="build-1" title="Row projection" status="working" statusLabel="working" freshness="live" sidebarCollapsed={narrow} onToggleSidebar={() => {}} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
-          <div {...stylex.props(styles.transcript)}><Transcript viewportKey="phone" title="Row projection" turns={[turn]} sync={sync} now={now} observedAt={now - 3000} onOpenTool={() => {}} /></div>
+          <ThreadHeader narrow={narrow} title="Row projection" freshness="live" sidebarCollapsed={narrow} onToggleSidebar={() => {}} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+          <div {...stylex.props(styles.transcript)}>{sections.map(section => <Transcript key={section.id} viewportKey={section.id} title={section.title} turns={section.turns} history={section.history} sync={sync} now={now} observedAt={now} onOpenTool={() => {}} />)}</div>
           <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn conversationLabel="Row projection" /></div>
         </EmbraceRuntimeProvider>
       </div>
@@ -44,9 +42,9 @@ function PhoneThreadStory({ scheme, narrow }: { scheme: Scheme; narrow: boolean 
 const meta = {
   title: 'Fractal UI/Phone thread',
   component: PhoneThreadStory,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'slices', slices: ['conversation'], window: transcriptMountedWindow }, layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: true },
-  argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, narrow: { control: 'boolean' } },
+  argTypes: { ...scenarioArgTypes(['conversation']), scheme: { options: ['dark', 'light'], control: 'radio' }, narrow: { control: 'boolean' } },
 } satisfies Meta<typeof PhoneThreadStory>
 export default meta
 type Story = StoryObj<typeof meta>
@@ -71,7 +69,7 @@ export const Narrow: Story = { tags: ['critical'], play: async ({ canvasElement 
   await expect(getComputedStyle(field).fontSize).toBe('16px')
   const header = canvas.getByTestId('thread-header')
   await expect(canvas.queryByTestId('run-progress')).toBeNull()
-  await expect(canvas.getByTestId('transcript-header')).toHaveTextContent('Running')
+  await expect(canvas.getAllByTestId('transcript-header').some(element => element.textContent?.includes('Running'))).toBe(true)
   for (const name of ['Expand sidebar', 'Agent details']) {
     const rect = within(header).getByRole('button', { name }).getBoundingClientRect()
     await expect(Math.min(rect.width, rect.height)).toBeGreaterThanOrEqual(44)
@@ -100,7 +98,7 @@ export const NarrowLight: Story = { ...Narrow, args: { scheme: 'light', narrow: 
 export const Desktop: Story = { tags: ['critical'], args: { narrow: false }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvasElement.querySelector('[data-testid="kit-composer"]')).not.toHaveAttribute('data-narrow')
-  await expect(canvas.getByTestId('run-progress')).toBeInTheDocument()
+  await expect(canvas.getAllByTestId('run-progress').length).toBeGreaterThan(0)
   await expect(getComputedStyle(canvas.getByRole('textbox', { name: 'Message' })).fontSize).toBe('14px')
   const send = canvas.getByRole('button', { name: 'Send' }).getBoundingClientRect()
   await expect({ width: send.width, height: send.height }).toEqual({ width: 32, height: 32 })

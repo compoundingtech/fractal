@@ -55,22 +55,116 @@ or a detached signature scheme. This is in-toto statement JSON inside a signed
 Git commit, **not** a DSSE envelope or a GitHub artifact attestation.
 
 The immutable record ID is this notes commit's full object ID. Its only ref is
-`refs/notes/evidence/<record-id>`. There is no shared mutable notes tip: different
+`refs/notes/evidence/<tree>/<record-id>`, where `<tree>` is the git tree the note is about (the
+name of the one entry in the note's flat tree). There is no shared mutable notes tip: different
 writers create different refs, so their updates cannot conflict. Duplicate
 imports verify the signature and create the ref transactionally, or confirm it
-already points to the same ID. A ref whose suffix does not equal its target is
-invalid. The flat notes tree remains readable with Git's notes command:
+already points to the same ID. A ref whose last component does not equal its target, or that
+sits under a tree the note is not about, is invalid and finds nothing. The flat notes tree
+remains readable with Git's notes command:
 
 ```sh
-git notes --ref=refs/notes/evidence/RECORD_ID show TREE_ID
-git push origin 'refs/notes/evidence/*:refs/notes/evidence/*'
-git fetch origin 'refs/notes/evidence/*:refs/notes/evidence/*'
+git notes --ref=refs/notes/evidence/TREE_ID/RECORD_ID show TREE_ID
+git push origin 'refs/notes/evidence/TREE_ID/RECORD_ID:refs/notes/evidence/TREE_ID/RECORD_ID'
+git fetch origin 'refs/notes/evidence/TREE_ID/*:refs/notes/evidence/TREE_ID/*'
 ```
 
-Keep the namespace when synchronizing repositories; do not prune records as a
-side effect of branch cleanup. The wildcard refspec is additive and does not
-need force updates or a merge of notes histories. v1 uses one ref per record;
-large-repository indexing and retention belong to later stages.
+**One tree is one prefix.** The verifier, the gate, the signed-tree job and the publisher reach the
+records of a tree through `refs/notes/evidence/<tree>/` (and the records of an input key through
+`refs/notes/evidence-input/<check>/<key>/`), never by listing or fetching every note: a lookup costs
+what that tree's own records cost, however many trees have records. A test pins this (the verifier's
+`for-each-ref` listings during one verification return at most the tree's own records). The cost of the
+whole namespace is paid only by `scripts/evidence-gc`, which also keeps its size bounded (see below).
+
+**Tags, written and read first.** Every reader also reads `refs/tags/evidence/<tree>/<record>` and
+`refs/tags/evidence/input/<check>/<key>/<record>` (lightweight tags naming the same signed commit), in the same
+listing or fetch as the notes, one prefix per tree or key in each namespace; a record under both names counts
+once. Records move there because a ruleset can protect tags and not notes (`doc/fleet/factory/skip-ci-plan`, the
+hard precondition: the readers were on main before any producer wrote one). The producers
+(`scripts/evidence-publish`, `scripts/ci-evidence-observe`, `scripts/evidence-wrap` and so `scripts/st-test --push`)
+file every record under both names, the tag and the note, created together or not at all and pushed in one push:
+a gate whose base predates the tag readers reads only notes, and a record only it cannot see would hide a newer
+failure from it. Writing notes stops in a later change, once no gate that still runs reads notes only. A tree id
+is hex, so `input/` never collides with a tree's prefix; both live under `evidence/`, which the tag release
+workflow ignores, full-history checkouts leave out and no workflow's push trigger matches (a lint pins it).
+
+**The first layout** was `refs/notes/evidence/<record-id>` (one object id under the prefix). The
+verifier still reads it, with a pattern that matches only names exactly one object id long, so it never
+lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
+refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
+Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/st3-kernel/src/evidence`) still writes
+the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
+removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
+
+Do not prune records as a side effect of branch cleanup, and keep the namespace when synchronizing
+repositories. The wildcard refspec is additive and does not need force updates or a merge of notes
+histories. v1 uses one ref per record.
+
+### Garbage collection and the size of the namespace
+
+Every gate member of every pull request and merge-group run adds one ref, so the namespace grows with CI
+(measured 2026-10-19: 9,430 records on 1,195 trees, about 8 records per tree, 258 input-index refs, 2.2k to
+3.5k new refs a day; the whole remote lists 13,797 refs, 1.3 MB, in about 0.5 s). `scripts/evidence-gc`
+keeps it bounded. It is the one tool that reads the whole namespace; nothing on a hot path does.
+
+```sh
+scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk            # dry run: prints counts per reason
+scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk --apply    # migrates and deletes locally and on the remote
+```
+
+**Keep set.** A note applies to the exact tree it names, so a note of a superseded pull request head is not
+needed. Kept: records of each open pull request's *current* head tree and of each merge-queue tip while it is
+queued (`open-pr-head`); records of the trees of main's first-parent commits of the last `--keep-main-days`
+(default 3: `main-window`); and an input-index ref (`refs/tags/evidence/input/<check>/<key>/<record>` or
+`refs/notes/evidence-input/<check>/<key>/<record>`) whose
+key still equals what a protected head tree (or main's tip) projects to for that check, so unchanged-input
+reuse keeps working (`input-key`). Everything else is kept for `--grace-hours` (default 24, a note written for a
+head the listing raced with) and then deleted. The first layout is read from the note: a protected record is
+migrated to `refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), an
+unprotected one is deleted. A record's tag and note get the same decision and count as one record.
+
+**Bounds.** Both count records, not refs, so filing each record twice during the move to tags does not halve them.
+`--soft` (default 3,000): above it the oldest unprotected records go first, both names of each. `--cap` (default
+5,000): if the protected set alone is over it, nothing protected is deleted, the set is printed and the exit status is 3, so
+a job summary shows it; publishers never fail a job over the cap. Output: refs, records and advertised bytes
+before and after, and the count per reason.
+
+**Sizing (2026-10-19 numbers).** A main tree that was tested carries 11.4 records on average and about 60 main
+trees a day have records, so the main window costs about 690 refs a day; the 265 open pull requests have 50 trees
+with records (289 refs) between them. The protected set is therefore about 290 + 690 x days: 2.4k for 3 days (the
+default), 5.1k for 7 days. A 7-day window needs `--cap 8000 --soft 6000`; with the default cap of 5,000 it would
+raise the alert every day. The main window serves a re-run or a push on the exact tree of a recent main commit,
+which happens within hours, so 3 days is generous.
+
+**Safety.** It fails closed: if a head commit cannot be turned into a tree, `--apply` deletes nothing (exit 1). A
+failed remote push leaves the local refs alone. A second run finds nothing to do. Refs outside the evidence namespaces
+and refs that are not well-formed records are never touched. Take a bundle first when running it by hand:
+`git bundle create evidence-notes.bundle 'refs/tags/evidence/*' 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
+
+### Records as tags (in progress)
+
+No ruleset can protect `refs/notes/*` (GitHub refuses the target pattern), so anyone with write access can delete a
+newer failing record and let an older pass decide again, and git keeps no trace of the deletion. The records are
+therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no deletion, no update), whose only
+bypass is the App that `evidence-gc` uses. Until then the exposure is bounded: nothing rejects, a pull request skip is
+undone by the merge queue's full run, and one run in five is sampled. The order, each step its own pull request:
+
+1. The tag release workflow ignores `evidence/**` tags (done).
+2. No workflow checkout fetches them (done). `fetch-depth: 0` fetches every tag, and 5,000 records as tags added 81.5 MiB and
+   16 s to a full fetch (measured 2026-10-19), mostly source objects of tested commits that no branch holds. Every
+   full-history checkout is now `fullHistoryCheckoutSteps` in `.github/workflows/workspace-ci.ts`: a one-commit checkout,
+   then one fetch of every branch and tag with the negative refspec `^refs/tags/evidence/*`. Deepening the shallow clone
+   took 21 s against 11 s for a full fetch, so the step drops the shallow marker, fetches as a fresh clone would
+   (`--refetch`, git 2.36 or later) and checks connectivity: 15 s in all, against 11 s for `fetch-depth: 0` today
+   (2026-10-20, from hetz2). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
+   against a real repository.
+   A plain `git fetch` does not follow these tags either: a record's tag points at a commit no fetched branch holds.
+   A fresh `git clone` does fetch them.
+3. The verifier and the gate read tags first and notes as the legacy layout (done); then the producers write each
+   record as a tag and a note (done, see "Tags, written and read first" above). Writing notes stops once no gate that
+   still runs reads notes only.
+4. The tag ruleset, and `evidence-gc` moves to the App.
 
 ## Trust and custody
 
@@ -296,7 +390,7 @@ for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected o
 (`$EVIDENCE_OBSERVER`, the operator's JSON argument vector; default
 `st sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
 persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
-against the key list in `main`, creates `refs/notes/evidence/<record>` and pushes it. It runs no
+against the key list in `main`, creates `refs/notes/evidence/<tree>/<record>` and pushes it. It runs no
 check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
 unverified. A full record that does not verify fails the job and creates no ref. A cancelled
 run has no `linux-gate` job to record (the observer exits 2): the workflow skips cancelled
@@ -464,6 +558,37 @@ standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_
 `ci-evidence-signing configure` writes it), which is how the Nix sandbox, where they live in
 `/nix/store`, supplies them without trusting the caller's PATH.
 
+## A check derivation as evidence: the `nix` record
+
+A required check that runs in the Nix sandbox can be a check derivation (`checks.<system>.<check>` in `flake.nix`). It only
+produces output when its tests pass, and the output path hashes every input (source, `flake.lock`, toolchain, build script),
+so a valid path is both the proof that these inputs passed and a cache: an unchanged tree needs no rebuild. Today
+The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on hetz2; a change to any file in the flake
+source still rebuilds it, because its source is the whole flake).
+
+`scripts/nix-check-facts --check NAME --out FILE` builds the derivation and writes the facts for
+`scripts/evidence-wrap --aggregate FILE`: `runner` `nix`, the command `nix build .#checks.<system>.NAME`, the exit code and
+`output_sha256` (the SHA-256 of the NAR hash string), and the inputs `drv_path`, `out_path`, `nar_hash`, `nar_size`,
+`references` (sorted store paths joined by commas, `-` for none), `cache_hit`, `nix_signatures` (the daemon's `name:base64`
+signatures, `none` when unsigned), `nix_key_id` and `nix_unsigned`. A path that is already valid is not built again; the record
+says `cache_hit=true` and names the same derivation, which is the proof that an unchanged tree skips the rebuild. A failing build
+is recorded too (exit code 1, the derivation, no output path) and never satisfies a check.
+
+`scripts/evidence-sign` accepts `runner: nix` only for that command shape and holds the inputs to their formats (store paths, the
+output named like its derivation, a `sha256-` NAR hash, sorted references, signatures as the daemon prints them). It cannot see
+the store, so it does not judge the Nix signature. The verifier does, in a later slice: it recomputes the fingerprint
+`1;out_path;sha256:<nar_hash in Nix base 32>;nar_size;references` itself, and trusts a Nix signature only when its key name and
+public key are in `.st/evidence-nix-keys` (Nix `trusted-public-keys` lines) read from the accepted base. A record cannot name its
+own key. The record needs both signatures: the SSH wrapper key, and at least one valid Nix signature from a different key.
+
+**Residual trust.** The Nix key proves the content of the path is genuine. Only the wrapper key says "this tree built to this
+path": a cache hit shares one derivation across trees, so the path cannot name a tree. A stolen wrapper key could attach a genuine
+old path to a new tree; the `flake_lock_sha256` bind and `max_age_s` limit that, they do not close it.
+
+**Key custody.** The Nix key is the machine's own (`nix.conf` `secret-key-files`, readable by the Nix daemon only). ci1 and ci2
+have none today (checked 2026-10-20), so no record can be signed by a production Nix key yet; tests and the sample in
+`doc/fleet/factory/nix-evidence/nix-sample-20261020` use a throwaway key.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors
@@ -523,7 +648,7 @@ a policy input, until deadlines and the production controller are decided.
 
 `scripts/evidence-verify` answers one question without a built st: does a trusted,
 signed note exist for this exact tree and this check? It needs only `git`,
-`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<record-id>` notes
+`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<tree>/<record-id>` notes
 (one SSH-signed commit per record), and finishes in well under a second on a
 repository with hundreds of records. `st evidence verify` stays the reference
 implementation; the script's tests use real Git repositories and real SSH
@@ -910,7 +1035,10 @@ records the exit code and output digest. The CI gate looks up the note for the p
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
-throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. When that tree has a
+`megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
+from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
+shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
 recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
@@ -936,6 +1064,15 @@ path (the checks run once); so does every fixup that changes the tree; a tree th
 
 The checks run without the agent seat's identity and session variables (`ST_*`, `ST2_*`, `ST3_*`, `CLAUDE*`, `ANTHROPIC_*`; `ST_AGENT`, `ST_SKIP_EVIDENCE` and the `ST_EVIDENCE*` switches stay, by exact name: that list in `scripts/st-test` is the only exception mechanism, and `ST_AGENT` stays visible to the checks because the `nix` wrapper that needs it starts them), as on a CI runner: tests that read them fail or behave differently under a seat. Tests that bind a request to the seat by process ancestry still do, so a trustworthy full run of the Linux gate must be started detached from any seat. It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
 there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
+
+**The signer starts with a scrubbed loader environment.** `evidence-sign` refuses to start when the loader or the interpreter was
+told to load code (`LD_PRELOAD` and the rest of its `REFUSED_ENVIRONMENT`): a preloaded library inside the signer is an injection
+point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (hetz2 preloads jemalloc), which made every signed push
+there report "a check failed". So the launcher scrubs instead: `evidence-wrap` resolves the signer program with the caller's PATH,
+then starts it by absolute path without any `LD_*`, `DYLD_*` or `PYTHON*` variable, `GLIBC_TUNABLES`, `GCONV_PATH` or `NLSPATH`,
+and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `st-test` starts the signer's interpreter with `-I`. The checks themselves
+keep the caller's environment. Tests set these variables in the caller and require a signed note, and require the signer to still
+refuse when it is started with `LD_PRELOAD`.
 
 ### When the gate says skip
 

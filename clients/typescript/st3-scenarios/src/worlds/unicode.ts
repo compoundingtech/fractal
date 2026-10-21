@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { child } from '../kit/context.ts'
 import { terminalRun } from '../kit/factories/terminalRun.ts'
 import { terminalRecord } from '../kit/factories/terminalRecord.ts'
@@ -58,3 +59,5 @@ export const unicode: WorldDefinition = {
     }
   },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

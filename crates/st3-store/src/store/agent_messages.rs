@@ -132,11 +132,25 @@ pub fn synthetic(fields: &Value) -> bool {
 }
 
 pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
-    // Before the lazy usage backfill has run, sends still sync coordination metadata, but the
-    // day counts wait for the first estimate, which rebuilds them from every retained send.
-    let counts = ready(transaction)?;
-    let synced = flush_with_coordination(transaction, true, counts)?;
+    // Before the usage backfill completes, sends still sync coordination metadata. Day counts
+    // follow only the sends the backfill has passed; it counts the rest when it reaches them.
+    let counts = if ready(transaction)? {
+        SendCounts::All
+    } else {
+        backfill_through(transaction)?.map_or(SendCounts::None, SendCounts::Through)
+    };
+    let synced = flush_counting(transaction, true, counts)?;
     coordination::cover_synced_sends(transaction, &synced)
+}
+
+/// Which flushed subjects have their sends counted for the usage estimate.
+#[derive(Clone, Copy)]
+pub enum SendCounts {
+    None,
+    All,
+    /// While the backfill runs: a subject it has counted, or one with a send at or below this
+    /// `store_index`, which it has passed.
+    Through(u64),
 }
 
 /// Returns the subjects it flushed.
@@ -145,58 +159,154 @@ pub fn flush_with_coordination(
     coordination_live: bool,
     count_sends: bool,
 ) -> Result<BTreeSet<String>> {
+    flush_counting(transaction, coordination_live, if count_sends { SendCounts::All } else { SendCounts::None })
+}
+
+/// Returns the subjects it flushed.
+pub fn flush_counting(
+    transaction: &Transaction<'_>,
+    coordination_live: bool,
+    counts: SendCounts,
+) -> Result<BTreeSet<String>> {
     let pending = transaction
         .prepare_cached("SELECT subject FROM local_agent_message_pending")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
     for subject in &pending {
-        // Earliest send time is stable across replication order and duplicate send claims.
-        let sent: Option<(u64, String)> = transaction
-            .query_row(
-                "SELECT CAST(accepted_at_unix_ms AS INTEGER),body FROM claims
-             WHERE subject=?1 AND kind='message.sent'
-             ORDER BY CAST(accepted_at_unix_ms AS INTEGER),id LIMIT 1",
-                [&subject],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if coordination_live && sent.is_none() {
-            coordination::sync(transaction, subject, None)?;
-        }
-        let desired = sent
-            .map(|(at, body)| -> Result<_> {
-                let body: Value = serde_json::from_str(&body)?;
-                if coordination_live {
-                    coordination::sync(transaction, subject, Some((at, &body["fields"])))?;
-                }
-                Ok(eligible(&body["fields"])
-                    .then(|| (at, body["fields"]["to"].as_str().unwrap().to_owned())))
-            })
-            .transpose()?
-            .flatten();
-        let current: Option<(u64, String)> = transaction
-            .query_row(
-                "SELECT sent_ms,recipient FROM agent_message_sends WHERE subject=?1",
-                [&subject],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if count_sends && current != desired {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hf5d965fad59a owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends WHERE subject=?1",
-                [&subject],
-            )?;
-            if let Some((at, recipient)) = desired {
-                transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hc00cfd430db8 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO agent_message_sends VALUES(?1,?2,?3)",
-                    params![subject, at, recipient],
-                )?;
-            }
-        }
+        sync_subject(transaction, subject, coordination_live, counts)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h7dc294f64b3e owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_agent_message_pending WHERE subject=?1",
             [&subject],
         )?;
     }
     Ok(pending)
+}
+
+fn sync_subject(
+    transaction: &Transaction<'_>,
+    subject: &str,
+    coordination_live: bool,
+    counts: SendCounts,
+) -> Result<()> {
+    // Earliest send time is stable across replication order and duplicate send claims.
+    let sent: Option<(u64, String)> = transaction
+        .query_row(
+            "SELECT CAST(accepted_at_unix_ms AS INTEGER),body FROM claims
+         WHERE subject=?1 AND kind='message.sent'
+         ORDER BY CAST(accepted_at_unix_ms AS INTEGER),id LIMIT 1",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if coordination_live && sent.is_none() {
+        coordination::sync(transaction, subject, None)?;
+    }
+    let desired = sent
+        .map(|(at, body)| -> Result<_> {
+            let body: Value = serde_json::from_str(&body)?;
+            if coordination_live {
+                coordination::sync(transaction, subject, Some((at, &body["fields"])))?;
+            }
+            Ok(eligible(&body["fields"])
+                .then(|| (at, body["fields"]["to"].as_str().unwrap().to_owned())))
+        })
+        .transpose()?
+        .flatten();
+    let current: Option<(u64, String)> = transaction
+        .query_row(
+            "SELECT sent_ms,recipient FROM agent_message_sends WHERE subject=?1",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let count = match counts {
+        SendCounts::None => false,
+        SendCounts::All => true,
+        SendCounts::Through(through) => current.is_some() || transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent' AND store_index<=?2)",
+            params![subject, through],
+            |row| row.get(0),
+        )?,
+    };
+    if count && current != desired {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hf5d965fad59a owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends WHERE subject=?1",
+            [subject],
+        )?;
+        if let Some((at, recipient)) = desired {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hc00cfd430db8 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO agent_message_sends VALUES(?1,?2,?3)",
+                params![subject, at, recipient],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// While the usage backfill runs, the `store_index` of the last `message.sent` claim it read.
+const BACKFILL_THROUGH: &str = "agent_message_days_v1_through";
+
+/// The most `message.sent` claims one background backfill page reads. A page of 500 holds the
+/// writer for about 20 ms on the load test's busy-host store (41 us a send).
+pub const BACKFILL_PAGE: usize = 500;
+
+fn backfill_through(transaction: &Transaction<'_>) -> Result<Option<u64>> {
+    Ok(transaction
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1",
+            [BACKFILL_THROUGH],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// One page of the usage backfill: count the subjects of at most `limit` `message.sent` claims
+/// past the last page, in `store_index` order, and mark the counts ready after the last page.
+/// Returns whether they are ready. The daemon runs it in the background, one page per writer
+/// turn, so neither opening the store nor the first estimate rebuilds every retained send; a
+/// cursor in `meta` carries it across restarts.
+pub fn backfill_page(transaction: &Transaction<'_>, limit: usize) -> Result<bool> {
+    if ready(transaction)? {
+        return Ok(true);
+    }
+    let through = match backfill_through(transaction)? {
+        Some(through) => through,
+        None => {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h92818f79cda5 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends;
+                 DELETE FROM agent_message_days;",
+            )?;
+            0
+        }
+    };
+    let claims = transaction
+        .prepare_cached(
+            "SELECT subject,store_index FROM claims INDEXED BY claims_kind_index
+             WHERE kind='message.sent' AND store_index>?1 ORDER BY store_index LIMIT ?2",
+        )?
+        .query_map(params![through, i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The historical pass counts sends only; coordination metadata bootstraps on its own.
+    for subject in claims.iter().map(|(subject, _)| subject.as_str()).collect::<BTreeSet<_>>() {
+        sync_subject(transaction, subject, false, SendCounts::All)?;
+    }
+    if claims.len() < limit {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h9948e4b91d26 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1",
+            [BACKFILL_THROUGH],
+        )?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h25642ab8e771 owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
+            [],
+        )?;
+        return Ok(true);
+    }
+    let through = claims.last().map_or(through, |(_, index)| *index);
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hd8dd65dbc13a owner=st3_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![BACKFILL_THROUGH, through.to_string()],
+    )?;
+    Ok(false)
 }

@@ -151,6 +151,41 @@ export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${names
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
 export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled() }}' } as const
 
+/**
+ * What `actions/checkout` with `fetch-depth: 0` fetches (every branch, every tag, the whole history) except evidence records.
+ * Signed evidence records are to become tags under refs/tags/evidence/ (docs/st3/gate-evidence.md, "Records as tags"), one per
+ * record up to the GC cap, and `fetch-depth: 0` fetches every tag: 5,000 of them added 81.5 MiB and 16 s to a full fetch
+ * (measured 2026-10-19), mostly source objects of tested commits that no branch holds. So check out one commit, then fetch the
+ * rest with a negative refspec (git 2.29 or later). Deepening the shallow clone (`--unshallow`) took 21 s against 11 s for a
+ * full fetch (2026-10-20, from hetz2): the server cannot reuse its packs for it. So the shallow marker goes and the history is
+ * fetched as a fresh clone would (`--refetch`, git 2.36 or later), then checked: the whole history is here or the step fails.
+ * The job token is used only when checkout did not persist its own.
+ */
+export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regexp '^http\\..*\\.extraheader$' || true)" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\\n')"
+  export GIT_CONFIG_VALUE_0
+fi
+head=$(git rev-parse HEAD)
+rm -f "$(git rev-parse --git-path shallow)"
+git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+git fsck --connectivity-only --no-dangling --no-progress`
+
+/**
+ * The checkout step (its own keys, such as `name`, and its `with`), shallow, then the fetch above with the same
+ * `continue-on-error`; `fetchIf` limits the fetch (a job that needs the history on pull requests only).
+ */
+export const fullHistoryCheckoutSteps = (checkout: Record<string, unknown> = {}, step: Record<string, unknown> = {}, fetchIf?: string) => [
+  { ...step, uses: 'actions/checkout@v4', with: { ...checkout, 'fetch-depth': 1 } },
+  {
+    name: 'Fetch the whole history without evidence tags',
+    ...(fetchIf ? { if: fetchIf } : {}),
+    ...('continue-on-error' in step ? { 'continue-on-error': step['continue-on-error'] } : {}),
+    env: { FETCH_TOKEN: '${{ github.token }}' },
+    run: fullHistoryFetchScript,
+  },
+]
+
 /** The public, read-only effect-utils cache supplies genie and other pinned effect-utils packages. */
 export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 
@@ -207,7 +242,7 @@ export const saveMainDependencyCaches = (setup: readonly unknown[]) => setup
  * HOME/XDG. `pull_request` checks out GitHub's merge ref: the PR head merged with the latest base.
  */
 export const commonSetupSteps = [
-  { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   // ci1 keeps its own caches warm on the machine (a Cargo home and build directory per runner, a
   // shared sccache and the Nix store) and names its Cargo home in CI_LOCAL_CARGO_HOME. Restoring
   // the archives below there would only cost time.
@@ -571,6 +606,80 @@ export const evidenceStepSteps = (
     artifact: options.artifact,
   })
 
+/**
+ * Signing steps for the Nix path: build the check derivation (`nix build .#checks.<system>.NAME`), then sign a `nix`
+ * record for it as `nix-NAME`. The facts script, the signer and the helper all come from the base commit; the build runs
+ * before the key is written, as every signing job's work does. The note is retained as the artifact
+ * `nix-evidence-note-NAME`, which the aggregate gate's `evidence-note-*` collection does not match: nothing publishes or
+ * reads it until gate-evidence's verifier accepts the `nix` kind. Without the Nix daemon's `secret-key-files` on the
+ * runner the path carries no Nix signature and the record says `nix_unsigned`, which a verifier rejects.
+ */
+export const nixEvidenceSteps = (name: string): unknown[] => {
+  const soft = { if: 'always()', 'continue-on-error': true } as const
+  const record = `nix-${name}`  // the ledger name only: one signature per job
+  return [
+    {
+      name: 'Take the evidence signer from the base commit',
+      id: 'evidence-base',
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+    },
+    {
+      // A failing build is a record too: the facts script exits 1 after writing it, so this step does not stop the signing.
+      name: `Build checks.${name} and record the facts`,
+      id: 'nix-build',
+      'continue-on-error': true,
+      run: `python3 "$RUNNER_TEMP/evidence-base/scripts/nix-check-facts" --check ${name} --out "$RUNNER_TEMP/nix-facts.json"`,
+    },
+    {
+      ...soft,
+      name: 'May this job use the signing key?',
+      id: 'evidence-guard',
+      if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
+      run: `python3 ${evidenceHelper} guard`,
+    },
+    {
+      ...soft,
+      name: 'Write the signer configuration and key',
+      id: 'evidence-configure',
+      if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
+      env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+      run: `set -o pipefail
+python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+    },
+    {
+      ...soft,
+      name: `Sign the nix record for ${name}`,
+      if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
+      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `helper=${evidenceHelper}
+python3 "$helper" once ${record}
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${name} \\
+  --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\
+  --out "$RUNNER_TEMP/evidence-notes" \\
+  --toolchain-sha256 "$(printf '%s|%s' "$(nix --version 2>/dev/null)" "$RUNNER_ARCH" | sha256sum | cut -d' ' -f1)"`,
+    },
+    { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
+    {
+      ...soft,
+      name: 'Retain the signed note',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: `nix-evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+    },
+  ]
+}
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({
@@ -653,6 +762,17 @@ export const perfStoresCache = (stage: string) => ({
 
 /** pnpm's store under the runner's temporary directory, which only step-level env can name. */
 export const pnpmStoreEnv = { pnpm_config_store_dir: '${{ runner.temp }}/pnpm-store' } as const
+
+/**
+ * Materializes megarepo.lock's members under repos/ before any shell that reads them. `mr`
+ * comes from the flake's effect-utils pin; later steps resolve locks in the same job-local store.
+ */
+export const megarepoApplyStep = {
+  name: 'Materialize megarepo members',
+  env: { MEGAREPO_STORE: '${{ runner.temp }}/megarepo' },
+  run: `nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
+} as const
 
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
@@ -750,11 +870,16 @@ export const fractalWebJobs = {
       fractalWebRunnerStep,
       // A pull request needs its history: the signing guard lists the commits between the base and the head to
       // check their authors, and without them a web-relevant run is never signed and its lane reads as not run.
-      { uses: 'actions/checkout@v4', with: { 'fetch-depth': "${{ github.event_name == 'pull_request' && '0' || '1' }}", 'persist-credentials': false } },
+      ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+      megarepoApplyStep,
       { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },
       fractalWebShellKeyStep,
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
+      // GitHub-hosted Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+      // effect-utils Buck TypeScript actions need them for bwrap (effect-utils #1784).
+      // This runner VM is ephemeral; the bwrap sandbox itself is unchanged.
+      { name: 'Enable user namespaces for Buck TypeScript sandbox', run: 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0' },
       { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
       {
         name: 'Run the fractal-web lanes and dependency license check',

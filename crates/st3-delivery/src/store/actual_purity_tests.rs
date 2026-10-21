@@ -135,8 +135,26 @@ fn repair_fixture(category: usize) -> (ReplicationExchange, String, Value) {
     (exchange, original.id, actual_snapshot(&reference, subject))
 }
 
+// Pull requests run 8 cases from a fixed seed, so a failure reproduces and every PR checks the same
+// permutations; that seed's 8 cases cover all 3 categories. The daily run (ST_TEST_SCALE=full, docs/ci.md)
+// keeps the 32 random cases this test always ran.
+fn purity_config() -> ProptestConfig {
+    if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        ProptestConfig::with_cases(32)
+    } else {
+        ProptestConfig {
+            cases: 8,
+            rng_seed: proptest::test_runner::RngSeed::Fixed(PURITY_SEED),
+            ..ProptestConfig::default()
+        }
+    }
+}
+
+// Chosen because its 8 cases cover categories 0-2 (checked by printing each case's category).
+const PURITY_SEED: u64 = 0x5eed_2026;
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+    #![proptest_config(purity_config())]
 
     #[test]
     fn actual_state_ignores_repaired_originals_under_permutations_splits_and_duplicates(
