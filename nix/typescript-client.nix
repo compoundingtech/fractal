@@ -29,11 +29,11 @@ let
       ../pnpm-workspace.yaml
       ../pnpm-source-inputs.json
       ../apps/fractal-web/package.json
-      ../apps/fractal-web/packages/st3-sdk/package.json
+      ../apps/fractal-web/packages/fractal-sdk/package.json
       ../apps/ios/package.json
-      ../clients/typescript/st3-client/package.json
-      ../clients/typescript/st3-scenarios/package.json
-      ../clients/typescript/st3-views/package.json
+      ../clients/typescript/fractal-client/package.json
+      ../clients/typescript/fractal-scenarios/package.json
+      ../clients/typescript/fractal-views/package.json
       ../packages/fractal-ui/package.json
     ];
   };

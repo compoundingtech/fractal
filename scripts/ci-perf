@@ -76,7 +76,7 @@ case "$stage" in
     # evidence inside the existing always-uploaded perf tree, not an uncollected temp root.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     FRACTAL_MESSAGING_FAULTS_EVIDENCE="$out/link-minutes-evidence" ST3_MESSAGING_FAULTS_EVIDENCE="$out/link-minutes-evidence" \
-      cargo test -p st3 --features test-support --test integration --locked messaging_faults::link_minutes \
+      cargo test -p fractal --features test-support --test integration --locked messaging_faults::link_minutes \
       -- --exact --nocapture --test-threads 1 2>&1 | tee "$out/link-minutes.log" || link_status=$?
     if [ "$link_status" -eq 0 ]; then
       python3 - "$out/link-minutes.log" <<'PY' || link_status=$?
@@ -104,7 +104,7 @@ PY
     # the job's lightly optimized build only makes the stores generate faster. Counts are the whole
     # process's, so nothing else may run beside the check.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    FRACTAL_COST_REPORT="$out/cost.json" ST_COST_REPORT="$out/cost.json" cargo test -p st3 --test integration --locked daemon_cost:: \
+    FRACTAL_COST_REPORT="$out/cost.json" ST_COST_REPORT="$out/cost.json" cargo test -p fractal --test integration --locked daemon_cost:: \
       -- --nocapture --test-threads 1 2>&1 | tee "$out/cost.log" || status=$?
     if [ -s "$out/cost.json" ]; then
       summarize_cost "$out/cost.json"
@@ -152,7 +152,7 @@ PY
     # Main's last reports, newest first; the test compares with the worst of them.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     FRACTAL_LOAD_GATE=1 ST_LOAD_GATE=1 FRACTAL_LOAD_REPORT="$out/load.json" ST_LOAD_REPORT="$out/load.json" FRACTAL_LOAD_BASELINE="$RUNNER_TEMP/perf-baseline" ST_LOAD_BASELINE="$RUNNER_TEMP/perf-baseline" \
-      cargo test --release -p st3 --features perf-load --test perf_load --locked daemon_load:: -- --nocapture \
+      cargo test --release -p fractal --features perf-load --test perf_load --locked daemon_load:: -- --nocapture \
       2>&1 | tee "$out/load.log" || status=$?
     if [ -s "$out/load.json" ]; then
       summarize_load "$out/load.json"
@@ -172,7 +172,7 @@ PY
     # never a required check (docs/ci.md).
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     FRACTAL_LOAD_GATE=1 ST_LOAD_GATE=1 FRACTAL_LOAD_HOG=1 ST_LOAD_HOG=1 FRACTAL_LOAD_HOG_REPORT="$out/hog" ST_LOAD_HOG_REPORT="$out/hog" \
-      cargo test --release -p st3 --features perf-load --test perf_load --locked a_seat_priority_hog -- --nocapture \
+      cargo test --release -p fractal --features perf-load --test perf_load --locked a_seat_priority_hog -- --nocapture \
       2>&1 | tee "$out/load-hog.log" || status=$?
     if [ -s "$out/hog/summary.md" ]; then
       { printf '\n'; cat "$out/hog/summary.md"; } >> "$GITHUB_STEP_SUMMARY"

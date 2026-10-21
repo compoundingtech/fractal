@@ -1,5 +1,5 @@
-import { ClientError, plainError, type St3Client } from '@smalltalk/st3-client'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import type * as Native from '@fractal/client/schema'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
 export type AlertActionResult =
@@ -32,9 +32,9 @@ export interface AlertActionPort {
 const refused = (detail: string): AlertActionResult => ({ _tag: 'Refused', detail })
 
 const REVIEW = {
-  'review.approve': (client: St3Client) => client.reviewApprove.bind(client),
-  'review.reject': (client: St3Client) => client.reviewReject.bind(client),
-  'review.request-changes': (client: St3Client) => client.reviewRequestChanges.bind(client),
+  'review.approve': (client: FractalClient) => client.reviewApprove.bind(client),
+  'review.reject': (client: FractalClient) => client.reviewReject.bind(client),
+  'review.request-changes': (client: FractalClient) => client.reviewRequestChanges.bind(client),
 } as const
 
 /**
@@ -42,7 +42,7 @@ const REVIEW = {
  * no longer holds open, or that no longer offers this answer, is not answered; neither is one
  * that changed since it was read. A failure is never retried: the person sees why.
  */
-export const gatewayAlertActions = (client: St3Client): AlertActionPort => ({
+export const gatewayAlertActions = (client: FractalClient): AlertActionPort => ({
   act: async ({ alert, action }) => {
     try {
       let current

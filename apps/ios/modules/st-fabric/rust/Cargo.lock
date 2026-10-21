@@ -682,6 +682,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-fabric-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iroh",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2854,19 +2867,6 @@ checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
  "der",
-]
-
-[[package]]
-name = "st-fabric-bridge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "iroh",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

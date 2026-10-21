@@ -1227,7 +1227,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: "${{ runner.temp }}/st-bench"
-          key: "perf-cost-stores-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+          key: "perf-cost-stores-${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
         id: cache-11
       - name: Run the cost check
         shell: bash

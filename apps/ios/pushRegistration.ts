@@ -1,4 +1,4 @@
-import type { PushRegistration, PushRegistrationStatus } from '../../clients/typescript/st3-client';
+import type { PushRegistration, PushRegistrationStatus } from '../../clients/typescript/fractal-client';
 
 export type PushEnvironment = PushRegistration['environment'];
 export type PushDecision = 'none' | 'register' | 'unregister';

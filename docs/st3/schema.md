@@ -1,10 +1,10 @@
 # st3 schema registry
 
-This file is generated from `st3-schema`.
+This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `ab318454d85787af18a36821c53eefcd4bc33c97da610305e607525dc6fb0b92`
+Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d58`
 
 ## Subject families
 
@@ -114,6 +114,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `harness.context-clear.requested` | `agent` | `authorized-requester` | `append` | `durable` | `context_epoch:string`, `incarnation_id:string`, `operation_status:string`, `runtime_id:string` |  |
 | `harness.context-clear.result` | `agent` | `system-only` | `once` | `durable` | `context_epoch:string`, `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string` |  |
 | `harness.diagnostic` | `agent` | `same-subject-actor` | `append` | `durable` | `attempt:integer`, `auth_attention_key:string`, `code:string`, `driver:string`, `incarnation_id:string`, `matched_line:string`, `observed_since_ms:integer`, `ownership_sequence:integer`, `provider_auth_sequence:integer`, `readiness_epoch:integer`, `reason:string`, `retry_after_unix_ms:integer`, `retry_attempt:integer`, `selector_scope:string`, `session_id:string`, `severity:string`, `status:string`, `step_run:subject-reference(step-run)`, `wake_attempts:integer` |  |
+| `harness.inventory.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `commands!:array`, `dynamic_commands!:string`, `harness!:string`, `incarnation_id!:string`, `observed_at!:string`, `session_id!:string` |  |
 | `harness.limits` | `agent` | `same-subject-actor` | `append` | `durable` | `account:string`, `account_ref:string`, `driver!:string`, `five_hour_percent:number`, `five_hour_resets_at_unix_ms:integer`, `incarnation_id:string`, `measured_at_unix_ms!:integer`, `plan:string`, `weekly_percent:number`, `weekly_resets_at_unix_ms:integer` |  |
 | `harness.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `ask:string`, `background_jobs:integer`, `blocked_on:string`, `blocking:array`, `driver:string`, `evidence_incarnation:string`, `exit:string`, `incarnation_id:string`, `input_buffer:string`, `observed_at_ms:integer`, `observed_since_ms:integer`, `ownership_sequence:integer`, `provider_auth:boolean`, `provider_auth_sequence:integer`, `quiescent:boolean`, `reason:string`, `rollout_operation:string`, `state!:string`, `status_transition:boolean`, `transition_sequence:integer`, `transport:string` |  |
 | `harness.session-file` | `agent` | `authorized-requester` | `append` | `durable` | `account_ref:string`, `agent:subject-reference(agent)`, `desired_token:string`, `discovery_revision:string`, `harness!:string`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id!:string`, `source_session:string`, `status:string` |  |
@@ -371,6 +372,20 @@ cursor in `meta`, on the same paced background loans, union every `checkpoint_cl
 them, including rows adoption later withdraws, so they only grow. Claim identities use the
 ledger's 32-byte/TEXT encoding. Readers still use `checkpoint_claims` until local-mode
 activation stops those withdrawals.
+
+## Claim range digests
+
+`claim_range_digests` summarizes the claims this store retains for claims sync. Each claim falls
+in one of 4,096 leaf ranges by the first three hex digits of its ID, and each leaf in one of 64 top
+ranges; an ID that is not 64 lowercase hex digits is counted in a separate irregular range. A
+range keeps its claim count and the 512-bit modular sum of its members' domain-separated SHA-512
+hashes, so it does not depend on arrival order. Plain-SQL triggers queue every claim insert and
+delete in `claim_range_pending`, so an earlier build that writes claims queues its changes too. A
+background job (`maintenance.claim_ranges`) folds the queue into the digests after each store
+event, and once folds the claims that predate the triggers, tracked by `claim_range_import`; it
+takes 4,096 rows per background writer loan and rests outside the loan for max(100 ms, 4 x the
+loan's hold), capped at 5 s. The digests cover exactly the retained claims when the queue and the
+import are both empty. Nothing reads them yet.
 
 ## Local message selectors
 
