@@ -13,7 +13,8 @@ import { isExportStory } from 'storybook/internal/csf'
 import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import * as nodePath from 'node:path'
-import { globSync } from 'node:fs'
+import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
 import './scenario-fixture-graph.unit.test.ts'
@@ -268,8 +269,74 @@ const loadersByFile = Object.fromEntries(Object.entries(storyLoaders).map(([file
 const storybookDirectory = nodePath.resolve(uiSource, '../.storybook')
 // Do not filter by extension here: every configured file needs a loader or an
 // explicit failure, including newly configured CSF extensions and glob braces.
-const configuredStoryFiles = (globs: string[]) => globSync(globs, { cwd: storybookDirectory })
-  .map(file => nodePath.resolve(storybookDirectory, file))
+const configuredStoryFiles = (globs: string[], directory = storybookDirectory) => {
+  const unsupported = (glob: string): never => {
+    throw new Error(`Cannot derive static Storybook inventory roots for configured pattern: ${glob}`)
+  }
+  const expandBraces = (glob: string): string[] => {
+    const start = glob.indexOf('{')
+    if (start === -1) return glob.includes('}') ? unsupported(glob) : [glob]
+    const alternatives: string[] = []
+    let depth = 0
+    let part = start + 1
+    for (let index = start; index < glob.length; index++) {
+      const character = glob[index]
+      if (character === '{') depth++
+      if (character === '}') {
+        depth--
+        if (depth === 0) {
+          if (alternatives.length === 0) return unsupported(glob)
+          alternatives.push(glob.slice(part, index))
+          return alternatives.flatMap(alternative => expandBraces(glob.slice(0, start) + alternative + glob.slice(index + 1)))
+        }
+      }
+      if (character === ',' && depth === 1) {
+        alternatives.push(glob.slice(part, index))
+        part = index + 1
+      }
+    }
+    return unsupported(glob)
+  }
+  const rejectSymlink = (path: string) => {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) throw new Error(`Symlink in configured Storybook inventory: ${path}`)
+    return stat
+  }
+  const walk = (path: string) => {
+    if (!rejectSymlink(path).isDirectory()) return
+    for (const name of readdirSync(path)) {
+      if (name !== 'node_modules') walk(nodePath.join(path, name))
+    }
+  }
+  const files = new Set<string>()
+  for (const glob of globs) {
+    const expandedGlobs = expandBraces(glob)
+    if (glob.includes('node_modules') || expandedGlobs.some(expanded => expanded.includes('node_modules'))) {
+      throw new Error(`Unsupported node_modules segment in configured Storybook pattern: ${glob}; extend the scenario inventory check before loading dependency stories`)
+    }
+    const roots = new Set(expandedGlobs.map(expanded => {
+      if (/[()!\\]/.test(expanded)) return unsupported(glob)
+      const segments = expanded.split('/')
+      const magic = segments.findIndex(segment => /[*?[]/.test(segment))
+      if (magic === 0 || (magic !== -1 && segments.slice(magic).includes('..'))) return unsupported(glob)
+      return nodePath.resolve(directory, magic === -1 ? nodePath.dirname(expanded) : segments.slice(0, magic).join('/'))
+    }))
+    for (const root of roots) {
+      // Inspect static ancestors first, without following earlier path components.
+      const ancestors: string[] = []
+      for (let parent = nodePath.dirname(root); ; parent = nodePath.dirname(parent)) {
+        ancestors.push(parent)
+        if (parent === nodePath.dirname(parent)) break
+      }
+      for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
+      walk(root)
+    }
+    for (const file of globSync(glob, { cwd: directory, exclude: ['**/node_modules/**'] })) {
+      files.add(nodePath.resolve(directory, file))
+    }
+  }
+  return [...files]
+}
 const configuredFiles = configuredStoryFiles(storyGlobs)
 const storyModules: Record<string, StoryModule> = {}
 for (const file of configuredFiles) {
@@ -283,6 +350,62 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
   expect(storybookConfig.stories).toEqual(storyGlobs)
   expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
   expect(configuredFiles.length).toBeGreaterThan(0)
+})
+
+test('configured inventory rejects directory and file symlinks without following them', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
+  try {
+    const source = nodePath.join(directory, 'src')
+    mkdirSync(source)
+    const story = nodePath.join(source, 'Example.stories.tsx')
+    writeFileSync(story, '')
+    const globs = ['src/**/*.stories.tsx']
+    expect(configuredStoryFiles(globs, directory)).toEqual([story])
+    const directoryLink = nodePath.join(source, 'linked')
+    symlinkSync(directory, directoryLink, 'dir')
+    expect(() => configuredStoryFiles(globs, directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    expect(() => configuredStoryFiles(['src/linked/**/*.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    expect(() => configuredStoryFiles(['src/linked/src/**/*.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    rmSync(directoryLink)
+    const fileLink = nodePath.join(source, 'Linked.stories.tsx')
+    symlinkSync(story, fileLink, 'file')
+    expect(() => configuredStoryFiles(globs, directory)).toThrow(`Symlink in configured Storybook inventory: ${fileLink}`)
+    expect(() => configuredStoryFiles(['src/Linked.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${fileLink}`)
+    rmSync(fileLink)
+    const dependencies = nodePath.join(source, 'node_modules')
+    mkdirSync(dependencies)
+    symlinkSync(directory, nodePath.join(dependencies, 'ignored'), 'dir')
+    expect(configuredStoryFiles(globs, directory)).toEqual([story])
+    expect(() => configuredStoryFiles(['src/node_modules/**/*.stories.tsx'], directory))
+      .toThrow('Unsupported node_modules segment in configured Storybook pattern: src/node_modules/**/*.stories.tsx; extend the scenario inventory check')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('configured inventory expands nested brace roots before inspecting symlinks', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-braces-'))
+  try {
+    const config = nodePath.join(directory, 'config/.storybook')
+    mkdirSync(config, { recursive: true })
+    mkdirSync(nodePath.join(directory, 'config/src/nested'), { recursive: true })
+    const outside = nodePath.join(directory, 'outside')
+    mkdirSync(outside)
+    const story = nodePath.join(outside, 'Example.stories.tsx')
+    writeFileSync(story, '')
+    const globs = ['../src/{nested,{../../outside,nested}}/**/*.stories.tsx']
+    expect(configuredStoryFiles(globs, config)).toEqual([story])
+    const link = nodePath.join(outside, 'linked')
+    symlinkSync(directory, link, 'dir')
+    expect(() => configuredStoryFiles(globs, config)).toThrow(`Symlink in configured Storybook inventory: ${link}`)
+    expect(() => configuredStoryFiles(['{../src,../../outside}/**/*.stories.tsx'], config))
+      .toThrow(`Symlink in configured Storybook inventory: ${link}`)
+    for (const glob of ['@(src|outside)/**/*.stories.tsx', '*/**/*.stories.tsx', '../src/{1..3}/**/*.stories.tsx']) {
+      expect(() => configuredStoryFiles([glob], config)).toThrow(`Cannot derive static Storybook inventory roots for configured pattern: ${glob}`)
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('configured .stories.ts CSFs are discovered and checked, including brace globs', async () => {
