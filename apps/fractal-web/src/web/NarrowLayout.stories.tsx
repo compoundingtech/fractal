@@ -320,7 +320,7 @@ export const DrawersFlow: Story = { play: restoringStoryUrl(async ({ canvasEleme
  * play then selects a seat with a long name: the breadcrumb truncates within its share and the tab row, with the
  * terminal tab added, still ends before Terminal.
  */
-export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: restoringStoryUrl(async ({ canvasElement }) => {
+export const TerminalToggle: Story = { parameters: { scenario: { mode: 'contract-fixture', reason: 'The real responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { terminalRuntime: true }, play: restoringStoryUrl(async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) await assertWide(canvasElement)
   if (narrow) await assertPhoneHeader(canvasElement)
@@ -366,4 +366,4 @@ export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: re
   await waitFor(() => expect(longTerminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 }) }
-export const TerminalToggleLight: Story = { ...TerminalToggle, args: { ...TerminalToggle.args, scheme: 'light' } }
+export const TerminalToggleLight: Story = { ...TerminalToggle, parameters: { scenario: { mode: 'contract-fixture', reason: 'The light responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { ...TerminalToggle.args, scheme: 'light' } }
