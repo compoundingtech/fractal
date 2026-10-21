@@ -6909,9 +6909,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             "a bound terminal seat cannot be spawned"
         );
         self.store.owned_desired_guard(subject)?;
+        // A self-restart released at its quiet boundary is as explicit as an immediate one.
         let explicit_retry = request.is_some_and(|request| {
-            request.body["fields"]["action"] == "restart"
-                && request.actor.as_deref().is_some_and(|actor| {
+            matches!(
+                request.body["fields"]["action"].as_str(),
+                Some("restart" | crate::restart::WHEN_IDLE)
+            ) && request.actor.as_deref().is_some_and(|actor| {
                     actor.starts_with("person/") || actor.starts_with("agent/")
                 })
         });
@@ -8032,7 +8035,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &format!("restart blocked: {error:#}"),
                 );
             }
+            // A self-restart that waited for its idle, quiescent boundary was asked for by the
+            // seat itself. Asking it to prepare now would wake it into a new turn at that boundary.
+            let quiesced = self
+                .store
+                .operation_claim(&crate::restart::release_key(&request))?
+                .is_some();
             if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+                && !quiesced
                 && !self.restart_may_proceed(
                     &subject.subject,
                     observation,
