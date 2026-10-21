@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Keep pinned PTY intermediates isolated even with an inherited Cargo build-dir."""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import sys
+
+repo = Path(__file__).resolve().parent.parent
+script = (repo / 'scripts/release-smalltalk').read_text()
+# Exercise the production command, not a second copy of its directory policy.
+build = script[script.index('pty_build_dir='):script.index('install -m 0755 "$pty_build_dir/')]
+
+# Check the shell boundary cheaply, without a Rust toolchain. The real-Cargo
+# check below additionally proves isolation and warm reuse in release CI.
+for revision in ('old', 'new'):
+    expected = f'/cached target/pty-runtime/{revision}'
+    result = subprocess.run(
+        ['bash', '-euc', 'cargo() { printf "%s\\n" "${CARGO_BUILD_BUILD_DIR-}" "$@"; };\n' + build],
+        env={**os.environ, 'build_dir': '/cached target', 'pty_rev': revision,
+             'pty_source': f'/source/{revision}', 'target': 'test-target',
+             'CARGO_BUILD_BUILD_DIR': '/shared/intermediates'},
+        text=True, capture_output=True, check=True)
+    arguments = result.stdout.splitlines()
+    assert arguments[0] == expected, result.stdout
+    assert arguments[arguments.index('--target-dir') + 1] == expected
+    assert arguments[arguments.index('--manifest-path') + 1] == f'/source/{revision}/Cargo.toml'
+if sys.argv[1:] == ['--script-only']:
+    print('Native release PTY shell build-directory isolation passed (two pins)')
+    sys.exit(0)
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    env = {**os.environ, 'CARGO_BUILD_BUILD_DIR': str(root / 'shared-intermediates'),
+           'CARGO_ENCODED_RUSTFLAGS': '', 'CARGO_NET_OFFLINE': 'true',
+           'CARGO_INCREMENTAL': '0'}
+    # No registry dependencies, PTY checkout, Zig or release binaries are needed.
+    target = subprocess.check_output(['rustc', '-vV'], text=True).split('host: ')[1].splitlines()[0]
+    for revision, symbol in [('old', 'old'), ('new', 'kill')]:
+        source = root / revision
+        for crate in ('pty', 'pty-core'):
+            (source / 'crates' / crate / 'src').mkdir(parents=True)
+            (source / 'crates' / crate / 'Cargo.toml').write_text(
+                f'[package]\nname = "{crate}"\nversion = "0.1.0"\nedition = "2021"\n' +
+                ('[dependencies]\npty-core = { path = "../pty-core" }\n' if crate == 'pty' else ''))
+        (source / 'Cargo.toml').write_text('[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n')
+        (source / 'crates/pty-core/src/lib.rs').write_text(f'pub fn {symbol}() {{}}\n')
+        (source / 'crates/pty/src/main.rs').write_text(f'fn main() {{ pty_core::{symbol}(); }}\n')
+        # A restored, clean source can be older than another pin's dep-info.
+        for path in source.rglob('*'):
+            if path.is_file():
+                os.utime(path, (1, 1))
+        subprocess.run(['cargo', 'generate-lockfile', '--offline', '--manifest-path', str(source / 'Cargo.toml')],
+                       env=env, check=True, capture_output=True)
+
+    # Poison the inherited intermediate directory with another pin's path crate.
+    subprocess.run(['cargo', 'build', '--release', '--locked', '--manifest-path', str(root / 'old/Cargo.toml'),
+                    '--target-dir', str(root / 'target/old'), '--target', target, '-p', 'pty', '--bin', 'pty'],
+                   env=env, check=True, capture_output=True)
+    # Recompile only the consumer: its required new API must not use the old library.
+    os.utime(root / 'new/crates/pty/src/main.rs', None)
+    command_env = {**env, 'build_dir': str(root / 'target'), 'pty_rev': 'new',
+                   'pty_source': str(root / 'new'), 'target': target}
+    for warm in (False, True):
+        result = subprocess.run(['bash', '-euc', build], env=command_env, cwd=root,
+                                text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        if warm:
+            assert 'Compiling ' not in result.stderr, result.stderr
+        else:
+            assert 'Compiling pty-core ' in result.stderr, result.stderr
+    assert list((root / 'target/pty-runtime/new').rglob('dep-lib-pty_core'))
+
+print('Native release PTY intermediate-cache isolation passed (cold + warm)')
