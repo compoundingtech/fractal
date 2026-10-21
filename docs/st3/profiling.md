@@ -297,6 +297,16 @@ day has not spent. The count is over the last hour, and with `max_per_hour = 0` 
 or one flaky test spends it all. A window without a sample, or without a finished pull request or
 merge group run for the count, is `no-data`.
 
+A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
+objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
+`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
+subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
+agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
+fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
+that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
+before the observer has read any runs, neither opens nor ends one. The other objectives open no
+fault.
+
 `st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
 remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
