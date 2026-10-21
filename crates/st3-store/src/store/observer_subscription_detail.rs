@@ -24,12 +24,19 @@ pub const DECLARATION_METADATA_SQL: &str =
                     AND typeof(owner_step) IN ('null','text')
              FROM desired WHERE subject=?1";
 
-pub const STATE_METADATA_SQL: &str =
-    "SELECT store_index, octet_length(body) + octet_length(accepted_at_unix_ms),
+/// The newest state claim at or before the cut in canonical order, never by arrival: members
+/// that admitted the same claims in another order name the same one. The accepted-time index
+/// yields the subject's states newest time first, so only claims newer than the cut and the
+/// newest millisecond at the cut are read, and the sort covers only that millisecond's ties.
+pub static STATE_METADATA_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    canonical_sql(
+        "SELECT store_index, octet_length(body) + octet_length(accepted_at_unix_ms),
                     typeof(body)='text' AND typeof(accepted_at_unix_ms)='text'
-             FROM claims INDEXED BY claims_subject_kind_index
-             WHERE subject=?1 AND kind=?2 AND store_index<=?3
-             ORDER BY store_index DESC LIMIT 1";
+             FROM claims INDEXED BY claims_subject_kind_accepted_index
+             WHERE subject=?1 AND kind=?2 AND +store_index<=?3
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+    )
+});
 
 pub const MAX_DETAIL_SOURCE_BYTES: usize = 256 * 1024;
 pub const MAX_DETAIL_KEY_BYTES: usize = 4096;
@@ -165,11 +172,42 @@ impl Store {
         index: u64,
         budget: &mut DetailBudget,
     ) -> Result<Option<(Value, u128)>> {
-        let connection = self.readers.get();
+        let Some((position, bytes)) = self.observer_subscription_state_position(subject, kind, index)?
+        else {
+            return Ok(None);
+        };
+        budget.charge(bytes)?;
+        smallclaims::read_budget::check()?;
+        self.observer_subscription_state_body(position)
+    }
+
+    /// The same state claim as [`Self::observer_subscription_detail_state`], for a list read,
+    /// which bounds its whole response instead of each state.
+    pub fn observer_subscription_state(
+        &self,
+        subject: &str,
+        kind: &str,
+        index: u64,
+    ) -> Result<Option<(Value, u128)>> {
+        let Some((position, _)) = self.observer_subscription_state_position(subject, kind, index)?
+        else {
+            return Ok(None);
+        };
+        self.observer_subscription_state_body(position)
+    }
+
+    /// The chosen state's store index and byte size, checked before any payload is copied.
+    fn observer_subscription_state_position(
+        &self,
+        subject: &str,
+        kind: &str,
+        index: u64,
+    ) -> Result<Option<(u64, i64)>> {
         // An inclusive bound is the old exclusive (index + 1) bound without overflow.
-        // The full index order needs no correlated subquery or temporary sort.
-        let metadata: Option<(u64, i64, bool)> = connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha6a19a5ab2ba owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ STATE_METADATA_SQL)?
+        let metadata: Option<(u64, i64, bool)> = self
+            .readers
+            .get()
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9d68ce48be00 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ &STATE_METADATA_SQL)?
             .query_row(/* sqlite-large-value: allow-for-now lv-h8c65bdd86397 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ params![subject, kind, index], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
@@ -178,10 +216,13 @@ impl Store {
             return Ok(None);
         };
         valid_metadata(valid)?;
-        budget.charge(bytes)?;
-        smallclaims::read_budget::check()?;
+        Ok(Some((position, bytes)))
+    }
+
+    fn observer_subscription_state_body(&self, position: u64) -> Result<Option<(Value, u128)>> {
         // Ignore unrelated claim metadata and predecessors, which the renderer never uses.
-        connection
+        self.readers
+            .get()
             .prepare_cached("SELECT body, accepted_at_unix_ms FROM claims WHERE store_index=?1")?
             .query_row(/* sqlite-large-value: allow-for-now lv-h78d8ff547884 owner=st3_store::store::observer_subscription_detail TODO=trace-statement-and-value-representation */ [position], |row| {
                 let body = row.get::<_, String>(0)?;
