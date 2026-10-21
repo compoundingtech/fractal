@@ -34,7 +34,7 @@ fn invite(store: &Store, name: Option<&str>, migrate: bool) -> CreatedFleetInvit
             name,
             Duration::from_secs(60),
             &["loopback".into()],
-            "person/sample",
+            "person/example",
             migrate,
         )
         .unwrap()
@@ -130,7 +130,7 @@ fn an_expired_invite_is_unknown_and_the_route_closes_when_none_is_left() {
             None,
             Duration::from_secs(10),
             &["loopback".into()],
-            "person/sample",
+            "person/example",
             false,
         )
         .unwrap();
@@ -159,7 +159,7 @@ fn a_revoked_invite_is_unknown() {
     let created = invite(&store, None, false);
     let _other = invite(&store, None, false);
     store
-        .revoke_fleet_invite(&created.invite, "sample", Some("person/sample"))
+        .revoke_fleet_invite(&created.invite, "sample", Some("person/example"))
         .unwrap();
     let request = request(&code(&created, false), &joiner(), "birch", "listening");
     assert_eq!(
@@ -330,7 +330,7 @@ fn a_removed_name_rejoins_only_from_a_store_that_never_wrote_as_it() {
         FleetRedemption::Admitted { .. }
     ));
     store
-        .remove_fleet_member("birch", "sample", "person/sample")
+        .remove_fleet_member("birch", "sample", "person/example")
         .unwrap();
 
     let migration = invite(&store, None, true);
