@@ -1,4 +1,4 @@
-// Block markdown the way stui renders an assistant reply (crates/stui/src/ui/text.rs markdown
+// Block markdown the way stui renders an assistant reply (crates/fractal-tui/src/ui/text.rs markdown
 // and inline): headings, bullets with a hanging marker, fenced code, quotes, rules, and tables
 // kept as monospace rows. Anything else is a plain line.
 

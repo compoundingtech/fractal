@@ -83,6 +83,10 @@ for workflow in sorted((root / '.github/workflows').glob('*.yml')):
         elif workflow.name == 'perf.yml' and 'name: perf-load-hog-macos' in block:
             # A manual macOS run that builds from a cold start: it restores and saves no caches.
             assert 'actions/cache' not in block and 'ci-perf-cache' not in block, 'the macOS hog run keeps no cache'
+        elif workflow.name == 'daily-long.yml' and 'name: daily-macos-check' in block:
+            # The daily macOS compile check builds cold, like the macOS hog run, and keeps no cache.
+            assert 'actions/cache' not in block and 'ci-perf-cache' not in block, 'the macOS check keeps no cache'
+            assert 'CACHE_REASON: Type-checks cold on a macOS runner and keeps no cache.' in block
         elif workflow.name == 'perf.yml':
             assert 'python3 scripts/ci-perf-cache restore' in block
         else:
@@ -92,7 +96,7 @@ for workflow in sorted((root / '.github/workflows').glob('*.yml')):
             if re.search(r'(?m)^        id: (cargo|nix)-cache$', step):
                 dependency_restores += 1
                 assert 'uses: actions/cache/restore@v4' in step, 'PR/queue dependency archives must not auto-save branch copies'
-            if 'uses: actions/cache/save@v4' in step and re.search(r'(?m)^          key: .*?(cargo-|nix5-)', step):
+            if 'uses: actions/cache/save@v4' in step and re.search(r'(?m)^          key: .*?(cargo-|nix5-|nix6-genie-closure-)', step):
                 main_dependency_saves += 1
                 assert "github.ref == 'refs/heads/main'" in step.replace("''", "'"), 'dependency writes require protected main'
 assert dependency_restores >= 10, dependency_restores

@@ -3,16 +3,12 @@ import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
-import { useLocale } from 'react-aria'
+import { SidebarTree, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@fractal/ui/assistant-ui/shell'
 import {
   Button as AriaButton,
-  ListLayout,
-  Tree,
-  TreeItem,
-  TreeItemContent,
-  Virtualizer,
+  useDragAndDrop,
   type Key,
-  type TreeItemRenderProps,
+  type DragAndDropOptions,
   type TreeProps,
 } from 'react-aria-components'
 
@@ -23,9 +19,9 @@ import { RenderProfiler } from '../telemetry/meters.tsx'
 import { matchPositions } from '../command-palette/fuzzy.ts'
 import {
   useAgent,
+  useAskingAgents,
   useDataSource,
   useFleetSelection,
-  useNow,
   useSubjectSelection,
 } from '../data/react.tsx'
 import type { Feed, Fleet } from '../data/source.ts'
@@ -38,10 +34,13 @@ import { SubjectAddress } from '../resources/contract.ts'
 import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.tsx'
 import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
+import { useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
 import type { Workspace, WindowAction } from './workspaces.ts'
+import type { AgentFoldersProps, SidebarNode, SidebarMoveTarget } from '../folders/sidebarContract.ts'
+import { useClockLabel } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 
 const unfiled = 'wf/unfiled'
 const styles = stylex.create({
@@ -54,16 +53,8 @@ const styles = stylex.create({
     minHeight: '28px',
     fontWeight: 600,
   },
-  // The Tree itself is the bounded scroll viewport, not the full sidebar document.
-  // Padding belongs to ListLayout so pointer drop coordinates and row offsets agree.
-  tree: { outline: 'none', maxHeight: '60vh', overflowY: 'auto', minHeight: 0 },
-  item: { outline: 'none', borderRadius: scale.radiusSm },
-  focused: {
-    outlineWidth: '2px',
-    outlineStyle: 'solid',
-    outlineColor: tokens['--ds-focus-color'],
-    outlineOffset: '-2px',
-  },
+  // The parent assigns available flex space; the kit owns the only scrolling tree.
+  treeViewport: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, overflow: 'hidden' },
   row: {
     display: 'flex',
     flexDirection: 'column',
@@ -138,20 +129,6 @@ const styles = stylex.create({
     backgroundColor: tokens['--ds-gray-alpha-100'],
     whiteSpace: 'nowrap',
   },
-  affordance: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '14px',
-    height: '18px',
-    flexShrink: 0,
-    color: tokens['--ds-gray-900'],
-    backgroundColor: 'transparent',
-    border: 0,
-    padding: 0,
-    cursor: 'pointer',
-    outlineColor: tokens['--ds-focus-color'],
-  },
   folder: {
     display: 'flex',
     alignItems: 'center',
@@ -186,11 +163,12 @@ const styles = stylex.create({
     backgroundColor: tokens['--ds-gray-alpha-200'],
     fontWeight: 600,
   },
-  indent: (depth: number) => ({ marginInlineStart: `${depth * 16}px` }),
+  drag: { position: 'absolute', insetInlineEnd: 0, top: 0, opacity: { default: 0, ':focus-visible': 1 }, width: 16, height: 16 },
+  treeContent: { position: 'relative', width: '100%' },
 })
 
 /** Fractal folders own membership; view-only filters, order and collapse use shared persistence. */
-export const AgentFolders = React.memo(
+const LegacyAgentFolders = React.memo(
   ({
     workspaces,
     selection,
@@ -207,6 +185,15 @@ export const AgentFolders = React.memo(
       source.gateway ?? source.mode,
     )
     const [filters, setFilters] = useAtom(stateAtoms.filters)
+    const machineMemory = useMachineMemory()
+    // Live gateways start from this browser's remembered machines; every other filter setting stays.
+    React.useLayoutEffect(() => {
+      if (source.mode === 'fixtures') return
+      const query = withRememberedMachines({ query: filters.query, remembered: machineMemory.remembered })
+      if (query !== filters.query) setFilters({ ...filters, query })
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- seed once per gateway's filters, not on every edit.
+    }, [stateAtoms.filters])
+    const asking = useAskingAgents()
     const [collapsedIds, setCollapsedIds] = useAtom(stateAtoms.collapsed)
     // Collection membership/order depends only on active filters. Presentation updates belong
     // to the keyed row below; feeding them through Tree rebuilds React Aria's entire collection.
@@ -217,12 +204,12 @@ export const AgentFolders = React.memo(
     const fleet = useFleetSelection({ select: identityFleet, equal: equalFleet })
     const selectAttention = React.useCallback(
       (subjects: readonly { readonly ref: string; readonly attention?: boolean }[]) =>
-        filters.needsMe || filters.sort === 'status'
+        filters.sort === 'status'
           ? subjects
               .filter((subject) => subject.ref.startsWith('agent/') && subject.attention === true)
               .map((subject) => subject.ref)
           : noAttention,
-      [filters.needsMe, filters.sort],
+      [filters.sort],
     )
     const attention = useSubjectSelection({ select: selectAttention, equal: sameRefs })
     const needsYou = new Set(attention)
@@ -264,6 +251,7 @@ export const AgentFolders = React.memo(
             agent,
             status,
             needsMe: needsYou.has(workspace.id),
+            asking: asking.has(workspace.id),
           },
         ]
       }),
@@ -274,19 +262,41 @@ export const AgentFolders = React.memo(
       rows: rows,
       filters: filters,
       sort: filters.sort,
-      parsedQuery,
+      query: parsedQuery,
     })
     const visibleUnfiled = sortMembers({
       members: view.unfiled.filter((id) =>
-        matchesRow({ row: rows.get(id)!, filters: filters, context: 'Unfiled', parsedQuery }),
+        matchesRow({ row: rows.get(id)!, filters: filters, query: parsedQuery }),
       ),
       rows: rows,
       sort: filters.sort,
     })
-    const searching = parsedQuery.query !== ''
+    // Faceted Show counts: visibility under every other filter, folder-context text matches included.
+    const othersQuery = { ...parsedQuery, asking: false, machines: [] }
+    const othersVisible = new Set(
+      view.unfiled.filter((id) =>
+        matchesRow({ row: rows.get(id)!, filters: filters, query: othersQuery }),
+      ),
+    )
+    const collectVisible = (items: readonly ProjectedFolder[]) => {
+      for (const folder of items) {
+        for (const id of folder.members) othersVisible.add(id)
+        collectVisible(folder.folders)
+      }
+    }
+    collectVisible(filterFolders({ folders: view.folders, rows: rows, filters: filters, sort: 'manual', query: othersQuery }))
+    const showRows = workspaces.map((workspace) => ({
+      host: workspace.host,
+      asking: asking.has(workspace.id),
+      others: othersVisible.has(workspace.id),
+    }))
+    const searching = parsedQuery.text !== ''
+    // Any typed query term, including facet-only and machine-only searches, reveals matches and
+    // keeps temporary expansion out of the saved layout; highlights still use free text alone.
+    const querying = searching || parsedQuery.facets.length > 0 || parsedQuery.machines.length > 0
     const highlight = (text: string) => {
       if (!searching) return text
-      const positions = matchPositions({ query: parsedQuery.query, text })
+      const positions = matchPositions({ query: parsedQuery.text, text })
       let sourceOffset = 0
       return [...text].map((character, index) => {
         const start = sourceOffset
@@ -301,8 +311,7 @@ export const AgentFolders = React.memo(
       })
     }
     const multipleHosts = new Set(workspaces.map((workspace) => workspace.host)).size > 1
-    const layout = React.useMemo(() => new ListLayout({ estimatedRowSize: 48, padding: 4 }), [])
-    const treeRef = React.useRef<HTMLDivElement>(null)
+    const treeRef = React.useRef<SidebarTreeHandle>(null)
     // Collection caches are independent of Workspace object identity. A changed member rebuilds
     // only its ancestor branches, retaining every sibling's item and folder content node.
     const folderElements = React.useMemo(
@@ -323,7 +332,7 @@ export const AgentFolders = React.memo(
       const cached = agentElements.get(id)
       if (
         cached !== undefined &&
-        cached.depth === depth &&
+        cached.element.depth === depth &&
         cached.workspace.title === workspace.title &&
         cached.workspace.host === workspace.host &&
         cached.workspace.unread.length === workspace.unread.length
@@ -336,50 +345,27 @@ export const AgentFolders = React.memo(
         host: workspace.host,
         unread: workspace.unread,
       }
-      const element = (
-        <TreeItem
-          key={id}
-          id={id}
-          textValue={workspace.title}
-          onAction={() => {
-            dispatch({ _tag: 'SelectWorkspace', id })
-            dispatch({
-              _tag: 'Layout',
-              workspace: id,
-              action: {
-                _tag: 'Open',
-                input: Schema.decodeSync(SubjectAddress)({ ref: id, presentation: 'detail' }),
-              },
-            })
-          }}
-          onHoverStart={() => source.prefetchConversation?.(id)}
-          data-wf-agent-ref={id}
-          className={treeItemClassName}
-        >
-          <TreeItemContent>
-            {() => (
-              <AgentFolderRow
-                workspace={rowWorkspace}
-                selection={selection}
-                dispatch={dispatch}
-                depth={depth + 1}
-                query={parsedQuery.query}
-                multipleHosts={multipleHosts}
-              />
-            )}
-          </TreeItemContent>
-        </TreeItem>
-      )
-      agentElements.set(id, { workspace: rowWorkspace, depth, element })
+      const element: AgentFolderTreeItem = {
+        id, depth, textValue: workspace.title, agentRef: id,
+        onAction: () => {
+          dispatch({ _tag: 'SelectWorkspace', id })
+          dispatch({
+            _tag: 'Layout', workspace: id,
+            action: { _tag: 'Open', input: Schema.decodeSync(SubjectAddress)({ ref: id, presentation: 'detail' }) },
+          })
+        },
+        onHover: () => source.prefetchConversation?.(id),
+        render: () => <AgentFolderRow workspace={rowWorkspace} selection={selection} dispatch={dispatch} query={parsedQuery.text} multipleHosts={multipleHosts} />,
+      }
+      agentElements.set(id, { workspace: rowWorkspace, element })
       return element
     }
     const renderFolder = ({
-      folder,
-      depth,
+      folder, depth,
     }: {
       readonly folder: ProjectedFolder
       readonly depth: number
-    }): React.ReactElement => {
+    }): AgentFolderTreeItem => {
       const children = [
         ...folder.folders.map((child) => renderFolder({ folder: child, depth: depth + 1 })),
         ...folder.members.map((id) => renderAgent({ id, depth: depth + 1 })),
@@ -388,85 +374,41 @@ export const AgentFolders = React.memo(
       const cached = folderElements.get(folder.id)
       const sameContent =
         cached !== undefined &&
+        cached.element.depth === depth &&
         cached.name === folder.name &&
-        cached.depth === depth &&
         cached.count === count
       if (sameContent && sameElements(cached.children, children)) return cached.element
-      const content = sameContent ? (
-        cached.content
-      ) : (
-        <TreeItemContent>
-          {({ isExpanded }) => (
-            <div {...stylex.props(styles.folder, styles.indent(depth))}>
-              <AriaButton slot="chevron" {...stylex.props(styles.affordance)}>
-                <WfIcon name={isExpanded ? 'chevronDown' : 'chevronRight'} />
-              </AriaButton>
-              <span {...stylex.props(styles.folderLabel)}>
-                <WfIcon name={isExpanded ? 'folderOpen' : 'folder'} />
-                <span {...stylex.props(styles.nameSlot)}>
-                  <span title={folder.name} {...stylex.props(styles.name)}>
-                    {highlight(folder.name)}
-                  </span>
-                </span>
-              </span>
-              <span {...stylex.props(styles.folderCount)}>{count}</span>
-              <ArrangementEditFeedback target={folder.id} />
-            </div>
-          )}
-        </TreeItemContent>
+      const content: AgentFolderTreeItem['render'] = sameContent ? cached.content : ({ expanded }) => (
+        <div {...stylex.props(styles.folder)}>
+          <span {...stylex.props(styles.folderLabel)}>
+            <WfIcon name={expanded ? 'folderOpen' : 'folder'} />
+            <span {...stylex.props(styles.nameSlot)}>
+              <span title={folder.name} {...stylex.props(styles.name)}>{highlight(folder.name)}</span>
+            </span>
+          </span>
+          <span {...stylex.props(styles.folderCount)}>{count}</span>
+          <ArrangementEditFeedback target={folder.id} />
+        </div>
       )
-      const element = (
-        <TreeItem
-          key={folder.id}
-          id={folder.id}
-          textValue={folder.name}
-          hasChildItems
-          className={treeItemClassName}
-        >
-          {content}
-          {children}
-        </TreeItem>
-      )
-      folderElements.set(folder.id, { name: folder.name, depth, count, content, children, element })
+      const element: AgentFolderTreeItem = { id: folder.id, depth, textValue: folder.name, render: content, children }
+      folderElements.set(folder.id, { name: folder.name, count, content, children, element })
       return element
     }
     const unfiledChildren = visibleUnfiled.map((id) => renderAgent({ id, depth: 1 }))
     const cachedUnfiled = folderElements.get(unfiled)
-    const unfiledContent =
-      cachedUnfiled?.count === visibleUnfiled.length ? (
-        cachedUnfiled.content
-      ) : (
-        <TreeItemContent>
-          {({ isExpanded }) => (
-            <div {...stylex.props(styles.folder)}>
-              <AriaButton slot="chevron" {...stylex.props(styles.affordance)}>
-                <WfIcon name={isExpanded ? 'chevronDown' : 'chevronRight'} />
-              </AriaButton>
-              <span {...stylex.props(styles.folderLabel)}>Unfiled</span>
-              <span {...stylex.props(styles.folderCount)}>{visibleUnfiled.length}</span>
-            </div>
-          )}
-        </TreeItemContent>
+    const unfiledContent: AgentFolderTreeItem['render'] =
+      cachedUnfiled?.count === visibleUnfiled.length ? cachedUnfiled.content : () => (
+        <div {...stylex.props(styles.folder)}>
+          <span {...stylex.props(styles.folderLabel)}>Unfiled</span>
+          <span {...stylex.props(styles.folderCount)}>{visibleUnfiled.length}</span>
+        </div>
       )
-    const unfiledElement =
-      cachedUnfiled?.content === unfiledContent &&
-      sameElements(cachedUnfiled.children, unfiledChildren) ? (
-        cachedUnfiled.element
-      ) : (
-        <TreeItem
-          key={unfiled}
-          id={unfiled}
-          textValue="Unfiled"
-          hasChildItems
-          className={treeItemClassName}
-        >
-          {unfiledContent}
-          {unfiledChildren}
-        </TreeItem>
-      )
+    const unfiledElement: AgentFolderTreeItem =
+      cachedUnfiled?.content === unfiledContent && sameElements(cachedUnfiled.children, unfiledChildren)
+        ? cachedUnfiled.element
+        : { id: unfiled, depth: 0, textValue: 'Unfiled', render: unfiledContent, children: unfiledChildren }
     folderElements.set(unfiled, {
       name: 'Unfiled',
-      depth: 0,
       count: visibleUnfiled.length,
       content: unfiledContent,
       children: unfiledChildren,
@@ -479,7 +421,7 @@ export const AgentFolders = React.memo(
     )
     const nextItems = [
       ...visibleFolders.map((folder) => renderFolder({ folder, depth: 0 })),
-      ...(visibleUnfiled.length === 0 && (visibleFolders.length > 0 || searching)
+      ...(visibleUnfiled.length === 0 && (visibleFolders.length > 0 || querying)
         ? []
         : [unfiledElement]),
     ]
@@ -490,13 +432,13 @@ export const AgentFolders = React.memo(
       collectionCache.items = nextItems
       collectionCache.folderIds = [...folderViews.keys(), unfiled]
       collectionCache.onExpandedChange = (keys) => {
-        if (!searching) setCollapsedIds(collectionCache.folderIds.filter((id) => !keys.has(id)))
+        if (!querying) setCollapsedIds(collectionCache.folderIds.filter((id) => !keys.has(id)))
       }
     }
     const expanded = React.useMemo(() => {
       const collapsed = new Set(collapsedIds)
-      return new Set(collectionCache.folderIds.filter((id) => searching || !collapsed.has(id)))
-    }, [collectionCache.folderIds, collapsedIds, searching])
+      return new Set(collectionCache.folderIds.filter((id) => querying || !collapsed.has(id)))
+    }, [collectionCache.folderIds, collapsedIds, querying])
     // Dynamic collections key their renderer cache by item identity; the renderer and its
     // dependencies must not capture live roster values. textValue still changes with the label,
     // including for an offscreen row, so React Aria's keyboard typeahead uses the current name.
@@ -504,8 +446,9 @@ export const AgentFolders = React.memo(
     return (
       <section
         aria-label="Agents"
+        {...stylex.props(styles.treeViewport)}
         onFocusCapture={(event) => {
-          const row = event.target.closest<HTMLElement>('[data-wf-agent-ref]')
+          const row = event.target.closest<HTMLElement>('[data-wf-agent-ref]') ?? event.target.closest('[role="row"]')?.querySelector<HTMLElement>('[data-wf-agent-ref]')
           const agentRef = row?.dataset.wfAgentRef
           if (agentRef !== undefined) source.prefetchConversation?.(agentRef)
         }}
@@ -517,8 +460,13 @@ export const AgentFolders = React.memo(
         </div>
         <SidebarToolbar
           filters={filters}
-          update={setFilters}
+          update={(value) => {
+            setFilters(value)
+            // Fixture registries never write live browser state.
+            if (source.mode !== 'fixtures') machineMemory.remember(value.query, workspaces.map((workspace) => workspace.host))
+          }}
           hosts={[...new Set(workspaces.map((workspace) => workspace.host))].toSorted()}
+          showRows={showRows}
         />
         {(snapshot.sidebarCandidates?.length ?? 0) > 1 ? (
           <div role="note" aria-label="Multiple legacy Sidebars" {...stylex.props(styles.notice)}>
@@ -544,7 +492,6 @@ export const AgentFolders = React.memo(
           items={collectionCache.items}
           expanded={expanded}
           onExpandedChange={collectionCache.onExpandedChange}
-          layout={layout}
           treeRef={treeRef}
         />
         {editRefusal?.attemptedTargets?.map((target) => (
@@ -568,9 +515,9 @@ export const AgentFolders = React.memo(
         ))}
         <RevealSelectedAgent
           selection={selection}
-          layout={layout}
           treeRef={treeRef}
           items={collectionCache.items}
+          revealKey={filters.query}
           expandAncestors={(id) => {
             const ancestors = new Set<string>()
             let parent = liveAncestor(doc, doc.placements[id]?.folder ?? null)
@@ -626,11 +573,15 @@ export const sameFolderFleet = (
 ): boolean => {
   if (left._tag !== 'Observed' || right._tag !== 'Observed') return left._tag === right._tag
   const status =
-    filters.needsMe ||
     filters.hideEnded ||
     filters.hideRetired ||
     filters.statuses.length > 0 ||
     filters.sort === 'status'
+  // Facet predicates read raw reported facts; hideEnded also reads the raw lifecycle state.
+  const facets = parseSidebarQuery(filters.query).facets
+  const repo = facets.some((facet) => facet.field === 'repo')
+  const tool = facets.some((facet) => facet.field === 'tool')
+  const state = filters.hideEnded || facets.some((facet) => facet.field === 'state')
   return (
     left.value.agents.length === right.value.agents.length &&
     left.value.agents.every((agent, index) => {
@@ -638,8 +589,13 @@ export const sameFolderFleet = (
       return (
         next !== undefined &&
         agent.ref === next.ref &&
-        (!status ||
+        (!(status || state) ||
           agentStatus({ agent, fleet: left }) === agentStatus({ agent: next, fleet: right })) &&
+        (!state || (agent.state === next.state && agent.status === next.status && agent.activity === next.activity)) &&
+        (!tool || agent.harness === next.harness) &&
+        (!repo ||
+          (agent.checkout._tag === 'Known' ? agent.checkout.value.repository : undefined) ===
+            (next.checkout._tag === 'Known' ? next.checkout.value.repository : undefined)) &&
         (filters.query.trim() === '' || agent.description === next.description) &&
         (filters.sort !== 'activity' ||
           (agent.lastActivityAt._tag === next.lastActivityAt._tag &&
@@ -651,162 +607,226 @@ export const sameFolderFleet = (
 }
 
 type AgentRowWorkspace = Pick<Workspace, 'id' | 'title' | 'host' | 'unread'>
+interface AgentFolderTreeItem extends SidebarTreeItem<AgentFolderTreeItem> {
+  readonly render: (state: Parameters<SidebarTreeProps<AgentFolderTreeItem>['renderRow']>[1]) => React.ReactNode
+  readonly agentRef?: string
+  readonly onAction?: () => void
+  readonly onHover?: () => void
+}
 interface CachedAgentElement {
   readonly workspace: AgentRowWorkspace
-  readonly depth: number
-  readonly element: React.ReactElement
+  readonly element: AgentFolderTreeItem
 }
 interface CachedFolderElement {
   readonly name: string
-  readonly depth: number
   readonly count: number
-  readonly content: React.ReactElement
-  readonly children: readonly React.ReactElement[]
-  readonly element: React.ReactElement
+  readonly content: AgentFolderTreeItem['render']
+  readonly children: readonly AgentFolderTreeItem[]
+  readonly element: AgentFolderTreeItem
 }
-// oxlint-disable-next-line overeng/named-args -- Retained-element array comparator; fixed positional Equivalence shape.
+// oxlint-disable-next-line overeng/named-args -- Retained-item array comparator; fixed positional Equivalence shape.
 const sameElements = (
-  left: readonly React.ReactElement[],
-  right: readonly React.ReactElement[],
+  left: readonly AgentFolderTreeItem[],
+  right: readonly AgentFolderTreeItem[],
 ): boolean =>
   left.length === right.length && left.every((element, index) => element === right[index])
-const renderTreeElement = (element: React.ReactElement): React.ReactElement => element
-const treeItemClassName = ({ isFocusVisible }: TreeItemRenderProps): string =>
-  stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''
 
-interface FolderTreeCollectionCache {
-  items: readonly React.ReactElement[]
-  folderIds: readonly string[]
-  onExpandedChange?: TreeProps<React.ReactElement>['onExpandedChange']
+// Presentation changes (query highlights, spend and selection) must not replace RAC items.
+const BoundFolderPresentation = React.createContext<AgentFoldersProps | null>(null)
+const BoundFolderRow = ({ node }: { readonly node: SidebarNode }) => {
+  const props = React.useContext(BoundFolderPresentation)
+  if (props === null) throw new Error('Bound folder rows require their presentation provider')
+  const status = props.rowStatus?.get(node.id)
+  return <div data-sidebar-content="" {...stylex.props(styles.treeContent)}>
+    <AriaButton slot="drag" aria-label={`Move ${node.label}`} {...stylex.props(styles.drag)} />
+    {node._tag === 'Agent' ? props.renderAgent?.(node) : (
+      <div {...stylex.props(styles.folder)}>
+        <span {...stylex.props(styles.folderLabel)}>{node.label}</span>
+        {props.renderFolderSignal?.(node)}
+      </div>
+    )}
+    {status?._tag === 'Pending' ? <span role="status">Saving folder layout…</span> : null}
+    {status?._tag === 'Refused' ? <span role="status">{status.reason}{status.onRetry === undefined ? null : <AriaButton onPress={status.onRetry}>Try again</AriaButton>}</span> : null}
+  </div>
 }
 
-/** Aria's Tree state/context must not rerender merely because the surrounding shell does. */
-const AgentFolderTree = React.memo(
-  ({
-    items,
-    expanded,
-    onExpandedChange,
-    layout,
-    treeRef,
-  }: {
-    readonly items: readonly React.ReactElement[]
-    readonly expanded: ReadonlySet<Key>
-    readonly onExpandedChange: NonNullable<TreeProps<React.ReactElement>['onExpandedChange']>
-    readonly layout: ListLayout<unknown>
-    readonly treeRef: React.RefObject<HTMLDivElement | null>
-  }) => {
-    const { direction } = useLocale()
-    const navigation = React.useRef<TreeItemRenderProps['state'] | undefined>(undefined)
-    // RAC 1.21.1 Tree drops onKeyDown props: filterDOMProps(global) keeps only global
-    // events, and ArrowRight then enters row controls even for an expanded folder. Resolve
-    // hierarchy in the real render-prop collection and move its own roving focus instead;
-    // Virtualizer still mounts/persists the keyed row, including offscreen children.
-    const onKeyDownCapture = (event: React.KeyboardEvent<HTMLDivElement>) => {
-      const state = navigation.current
-      const target = event.target
-      if (
-        state === undefined ||
-        !(target instanceof HTMLElement) ||
-        target.getAttribute('role') !== 'row' ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.shiftKey
-      )
-        return
-      const expandKey = direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight'
-      const collapseKey = direction === 'rtl' ? 'ArrowRight' : 'ArrowLeft'
-      if (event.key !== expandKey && event.key !== collapseKey) return
-      const focused = state.selectionManager.focusedKey
-      const node = focused === null ? undefined : state.collection.getItem(focused)
-      if (node === undefined || node === null) return
-      let child: Key | undefined
-      for (const candidate of state.collection.getChildren?.(node.key) ?? []) {
-        if (candidate.type === 'item') {
-          child = candidate.key
-          break
+interface CachedBoundElement {
+  readonly node: SidebarNode
+  readonly element: AgentFolderTreeItem
+}
+
+/** The live host owns roster presentation and arrangement edits; RAC owns hierarchy and focus. */
+const BoundAgentFolders = (props: AgentFoldersProps) => {
+  const treeRef = React.useRef<SidebarTreeHandle>(null)
+  const { expanded, foldersById } = React.useMemo(() => {
+    const expanded = new Set<Key>()
+    const foldersById = new Map<string, SidebarNode>()
+    const index = (nodes: readonly SidebarNode[]): void => {
+      for (const node of nodes) {
+        foldersById.set(node.id, node)
+        if (node._tag !== 'Agent') {
+          if (!node.collapsed) expanded.add(node.id)
+          index(node.children)
         }
       }
-      let destination: Key | undefined
-      if (event.key === expandKey) {
-        if (child === undefined) return
-        if (state.expandedKeys.has(node.key)) destination = child
-        else state.toggleKey(node.key)
-      } else if (child !== undefined && state.expandedKeys.has(node.key)) {
-        state.toggleKey(node.key)
-      } else {
-        const parent =
-          node.parentKey === undefined || node.parentKey === null
-            ? undefined
-            : state.collection.getItem(node.parentKey)
-        if (parent?.type !== 'item') return
-        destination = parent.key
-      }
-      event.preventDefault()
-      event.stopPropagation()
-      if (destination !== undefined) {
-        state.selectionManager.setFocused(true)
-        state.selectionManager.setFocusedKey(destination)
-      }
     }
-    return (
-      <div onKeyDownCapture={onKeyDownCapture}>
-        <Virtualizer layout={layout} shouldObserveItemSize>
-          <Tree
-            aria-label="Agents and folders"
-            ref={treeRef}
-            items={items}
-            selectionMode="none"
-            expandedKeys={expanded}
-            onExpandedChange={onExpandedChange}
-            className={({ state }) => {
-              navigation.current = state
-              return stylex.props(styles.tree).className ?? ''
-            }}
-          >
-            {renderTreeElement}
-          </Tree>
-        </Virtualizer>
-      </div>
-    )
-  },
-)
+    index(props.tree)
+    return { expanded, foldersById }
+  }, [props.tree])
+  const dropTarget = React.useCallback((target: { readonly type: string; readonly key?: Key; readonly dropPosition?: string }): SidebarMoveTarget | undefined => {
+    if (target.type === 'root') return { _tag: 'Root', index: (props.orderingTree ?? props.tree).filter(node => node._tag === 'Folder').length }
+    if (target.key === undefined) return undefined
+    const node = foldersById.get(String(target.key))
+    if (node === undefined) return undefined
+    if (target.dropPosition === 'on') return node._tag === 'Group' ? { _tag: 'Unfiled' } : node._tag === 'Folder' ? { _tag: 'Into', folder: node.id } : undefined
+    return { _tag: target.dropPosition === 'before' ? 'Before' : 'After', sibling: node.id }
+  }, [foldersById, props.orderingTree, props.tree])
+  const applyDrop = React.useCallback(async (event: { readonly target: { readonly type: string; readonly key?: Key; readonly dropPosition?: string }; readonly items: Parameters<NonNullable<DragAndDropOptions['onItemDrop']>>[0]['items'] }): Promise<void> => {
+    const target = dropTarget(event.target)
+    const item = event.items[0]
+    if (target === undefined || item?.kind !== 'text' || event.items.length !== 1) return
+    const id = await item.getText('application/x-fractal-sidebar-row')
+    if ('ok' in props.canDrop([id], target)) props.onMove({ items: [id], target })
+  }, [dropTarget, props.canDrop, props.onMove])
+  const dragOptions = React.useMemo<DragAndDropOptions<AgentFolderTreeItem>>(() => ({
+    getItems: keys => [...keys].filter(key => foldersById.get(String(key))?._tag !== 'Group').map(key => ({ 'application/x-fractal-sidebar-row': String(key), 'text/plain': foldersById.get(String(key))?.label ?? String(key) })),
+    acceptedDragTypes: ['application/x-fractal-sidebar-row'],
+    getAllowedDropOperations: () => ['move'],
+    getDropOperation: (target, types) => {
+      const intent = dropTarget(target)
+      return intent !== undefined && types.has('application/x-fractal-sidebar-row') ? 'move' : 'cancel'
+    },
+    onItemDrop: applyDrop,
+    onInsert: applyDrop,
+    onRootDrop: event => applyDrop({ ...event, target: { type: 'root' } }),
+  }), [foldersById, dropTarget, applyDrop])
+  const { dragAndDropHooks } = useDragAndDrop<AgentFolderTreeItem>(dragOptions)
+  // Status names replace only their owning RAC item, retaining sibling measurement keys.
+  const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect])
+  const items = React.useMemo(() => {
+    const retained = new Set<string>()
+    const render = (node: SidebarNode, depth: number): AgentFolderTreeItem => {
+      retained.add(node.id)
+      const cached = elements.get(node.id)
+      const children = node._tag === 'Agent' ? undefined : node.children.map(child => render(child, depth + 1))
+      const accessibleName = props.accessibleNames?.get(node.id)
+      const agentRef = node._tag === 'Agent' ? node.subject : undefined
+      const sameChildren = children === undefined ? cached?.element.children === undefined
+        : cached?.element.children !== undefined && sameElements(cached.element.children, children)
+      if (cached !== undefined && cached.node._tag === node._tag && cached.element.depth === depth &&
+        cached.element.textValue === node.label && cached.element.accessibleName === accessibleName &&
+        cached.element.agentRef === agentRef && sameChildren &&
+        (node._tag === 'Agent' || (cached.node._tag !== 'Agent' && cached.node.collapsed === node.collapsed))) return cached.element
+      const element: AgentFolderTreeItem = {
+        id: node.id, depth, textValue: node.label, accessibleName, agentRef, children,
+        onAction: node._tag === 'Agent' ? () => props.onSelect?.(node.id) : undefined,
+        render: () => <BoundFolderRow node={node} />,
+      }
+      elements.set(node.id, { node, element })
+      return element
+    }
+    const next = props.tree.map(node => render(node, 0))
+    for (const key of elements.keys()) if (!retained.has(key)) elements.delete(key)
+    return next
+  }, [props.tree, props.onSelect, props.accessibleNames, elements])
+  const expandAncestors = (selected: string) => {
+    const path: Exclude<SidebarNode, { readonly _tag: 'Agent' }>[] = []
+    const find = (nodes: readonly SidebarNode[]): boolean => {
+      for (const node of nodes) {
+        if (node._tag === 'Agent') { if (node.id === selected) return true }
+        else {
+          path.push(node)
+          if (find(node.children)) return true
+          path.pop()
+        }
+      }
+      return false
+    }
+    if (find(props.tree)) for (const node of path) if (node.collapsed) props.onToggleCollapsed({ id: node.id, collapsed: false })
+  }
+  const onExpandedChange = React.useCallback((keys: Set<Key>) => {
+    for (const node of foldersById.values()) if (node._tag !== 'Agent' && node.collapsed === keys.has(node.id)) props.onToggleCollapsed({ id: node.id, collapsed: !keys.has(node.id) })
+  }, [foldersById, props.onToggleCollapsed])
+  return <BoundFolderPresentation.Provider value={props}>
+    <AgentFolderTree items={items} expanded={expanded} onExpandedChange={onExpandedChange} treeRef={treeRef} dragAndDropHooks={dragAndDropHooks} />
+    <RevealAgentRow selected={props.selectedId ?? ''} treeRef={treeRef} items={items} revealKey={props.revealKey} expandAncestors={expandAncestors} />
+    {props.treeStatus}
+    {props.unavailable === undefined ? null : <div role="status">{props.unavailable}</div>}
+  </BoundFolderPresentation.Provider>
+}
 
-/** Selection from another surface reveals its row without subscribing the collection to selection. */
-const RevealSelectedAgent = ({
-  selection,
-  layout,
-  treeRef,
-  items,
-  expandAncestors,
+export const AgentFolders = (props: AgentFoldersProps | React.ComponentProps<typeof LegacyAgentFolders>) =>
+  'tree' in props ? <BoundAgentFolders {...props} /> : <LegacyAgentFolders {...props} />
+interface FolderTreeCollectionCache {
+  items: readonly AgentFolderTreeItem[]
+  folderIds: readonly string[]
+  onExpandedChange?: SidebarTreeProps<AgentFolderTreeItem>['onExpandedChange']
+}
+
+
+// The kit owns indentation, hierarchy keys, measurement, sticky ancestors and scrolling.
+const renderFolderTreeRow: SidebarTreeProps<AgentFolderTreeItem>['renderRow'] = (item, state) =>
+  <div data-wf-agent-ref={item.agentRef} onMouseEnter={item.onHover}>
+    {item.render(state)}
+  </div>
+
+/** Keep the collection boundary stable while keyed rows subscribe to presentation separately. */
+const AgentFolderTree = React.memo(({
+  items, expanded, onExpandedChange, treeRef, dragAndDropHooks,
 }: {
-  readonly selection: Atom.Atom<string>
-  readonly layout: ListLayout<unknown>
-  readonly treeRef: React.RefObject<HTMLDivElement | null>
-  readonly items: readonly React.ReactElement[]
-  readonly expandAncestors: (id: string) => void
+  readonly items: readonly AgentFolderTreeItem[]
+  readonly expanded: ReadonlySet<Key>
+  readonly onExpandedChange: SidebarTreeProps<AgentFolderTreeItem>['onExpandedChange']
+  readonly treeRef: React.RefObject<SidebarTreeHandle | null>
+  readonly dragAndDropHooks?: TreeProps<AgentFolderTreeItem>['dragAndDropHooks']
 }) => {
-  const selected = useAtomValue(selection)
+  const actions = React.useMemo(() => {
+    const indexed = new Map<Key, AgentFolderTreeItem>()
+    const visit = (nodes: readonly AgentFolderTreeItem[]) => {
+      for (const node of nodes) { indexed.set(node.id, node); if (node.children !== undefined) visit(node.children) }
+    }
+    visit(items)
+    return indexed
+  }, [items])
+  return <div {...stylex.props(styles.treeViewport)}>
+    <SidebarTree ref={treeRef} aria-label="Agents and folders" items={items} expandedKeys={expanded} onExpandedChange={onExpandedChange}
+      renderRow={renderFolderTreeRow} onAction={key => actions.get(key)?.onAction?.()} dragAndDropHooks={dragAndDropHooks} />
+  </div>
+})
+AgentFolderTree.displayName = 'AgentFolderTree'
+
+type RevealAgentRowProps = {
+  readonly selected: string
+  readonly treeRef: React.RefObject<SidebarTreeHandle | null>
+  readonly items: readonly AgentFolderTreeItem[]
+  readonly revealKey?: string
+  readonly expandAncestors: (id: string) => void
+}
+const RevealSelectedAgent = (props: Omit<RevealAgentRowProps, 'selected'> & { readonly selection: Atom.Atom<string> }) =>
+  <RevealAgentRow {...props} selected={useAtomValue(props.selection)} />
+
+const RevealAgentRow = ({ selected, treeRef, items, revealKey = '', expandAncestors }: RevealAgentRowProps) => {
   const revealed = React.useRef<string | undefined>(undefined)
   const expand = React.useEffectEvent(expandAncestors)
+  // Row presentation is not a reveal request. Only selection, ancestry or search changes are.
+  const ancestry: Key[] = []
+  const find = (nodes: readonly AgentFolderTreeItem[]): boolean => {
+    for (const node of nodes) {
+      if (node.id === selected) return true
+      ancestry.push(node.id)
+      if (node.children !== undefined && find(node.children)) return true
+      ancestry.pop()
+    }
+    return false
+  }
+  const present = find(items)
+  const request = JSON.stringify([selected, ancestry, revealKey])
   React.useLayoutEffect(() => {
-    if (revealed.current === selected) return
-    revealed.current = undefined
+    if (selected === '' || !present || revealed.current === request) return
     expand(selected)
-    // The collection portal commits before Virtualizer finishes its layout. Use its keyed
-    // layout lookup on the next frame, never a DOM query/walk over every row.
-    const frame = requestAnimationFrame(() => {
-      if (layout.virtualizer === null) return
-      const rect = layout.getLayoutInfo(selected)?.rect
-      const tree = treeRef.current
-      if (rect === undefined || tree === null) return
-      revealed.current = selected
-      if (rect.y < tree.scrollTop) tree.scrollTop = rect.y
-      else if (rect.maxY > tree.scrollTop + tree.clientHeight)
-        tree.scrollTop = rect.maxY - tree.clientHeight
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [selected, layout, treeRef, items])
+    treeRef.current?.reveal(selected)
+    revealed.current = request
+  }, [selected, present, request, treeRef])
   return null
 }
 
@@ -822,21 +842,18 @@ const AgentFolderRow = React.memo(
     workspace,
     selection,
     dispatch,
-    depth,
     query,
     multipleHosts,
   }: {
     readonly workspace: AgentRowWorkspace
     readonly selection: Atom.Atom<string>
     readonly dispatch: (action: WindowAction) => void
-    readonly depth: number
     readonly query: string
     readonly multipleHosts: boolean
   }) => {
     const feed = useAgent(workspace.id)
     const agent = feed._tag === 'Observed' ? feed.value : undefined
     const status = agentStatus({ agent, fleet: feed })
-    const now = useNow()
     const description = agent?.description?.trim() ?? ''
     const activityAt = agent?.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined
     const activate = () => {
@@ -867,7 +884,7 @@ const AgentFolderRow = React.memo(
       })
     }
     return (
-      <CurrentAgent selection={selection} agentRef={workspace.id} status={status} depth={depth}>
+      <CurrentAgent selection={selection} agentRef={workspace.id} status={status}>
         {(current) => (
           <>
             <AgentUsageRow
@@ -882,15 +899,7 @@ const AgentFolderRow = React.memo(
                   {...stylex.props(styles.rowContent)}
                 >
                   <div {...stylex.props(styles.line)}>
-                    <span
-                      title={
-                        agent?.statusSince === undefined
-                          ? 'Status boundary unavailable; last activity is not time in status'
-                          : `Observed status since ${new Date(agent.statusSince).toLocaleString()} · ${compactTime({ at: agent.statusSince, now })} in status`
-                      }
-                    >
-                      <StatusIcon status={status} />
-                    </span>
+                    <FolderStatusTime status={status} since={agent?.statusSince} />
                     <span {...stylex.props(styles.nameSpace)}>
                       <span {...stylex.props(styles.nameSlot)}>
                         <span
@@ -911,13 +920,7 @@ const AgentFolderRow = React.memo(
                       </span>
                     ) : null}
                     {activityAt === undefined ? null : (
-                      <time
-                        dateTime={new Date(activityAt).toISOString()}
-                        title={`Last activity ${new Date(activityAt).toLocaleString()}`}
-                        {...stylex.props(styles.meta)}
-                      >
-                        {compactTime({ at: activityAt, now })}
-                      </time>
+                      <FolderActivityTime at={activityAt} />
                     )}
                   </div>
                   <div {...stylex.props(styles.secondLine)}>
@@ -946,6 +949,16 @@ const AgentFolderRow = React.memo(
   },
 )
 
+function FolderStatusTime({ status, since }: { readonly status: AgentStatus; readonly since?: number }) {
+  const title = useClockLabel(now => since === undefined ? 'Status boundary unavailable; last activity is not time in status' : `Observed status since ${new Date(since).toLocaleString()} · ${compactTime({ at: since, now })} in status`)
+  return <span title={title}><StatusIcon status={status} /></span>
+}
+
+function FolderActivityTime({ at }: { readonly at: number }) {
+  const elapsed = useClockLabel(now => compactTime({ at, now }))
+  return <time dateTime={new Date(at).toISOString()} title={`Last activity ${new Date(at).toLocaleString()}`} {...stylex.props(styles.meta)}>{elapsed}</time>
+}
+
 /** Keyed feedback subscribes independently of the Tree's cached collection elements. */
 export const ArrangementEditFeedback = ({ target }: { readonly target: string }) => {
   const source = useDataSource()
@@ -962,13 +975,11 @@ const CurrentAgent = ({
   selection,
   agentRef,
   status,
-  depth,
   children,
 }: {
   readonly selection: Atom.Atom<string>
   readonly agentRef: string
   readonly status: AgentStatus
-  readonly depth: number
   readonly children: (current: boolean) => React.ReactNode
 }) => {
   const current = useAtomValue(selection, (selected) => selected === agentRef)
@@ -980,7 +991,6 @@ const CurrentAgent = ({
         status === 'working' && styles.workingRail,
         status === 'waiting' && styles.waitingRail,
         status === 'stale' && styles.staleRail,
-        styles.indent(depth),
         current && styles.selected,
       )}
     >
