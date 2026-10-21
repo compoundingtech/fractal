@@ -942,11 +942,11 @@ pub use fractal_conversation_ui::adapt::unreadable_transcript;
 /// The tool calls `timeline` records with no result yet, oldest first, each in full. A native
 /// prompt asks about one of them, though it names none: only when exactly one waits is it certain
 /// which one an answer is for.
-pub fn pending_calls(timeline: &[st3_client::TimelineEntry]) -> Vec<super::view::PendingCall> {
+pub fn pending_calls(timeline: &[fractal_client::TimelineEntry]) -> Vec<super::view::PendingCall> {
     let answered: std::collections::HashSet<&str> = timeline
         .iter()
         .filter_map(|entry| match &entry.body {
-            st3_client::TimelineBody::ToolResult(result) => Some(result.call_id.as_str()),
+            fractal_client::TimelineBody::ToolResult(result) => Some(result.call_id.as_str()),
             _ => None,
         })
         .collect();
@@ -954,7 +954,7 @@ pub fn pending_calls(timeline: &[st3_client::TimelineEntry]) -> Vec<super::view:
     timeline
         .iter()
         .filter_map(|entry| match &entry.body {
-            st3_client::TimelineBody::ToolCall(call)
+            fractal_client::TimelineBody::ToolCall(call)
                 if !answered.contains(call.call_id.as_str()) && seen.insert(call.call_id.as_str()) =>
             {
                 Some(super::view::PendingCall {

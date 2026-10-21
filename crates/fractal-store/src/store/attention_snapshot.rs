@@ -2461,7 +2461,7 @@ impl Store {
                 "stale-fence",
                 format!(
                     "{}is no longer waiting: it was answered or replaced",
-                    st3_client::PROMPT_REFUSAL_PREFIX
+                    fractal_client::PROMPT_REFUSAL_PREFIX
                 ),
             ));
         };
@@ -2470,7 +2470,7 @@ impl Store {
                 "stale-fence",
                 format!(
                     "{}can only be answered in the seat's terminal",
-                    st3_client::PROMPT_REFUSAL_PREFIX
+                    fractal_client::PROMPT_REFUSAL_PREFIX
                 ),
             ));
         }
