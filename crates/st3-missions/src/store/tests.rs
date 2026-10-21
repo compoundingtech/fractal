@@ -10810,3 +10810,58 @@ mod terminal_projection_date_tests {
 
     /* sqlite-large-value: allow-for-now lv-h57c08895c9da owner=st3_missions::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
 }
+
+#[test]
+fn carried_blocker_reason_uses_source_cut_across_replay_and_upgrade() {
+    let store = Store::open_memory("node").unwrap();
+    let at = now_ms() + 60_000;
+    store.set_write_clock_at(at).unwrap();
+    publish_carry(&store, CARRY_SOURCE, "carry-reason-one");
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/requester".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "carry-reason-run".into(),
+    }).unwrap();
+    let original = run.steps.iter().find(|step| step.step == "work").unwrap();
+    store.set_step_state(&original.subject, "blocked", Some("canonical baseline is not satisfied")).unwrap();
+    let revised = publish_carry(&store,
+        &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."), "carry-reason-two");
+    let adopted = store.adopt_mission_revision(&run.id, &revised, "person/requester", "revise other work", "carry-reason-adopt").unwrap();
+    let carried = adopted.steps.iter().find(|step| step.step == "work").unwrap();
+    assert_eq!(carried.status, "blocked");
+    assert_eq!(carried.blocked_reason.as_deref(), Some("canonical baseline is not satisfied"));
+    // A later predecessor observation cannot change the cut recorded by the carry.
+    store.set_write_clock_at(at + 1_000).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: original.subject.clone(), kind: "step-run.state".into(), actor: None,
+        fields: BTreeMap::from([("status".into(),json!("blocked")),("reason".into(),json!("later predecessor reason"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let expected = projection_digest::tables(&store.readers.get()).unwrap();
+    let target = Store::open_memory("target").unwrap();
+    target.import_replication("node", &store.export_replication(0).unwrap()).unwrap();
+    let copied = target.step_run(&carried.subject).unwrap().unwrap();
+    assert_eq!(copied.blocked_reason, carried.blocked_reason);
+    assert_eq!(projection_digest::tables(&target.readers.get()).unwrap(), expected);
+    target.replay_replication_graph().unwrap();
+    assert_eq!(target.step_run(&carried.subject).unwrap().unwrap().blocked_reason, carried.blocked_reason);
+    assert_eq!(projection_digest::tables(&target.readers.get()).unwrap(), expected);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("old-carried-reason.sqlite3");
+    target.copy_store_to(&path).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        projection_digest::register(&connection).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-he7db32589fbe owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET blocked_reason=NULL WHERE subject=?1", [&carried.subject]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h00373a217677 owner=st3_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='mission_projection_source_rules'", []).unwrap();
+    }
+    let opened = Store::open(&path, "target").unwrap();
+    assert_eq!(opened.step_run(&carried.subject).unwrap().unwrap().blocked_reason, carried.blocked_reason);
+    assert_eq!(projection_digest::tables(&opened.readers.get()).unwrap(), expected);
+    // A real successor transition owns its reason, and must survive reopen.
+    opened.set_step_state(&carried.subject, "ready", None).unwrap();
+    drop(opened);
+    let opened = Store::open(&path, "target").unwrap();
+    assert_eq!(opened.step_run(&carried.subject).unwrap().unwrap().status, "ready");
+    assert_eq!(opened.step_run(&carried.subject).unwrap().unwrap().blocked_reason, None);
+}

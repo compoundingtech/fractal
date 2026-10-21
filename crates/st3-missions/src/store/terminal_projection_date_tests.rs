@@ -526,3 +526,48 @@ mission "trim-date-child" state="ready" { goal "End before parent."; step "work"
     assert_eq!(checked_digests(&peer), digests);
     same_envelopes(&source, &peer);
 }
+
+#[test]
+fn old_terminal_dates_are_repaired_on_upgrade_without_new_claims() {
+    let source = Store::open_memory("node").unwrap();
+    let at = now_ms() + 60_000;
+    source.set_write_clock_at(at).unwrap();
+    publish_mission(
+        &source,
+        r#"version 2
+mission "date-upgrade" state="ready" { concurrent-runs; goal "Keep canonical terminal dates."; step "work" { agentless } }
+"#,
+        "date-upgrade-mission",
+    );
+    let run = source.create_mission_run(&terminal_date_request("date-upgrade", "date-upgrade-run")).unwrap();
+    source.set_write_clock_at(at + 1_000).unwrap();
+    source.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+    let expected = terminal_date_capture(&source, &run);
+    let frontier = source.index().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("old-terminal-projection.sqlite3");
+    source.copy_store_to(&path).unwrap();
+    {
+        // Emulate rows written before the terminal-cascade fix. The immutable
+        // own terminal claims remain unchanged; no fabricated repair claim.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        projection_digest::register(&connection).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hedbd2aacd628 owner=st3_missions::store::terminal_projection_date_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+            params![run.id, (at + 9_000).to_string()]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h24125be0dd69 owner=st3_missions::store::terminal_projection_date_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET updated_at_unix_ms=?2 WHERE id=?1",
+            params![generation_id_from_subject(&run.generation), (at + 9_000).to_string()]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h8731f4c4c58e owner=st3_missions::store::terminal_projection_date_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='mission_projection_source_rules'", []).unwrap();
+    }
+    let opened = Store::open(&path, "node").unwrap();
+    let repaired = terminal_date_capture(&opened, &run);
+    assert_eq!(repaired.rows, expected.rows);
+    assert_eq!(repaired.digests, expected.digests);
+    assert_eq!(repaired.claims, expected.claims);
+    assert_eq!(opened.index().unwrap(), frontier);
+    same_envelopes(&source, &opened);
+    let before_reopen = projection_digest::generation(&opened.readers.get()).unwrap();
+    drop(opened);
+    let reopened = Store::open(&path, "node").unwrap();
+    assert_eq!(terminal_date_capture(&reopened, &run).rows, expected.rows);
+    assert_eq!(projection_digest::generation(&reopened.readers.get()).unwrap(), before_reopen);
+}
