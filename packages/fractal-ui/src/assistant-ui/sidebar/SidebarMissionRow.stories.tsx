@@ -49,6 +49,7 @@ const folders: readonly { readonly label: string; readonly rows: readonly Row[] 
     row('long', 'Review every long scope', { host: 'build-2', missionContext: mission('long', longSlug, { progress: { _tag: 'Known', done: 0, total: 3 }, step: { _tag: 'Step', name: 'Collect the hover scope notes for review' }, queued: [] }) }),
     row('sync', 'Sync upstream notes', { host: 'build-2', missionContext: mission('fractal-web-upstream', 'fractal-web-upstream', { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Write the port notes' }, queued: [] }) }),
     row('release', 'Release checklist', { status: 'ended', statusLabel: statuses.ended.label, host: 'build-2' }),
+    row('unavailable', 'Mission feed failed before a read', { missionContext: { _tag: 'Unavailable' }, missionInfo: { _tag: 'Failed' } }),
     // Retained mission info: Stale with a reported update time, Stale without one, and Failed (no time) with a queue.
     row('uploads', 'Watch the upload retries', { missionInfo: { _tag: 'Stale', updatedAt: staleAt }, missionContext: mission('upload-retries', 'upload-retries', { progress: { _tag: 'Known', done: 1, total: 3 }, step: { _tag: 'Step', name: 'Watch the next upload' }, queued: [] }) }),
     row('search', 'Index the search logs', { host: 'build-2', missionInfo: { _tag: 'Stale' }, missionContext: mission('search-index', 'search-index', { progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: 'Rebuild the log index' }, queued: [] }) }),
@@ -67,17 +68,51 @@ const missionTree: readonly MissionTreeItem[] = [{
   id: missionParent.ref, depth: 0, textValue: missionParent.title, accessibleName: sidebarRowAccessibleName(missionParent), row: missionParent, disclosurePlacement: 'trailing',
   children: [{ id: missionChild.ref, depth: 1, textValue: missionChild.title, row: missionChild, children: [], isDisabled: true }],
 }]
+/**
+ * A parent pinned above enough helpers to scroll its real row out of the virtualized tree. Like a live sidebar row bound
+ * to its own data, its queue comes from context: the tree's items and `renderRow` keep their identity when it changes.
+ */
+const stickyHelpers: readonly Row[] = Array.from({ length: 12 }, (_, index) => ({ ...missionChild, ref: `agent/example-sticky-helper-${index + 1}`, parentRef: 'agent/example-sticky-parent', title: `Pinned parent helper ${index + 1}` }))
+const stickyParent: Row = { ...missionParent, ref: 'agent/example-sticky-parent', title: 'Mission parent pinned above helpers', children: stickyHelpers,
+  missionContext: mission('fractal-web-upstream', 'fractal-web-upstream', { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Write the port notes' }, queued: [] }),
+}
+const stickyParentQueued: Row = { ...stickyParent, missionContext: missionParent.missionContext }
+const stickyTree: readonly MissionTreeItem[] = [{
+  id: stickyParent.ref, depth: 0, textValue: stickyParent.title, accessibleName: sidebarRowAccessibleName(stickyParent), row: stickyParent, disclosurePlacement: 'trailing',
+  children: stickyHelpers.map(helper => ({ id: helper.ref, depth: 1, textValue: helper.title, row: helper, children: [], isDisabled: true })),
+}]
+const StickyQueueContext = React.createContext(false)
+function StickyMissionRow({ item, expanded, trailingDisclosure }: { readonly item: MissionTreeItem; readonly expanded: boolean; readonly trailingDisclosure: boolean }) {
+  const queued = React.useContext(StickyQueueContext)
+  return <MilestoneAgentRow row={queued && item.row === stickyParent ? stickyParentQueued : item.row} now={storyNow} displayOnly={item.isDisabled} active={item.isDisabled}
+    touchDisclosure={trailingDisclosure ? <SidebarTreeDisclosure expanded={expanded} /> : undefined} />
+}
+const renderStickyRow = (item: MissionTreeItem, state: { readonly expanded: boolean; readonly trailingDisclosure: boolean }) =>
+  <StickyMissionRow item={item} expanded={state.expanded} trailingDisclosure={state.trailingDisclosure} />
+
 
 function MissionParentStory() {
   const [expanded, setExpanded] = React.useState<Set<Key>>(() => new Set([missionParent.ref]))
   const [opened, setOpened] = React.useState<string>()
-  return <section aria-label="Mission parent" data-host="mission-parent" data-opened={opened} {...stylex.props(styles.column, styles.phoneColumn, styles.parentViewport)}>
-    <SidebarTree aria-label="Mission parent and helper" items={missionTree} expandedKeys={expanded} onExpandedChange={setExpanded}
-      onAction={key => setOpened(String(key))}
-      renderRow={(item, state) => <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} active={item.isDisabled}
-        onOpen={item.isDisabled ? undefined : row => setOpened(row.ref)}
-        touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined} />} />
-  </section>
+  const [stickyExpanded, setStickyExpanded] = React.useState<Set<Key>>(() => new Set([stickyParent.ref]))
+  const [queued, setQueued] = React.useState(false)
+  return <>
+    <section aria-label="Mission parent" data-host="mission-parent" data-opened={opened} {...stylex.props(styles.column, styles.phoneColumn, styles.parentViewport)}>
+      <SidebarTree aria-label="Mission parent and helper" items={missionTree} expandedKeys={expanded} onExpandedChange={setExpanded}
+        onAction={key => setOpened(String(key))}
+        renderRow={(item, state) => <MilestoneAgentRow row={item.row} now={storyNow} displayOnly={item.isDisabled} active={item.isDisabled}
+          onOpen={item.isDisabled ? undefined : row => setOpened(row.ref)}
+          touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined} />} />
+    </section>
+    <section aria-label="Pinned mission parent" data-host="sticky-parent" {...stylex.props(styles.column, styles.phoneColumn)}>
+      <button type="button" aria-pressed={queued} onClick={() => setQueued(value => !value)} {...stylex.props(styles.queueToggle)}>Queue a mission</button>
+      <div {...stylex.props(styles.stickyViewport)}>
+        <StickyQueueContext.Provider value={queued}>
+          <SidebarTree aria-label="Pinned mission parent and helpers" items={stickyTree} expandedKeys={stickyExpanded} onExpandedChange={setStickyExpanded} renderRow={renderStickyRow} />
+        </StickyQueueContext.Provider>
+      </div>
+    </section>
+  </>
 }
 
 
@@ -210,6 +245,15 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
     await expect(line2(plain).textContent).toBe(text)
     await expect(plain.querySelector('[data-box], [data-line2-slot]')).toBeNull()
   }
+  // Failed before any value is not the same as an agent without a mission.
+  const unavailable = designedRow(canvasElement, 'Mission feed failed before a read')
+  const warning = unavailable.querySelector<HTMLElement>('[data-mission-unavailable]')!
+  await expect(warning).toHaveTextContent('Mission info unavailable')
+  await expect(warning.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+  await expect(warning.closest('button')).toBeNull()
+  await expect(unavailable.querySelector('[data-mission-pill], [data-mission-trigger], [data-queued-missions]')).toBeNull()
+  await expect(line2(unavailable).textContent).toBe(' Mission info unavailable·build-1')
+  await expect(getComputedStyle(warning).color).toBe(getComputedStyle(designedRow(canvasElement, 'Watch the upload retries').querySelector('[data-row-field="mission"]')!).color)
   // Folders stay project folders: no mission grouping and no "No mission" section.
   await expect([...canvasElement.querySelectorAll('[data-host="designed"] [data-folder]')].map(folder => folder.getAttribute('data-folder'))).toEqual(['fractal-web', 'smalltalk'])
   await expect(canvasElement).not.toHaveTextContent(/no mission/i)
@@ -401,7 +445,7 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(infoDialog()).toBeNull())
 
-  // The queued row: one target for pill and "+2"; a touch press opens the queue inside the frame. Ends open for the a11y check.
+  // The queued row: one target for pill and "+2"; a touch press opens the queue inside the frame.
   const trigger = within(designedRow(context.canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+2 more missions queued') })
   await expect(trigger.querySelector('[data-queued-count]')).toHaveTextContent('+2')
   await userEvent.pointer([{ keys: '[TouchA>]', target: trigger }, { keys: '[/TouchA]', target: trigger }])
@@ -412,9 +456,42 @@ const phonePlay: NonNullable<Story['play']> = async context => {
     expect(box.left).toBeGreaterThanOrEqual(0)
     expect(box.right).toBeLessThanOrEqual(Math.min(window.innerWidth, rect(frame).right))
   })
+  await waitFor(() => expect(dialog).toHaveFocus())
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(queuedDialog()).toBeNull())
+
+  // A pinned parent whose real row is virtualized away gains a queue in place (its touch row grows to the 44px mission
+  // track). The pin takes the content's measured height, never a cached or fixed one, so nothing is clipped.
+  // Ends queued and pinned for the a11y check.
+  const stickySection = context.canvasElement.querySelector<HTMLElement>('[data-host="sticky-parent"]')!
+  const stickyGrid = within(stickySection).getByRole('treegrid')
+  stickyGrid.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+  stickyGrid.scrollTop = stickyGrid.scrollHeight
+  const pin = () => stickySection.querySelector<HTMLElement>(`[data-pinned-key="${stickyParent.ref}"]`)
+  const pinnedRow = () => pin()?.querySelector<HTMLElement>('[data-milestone-row]') ?? null
+  const realParent = () => stickySection.querySelector(`[data-sidebar-tree-key="${stickyParent.ref}"]`)
+  const before = await waitFor(() => {
+    const row = pinnedRow()
+    expect(row).not.toBeNull()
+    expect(realParent()).toBeNull()
+    expect(row).not.toHaveAttribute('data-touch-mission')
+    expect(Math.abs(rect(pin()!).height - rect(row!).height)).toBeLessThanOrEqual(0.5)
+    return rect(row!).height
+  })
+  await userEvent.click(within(stickySection).getByRole('button', { name: 'Queue a mission' }))
+  await waitFor(() => {
+    const shell = pin()!
+    const row = pinnedRow()!
+    expect(realParent()).toBeNull()
+    expect(row).toHaveAttribute('data-touch-mission')
+    expect(rect(row).height).toBeGreaterThan(before + 0.5)
+    expect(Math.abs(rect(shell).height - rect(row).height)).toBeLessThanOrEqual(0.5)
+    expect(rect(row).bottom).toBeLessThanOrEqual(rect(shell).bottom + 0.5)
+    expect(shell.scrollHeight).toBeLessThanOrEqual(shell.clientHeight)
+  })
 }
 
-export const Phone: Story = { tags: ['critical'], name: 'Phone · merged mission touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed row matrix in a touch-layout frame at the viewport width (390 or 440px) proves pill alignment and truncation, one 44px pill-and-"+N" target per queued or retained-info row kept inside its row and clear of the parent’s disclosure and actions tracks and the next row, Stale/Failed mission info, and display-only rows without mission controls.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
+export const Phone: Story = { tags: ['critical'], name: 'Phone · merged mission touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed row matrix in a touch-layout frame at the viewport width (390 or 440px) proves pill alignment and truncation, one 44px pill-and-"+N" target per queued or retained-info row kept inside its row and clear of the parent’s disclosure and actions tracks and the next row, Stale/Failed mission info, display-only rows without mission controls, and a pinned parent whose offscreen row gains a queue and grows its pin to the new height unclipped.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
 export const PhoneLight: Story = { ...Phone, name: 'Phone · merged mission touch target · light', args: { scheme: 'light', phone: true } }
 
 
@@ -427,6 +504,9 @@ const styles = stylex.create({
   phoneFrame: { flexDirection: 'column', width: '100%', maxWidth: '440px', padding: 0, gap: 0 },
   phoneColumn: { width: '100%' },
   parentViewport: { height: '144px', minHeight: 0 },
+  // The pinned band holds at most 40% of the tree, so the tree must exceed 68 / 0.4 for a queued parent to pin whole.
+  stickyViewport: { height: '240px', minHeight: 0 },
+  queueToggle: { alignSelf: 'flex-start', minHeight: g.touchTarget },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   // Resolves the surface's own tokens for the plays: attention amber (decision handle) and soft ink (pill text).
   toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: tone.attention, backgroundColor: ink.fgSoft },

@@ -13,6 +13,7 @@ export type SidebarMissionStep = { readonly _tag: 'Step'; readonly name: string 
 /** The mission the agent currently works on, plus missions queued behind it; None when the agent has no current mission. */
 export type SidebarMissionContext =
   | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly progress: SidebarMissionProgress; readonly step: SidebarMissionStep; readonly queued: readonly { readonly id: string; readonly slug: string }[] }
+  | { readonly _tag: 'Unavailable' }
   | { readonly _tag: 'None' }
 /**
  * Freshness of `missionContext`. Live: the current observation. Stale: the last observation, retained while the source

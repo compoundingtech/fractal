@@ -68,6 +68,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
+  const unavailable = !displayOnly && row.missionContext?._tag === 'Unavailable'
   const touchMission = mission !== undefined && touch && missionLineHasTrigger(mission, row.missionInfo)
   const signal = row.needsMe
     ? mission?.step._tag === 'Waiting' ? null : <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
@@ -87,7 +88,9 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="line2" data-mission-info={mission === undefined ? undefined : (row.missionInfo?._tag ?? 'Live').toLowerCase()} {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, !displayOnly && (narrow || touchMission || (mission?.queued.length ?? 0) > 0) && styles.line2BeforeMenu, !displayOnly && touchDisclosure !== undefined && styles.touchDisclosureLine2)}>
       {mission !== undefined
         ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} />
-        : <><span data-row-field="status-label">{row.statusLabel}</span><span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
+        : <>{unavailable
+          ? <span data-mission-unavailable {...stylex.props(styles.unavailable)}><svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12"><path d="M6 1 11 10H1Z" fill="none" stroke="currentColor" /><path d="M6 4v3m0 1v1" stroke="currentColor" /></svg> Mission info unavailable</span>
+          : <span data-row-field="status-label">{row.statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
     {!displayOnly && <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
       menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />}
@@ -131,6 +134,7 @@ const styles = stylex.create({
   // Phone rows give the action trigger its own column; a "+N" or touch mission-button row also stops short of the desktop trigger's overlay.
   line2BeforeMenu: { gridColumn: '2 / -2' },
   sep: { paddingInline: s.xs, color: ink.fgMuted },
+  unavailable: { color: ink.fgMuted },
   // The card mounts on pointer enter; the delayed entrance is the 150ms hover intent, so a pass across rows never flashes cards.
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationDelay: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },
 })

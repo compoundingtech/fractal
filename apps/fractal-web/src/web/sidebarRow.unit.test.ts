@@ -51,6 +51,19 @@ describe('mission feed evidence', () => {
 
 const agent: Agent = { ref:'agent/example-readonly', terminal:'', name:'Reported name', lifecycle: {_tag:'Unknown'}, host:'build-1', connected:true, activity:'idle', status:'idle', usage: {_tag:'Unknown'}, checkout: {_tag:'Unknown'}, workspace: {_tag:'Unknown'}, startedAt: {_tag:'Unknown'}, endedAt: {_tag:'Unknown'}, blockedOn: {_tag:'Unknown'}, ask: {_tag:'Unknown'}, lastActivityAt: {_tag:'Unknown'} }
 const row = (change: Partial<Agent> = {}, stale = false) => sidebarRow({agent:{...agent,...change},stale})
+it('distinguishes no mission, failed without a value and failed with retained mission info', () => {
+  const failed = { _tag: 'Failed' } as const
+  const noMission = sidebarRow({ agent, stale: false, missionUnavailable: true, missionInfo: failed })
+  expect(noMission.missionContext).toEqual({ _tag: 'None' })
+  expect(sidebarRowAccessibleName(noMission)).toBe('Reported name, Idle')
+  const working = { ...agent, mission: 'mission/example/review' }
+  const missing = sidebarRow({ agent: working, stale: false, missionUnavailable: true, missionInfo: failed })
+  expect(missing.missionContext).toEqual({ _tag: 'Unavailable' })
+  expect(sidebarRowAccessibleName(missing)).toBe('Reported name, Idle, mission info unavailable')
+  const retained = sidebarRow({ agent: working, stale: false, missionInfo: failed })
+  expect(retained.missionContext).toMatchObject({ _tag: 'Mission', slug: 'review' })
+  expect(sidebarRowAccessibleName(retained)).toBe('Reported name, Idle, Mission review, mission info may be out of date')
+})
 describe('controlled native sidebar observations', () => {
   it('never exposes an unknown raw status in hover copy', () => {
     for (const status of ['indeterminate', 'unexpected-runtime-value']) {

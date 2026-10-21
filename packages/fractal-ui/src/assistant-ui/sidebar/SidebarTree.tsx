@@ -272,6 +272,9 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       return row === undefined || row.estimated || row.rect.y >= scroll ? [] : [{ item, height: row.rect.height, offset: 0 }]
     })
     if (props.stickyAncestors === false) candidates = []
+    // A pinned ancestor is usually unmounted, so no row observer sees its content change in place
+    // (a bound row's live data). Its bank copy does, and corrects the cached height its pin uses.
+    for (const pin of candidates) measurementCandidates.set(pin.item.id, pin.item)
     const budget = height * 0.4
     let pins: Pin<T>[] = candidates
     // Retain deepest rows. The breadcrumb uses the real upper row's measured height.
@@ -420,7 +423,8 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       for (const entry of entries) {
         const id = (entry.target as HTMLElement).dataset.measureKey
         const item = snapshot.measurements.find(item => String(item.id) === id)
-        if (item === undefined || layout.virtualizer === null) continue
+        // As with mounted rows, a hidden tree reports zero; the last measurement stands.
+        if (item === undefined || layout.virtualizer === null || entry.contentRect.height <= 0) continue
         const size = layout.getContentSize().copy()
         size.width = entry.contentRect.width
         size.height = entry.contentRect.height

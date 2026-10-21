@@ -64,6 +64,7 @@ export const sidebarRowAccessibleName = (row: Row): string => {
     if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
     if (row.missionInfo !== undefined && row.missionInfo._tag !== 'Live') parts.push('mission info may be out of date')
   }
+  if (row.missionContext?._tag === 'Unavailable') parts.push('mission info unavailable')
   return parts.join(', ')
 }
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */

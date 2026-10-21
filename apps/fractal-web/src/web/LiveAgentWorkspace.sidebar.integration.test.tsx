@@ -79,7 +79,12 @@ const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
 
-it.each(['missions', 'attention'] as const)('retains %s freshness, failures and observed time in mission rows and tree names', async family => {
+it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
+  (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
+('retains $family freshness and distinguishes missing mission info at $width $scheme', async ({ family, width, scheme }) => {
+  window.localStorage.setItem('wf.ui@1', JSON.stringify({ version: 1, entries: {
+    'round2.scheme': { version: 1, value: scheme, clock: 1, writer: 'mission-test' },
+  } }))
   const mission = fixtureMissions[0]!
   const runId = 'mission-run/example/review'
   const hydrated: Mission = { ...mission, run_generations: {}, run_details: [{
@@ -108,7 +113,7 @@ it.each(['missions', 'attention'] as const)('retains %s freshness, failures and 
   }).pipe(Atom.keepAlive)
   source = { ...source, missions, attention, sync: { ...source.sync!, missions: missionsSync, attention: attentionSync } }
   registry.set(agents, observed({ value: [seat] }))
-  await mount(1440)
+  await mount(width)
   const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
   const expected = `Worker, Working, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
   expect(row().getAttribute('aria-label')).toBe(expected)
@@ -146,10 +151,17 @@ it.each(['missions', 'attention'] as const)('retains %s freshness, failures and 
       registry.set(attentionSync, { ...registry.get(attentionSync), last: Option.none() })
     }
   })
-  expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+  expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
   expect(row().querySelector('[data-mission-pill]')).toBeNull()
-  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
+  const warning = row().querySelector('[data-mission-unavailable]')!
+  expect(warning.textContent).toContain('Mission info unavailable')
+  expect(warning.querySelector('svg')).not.toBeNull()
+  expect(warning.closest('button')).toBeNull()
   expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
+  await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
+  expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+  expect(row().querySelector('[data-mission-unavailable], [data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
 })
 
 it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {

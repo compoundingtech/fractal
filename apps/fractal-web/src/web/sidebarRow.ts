@@ -118,7 +118,8 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
     statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
     freshness: stale ? 'stale' : 'live', description: agent.description, harness: agent.harness,
     terminal: agent.terminal || undefined, mission: agent.mission, lastActivityAt, statusSince,
-    missionContext: missionUnavailable ? { _tag: 'None' } : sidebarMissionContext({ agent, missions, attention }),
+    missionContext: missionUnavailable && (agent.currentWork?.[0]?.missionId ?? agent.mission) !== undefined
+      ? { _tag: 'Unavailable' } : sidebarMissionContext({ agent, missions, attention }),
     missionInfo,
     needsMe,
     childrenKnown: agent.subagents !== undefined,
