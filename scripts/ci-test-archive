@@ -348,7 +348,7 @@ def main():
         subprocess.run(['bash', 'scripts/ci-linux', 'conversation-model'], check=True)
         # The real-user gateway must retain the standalone production feature set.
         with (directory / 'production-build.json').open('w') as stream:
-            subprocess.run(['cargo', 'build', '--locked', '-p', 'st3', '--bin', 'st3',
+            subprocess.run(['cargo', 'build', '--locked', '-p', 'fractal', '--bin', 'st3',
                             '--message-format=json'], check=True, stdout=stream)
         artifacts = [json.loads(line) for line in (directory / 'production-build.json').read_text().splitlines()]
         binaries = [item for item in artifacts if item.get('reason') == 'compiler-artifact'
