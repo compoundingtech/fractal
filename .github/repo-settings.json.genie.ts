@@ -62,5 +62,16 @@ export default githubRepoSettings({
         },
       },
     ],
+  }), githubRuleset({
+    // Evidence records are tags (docs/st3/gate-evidence.md, "Records as tags"): once written, a record is never deleted or moved,
+    // so a newer failing record cannot be removed to let an older pass decide again. Creation stays open: producers create tags.
+    // No bypass actor: scripts/evidence-gc turns this ruleset's enforcement off only around its own tag deletions (--lock-config,
+    // logged, relocked in a finally and checked), and the protection that does not depend on GitHub is the signed evidence log.
+    name: 'evidence-tags',
+    target: 'tag',
+    enforcement: 'active',
+    bypass_actors: [],
+    conditions: { ref_name: { include: ['refs/tags/evidence/**'], exclude: [] } },
+    rules: [{ type: 'deletion' }, { type: 'update' }, { type: 'non_fast_forward' }],
   })],
 })
