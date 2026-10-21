@@ -310,36 +310,71 @@ const storybookDirectory = nodePath.resolve(uiSource, '../.storybook')
 // Do not filter by extension here: every configured file needs a loader or an
 // explicit failure, including newly configured CSF extensions and glob braces.
 const configuredStoryFiles = (globs: string[], directory = storybookDirectory) => {
+  const unsupported = (glob: string): never => {
+    throw new Error(`Cannot derive static Storybook inventory roots for configured pattern: ${glob}`)
+  }
+  const expandBraces = (glob: string): string[] => {
+    const start = glob.indexOf('{')
+    if (start === -1) return glob.includes('}') ? unsupported(glob) : [glob]
+    const alternatives: string[] = []
+    let depth = 0
+    let part = start + 1
+    for (let index = start; index < glob.length; index++) {
+      const character = glob[index]
+      if (character === '{') depth++
+      if (character === '}') {
+        depth--
+        if (depth === 0) {
+          if (alternatives.length === 0) return unsupported(glob)
+          alternatives.push(glob.slice(part, index))
+          return alternatives.flatMap(alternative => expandBraces(glob.slice(0, start) + alternative + glob.slice(index + 1)))
+        }
+      }
+      if (character === ',' && depth === 1) {
+        alternatives.push(glob.slice(part, index))
+        part = index + 1
+      }
+    }
+    return unsupported(glob)
+  }
   const rejectSymlink = (path: string) => {
     const stat = lstatSync(path)
     if (stat.isSymbolicLink()) throw new Error(`Symlink in configured Storybook inventory: ${path}`)
     return stat
   }
-  const walk = (path: string) => {
+  const walk = (path: string, includeDependencies: boolean) => {
     if (!rejectSymlink(path).isDirectory()) return
     for (const name of readdirSync(path)) {
-      if (name !== 'node_modules') walk(nodePath.join(path, name))
+      if (includeDependencies || name !== 'node_modules') walk(nodePath.join(path, name), includeDependencies)
     }
   }
-  const roots = new Set(globs.map(glob => {
-    const segments = glob.split('/')
-    const magic = segments.findIndex(segment => /[*?{[(]/.test(segment))
-    return nodePath.resolve(directory, magic === -1 ? nodePath.dirname(glob) : segments.slice(0, magic).join('/'))
-  }))
-  for (const root of roots) {
-    // Inspect static ancestors too: lstat(root) alone would follow a symlink in
-    // an earlier path component before inspecting the root itself.
-    const ancestors: string[] = []
-    for (let parent = nodePath.dirname(root); ; parent = nodePath.dirname(parent)) {
-      ancestors.push(parent)
-      if (parent === nodePath.dirname(parent)) break
+  const files = new Set<string>()
+  for (const glob of globs) {
+    // Storybook commonGlobOptions disables its dependency ignore for the entire
+    // configured pattern when that pattern explicitly mentions node_modules.
+    const includeDependencies = glob.includes('node_modules')
+    const roots = new Set(expandBraces(glob).map(expanded => {
+      if (/[()!\\]/.test(expanded)) return unsupported(glob)
+      const segments = expanded.split('/')
+      const magic = segments.findIndex(segment => /[*?[]/.test(segment))
+      if (magic === 0 || (magic !== -1 && segments.slice(magic).includes('..'))) return unsupported(glob)
+      return nodePath.resolve(directory, magic === -1 ? nodePath.dirname(expanded) : segments.slice(0, magic).join('/'))
+    }))
+    for (const root of roots) {
+      // Inspect static ancestors first, without following earlier path components.
+      const ancestors: string[] = []
+      for (let parent = nodePath.dirname(root); ; parent = nodePath.dirname(parent)) {
+        ancestors.push(parent)
+        if (parent === nodePath.dirname(parent)) break
+      }
+      for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
+      walk(root, includeDependencies)
     }
-    for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
-    walk(root)
+    for (const file of globSync(glob, { cwd: directory, exclude: includeDependencies ? [] : ['**/node_modules/**'] })) {
+      files.add(nodePath.resolve(directory, file))
+    }
   }
-  // Do not follow links or include dependencies, matching Storybook's exclusion.
-  return globSync(globs, { cwd: directory, exclude: ['**/node_modules/**'] })
-    .map(file => nodePath.resolve(directory, file))
+  return [...files]
 }
 const configuredFiles = configuredStoryFiles(storyGlobs)
 const storyModules: Record<string, StoryModule> = {}
@@ -380,6 +415,35 @@ test('configured inventory rejects directory and file symlinks without following
     mkdirSync(dependencies)
     symlinkSync(directory, nodePath.join(dependencies, 'ignored'), 'dir')
     expect(configuredStoryFiles(globs, directory)).toEqual([story])
+    expect(() => configuredStoryFiles(['src/node_modules/**/*.stories.tsx'], directory))
+      .toThrow(`Symlink in configured Storybook inventory: ${nodePath.join(dependencies, 'ignored')}`)
+    expect(() => configuredStoryFiles(['src/{node_modules,other}/**/*.stories.tsx'], directory))
+      .toThrow(`Symlink in configured Storybook inventory: ${nodePath.join(dependencies, 'ignored')}`)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('configured inventory expands nested brace roots before inspecting symlinks', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-braces-'))
+  try {
+    const config = nodePath.join(directory, 'config/.storybook')
+    mkdirSync(config, { recursive: true })
+    mkdirSync(nodePath.join(directory, 'config/src/nested'), { recursive: true })
+    const outside = nodePath.join(directory, 'outside')
+    mkdirSync(outside)
+    const story = nodePath.join(outside, 'Example.stories.tsx')
+    writeFileSync(story, '')
+    const globs = ['../src/{nested,{../../outside,nested}}/**/*.stories.tsx']
+    expect(configuredStoryFiles(globs, config)).toEqual([story])
+    const link = nodePath.join(outside, 'linked')
+    symlinkSync(directory, link, 'dir')
+    expect(() => configuredStoryFiles(globs, config)).toThrow(`Symlink in configured Storybook inventory: ${link}`)
+    expect(() => configuredStoryFiles(['{../src,../../outside}/**/*.stories.tsx'], config))
+      .toThrow(`Symlink in configured Storybook inventory: ${link}`)
+    for (const glob of ['@(src|outside)/**/*.stories.tsx', '*/**/*.stories.tsx', '../src/{1..3}/**/*.stories.tsx']) {
+      expect(() => configuredStoryFiles([glob], config)).toThrow(`Cannot derive static Storybook inventory roots for configured pattern: ${glob}`)
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
