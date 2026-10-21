@@ -1465,6 +1465,7 @@ fn only(exchange: &ReplicationExchange, envelopes: Vec<ReplicaEnvelope>) -> Repl
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         ..exchange.clone()
