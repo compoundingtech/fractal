@@ -1,11 +1,11 @@
 {
-  "summary": "Revert the mission projection source upgrade (#3554), which was never deployed",
+  "summary": "Revert the mission projection source upgrade (#3554): the carried-reason reducer and the projection definition versions return to the pre-#3554 text",
   "version": 1,
-  "replay": {"status": "none", "detail": "The reverted change was never released, so no running member has its projection definitions or its one-time repair; replay behaves as on the last deployed build."},
-  "schema": {"status": "none", "detail": "No table, storage-version or claim-schema change; the local meta marker the reverted change would have written is not written."},
+  "replay": {"status": "changed", "detail": "Replay and carried-step reconciliation return to the pre-#3554 reducer: a carried step's blocker reason is again not derived from the referenced source step at the carry cut, and the one-time repair of persisted terminal dates and carried rows no longer exists. A copy that already ran the repair is not reverted by deleting this hook. Persisted terminal-date and carried-reason divergence is deliberately left unresolved by this change."},
+  "schema": {"status": "none", "detail": "No table, storage-version or claim-schema change; the local meta marker the reverted change would have written is no longer written."},
   "rules": {"status": "none", "detail": "No checkpoint retention rules, rules version, envelopes, seals or trim permission changes."},
-  "compatibility": {"status": "none", "detail": "Mission-run, run-generation and step projection definition versions stay as in the last deployed build; no mixed-version behaviour changes."},
-  "downtime": {"status": "none", "detail": "Removes a synchronous first-open walk of every terminal run, generation and carried step claim, so startup does not gain that work."},
+  "compatibility": {"status": "changed", "detail": "The three explicit projection definition versions (mission_runs, run_generations, step_runs at 2) disappear again and the previous implicit definitions apply. A member that ran #3554 and a member on this build compare those projections under different definitions; the members reported to be still on the cd947aaa build never ran #3554. This does not claim that no other deployment ever ran #3554."},
+  "downtime": {"status": "unknown", "detail": "Removing #3554 removes its synchronous first-open walk of every terminal run, generation and carried step claim. Startup cost of the other commits since the last deployed build is not measured; a revert is not a startup qualification of main."},
   "manual": {"status": "none", "detail": "No manual step. Deploy through the normal reviewed rollout."},
-  "recovery": {"status": "none", "detail": "Nothing to recover: the reverted change never ran on a deployed member. The divergence it addressed is tracked separately."}
+  "recovery": {"status": "changed", "detail": "Reverting a binary is not a projection repair: a copy that was already repaired keeps its repaired rows, and the divergence this revert leaves open is tracked separately."}
 }
