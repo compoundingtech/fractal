@@ -2643,6 +2643,16 @@ async fn self_restart_now_and_other_actors_interrupt_immediately() {
         })).await.unwrap();
         assert_eq!(request.body["fields"]["action"], "restart");
         fixture.reconciler.reconcile_once().unwrap();
+        if case != "now" {
+            // Another actor's restart is never deferred until the turn ends. It is a planned
+            // restart: the seat is asked for its handoff and stopped at the prepare deadline.
+            assert!(fixture.runtime.stops.lock().unwrap().is_empty(), "{case}");
+            assert_eq!(prepare_messages(&fixture, &subject).len(), 1, "{case}");
+            let due = fixture.reconciler.next_deadline().expect("the prepare deadline");
+            let wait = due.saturating_sub(smallclaims::store::now_ms()) + 1;
+            tokio::time::sleep(Duration::from_millis(wait as u64)).await;
+            fixture.reconciler.reconcile_once().unwrap();
+        }
         assert_eq!(
             fixture.runtime.stops.lock().unwrap().as_slice(),
             ["fixture:1"],
