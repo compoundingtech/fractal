@@ -186,6 +186,9 @@ const press = async (target: HTMLElement, via: Press) => {
 }
 /** Menu trigger → Reported agent details; resolves once the details dialog owns focus and keeps it across frames. */
 const openReportedDetails = async (row: HTMLElement, via: Press) => {
+  // Let queued virtualizer scroll work run before checking whether the row accepts a press.
+  await nextFrame()
+  await nextFrame()
   const trigger = within(row).getByRole('button', { name: /^Actions for / })
   const title = trigger.getAttribute('aria-label')!.replace(/^Actions for /, '')
   // RAC disables pointer events while its virtualizer settles the selected row into view.
@@ -262,7 +265,7 @@ export const AgentRowDetails: Story = {
   play: async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) {
-    const row = within(canvas.getByRole('complementary', { name: 'Agents' })).getByRole('row', { name: detailsRow })
+    const row = await within(canvas.getByRole('complementary', { name: 'Agents' })).findByRole('row', { name: detailsRow })
     const painted = row.querySelector('[data-milestone-row]')!
     const compact = window.matchMedia(compactDetailsQuery).matches
     for (const via of ['mouse', 'keyboard'] as const) {
@@ -279,8 +282,8 @@ export const AgentRowDetails: Story = {
   await waitFor(() => expect(agents.contains(document.activeElement)).toBe(true))
   // The drawer keeps its strip of thread: 320 px, or the viewport less 40 px when narrower.
   await expect(Math.abs(agents.getBoundingClientRect().width - Math.min(320, document.documentElement.clientWidth - 40))).toBeLessThanOrEqual(1)
-  const row = within(agents).getByRole('row', { name: detailsRow })
   for (const via of ['touch', 'keyboard'] as const) {
+    const row = await within(agents).findByRole('row', { name: detailsRow })
     const { trigger, dialog, popover } = await openReportedDetails(row, via)
     // Inside the drawer's modal DOM, so its focus containment and inert boundary include the details.
     await expect(agents.contains(dialog)).toBe(true)
