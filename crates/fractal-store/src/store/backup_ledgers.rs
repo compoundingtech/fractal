@@ -51,14 +51,14 @@ const LEDGERS: &[Ledger] = &[
         columns: &[("id", Identity)],
         key: 1,
         implied: None,
-        union: /* sqlite-large-value: allow-for-now lv-h26f0da55c56a owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({0})",
+        union: /* sqlite-large-value: allow-for-now lv-hf7633284200e owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({0})",
     },
     Ledger {
         table: "retired_envelopes",
         columns: &[("writer", Text), ("sequence", Integer), ("envelope_hash", Identity)],
         key: 3,
         implied: None,
-        union: /* sqlite-large-value: allow-for-now lv-h8fc5c58c13d3 owner=fractal_store::store::backup_ledgers TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash) \
+        union: /* sqlite-large-value: allow-for-now lv-hcad17555b6f4 owner=fractal_store::store::backup_ledgers TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash) \
                 VALUES ({0}, {1}, {2})",
     },
     Ledger {
@@ -66,7 +66,7 @@ const LEDGERS: &[Ledger] = &[
         columns: &[("id", Identity), ("checkpoint", Text)],
         key: 2,
         implied: None,
-        union: /* sqlite-large-value: allow-for-now lv-h92622ad5973a owner=fractal_store::store::backup_ledgers TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO retired_claim_withdrawals(id, checkpoint) VALUES ({0}, {1})",
+        union: /* sqlite-large-value: allow-for-now lv-h97b5f2322104 owner=fractal_store::store::backup_ledgers TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO retired_claim_withdrawals(id, checkpoint) VALUES ({0}, {1})",
     },
     Ledger {
         table: "retired_envelope_withdrawals",
@@ -78,7 +78,7 @@ const LEDGERS: &[Ledger] = &[
         ],
         key: 4,
         implied: None,
-        union: /* sqlite-large-value: allow-for-now lv-h096bfc0baa97 owner=fractal_store::store::backup_ledgers TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO retired_envelope_withdrawals(writer, sequence, envelope_hash, \
+        union: /* sqlite-large-value: allow-for-now lv-h5fd641b09aae owner=fractal_store::store::backup_ledgers TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO retired_envelope_withdrawals(writer, sequence, envelope_hash, \
                 checkpoint) VALUES ({0}, {1}, {2}, {3})",
     },
     Ledger {
@@ -86,7 +86,7 @@ const LEDGERS: &[Ledger] = &[
         columns: &[("operation_id", Text), ("request_digest", Text), ("claim_id", Identity)],
         key: 3,
         implied: None,
-        union: /* sqlite-large-value: allow-for-now lv-h230940c64c3a owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_operation_receipts(operation_id, request_digest, \
+        union: /* sqlite-large-value: allow-for-now lv-hbd59de6a2e5f owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_operation_receipts(operation_id, request_digest, \
                 claim_id) VALUES ({0}, {1}, {2})",
     },
     Ledger {
@@ -99,7 +99,7 @@ const LEDGERS: &[Ledger] = &[
         ],
         key: 1,
         implied: None,
-        union: /* sqlite-large-value: allow-for-now lv-hc6472a927474 owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ancestry(claim_id, subject, kind, predecessors) \
+        union: /* sqlite-large-value: allow-for-now lv-h3f5784d30226 owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ancestry(claim_id, subject, kind, predecessors) \
                 VALUES ({0}, {1}, {2}, {3})",
     },
     Ledger {
@@ -113,7 +113,7 @@ const LEDGERS: &[Ledger] = &[
              AND replica_sequence=ledger.sequence AND hash=ledger.hash)",
         ),
         // The same rule as the batch triggers: a head only ever rises.
-        union: /* sqlite-large-value: allow-for-now lv-h3cbef448f4bf owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO writer_heads(writer, sequence, hash) VALUES ({0}, {1}, {2}) \
+        union: /* sqlite-large-value: allow-for-now lv-h4c19f44148e6 owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO writer_heads(writer, sequence, hash) VALUES ({0}, {1}, {2}) \
                 ON CONFLICT(writer) DO UPDATE SET sequence=excluded.sequence, hash=excluded.hash \
                 WHERE excluded.sequence>writer_heads.sequence",
     },
@@ -127,7 +127,7 @@ const LEDGERS: &[Ledger] = &[
              AND state='repaired' AND claim_id=ledger.claim_id \
              AND replacement_claim_id=ledger.replacement_claim_id)",
         ),
-        union: /* sqlite-large-value: allow-for-now lv-he9018892f845 owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO repaired_claim_replacements(claim_id, \
+        union: /* sqlite-large-value: allow-for-now lv-h6d886ced104e owner=fractal_store::store::backup_ledgers TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO repaired_claim_replacements(claim_id, \
                 replacement_claim_id, record_ref) VALUES ({0}, {1}, {2})",
     },
 ];
@@ -188,7 +188,7 @@ fn for_each_page(
 ) -> Result<()> {
     let mut after: Option<Vec<Value>> = None;
     loop {
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3263a5d5f7db owner=fractal_store::store::backup_ledgers TODO=trace-statement-and-value-representation */ &page_query(ledger, after.is_none()))?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hdab4da12bdd0 owner=fractal_store::store::backup_ledgers TODO=trace-statement-and-value-representation */ &page_query(ledger, after.is_none()))?;
         let width = ledger.columns.len();
         let read = |row: &rusqlite::Row<'_>| {
             (0..width)
@@ -338,9 +338,9 @@ pub fn union_page(transaction: &rusqlite::Transaction<'_>, page: &LedgerPage) ->
     for (index, mark) in marks.iter().enumerate() {
         sql = sql.replace(&format!("{{{index}}}"), mark);
     }
-    let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h38b5b9bd0d24 owner=fractal_store::store::backup_ledgers TODO=trace-statement-and-value-representation */ &sql)?;
+    let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hdd07951df967 owner=fractal_store::store::backup_ledgers TODO=trace-statement-and-value-representation */ &sql)?;
     for row in &page.rows {
-        statement.execute(/* sqlite-large-value: allow-for-now lv-h747c6b767e0d owner=fractal_store::store::backup_ledgers TODO=trace-statement-and-value-representation */ rusqlite::params_from_iter(stored(ledger, row)?))?;
+        statement.execute(/* sqlite-large-value: allow-for-now lv-hdeee77e847a1 owner=fractal_store::store::backup_ledgers TODO=trace-statement-and-value-representation */ rusqlite::params_from_iter(stored(ledger, row)?))?;
     }
     Ok(())
 }
