@@ -13,6 +13,7 @@ import { isExportStory } from 'storybook/internal/csf'
 import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import * as nodePath from 'node:path'
+import { globSync } from 'node:fs'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
 import './scenario-fixture-graph.unit.test.ts'
@@ -276,7 +277,7 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './stories/milestone/RedesignMilestone.stories.tsx#Decisions': 3355,
 }
 
-// Separate shrink-only debt owned by the app, never part of the blocked-PR ratchet.
+// Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
 const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
@@ -295,12 +296,16 @@ interface StoryModule {
   readonly [exportName: string]: unknown
 }
 // A lazy repository-wide loader pool is not the inventory: only configured CSFs
-// are imported. New Storybook locations need no parallel glob-list update.
-const storyLoaders = import.meta.glob<StoryModule>('../../../**/*.stories.tsx')
+// are imported. Configured files outside this supported pool fail explicitly.
+const storyLoaders = import.meta.glob<StoryModule>('../../../**/*.stories.{ts,tsx,js,jsx,mjs,mts,cjs,cts}')
 const uiSource = nodePath.resolve(process.cwd(), 'src')
 const loadersByFile = Object.fromEntries(Object.entries(storyLoaders).map(([file, loader]) => [nodePath.resolve(uiSource, file), loader]))
 const storybookDirectory = nodePath.resolve(uiSource, '../.storybook')
-const configuredFiles = ts.sys.readDirectory(storybookDirectory, ['.tsx'], undefined, storyGlobs)
+// Do not filter by extension here: every configured file needs a loader or an
+// explicit failure, including newly configured CSF extensions and glob braces.
+const configuredStoryFiles = (globs: string[]) => globSync(globs, { cwd: storybookDirectory })
+  .map(file => nodePath.resolve(storybookDirectory, file))
+const configuredFiles = configuredStoryFiles(storyGlobs)
 const storyModules: Record<string, StoryModule> = {}
 for (const file of configuredFiles) {
   const path = `./${nodePath.relative(uiSource, file)}`
@@ -313,6 +318,19 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
   expect(storybookConfig.stories).toEqual(storyGlobs)
   expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
   expect(configuredFiles.length).toBeGreaterThan(0)
+})
+
+test('configured .stories.ts CSFs are discovered and checked, including brace globs', async () => {
+  const files = configuredStoryFiles(['../src/scenario-story-check-fixtures/*.stories.{ts,tsx}'])
+  expect(files).toEqual([nodePath.resolve(uiSource, 'scenario-story-check-fixtures/Primitive.stories.ts')])
+  const loader = loadersByFile[files[0]!]
+  expect(loader).toBeDefined()
+  if (loader === undefined) throw new Error('Configured TypeScript CSF has no loader')
+  const module = await loader()
+  const story = module['AllStates']
+  expect(isStory(story)).toBe(true)
+  if (!isStory(story)) throw new Error('TypeScript CSF fixture has no object story')
+  expect(scenarioStoryCheck(story, module.default)._tag).toBe('Passed')
 })
 const isStory = (value: unknown): value is StoryObj => typeof value === 'object' && value !== null
 const undeclared: string[] = []
@@ -422,7 +440,7 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
   for (const id of undeclared) process.stdout.write(`${id}: undeclared — blocked by PR #${deferredStoryModes[id]}\n`)
 })
 
-test('app mode debt matches its separate shrink-only owner ratchet', () => {
+test('app mode debt matches its reviewed shrink-only pin', () => {
   expect(Object.keys(deferredAppStoryModes)).toHaveLength(10)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
