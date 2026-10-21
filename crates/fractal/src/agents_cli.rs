@@ -516,6 +516,14 @@ pub(super) async fn run_agents(
                     }),
                 )
                 .await?;
+            if request.body["fields"]["action"] == "restart-when-idle" {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Restart pending for {subject}: waiting for the turn to end and the harness to be idle and quiescent");
+                    Ok(())
+                };
+            }
             let previous = request.body["fields"]["incarnation_id"]
                 .as_str()
                 .unwrap_or("");
