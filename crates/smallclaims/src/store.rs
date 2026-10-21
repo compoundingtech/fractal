@@ -6337,6 +6337,7 @@ impl Store {
 
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let signature_requests = self.replication_signature_requests()?;
         Ok(ReplicationExchange {
@@ -6346,8 +6347,8 @@ impl Store {
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 digest: snapshot.inventory.digest.clone(),
                 envelopes: Vec::new(),
@@ -6408,6 +6409,7 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
@@ -6427,8 +6429,8 @@ impl Store {
                 projection_registry_digest: Some(self.runtime.projection_registry_digest()),
                 projection_versions: self.runtime.projection_versions(),
                 authority_digest: snapshot.authority_digest.clone(),
-                graph_digest: snapshot.legacy_graph_digest.clone(),
-                projection_digests: snapshot.projection_digests.clone(),
+                graph_digest: digests.0.clone(),
+                projection_digests: digests.1.clone(),
                 inventory: ReplicationInventory {
                     digest: snapshot.inventory.digest.clone(),
                     envelopes: listed,
@@ -6479,8 +6481,8 @@ impl Store {
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
@@ -7270,6 +7272,29 @@ impl Store {
     /// Whether admitted replicated claims wait for a deferred projection.
     pub fn replication_projection_deferred(&self) -> bool {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
+    }
+
+    /// The graph and projection digests an exchange carries. While this node's projection is
+    /// not settled (a deferred catch-up, committed batches not yet sealed into envelopes, or
+    /// replicated claims waiting for a build that knows their kinds), its tables can differ
+    /// from a settled peer's at the same inventory with no divergence at all. It then sends
+    /// neither, which a peer reads as nothing to compare this time.
+    fn exported_digests(
+        &self,
+        snapshot: &ReplicationSnapshot,
+    ) -> Result<(String, BTreeMap<String, String>)> {
+        let waiting: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE state='unknown')",
+            [],
+            |row| row.get(0),
+        )?;
+        if self.replication_projection_deferred() || snapshot.unsealed || waiting {
+            return Ok((String::new(), BTreeMap::new()));
+        }
+        Ok((
+            snapshot.legacy_graph_digest.clone(),
+            snapshot.projection_digests.clone(),
+        ))
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
