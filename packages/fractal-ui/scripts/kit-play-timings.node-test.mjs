@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { readinessTimings, summarizeTimings, costTable, notice } from './kit-play-timings.mjs'
+import { shardArtifactName, shardStories } from './kit-play-shards.mjs'
+import { fullCases } from './kit-play-commit-set.mjs'
 
 const marks = { dom: 10, playing: 30, played: 70, completing: 75, a11yStart: 80, a11yEnd: 150, finished: 160, observed: 170 }
 test('readiness phases partition one document clock, including lifecycle overhead', () => {
@@ -79,4 +81,57 @@ test('public benchmark margin uses the worst probe and does not invent unobserve
   ] }] } }])
   assert.match(table, /minimum margin: 1.500× .*2 probes/)
   assert.match(costTable([]), /minimum margin: unavailable/)
+})
+
+test('shard CLI selects attempts before requiring receipts, without weakening provenance or coverage', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kit-play-shard-attempt-test-'))
+  try {
+    const provenance = { runId: '123', headSha: 'a'.repeat(40), runAttempt: 2 }
+    const ids = Array.from({ length: 32 }, (_, index) => `story-${index}`).sort()
+    const receipt = shardIndex => ({
+      ...provenance, runAttempt: shardIndex === 0 ? 2 : 1,
+      shardIndex, shardCount: 2, pass: true, fullIds: ids,
+      rows: fullCases(shardStories(ids, shardIndex, 2)).map(row => ({ ...row, pass: true })),
+    })
+    const save = async (identity, content) => {
+      const path = join(directory, shardArtifactName(identity))
+      await mkdir(path)
+      await writeFile(join(path, 'lane-seconds'), '42')
+      if (content) await writeFile(join(path, 'receipt.json'), JSON.stringify(content))
+      return path
+    }
+    await save({ ...receipt(0), runAttempt: 1 })
+    const latest = await save(receipt(0), receipt(0))
+    await save(receipt(1), receipt(1))
+    const run = (attempt = 2) => spawnSync(process.execPath, [new URL('./kit-play-shards.mjs', import.meta.url).pathname, directory, '2'], {
+      encoding: 'utf8', env: { ...process.env, GITHUB_RUN_ID: provenance.runId, GITHUB_SHA: provenance.headSha, GITHUB_RUN_ATTEMPT: String(attempt) },
+    })
+    const passed = run()
+    assert.equal(passed.status, 0, passed.stderr)
+    assert.deepEqual(JSON.parse(passed.stdout), { stories: ids.length, cases: fullCases(ids).length, shards: 2, pass: true })
+
+    // The public-cost publisher also accepts the retained lane-only older attempt.
+    const cost = spawnSync(process.execPath, [new URL('./kit-play-cost.mjs', import.meta.url).pathname, directory], {
+      encoding: 'utf8', env: { ...process.env, GITHUB_RUN_ID: provenance.runId, GITHUB_SHA: provenance.headSha, GITHUB_RUN_ATTEMPT: '2', GITHUB_STEP_SUMMARY: '' },
+    })
+    assert.equal(cost.status, 0, cost.stderr)
+    assert.ok(cost.stdout.includes('| 0 | 42.00'))
+
+    const corrupt = { ...receipt(0), headSha: 'b'.repeat(40) }
+    await writeFile(join(latest, 'receipt.json'), JSON.stringify(corrupt))
+    assert.match(run().stderr, /Artifact name does not match receipt provenance/)
+    await writeFile(join(latest, 'receipt.json'), JSON.stringify({ ...receipt(0), rows: [] }))
+    assert.match(run().stderr, /Incomplete shard cases/)
+    await writeFile(join(latest, 'receipt.json'), JSON.stringify(receipt(0)))
+
+    const missing = await save({ ...receipt(0), runAttempt: 3 })
+    assert.match(run(3).stderr, /ENOENT/)
+    await rm(missing, { recursive: true })
+    const foreign = await save({ ...receipt(0), runId: '999', runAttempt: 1 })
+    assert.match(run().stderr, /Shard workflow provenance mismatch/)
+    await rm(foreign, { recursive: true })
+    assert.match(run(1).stderr, /Shard workflow provenance mismatch/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
