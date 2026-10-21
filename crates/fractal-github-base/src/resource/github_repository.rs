@@ -2565,6 +2565,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runs_in_the_last_hour_have_their_artifacts_listed_once_for_flaky_tests() {
+        use super::super::github_workflows::{read_flaky, WorkspaceCi, WorkspaceRun};
+        let (github, base) = FakeGithub::start().await;
+        let base = format!("{base}/repos/acme/garden");
+        let now = chrono::Utc::now();
+        let at = |minutes_ago: i64| (now - chrono::TimeDelta::minutes(minutes_ago)).to_rfc3339();
+        let run = |id: u64, event: &str, minutes_ago: i64| {
+            let branch = if event == "merge_group" { format!("gh-readonly-queue/main/pr-{id}-{}", "e".repeat(40)) } else { "feature".to_owned() };
+            WorkspaceRun::from_run("acme/garden", &json!({"id": id, "name": "Workspace CI",
+                "path": ".github/workflows/fleet.yml", "event": event, "head_branch": branch,
+                "status": "completed", "conclusion": "success", "created_at": at(minutes_ago + 10),
+                "run_started_at": at(minutes_ago + 9), "updated_at": at(minutes_ago),
+                "repository": {"full_name": "acme/garden"}})).unwrap()
+        };
+        let artifacts = |id: u64| format!("/repos/acme/garden/actions/runs/{id}/artifacts?per_page=100");
+        // Two runs in the hour (one a pull request's), one before it.
+        let mut ci = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: 0,
+            runs: vec![run(1, "merge_group", 5), run(2, "pull_request", 20), run(3, "merge_group", 90)] };
+        github.route(&artifacts(1), json!({"total_count": 3, "artifacts": [{"name": "linux-tests-logs"},
+            {"name": "nextest-flaky-linux-tests-2"}, {"name": "nextest-flaky-linux-tests-shard-3-1"}]}));
+        github.route(&artifacts(2), json!({"total_count": 1, "artifacts": [{"name": "linux-tests-logs"}]}));
+        let mut listed = BTreeMap::from([(99, 4)]);
+        let now_ms = now.timestamp_millis() as u64;
+        let client = reqwest::Client::new();
+        let auth = GithubAuth::test("fixture-auth");
+        read_flaky(&client, &base, &auth, Duration::from_secs(60), &mut ci, &mut listed, now_ms).await;
+        let mut requests = github.take_requests();
+        requests.sort();
+        assert_eq!(requests, [format!("GET {} HTTP/1.1", artifacts(1)), format!("GET {} HTTP/1.1", artifacts(2))]);
+        assert_eq!(ci.runs.iter().map(|run| run.flaky).collect::<Vec<_>>(), [Some(3), Some(0), None]);
+        // A run gone from the hour is pruned, and a listed run is never listed again.
+        assert_eq!(listed, BTreeMap::from([(1, 3), (2, 0)]));
+        read_flaky(&client, &base, &auth, Duration::ZERO, &mut ci, &mut listed, now_ms + 60_000).await;
+        assert!(github.take_requests().is_empty());
+        assert_eq!(ci.runs[0].flaky, Some(3));
+        // A failed listing is tried again on a later poll; the next run waits for it.
+        ci.runs.extend([run(4, "merge_group", 2), run(5, "merge_group", 1)]);
+        read_flaky(&client, &base, &auth, Duration::ZERO, &mut ci, &mut listed, now_ms).await;
+        assert_eq!(github.take_requests(), [format!("GET {} HTTP/1.1", artifacts(5))]);
+        assert_eq!((ci.runs[3].flaky, ci.runs[4].flaky), (None, None));
+        github.route(&artifacts(5), json!({"total_count": 0, "artifacts": []}));
+        github.route(&artifacts(4), json!({"total_count": 1, "artifacts": [{"name": "nextest-flaky-linux-tests-shard-2-5"}]}));
+        read_flaky(&client, &base, &auth, Duration::ZERO, &mut ci, &mut listed, now_ms).await;
+        assert_eq!(github.take_requests().len(), 2);
+        assert_eq!((ci.runs[3].flaky, ci.runs[4].flaky), (Some(5), Some(0)));
+        assert!(github.graphql_requests.lock().is_empty());
+    }
+
+    #[tokio::test]
     async fn main_performance_failures_follow_conditional_object_pagination_and_fail_closed() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));

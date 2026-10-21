@@ -2,7 +2,10 @@
 //! `perf.yml` push run on main, or a daily long-lanes run on main whose `daily-perf-` lane failed.
 //!
 //! The same observation reads the recent completed Workspace CI runs (`fleet.yml`) and keeps them
-//! in this process only, for CI's objectives in `st slo`: they never enter the observed facts.
+//! in this process only, for CI's objectives in `st slo`: they never enter the observed facts. A
+//! run that finished in the last hour has its artifacts listed once, for the tests nextest passed
+//! only on a retry (`nextest-flaky-<lane>-<N>`).
+use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -159,6 +162,13 @@ pub const CRITICAL_PATH_SERIES: &str = "ci/workspace-critical-path";
 pub const MERGE_QUEUE_SERIES: &str = "ci/merge-queue";
 pub const FLAKES_SERIES: &str = "ci/flakes";
 const DAY_MS: u64 = 86_400_000;
+/// The flakes objective's window.
+const HOUR_MS: u64 = 3_600_000;
+/// A test lane's artifact whose name carries nextest's flaky test count: `nextest-flaky-<lane>-<N>`.
+const FLAKY_ARTIFACT_PREFIX: &str = "nextest-flaky-";
+/// The most runs whose artifacts one poll lists, so a restart in a busy hour cannot burst; the
+/// rest are listed on the next polls while they are still in the hour.
+const FLAKY_READS_PER_POLL: usize = 20;
 
 /// One completed Workspace CI run: a pull request's or a merge group's, with GitHub's run-level
 /// timestamps. `updated_unix_ms` is the run's `updated_at`, which a completed run last changes
@@ -176,6 +186,9 @@ pub struct WorkspaceRun {
     pub created_unix_ms: u64,
     pub started_unix_ms: u64,
     pub updated_unix_ms: u64,
+    /// The tests nextest passed only on a retry in the run's test lanes, from its artifacts'
+    /// names; None until they are listed (only for a run that finished in the last hour).
+    pub flaky: Option<u64>,
 }
 
 impl WorkspaceRun {
@@ -215,6 +228,7 @@ impl WorkspaceRun {
             created_unix_ms: at("created_at")?,
             started_unix_ms: at("run_started_at")?,
             updated_unix_ms: at("updated_at")?,
+            flaky: None,
         };
         (run.started_unix_ms <= run.updated_unix_ms && run.created_unix_ms <= run.updated_unix_ms)
             .then_some(run)
@@ -258,20 +272,26 @@ impl WorkspaceCi {
         )
     }
 
-    /// For `ci/flakes`: the merge groups whose Workspace CI run failed, ejecting the group, and
-    /// all merge groups whose run finished, after `since_unix_ms` and by `until_unix_ms`. None
-    /// when these runs do not feed `series`.
-    pub fn ejected_groups(&self, series: &str, since_unix_ms: u64, until_unix_ms: u64) -> Option<(u64, u64)> {
+    /// For `ci/flakes`, the runs that finished after `since_unix_ms` and by `until_unix_ms`: the
+    /// merge groups whose Workspace CI run failed, ejecting the group, and the tests nextest passed
+    /// only on a retry. None when these runs do not feed `series`.
+    pub fn flakes(&self, series: &str, since_unix_ms: u64, until_unix_ms: u64) -> Option<Flakes> {
         if series != FLAKES_SERIES {
             return None;
         }
-        let groups = self.within(since_unix_ms, until_unix_ms).filter(|run| run.event == "merge_group");
-        let (mut ejected, mut finished) = (0, 0);
-        for run in groups {
-            finished += 1;
-            ejected += u64::from(run.conclusion == "failure");
+        let mut flakes = Flakes::default();
+        for run in self.within(since_unix_ms, until_unix_ms) {
+            flakes.runs += 1;
+            if run.event == "merge_group" {
+                flakes.groups += 1;
+                flakes.ejected += u64::from(run.conclusion == "failure");
+            }
+            if let Some(flaky) = run.flaky {
+                flakes.listed += 1;
+                flakes.flaky_tests += flaky;
+            }
         }
-        Some((ejected, finished))
+        Some(flakes)
     }
 
     fn within(&self, since_unix_ms: u64, until_unix_ms: u64) -> impl Iterator<Item = &WorkspaceRun> {
@@ -279,6 +299,95 @@ impl WorkspaceCi {
             .iter()
             .filter(move |run| run.updated_unix_ms > since_unix_ms && run.updated_unix_ms <= until_unix_ms)
     }
+}
+
+/// What `ci/flakes` counts in a window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Flakes {
+    /// The pull request and merge group runs that finished.
+    pub runs: u64,
+    /// The merge groups whose run finished, and those of them that failed.
+    pub groups: u64,
+    pub ejected: u64,
+    /// The runs whose artifacts were listed, and the flaky tests they named.
+    pub listed: u64,
+    pub flaky_tests: u64,
+}
+
+impl Flakes {
+    pub fn count(&self) -> u64 {
+        self.ejected + self.flaky_tests
+    }
+}
+
+/// The count a `nextest-flaky-<lane>-<N>` artifact names, or None for any other artifact.
+fn flaky_count(name: &str) -> Option<u64> {
+    let (lane, count) = name.strip_prefix(FLAKY_ARTIFACT_PREFIX)?.rsplit_once('-')?;
+    if lane.is_empty() || count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    count.parse().ok()
+}
+
+/// The flaky tests a run's artifacts name, summed over its lanes (and attempts).
+fn flaky_tests(artifacts: &[Value]) -> u64 {
+    artifacts
+        .iter()
+        .filter_map(|artifact| artifact.get("name").and_then(Value::as_str))
+        .filter_map(flaky_count)
+        .sum()
+}
+
+/// The runs whose artifacts this poll lists: those that finished in the last hour and were not
+/// listed before, newest first, at most `FLAKY_READS_PER_POLL`.
+fn flaky_reads(runs: &[WorkspaceRun], listed: &BTreeMap<u64, u64>, now_unix_ms: u64) -> Vec<u64> {
+    let since = now_unix_ms.saturating_sub(HOUR_MS);
+    let mut unread = runs
+        .iter()
+        .filter(|run| run.updated_unix_ms > since && !listed.contains_key(&run.run_id))
+        .map(|run| (run.updated_unix_ms, run.run_id))
+        .collect::<Vec<_>>();
+    unread.sort_unstable_by(|left, right| right.cmp(left));
+    unread.into_iter().take(FLAKY_READS_PER_POLL).map(|(_, run_id)| run_id).collect()
+}
+
+/// List the artifacts of `ci`'s runs that finished in the last hour, each at most once in this
+/// process: `listed` keeps each run's flaky test count, pruned to the runs still in the hour.
+/// Each run's `flaky` is then set from it. A failed listing is tried again on a later poll.
+pub(crate) async fn read_flaky(
+    client: &reqwest::Client,
+    base: &str,
+    auth: &GithubAuth,
+    cache_for: Duration,
+    ci: &mut WorkspaceCi,
+    listed: &mut BTreeMap<u64, u64>,
+    now_unix_ms: u64,
+) {
+    let since = now_unix_ms.saturating_sub(HOUR_MS);
+    listed.retain(|run_id, _| ci.runs.iter().any(|run| run.run_id == *run_id && run.updated_unix_ms > since));
+    for run_id in flaky_reads(&ci.runs, listed, now_unix_ms) {
+        // At most 100 artifacts: a longer listing fails rather than truncates.
+        let url = format!("{base}/actions/runs/{run_id}/artifacts?per_page=100");
+        match super::github_listing_at_field(client, url.clone(), auth, cache_for, 1, false, Some("artifacts")).await {
+            Ok(artifacts) => {
+                listed.insert(run_id, flaky_tests(&artifacts.values));
+            }
+            Err(error) => {
+                tracing::warn!(run_id, error = %error, "could not list a Workspace CI run's artifacts for st slo");
+                break;
+            }
+        }
+        // Each run is listed once, so its cached answer would never be revalidated.
+        super::github_forget(&url).await;
+    }
+    for run in &mut ci.runs {
+        run.flaky = listed.get(&run.run_id).copied();
+    }
+}
+
+fn flaky_listed() -> &'static Mutex<BTreeMap<u64, u64>> {
+    static LISTED: OnceLock<Mutex<BTreeMap<u64, u64>>> = OnceLock::new();
+    LISTED.get_or_init(Default::default)
 }
 
 fn workspace_ci_store() -> &'static Mutex<Option<WorkspaceCi>> {
@@ -361,7 +470,12 @@ pub async fn observe_workspace_ci(
         return;
     }
     match workspace_ci_runs(client, base, repository, auth, cache_for, now_unix_ms).await {
-        Ok(ci) => *workspace_ci_store().lock().unwrap_or_else(PoisonError::into_inner) = Some(ci),
+        Ok(mut ci) => {
+            let mut listed = flaky_listed().lock().unwrap_or_else(PoisonError::into_inner).clone();
+            read_flaky(client, base, auth, cache_for, &mut ci, &mut listed, now_unix_ms).await;
+            *flaky_listed().lock().unwrap_or_else(PoisonError::into_inner) = listed;
+            *workspace_ci_store().lock().unwrap_or_else(PoisonError::into_inner) = Some(ci);
+        }
         Err(error) => tracing::warn!(repository, error = %error, "could not read Workspace CI runs for st slo"),
     }
 }
@@ -519,7 +633,7 @@ mod tests {
             workspace(6, "merge_group", "failure", "2026-10-21T07:00:00Z", 3),
             workspace(7, "merge_group", "cancelled", "2026-10-21T09:20:00Z", 1),
         ];
-        let ci = WorkspaceCi {
+        let mut ci = WorkspaceCi {
             repository: "acme/garden".to_owned(),
             observed_at_unix_ms: unix_ms("2026-10-21T09:30:00Z"),
             runs: runs.iter().filter_map(|run| WorkspaceRun::from_run("acme/garden", run)).collect(),
@@ -532,13 +646,57 @@ mod tests {
         assert_eq!(ci.durations(FLAKES_SERIES, now - DAY_MS, now), None);
         assert_eq!(ci.durations("ci/other", now - DAY_MS, now), None);
         // In the last hour: run 5 ejected, run 7 cancelled; run 4 finished at 08:07:30, outside.
-        assert_eq!(ci.ejected_groups(FLAKES_SERIES, now - 3_600_000, now), Some((1, 2)));
-        assert_eq!(ci.ejected_groups(FLAKES_SERIES, now - DAY_MS, now), Some((2, 4)));
-        assert_eq!(ci.ejected_groups(MERGE_QUEUE_SERIES, now - 3_600_000, now), None);
+        let hour = |ci: &WorkspaceCi| ci.flakes(FLAKES_SERIES, now - HOUR_MS, now).unwrap();
+        assert_eq!(hour(&ci), Flakes { runs: 2, groups: 2, ejected: 1, listed: 0, flaky_tests: 0 });
+        assert_eq!(hour(&ci).count(), 1);
+        let day = ci.flakes(FLAKES_SERIES, now - DAY_MS, now).unwrap();
+        assert_eq!((day.runs, day.groups, day.ejected), (6, 4, 2));
+        assert_eq!(ci.flakes(MERGE_QUEUE_SERIES, now - HOUR_MS, now), None);
+        // Flaky tests count with the ejected groups, from runs whose artifacts were listed.
+        ci.runs.iter_mut().find(|run| run.run_id == 7).unwrap().flaky = Some(3);
+        ci.runs.iter_mut().find(|run| run.run_id == 5).unwrap().flaky = Some(0);
+        ci.runs.iter_mut().find(|run| run.run_id == 4).unwrap().flaky = Some(9);
+        assert_eq!(hour(&ci), Flakes { runs: 2, groups: 2, ejected: 1, listed: 2, flaky_tests: 3 });
+        assert_eq!(hour(&ci).count(), 4);
         // A window with nothing in it holds no samples.
         let later = now + 2 * DAY_MS;
         assert_eq!(ci.durations(CRITICAL_PATH_SERIES, later - DAY_MS, later), Some(vec![]));
-        assert_eq!(ci.ejected_groups(FLAKES_SERIES, later - 3_600_000, later), Some((0, 0)));
+        assert_eq!(ci.flakes(FLAKES_SERIES, later - HOUR_MS, later), Some(Flakes::default()));
+    }
+
+    #[test]
+    fn flaky_artifacts_name_their_lane_and_count() {
+        assert_eq!(flaky_count("nextest-flaky-linux-tests-1"), Some(1));
+        assert_eq!(flaky_count("nextest-flaky-linux-tests-shard-3-12"), Some(12));
+        assert_eq!(flaky_count("nextest-flaky-lane-0"), Some(0));
+        for other in ["linux-tests-logs", "nextest-flaky-", "nextest-flaky-7", "nextest-flaky--7",
+            "nextest-flaky-linux-tests-", "nextest-flaky-linux-tests-x", "nextest-flaky-linux-tests-+3",
+            "nextest-flaky-linux-tests-99999999999999999999999", "evidence-note-nextest-flaky-a-1"] {
+            assert_eq!(flaky_count(other), None, "{other}");
+        }
+        let artifacts = [json!({"name": "linux-tests-logs"}), json!({"name": "nextest-flaky-linux-tests-2"}),
+            json!({"name": "nextest-flaky-linux-tests-shard-4-1"}), json!({"id": 3}), json!({"name": 7})];
+        assert_eq!(flaky_tests(&artifacts), 3);
+        assert_eq!(flaky_tests(&[]), 0);
+    }
+
+    #[test]
+    fn each_run_in_the_hour_is_listed_once_and_a_poll_lists_at_most_twenty() {
+        let now = unix_ms("2026-10-21T09:30:00Z");
+        // Thirty runs finished in the hour one minute apart, 09:00:30 to 09:29:30, and one before it.
+        let mut runs = (1..=30)
+            .map(|id| WorkspaceRun::from_run("acme/garden", &workspace(id, "merge_group", "success", "2026-10-21T08:00:00Z", id as i64 + 59)).unwrap())
+            .collect::<Vec<_>>();
+        runs.push(WorkspaceRun::from_run("acme/garden", &workspace(31, "pull_request", "success", "2026-10-21T07:00:00Z", 5)).unwrap());
+        let listed_at = |ids: &[u64]| ids.iter().map(|id| (*id, 0)).collect::<BTreeMap<u64, u64>>();
+        let first = flaky_reads(&runs, &BTreeMap::new(), now);
+        assert_eq!(first, (11..=30).rev().collect::<Vec<_>>(), "newest first, at most twenty");
+        let second = flaky_reads(&runs, &listed_at(&first), now);
+        assert_eq!(second, (1..=10).rev().collect::<Vec<_>>(), "the rest on the next poll; never the run before the hour");
+        let all = first.iter().chain(&second).copied().collect::<Vec<_>>();
+        assert!(flaky_reads(&runs, &listed_at(&all), now).is_empty(), "a listed run is never listed again");
+        // An hour later none is in the window.
+        assert!(flaky_reads(&runs, &BTreeMap::new(), now + HOUR_MS).is_empty());
     }
 
     #[test]
