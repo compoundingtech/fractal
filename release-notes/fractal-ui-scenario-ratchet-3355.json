@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare honest scenario exemptions for the 40 stories unblocked by #3355",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "SidebarTree's 17 synthetic geometry stories and RedesignMilestone's 23 fixture-reachable stories are pinned as contract-fixture exemptions. Loading and empty milestone stories switch on state rather than consume slices; they can convert when the composition takes roster and conversation slice data. Decisions shares the fixture-reaching CSF import graph and is not a primitive exemption. The deferred ratchet shrinks from 181 to 141; explicit exemptions rise from 263 to 303. Story identities and deployed behavior are unchanged." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}
