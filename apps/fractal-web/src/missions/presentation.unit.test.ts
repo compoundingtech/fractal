@@ -1,5 +1,5 @@
-import type * as St3 from '@smalltalk/st3-client/schema'
-import type { DecodedAgent } from '@st3/sdk/effect'
+import type * as St3 from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 

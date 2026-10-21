@@ -1,14 +1,14 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
-import { ChromeControl } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { ChromeControl } from '@fractal/ui/assistant-ui/shell'
 
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { AgentControl, AgentControlResult } from '../agents/agent-control-port.ts'
 import { useDataSource } from '../data/react.tsx'
 import type { Agent } from '../data/source.ts'
 
-// An agent's actions, as stui's agent actions menu offers them (crates/stui/src/ui/screens.rs,
+// An agent's actions, as stui's agent actions menu offers them (crates/fractal-tui/src/ui/screens.rs,
 // `agent_actions`): what can be done to it now, in the same order and words. What changes the
 // seat asks to confirm first; starting or resuming does not. Interrupt only stops the current turn,
 // as the composer's Stop and Esc do, so it does not ask either.

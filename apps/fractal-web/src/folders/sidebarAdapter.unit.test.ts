@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest'
-import { ArrangementEditParameters, ArrangementKey } from '@smalltalk/st3-client/schema'
+import { ArrangementEditParameters, ArrangementKey } from '@fractal/client/schema'
 import { Effect, Schema } from 'effect'
 import * as fc from 'fast-check'
 import { generateNKeysBetween } from 'fractional-indexing'

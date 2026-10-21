@@ -27,6 +27,27 @@ mod worker;
 pub use backend::{Backend, Local, redemption_answer};
 pub use worker::*;
 
+/// `ST3_WORKER_INTERVAL_MS`, read once: a cap on every worker timer, and on the store's
+/// catch-up and divergence intervals that follow them, so tests of several nodes on one machine
+/// need not wait out the 30- and 60-second defaults. Unset, nothing is capped.
+pub(crate) fn worker_timer_cap() -> Option<std::time::Duration> {
+    static CAP: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("ST3_WORKER_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+/// `default`, or `cap` when that is shorter.
+pub(crate) fn capped(
+    default: std::time::Duration,
+    cap: Option<std::time::Duration>,
+) -> std::time::Duration {
+    cap.map_or(default, |cap| cap.min(default))
+}
+
 const PROTOCOL: &str = "st3-replication-v1";
 pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 

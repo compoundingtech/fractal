@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import type { Undecodable } from '@st3/sdk/effect'
+import type { Undecodable } from '@fractal/sdk/effect'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { Feed, Fleet, RosterDecode } from '../data/source.ts'
 

@@ -2,7 +2,7 @@ import { Effect, Layer } from 'effect'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
-import type { Replay } from '@smalltalk/st3-scenarios/replay'
+import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
 export const createPageRuntime = (replay?: Replay) => {
