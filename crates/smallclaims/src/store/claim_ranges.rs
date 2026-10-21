@@ -303,6 +303,23 @@ impl Store {
     pub fn claim_ranges_complete(&self) -> Result<bool> {
         complete(&self.readers.get())
     }
+
+    /// What this node tells a peer about the claims it retains: the whole set's count and digest,
+    /// read with the index's completeness in one read transaction, or none while it folds.
+    pub fn claim_range_summary(&self) -> Result<crate::replication::ClaimRangeSummary> {
+        let connection = self.readers.get();
+        let read = connection.unchecked_transaction()?;
+        let retained = if complete(&read)? {
+            let (count, digest) = whole(&read)?;
+            Some(crate::replication::ClaimRangeDigest { count, digest: hex::encode(digest) })
+        } else {
+            None
+        };
+        Ok(crate::replication::ClaimRangeSummary {
+            version: crate::replication::CLAIM_RANGE_VERSION,
+            retained,
+        })
+    }
 }
 
 #[cfg(test)]

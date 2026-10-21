@@ -74,6 +74,31 @@ pub struct ReplicationExchange {
     /// name both builds in the bug it records. Older peers leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// The sender's claim-range summary. Its presence says the sender speaks the claim-range
+    /// protocol; older peers leave it out and are compared by envelopes alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_ranges: Option<ClaimRangeSummary>,
+}
+
+/// The claim-range protocol version this build speaks.
+pub const CLAIM_RANGE_VERSION: u32 = 1;
+
+/// A summary of the claims a member retains, for comparing claim sets rather than envelope
+/// histories or projection outputs. It is a transport summary, not evidence: ordinary admission
+/// authenticates every claim.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeSummary {
+    pub version: u32,
+    /// Every retained claim, or `None` while the sender's range index is still folding claims in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<ClaimRangeDigest>,
+}
+
+/// The population of a claim range and the hex of its 512-bit digest.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeDigest {
+    pub count: u64,
+    pub digest: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -434,6 +459,14 @@ pub struct ReplicationPeerSync {
     /// comparison found them equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_differs_since_unix_ms: Option<u128>,
+    /// When this node last compared the claims it retains with the peer's. Only a peer that sends
+    /// a claim-range summary is compared, and only while both range indexes cover every claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims_compared_at_unix_ms: Option<u128>,
+    /// When the comparisons began finding different claims; `None` while the latest found the
+    /// same ones. Claims in flight differ for a while, so this is reported and gates nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims_differ_since_unix_ms: Option<u128>,
     /// Consecutive comparisons found the same envelopes projecting different graphs. More
     /// exchanges cannot fix that, so this node's views can be wrong until it is repaired.
     #[serde(default)]

@@ -619,6 +619,8 @@ The inventory is compact. It carries one digest per writer range of 256 sequence
 
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
+Each exchange also carries a claim-range summary: claim-range protocol version 1, and the count and digest of every claim its sender retains. Two members can hold different envelopes and still retain the same claims, so a member compares the claims, not envelope histories or projection outputs. The digest comes from the store's range index (`claim_range_digests`), and a summary omits it while the index is still folding claims in. A member compares only a summary of the version it speaks with its own folded index, and records in the peer's sync status when it last compared and since when the claims have differed (`claims_compared_at_unix_ms`, `claims_differ_since_unix_ms`). Claims in flight differ for a while, so the difference is reported and gates nothing: it does not mark the pair diverged, end or hold a first sync, or start a repair. Missing claims still arrive through ordinary envelope transport. An older peer sends no summary and ignores this one, and is compared by envelopes alone.
+
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
