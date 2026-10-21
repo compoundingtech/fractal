@@ -12,7 +12,7 @@ use crate::message_body::BodyAttachment as _;
 
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,
-    VERSION_WITH_BODIES,
+    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -118,7 +118,7 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 fn check_header(header: &Header) -> Result<()> {
     ensure!(
         header.format == FORMAT
-            && (header.version == VERSION || header.version == VERSION_WITH_BODIES),
+            && [VERSION, VERSION_WITH_BODIES, VERSION_WITH_LEDGERS].contains(&header.version),
         "unsupported claim backup format/version"
     );
     ensure!(
@@ -167,6 +167,10 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                 );
                 body_bytes(&body)?;
             }
+            Record::Ledger(_) => ensure!(
+                header.version >= VERSION_WITH_LEDGERS,
+                "a ledger page in an archive that does not declare them"
+            ),
             Record::End {
                 envelopes: expected,
                 sha256,
@@ -256,6 +260,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-hcae396e7e94c owner=st3_store
             Record::Signatures(signatures) => {
                 store.receive_backup_signatures(&header, &signatures)?
             }
+            Record::Ledger(page) => store.receive_backup_ledger(&page)?,
             Record::Checkpoint(page) => {
                 ensure!(!checkpoint_finished, "duplicate checkpoint manifest");
                 let manifest = checkpoint.get_or_insert_with(|| CheckpointManifest {
