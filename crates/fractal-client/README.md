@@ -43,7 +43,16 @@ the subscription and immutable `Arc` rows; dropping the last receiver unsubscrib
 The stream coalesces intermediate states for slow readers, retaining one state rather
 than an event queue. A window contains the server's ordered rows, snapshot and
 `has_more`; it is not complete history. Limits are 16 subscriptions per connection,
-1–200 rows per window and 16 pending watch requests.
+1–200 rows per window, 16 pending watch requests, and 32 queued socket writes plus one
+in-flight command. Selectors must fit within the 16 KiB command budget including its
+reserved envelope. `AttentionDescriptor.person` selects the authorized person.
+
+Writes are polled alongside admission and lifecycle signals, never awaited by a
+blocking worker branch. Dropping a watcher during a blocked send cancels the socket
+instead of stranding cleanup; remaining watches rejoin on one fresh connection.
+Queue overflow likewise reconnects rather than retaining more commands. Dropping
+the last `FollowClient` handle shuts down immediately, without waiting for the peer
+to read or acknowledge a close handshake; retained receiver streams then end.
 
 Reconnect and resync retain the last window as stale until a new snapshot arrives.
 Each resubscribe uses a new wire ID so queued frames from older generations cannot

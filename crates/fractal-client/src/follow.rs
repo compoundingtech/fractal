@@ -1,6 +1,6 @@
 //! Retained, typed collection windows multiplexed over one reconnecting socket.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -17,6 +17,8 @@ use crate::{Attention, Client, ClientError, CollectionStream, ErrorCode, Snapsho
 
 const MAX_WATCHES: usize = 16;
 const MAX_ROWS: usize = 200;
+const MAX_PENDING_WRITES: usize = MAX_WATCHES * 2;
+const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 /// Maps a collection selector to its decoded row. Implementations decode raw rows once,
@@ -30,14 +32,13 @@ pub trait Descriptor: Send + Sync + 'static {
 /// Existing attention collection; notice descriptors belong to their own wire contract.
 #[derive(Clone, Debug, Default)]
 pub struct AttentionDescriptor {
-    pub actor: Option<String>,
-    pub status: Option<String>,
+    pub person: Option<String>,
 }
 
 impl Descriptor for AttentionDescriptor {
     type Row = Attention;
     fn selector(&self) -> Value {
-        serde_json::json!({"collection":"attention", "actor":self.actor, "status":self.status})
+        serde_json::json!({"collection":"attention", "person":self.person})
     }
     fn decode(&self, row: Value) -> Result<Attention, ClientError> {
         decode_row(row)
@@ -129,7 +130,12 @@ impl FollowClient {
         let socket = client.collection_stream().await?;
         let (commands, receiver) = mpsc::channel(MAX_WATCHES);
         let dropped = Arc::new(Notify::new());
-        tokio::spawn(run(client, socket, receiver, dropped.clone()));
+        tokio::spawn(run(
+            client,
+            Connection::new(socket),
+            receiver,
+            dropped.clone(),
+        ));
         Ok(Self { commands, dropped })
     }
 
@@ -151,6 +157,10 @@ impl FollowClient {
                 "follow descriptor must select a collection".into(),
             ));
         }
+        // Count serialized bytes without allocating a second command buffer.
+        serde_json::to_writer(&mut CommandSize(0), &selector).map_err(|_| {
+            ClientError::Protocol("follow selector exceeds its command byte bound".into())
+        })?;
         let (sender, retained) = watch::channel(Arc::new(FollowState {
             value: None,
             freshness: Freshness::Pending,
@@ -325,54 +335,133 @@ impl<D: Descriptor> Slot for TypedSlot<D> {
     }
 }
 
-async fn subscribe(socket: &mut CollectionStream, entry: &Entry) -> Result<(), ClientError> {
+// Reserve envelope space for generated subscription IDs, kind and limit.
+struct CommandSize(usize);
+impl std::io::Write for CommandSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        if self.0 > MAX_COMMAND_BYTES - 256 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "command too large",
+            ));
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn subscribe(entry: &Entry) -> Value {
     let mut command = entry.selector.clone();
     command["kind"] = "subscribe".into();
     command["id"] = entry.wire_id.clone().into();
     command["limit"] = entry.slot.limit().into();
-    socket.send(&command).await
+    command
+}
+
+type Write = futures_util::future::BoxFuture<'static, (CollectionStream, Result<(), ClientError>)>;
+
+/// Own the socket across a send without awaiting it outside the lifecycle select.
+/// Cancelling this future drops the socket, including its buffered write.
+struct Connection {
+    socket: Option<CollectionStream>,
+    writing: Option<Write>,
+    outgoing: VecDeque<Value>,
+}
+
+impl Connection {
+    fn new(socket: CollectionStream) -> Self {
+        Self {
+            socket: Some(socket),
+            writing: None,
+            outgoing: VecDeque::new(),
+        }
+    }
+    fn connected(&self) -> bool {
+        self.socket.is_some() || self.writing.is_some()
+    }
+    fn reset(&mut self) {
+        self.writing = None;
+        self.socket = None;
+        self.outgoing.clear();
+    }
+    fn enqueue(&mut self, command: Value) {
+        if !self.connected() {
+            return;
+        }
+        if self.outgoing.len() == MAX_PENDING_WRITES {
+            // A slow peer cannot grow pending writes or obstruct local lifecycle.
+            // Reconnect reconciles the retained subscriptions instead of replaying
+            // an arbitrarily long command queue.
+            self.reset();
+        } else {
+            self.outgoing.push_back(command);
+        }
+    }
+    fn start_write(&mut self) {
+        if self.socket.is_some() && !self.outgoing.is_empty() {
+            let mut socket = self.socket.take().unwrap();
+            let command = self.outgoing.pop_front().unwrap();
+            self.writing = Some(Box::pin(async move {
+                let sent = socket.send(&command).await;
+                (socket, sent)
+            }));
+        }
+    }
 }
 
 async fn run(
     client: Client,
-    socket: CollectionStream,
+    mut connection: Connection,
     mut commands: mpsc::Receiver<Add>,
     dropped: Arc<Notify>,
 ) {
-    let mut socket = Some(socket);
     let mut entries: HashMap<u64, Entry> = HashMap::new();
     let mut routes = HashMap::new();
     let mut next_id = 0_u64;
-    // A new wire ID on every resubscribe fences queued frames from older generations,
-    // including servers whose protocol has no explicit generation field.
+    // Every resubscribe fences publications from older generations.
     let mut generation = 0_u64;
-    let mut handles_closed = false;
     loop {
+        // Preserve a completed send before deciding whether lifecycle cleanup must
+        // cancel one that is genuinely backpressured.
+        if let Some(write) = &mut connection.writing
+            && let Poll::Ready((socket, sent)) = futures_util::poll!(write.as_mut())
+        {
+            connection.writing = None;
+            if sent.is_ok() {
+                connection.socket = Some(socket);
+            } else {
+                connection.reset();
+            }
+        }
         let closed: Vec<_> = entries
             .iter()
             .filter_map(|(id, entry)| entry.slot.closed().then_some(*id))
             .collect();
+        if !closed.is_empty() && connection.writing.is_some() {
+            // A dropped watcher must not wait behind a backpressured send.
+            // Closing the socket releases every old subscription at the peer.
+            connection.reset();
+        }
         for id in closed {
             let entry = entries.remove(&id).unwrap();
             routes.remove(&entry.wire_id);
-            if let Some(active) = &mut socket
-                && active.unsubscribe(&entry.wire_id).await.is_err()
-            {
-                socket = None;
-            }
+            connection.enqueue(serde_json::json!({"kind":"unsubscribe", "id":entry.wire_id}));
         }
-        if handles_closed && entries.is_empty() {
-            break;
-        }
-        if socket.is_none() {
+        if !connection.connected() {
             for entry in entries.values_mut() {
                 entry.slot.stale();
             }
         }
+        connection.start_write();
         tokio::select! {
             _ = dropped.notified() => {},
-            add = commands.recv(), if !handles_closed => {
-                let Some(add) = add else { handles_closed = true; continue; };
+            add = commands.recv() => {
+                // The last client handle is the connection's shutdown authority.
+                // Drop, rather than flush/close-await, a potentially blocked socket.
+                let Some(add) = add else { break; };
                 if entries.len() == MAX_WATCHES {
                     let _ = add.accepted.send(Err(ClientError::Protocol("follow connection has 16 subscriptions".into())));
                     continue;
@@ -380,13 +469,17 @@ async fn run(
                 next_id += 1;
                 generation += 1;
                 let entry = Entry { slot: add.slot, selector: add.selector, wire_id: format!("follow-{next_id}-{generation}") };
-                if let Some(active) = &mut socket
-                    && subscribe(active, &entry).await.is_err() { socket = None; }
+                connection.enqueue(subscribe(&entry));
                 routes.insert(entry.wire_id.clone(), next_id);
                 entries.insert(next_id, entry);
                 let _ = add.accepted.send(Ok(()));
             },
-            frame = async { socket.as_mut().unwrap().next().await }, if socket.is_some() => {
+            (socket, sent) = async { connection.writing.as_mut().unwrap().await }, if connection.writing.is_some() => {
+                connection.writing = None;
+                if sent.is_ok() { connection.socket = Some(socket); }
+                else { connection.reset(); }
+            },
+            frame = async { connection.socket.as_mut().unwrap().next().await }, if connection.socket.is_some() => {
                 match frame {
                     Ok(Some(frame)) => {
                         let Some(id) = frame["id"].as_str().and_then(|id| routes.get(id)).copied() else { continue; };
@@ -394,43 +487,37 @@ async fn run(
                         match entry.slot.frame(frame) {
                             Ok(true) => {
                                 routes.remove(&entry.wire_id);
-                                if socket.as_mut().unwrap().unsubscribe(&entry.wire_id).await.is_err() {
-                                    socket = None;
-                                    continue;
-                                }
+                                connection.enqueue(serde_json::json!({"kind":"unsubscribe", "id":entry.wire_id}));
                                 generation += 1;
                                 entry.wire_id = format!("follow-{id}-{generation}");
                                 routes.insert(entry.wire_id.clone(), id);
-                                if subscribe(socket.as_mut().unwrap(), entry).await.is_err() { socket = None; }
+                                connection.enqueue(subscribe(entry));
                             }
                             Ok(false) => {},
                             Err(error) => entry.slot.protocol_error(error.to_string()),
                         }
                     }
-                    Ok(None) | Err(_) => socket = None,
+                    Ok(None) | Err(_) => connection.reset(),
                 }
             },
             connected = async {
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 client.collection_stream().await
-            }, if socket.is_none() => {
-                if let Ok(mut active) = connected {
+            }, if !connection.connected() => {
+                if let Ok(active) = connected {
+                    connection = Connection::new(active);
                     routes.clear();
-                    let mut failed = false;
                     for (id, entry) in &mut entries {
                         generation += 1;
                         entry.wire_id = format!("follow-{id}-{generation}");
                         routes.insert(entry.wire_id.clone(), *id);
-                        if subscribe(&mut active, entry).await.is_err() { failed = true; break; }
+                        connection.enqueue(subscribe(entry));
                     }
-                    if !failed { socket = Some(active); }
                 }
             },
         }
     }
-    if let Some(active) = socket {
-        active.close().await;
-    }
+    // No async close handshake: shutdown cannot depend on peer read progress.
 }
 
 #[cfg(test)]
@@ -446,6 +533,18 @@ mod tests {
             commands,
             dropped: Arc::new(Notify::new()),
         };
+        assert!(
+            client
+                .watch(
+                    AttentionDescriptor {
+                        person: Some("x".repeat(MAX_COMMAND_BYTES))
+                    },
+                    1
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(pending_commands.len(), 0);
         let mut pending = Vec::new();
         for _ in 0..=MAX_WATCHES {
             let mut request = Box::pin(client.watch(AttentionDescriptor::default(), 1));
@@ -462,5 +561,104 @@ mod tests {
         assert_eq!(client.commands.capacity(), 0);
         assert!(admitted.accepted.send(Ok(())).is_ok());
         assert!(futures_util::poll!(pending[0].as_mut()).is_ready());
+    }
+
+    async fn backpressured_connection() -> (Connection, tokio::net::UnixStream) {
+        use std::os::fd::AsRawFd;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (sender, peer) = tokio::net::UnixStream::pair().unwrap();
+        let send_bytes: libc::c_int = 1024;
+        // SAFETY: sender owns a live socket fd; the option points to a correctly
+        // sized initialized c_int for the duration of this synchronous syscall.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    sender.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&send_bytes).cast(),
+                    std::mem::size_of_val(&send_bytes) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let socket = CollectionStream {
+            socket: crate::TerminalSocket::Unix(
+                tokio_tungstenite::WebSocketStream::from_raw_socket(sender, Role::Client, None)
+                    .await,
+            ),
+            limit: MAX_COMMAND_BYTES,
+            heard: crate::Heard::new(),
+            subscribed: HashMap::new(),
+        };
+        let mut connection = Connection::new(socket);
+        connection.enqueue(serde_json::json!({"kind":"subscribe", "id":"blocked", "collection":"attention", "person":"x".repeat(MAX_COMMAND_BYTES - 512)}));
+        connection.start_write();
+        // The peer deliberately never reads. Prove an actual pending socket
+        // send, rather than relying on a sleep or guessing its buffer capacity.
+        assert!(futures_util::poll!(connection.writing.as_mut().unwrap().as_mut()).is_pending());
+        (connection, peer)
+    }
+
+    #[tokio::test]
+    async fn unread_peer_cannot_strand_admission_drop_or_shutdown() {
+        use futures_util::StreamExt;
+        let (connection, peer) = backpressured_connection().await;
+        let (commands, receiver) = mpsc::channel(MAX_WATCHES);
+        let dropped = Arc::new(Notify::new());
+        let client = FollowClient {
+            commands,
+            dropped: dropped.clone(),
+        };
+        let worker = tokio::spawn(run(
+            Client::unix("unused-follow-test.sock"),
+            connection,
+            receiver,
+            dropped,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut watches = Vec::new();
+            for _ in 0..MAX_WATCHES {
+                watches.push(
+                    client
+                        .watch(AttentionDescriptor::default(), 1)
+                        .await
+                        .unwrap(),
+                );
+            }
+            // Capacity errors do not wait behind the blocked send either.
+            assert!(
+                client
+                    .watch(AttentionDescriptor::default(), 1)
+                    .await
+                    .is_err()
+            );
+            drop(watches.pop());
+            // A drop cancels the blocked socket and marks remaining windows stale.
+            loop {
+                if watches[0].next().await.unwrap().freshness == Freshness::Stale {
+                    break;
+                }
+            }
+            drop(client);
+            worker.await.unwrap();
+            assert!(watches[0].next().await.is_none());
+        })
+        .await
+        .unwrap();
+        // Keep the peer alive and unread until every lifecycle assertion finishes.
+        drop(peer);
+    }
+
+    #[tokio::test]
+    async fn outgoing_write_queue_resets_at_its_bound() {
+        let (mut connection, _peer) = backpressured_connection().await;
+        for _ in 0..MAX_PENDING_WRITES {
+            connection.enqueue(serde_json::json!({"kind":"unsubscribe", "id":"queued"}));
+        }
+        assert_eq!(connection.outgoing.len(), MAX_PENDING_WRITES);
+        connection.enqueue(serde_json::json!({"kind":"unsubscribe", "id":"overflow"}));
+        assert!(!connection.connected());
+        assert!(connection.outgoing.is_empty());
     }
 }
