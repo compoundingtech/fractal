@@ -2,7 +2,7 @@
 # Source: BUCK.genie.ts
 
 # Projected from pnpm-lock.yaml for the Buck importers in lock.ts.
-# Store fingerprint: sha256:1cafc25bab89b8b1b1b22aa3f9ffbcc18784ad3355ed0c30efe9a542f2d15b03
+# Store fingerprint: sha256:06db3a24c893b2ca762fd509a72f4b217c3f5d2756c0721520ef6de535589fd8
 
 load("@rules//buck2/dependencies:defs.bzl", "pnpm_package", "pnpm_platform_gated_packages")
 
@@ -68,7 +68,7 @@ pnpm_store_entry(
 )
 
 pnpm_store_view(
-    name = "view_clients_typescript_st3_client_418fd70e574e",
+    name = "view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
         "effect": "effect@4.0.0",
@@ -90,7 +90,7 @@ pnpm_store_view(
 )
 
 pnpm_store_view(
-    name = "product_view_clients_typescript_st3_client_418fd70e574e",
+    name = "product_view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
         "effect": "effect@4.0.0",
@@ -112,7 +112,7 @@ pnpm_store_view(
 )
 
 pnpm_store_view(
-    name = "external_view_clients_typescript_st3_client_418fd70e574e",
+    name = "external_view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
         "effect": "effect@4.0.0",
@@ -134,7 +134,7 @@ pnpm_store_view(
 )
 
 pnpm_store_view(
-    name = "view_clients_typescript_st3_views_4839e64c8727",
+    name = "view_clients_typescript_fractal_views_beb5b8218462",
     runtime = ":assemble-store.ts",
     direct = {
         "typescript": "typescript@6.0.3",
@@ -147,16 +147,16 @@ pnpm_store_view(
         "tsserver": "typescript@6.0.3\tbin/tsserver",
     },
     workspace_trees = {
-        "workspace_clients_typescript_st3_client_2de42fb899eb": "//clients/typescript/st3-client:package_tree",
+        "workspace_clients_typescript_fractal_client_a9aaa0b98a67": "//clients/typescript/fractal-client:package_tree",
     },
     workspace_dependencies = {
-        "@smalltalk/st3-client": "workspace_clients_typescript_st3_client_2de42fb899eb",
+        "@fractal/client": "workspace_clients_typescript_fractal_client_a9aaa0b98a67",
     },
     visibility = ["PUBLIC"],
 )
 
 pnpm_store_view(
-    name = "product_view_clients_typescript_st3_views_4839e64c8727",
+    name = "product_view_clients_typescript_fractal_views_beb5b8218462",
     runtime = ":assemble-store.ts",
     direct = {
         "typescript": "typescript@6.0.3",
@@ -169,16 +169,16 @@ pnpm_store_view(
         "tsserver": "typescript@6.0.3\tbin/tsserver",
     },
     workspace_trees = {
-        "workspace_clients_typescript_st3_client_2de42fb899eb": "//clients/typescript/st3-client:product_package_tree",
+        "workspace_clients_typescript_fractal_client_a9aaa0b98a67": "//clients/typescript/fractal-client:product_package_tree",
     },
     workspace_dependencies = {
-        "@smalltalk/st3-client": "workspace_clients_typescript_st3_client_2de42fb899eb",
+        "@fractal/client": "workspace_clients_typescript_fractal_client_a9aaa0b98a67",
     },
     visibility = ["PUBLIC"],
 )
 
 pnpm_store_view(
-    name = "external_view_clients_typescript_st3_views_4839e64c8727",
+    name = "external_view_clients_typescript_fractal_views_beb5b8218462",
     runtime = ":assemble-store.ts",
     direct = {
         "typescript": "typescript@6.0.3",

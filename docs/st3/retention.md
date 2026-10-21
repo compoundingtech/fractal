@@ -1,11 +1,11 @@
 # Retention
 
 How long st keeps each claim kind is one policy file:
-[`crates/st3-schema/retention.toml`](../../crates/st3-schema/retention.toml). It names every
+[`crates/fractal-schema/retention.toml`](../../crates/fractal-schema/retention.toml). It names every
 registered claim kind once, with its class, where its writes go and, for a transition, its window.
 It also holds the checkpoint rules, in order: which claims of a kind a checkpoint may drop.
 
-The daemon reads the policy when it builds the schema registry (`st3_schema::retention`). It is
+The daemon reads the policy when it builds the schema registry (`fractal_schema::retention`). It is
 compiled into the build rather than read from a node's configuration, because every member of a
 fleet must apply the same rules: the rules render the rules description, whose hash is the
 `rules_digest` in every checkpoint seal. A member that runs different rules seals different terms
@@ -62,7 +62,7 @@ Each rule has:
 - `slot`: the fields besides subject and kind that make up a slot. `claim.origin` is the writer.
   A rule without a slot keeps every claim. `require_slot` leaves out a claim missing a slot field;
 - `keep`: what the rule keeps. It names the planner function in
-  `crates/st3-store/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
+  `crates/fractal-store/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
   it does not know;
 - `after_slot`: extra terms rendered after the slot in the rules description, for a rule whose planner needs them;
 - `min_age`: only claims accepted at least this long before the cut go.
@@ -78,7 +78,7 @@ rule does, and changes the rules digest:
    If the checkpoint proof's reader answers (`subject_answers` in `checkpoint_rules.rs`) do not
    cover the new reader, add it, so a rule that changes an answer fails the proof.
 2. Bump `RULES_VERSION` and say why in its comment.
-3. Add a test in `crates/st3-store/src/store/checkpoint_tests.rs` that names the dropped and the kept
+3. Add a test in `crates/fractal-store/src/store/checkpoint_tests.rs` that names the dropped and the kept
    claims.
 4. Measure it on a copy of a real store (below), never on a live one.
 5. Deploy it to every member. Until every participant runs the same rules, checkpoints wait at
@@ -86,13 +86,13 @@ rule does, and changes the rules digest:
 
 ## Measuring a change
 
-`crates/st3/examples/retention_plan.rs` plans a checkpoint on a private copy of a store and prints
+`crates/fractal/examples/retention_plan.rs` plans a checkpoint on a private copy of a store and prints
 what it would drop by kind, with the drop and retained digests. With a scratch directory it also
 proves the plan, as a real checkpoint does.
 
 ```sh
 cp /path/to/safety-copy.sqlite3 /private/dir/clone.sqlite3 && chmod 600 /private/dir/clone.sqlite3
-cargo run --release -p st3 --example retention_plan -- /private/dir/clone.sqlite3 2026-10-10
+cargo run --release -p fractal --example retention_plan -- /private/dir/clone.sqlite3 2026-10-10
 ```
 
 It opens and migrates the clone, so never point it at a live store or at the copy you keep. Two
