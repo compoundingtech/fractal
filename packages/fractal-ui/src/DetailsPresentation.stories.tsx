@@ -828,7 +828,7 @@ function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:bool
   if(narrow)return <DataSourceProvider source={source} registry={registry}>
     <ProductionPhoneSheet scheme={scheme}>{close=><AgentDetailsPanel agentRef={ompAgentRef} width="fill" scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>}</ProductionPhoneSheet>
   </DataSourceProvider>
-  return <div role="main" aria-label="Production desktop inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:440,maxWidth:'100%',height:900,display:'flex',flexDirection:'column'}}>
+  return <div role="main" aria-label="Production desktop inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:440,maxWidth:'100%',height:900,display:'flex'}}>
     <ThemePortal><NarrowLayoutContext.Provider value={false}><DataSourceProvider source={source} registry={registry}>
       <AgentDetailsPanel agentRef={ompAgentRef} width={440} scheme={scheme} onClose={()=>undefined} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
     </DataSourceProvider></NarrowLayoutContext.Provider></ThemePortal>
@@ -920,6 +920,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     else{
       panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'})
       await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+      requireContract(panel.getBoundingClientRect().height>=899,'Production desktop inspector lost its dock-height layout')
       assertDesktopClose(panel)
     }
     await waitFor(()=>{assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state)})
