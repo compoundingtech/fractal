@@ -55,6 +55,7 @@ EXPECTED_PROTECTED = (
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
     'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json',
+    '.st/evidence-log-key',
 )
 
 
@@ -1173,7 +1174,8 @@ class EndToEnd(unittest.TestCase):
                 (self.f.repo / '.github/workflows/fleet.yml').write_text('name: x\n')
                 (self.f.repo / '.github/workflows/fleet.yml.genie.ts').write_text('export default 1\n')
                 for name in ('.github/workflows/workspace-ci.ts', 'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
-                             '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json'):
+                             '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json',
+                             '.st/evidence-log-key'):
                     (self.f.repo / name).parent.mkdir(parents=True, exist_ok=True)
                     (self.f.repo / name).write_text('placeholder\n')
                 base = self.commit_base()
