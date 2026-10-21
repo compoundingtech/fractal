@@ -33,6 +33,20 @@ def run(*command, cwd=None, stdin=None):
     return done.stdout.decode().strip()
 
 
+def init_repo(path, *options):
+    """A throwaway repository that git never maintains in the background.
+
+    After a commit or a fetch git starts `git maintenance run --auto --detach`, which outlives the command: it takes
+    objects/maintenance.lock and, past a few hundred loose objects, repacks (git 2.54 does so even with gc.auto=0;
+    only maintenance.auto=false stops it). Running on, it writes into objects/ and objects/pack while the temporary
+    directory is removed ("Directory not empty: '.../.git/objects'" at cleanup), and it can repack the objects the
+    next command is reading (the likely source of a `git commit` failing with "fatal: could not parse HEAD").
+    """
+    run('git', 'init', '-q', *options, str(path))
+    run('git', '-C', str(path), 'config', 'gc.auto', '0')
+    run('git', '-C', str(path), 'config', 'maintenance.auto', 'false')
+
+
 class Fixture:
     def __init__(self, object_format='sha1', layout='tree'):
         # 'tree': refs/notes/evidence/<tree>/<record> (what publishers write); 'tag': refs/tags/evidence/<tree>/<record> (protected, next);
@@ -42,11 +56,7 @@ class Fixture:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.repo = self.root / 'repo'
-        run('git', 'init', '-q', f'--object-format={object_format}', str(self.repo))
-        # No automatic gc or maintenance: git starts it detached after a commit once loose objects pile up, and it then writes into
-        # objects/pack while the temporary directory is being removed (seen in CI as "Directory not empty: 'pack'" at cleanup).
-        run('git', '-C', str(self.repo), 'config', 'gc.auto', '0')
-        run('git', '-C', str(self.repo), 'config', 'maintenance.auto', 'false')
+        init_repo(self.repo, f'--object-format={object_format}')
         self.allowed = []
         self.keys = self.root / 'allowed-signers'
         self.counter = 0
@@ -427,7 +437,7 @@ class Verifier(unittest.TestCase):
         record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
         other = tempfile.TemporaryDirectory()
         self.addCleanup(other.cleanup)
-        run('git', 'init', '-q', other.name)
+        init_repo(other.name)  # its fetch would otherwise start a detached maintenance in it
         run('git', '-C', other.name, 'fetch', '-q', '--depth=1', '--no-tags', 'file://' + str(self.f.repo),
             'refs/notes/evidence/*:refs/notes/evidence/*')
         missing = subprocess.run(['git', '-C', other.name, 'cat-file', '-e', self.commit], capture_output=True)
