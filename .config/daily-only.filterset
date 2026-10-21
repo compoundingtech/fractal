@@ -8,3 +8,11 @@
 # per run. Per-PR contracts: smallclaims worker_tests (link outage) and fractal-api-core tests
 # (refused handoff), #3456; mailbox restart recovery and delivery_presence, already per PR.
 package(=fractal) and binary(=integration) and test(/^messaging_faults::/)
+
+# Each boot canary starts a real daemon, PTY seats and stub providers and polls them against a
+# 180 s bound: about 950 s per run for these 35. Per-PR contracts: #3464 (restart, daemon-restart,
+# concurrent), #3466 (idle-hold, access modes, codex import), and the existing reexec, utf8,
+# claim-socket and when-idle tests (doc fleet/factory/test-speed/core-vs-daily §4.1). Kept per PR:
+# the REQUIRED mail canaries (scripts/ci-mail-redelivery-canaries: every a_suspended_seat_resumes
+# canary and the three claude channel canaries) and the canary harness's own fast self-tests.
+package(=fractal) and binary(=integration) and test(/^boot_canaries::/) and not test(/a_suspended_seat_resumes_its_own_native_session$|^boot_canaries::claude_(missing|uninitialized|permanent)_channel_|^boot_canaries::(event_waits_|every_exit_reaps_|interrupted_tests_keep_|the_canary_never_names_)/)
