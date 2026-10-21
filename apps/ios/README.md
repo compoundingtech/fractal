@@ -40,6 +40,38 @@ New agent offers a repository from the selected machine’s agents, or an absolu
 
 Conversation and session views, Home rows, requests and answers, device-signing data and client naming live in the shared [`@smalltalk/st3-views`](../../clients/typescript/st3-views/README.md) package. The phone imports it through a `workspace:*` dependency; its tests check the same transcript and signing fixtures as Rust. Other pure phone logic lives in tested modules (`agentsView.ts`, `missionsView.ts`, `markdown.ts`, `tabs.ts`). A transcript entry the app does not understand is shown as a dim event line, never dropped silently, and never breaks the rest of the conversation. Launches retain their explicit reads. When the member grants `inventory-collections` version 1, clients, usage, machines, devices, native sessions and terminal lists follow screen-scoped windows on the same socket, up to 200 rows each. Shared screens share a slot, including each of the three selected usage periods; a window leaves thirty seconds after its last focused screen leaves. At most fifteen total subscriptions fit the sixteen-slot bound. Pull to refresh resubscribes for authoritative snapshots. An older member retains reads on focus and explicit pull, with a Fleet note that inventories are read, not followed; no automatic inventory timer remains. A collection that fails is named instead of appearing empty.
 
+## Private client diagnostics
+
+The iOS entry point installs diagnostics before importing the React app. A native Expo app-delegate subscriber starts earlier, establishes the process launch UUID, and durably records native launch markers. JS uses that same launch UUID with sequences in the upper half of `u32`; native sequences use the lower half. JS records `js-start`, `root-mounted`, foreground/background transitions, a 16-entry in-memory launch breadcrumb ring, global errors, unhandled promise rejections, and root React render failures. It preserves React Native's original global handler and Debug rejection reporting. RN 0.86's Hermes promise rejection tracker and C++ exception listener are used directly; a browser `unhandledrejection` listener would not capture these paths.
+Historical MetricKit retrieval, sanitization, hashing and persistence run asynchronously
+on a serial utility queue, with a runtime assertion forbidding main-thread processing.
+Once the synchronous process marker is durable, later pre-JS callbacks and
+`launchContext()` do not wait for that report queue.
+
+Reports contain only the generated `ClientDiagnosticEvent` contract: bounded build/runtime/update/OS tokens, UUIDs, times/sequences, severity/source, fixed breadcrumb/error names, and up to 32 numeric JS frame locations or native binary-category/hex-offset frames. Raw error messages, stacks, function names, URLs, headers, credentials, filesystem paths, arbitrary keys, and user content never enter the persisted/uploaded report. Invalid metadata is replaced with `unknown`; update identity is a UUID or `embedded`. Running JS reports use the optional native Expo Updates module's current runtime/update identity when installed. Native-only reports use app/build runtime metadata and `embedded`, because MetricKit cannot recover the original OTA bundle identity.
+Runtime metadata preserves Expo's `nativeVersion` representation (`app_version(native_build)`, for example `0.1.0(1)`) in JS and native reports. The runtime allowlist permits only bounded ASCII tokens with an optional parenthesized build suffix; unsafe or oversized values become `unknown`, never truncated runtime identities.
+The gateway independently applies the same runtime grammar and 128-character limit before recording observations: unsafe runtime strings are replaced with `unknown`, and oversized submissions are rejected.
+
+The AsyncStorage journal (`st3.client-diagnostics.v1`) holds at most **128 reports / 512 KiB / seven days**, expiring by capture time and evicting oldest reports first. Its storage writes and acknowledgements are serialized; network I/O does not block capture. A successful native drain transfers ownership only after sanitized reports are durably written to the JS journal. Native IDs are acknowledged only when present in that durable queue; failed writes leave native reports retained. The native journal has the same independent bounds. A failed JS write retains at most 128 sanitized pending reports in memory for the next capture/lifecycle retry; abrupt process termination can still lose reports whose storage write had not completed.
+
+Uploads use the existing authenticated `St3Client.diagnosticsSubmit` and only begin in the foreground once a paired URL and Keychain-hydrated credential are available and that exact client's capabilities grant `write.client-diagnostics`. A native `launchContext` storage failure falls back to a JS launch UUID rather than aborting startup. Fabric proof sessions do not upload diagnostics. Nothing sends anonymously, and neither the URL nor the credential is written into the diagnostic journal. Batches contain at most **32 reports / 128 KiB**, including their JSON envelope. Only server-acknowledged IDs from the actual submitted batch are durably removed. Duplicates are safe after a lost response or failed local acknowledgement write. Failures/no-progress responses retry with persisted exponential backoff (one second up to five minutes, with bounded jitter); foregrounding resumes the journal without bypassing that backoff. Diagnostic storage/transport failures are not logged back into capture.
+An authentication refusal (401/403) from capability discovery or submission pauses that exact client across foreground, reconnect and capture; re-pairing supplies a replacement client and resumes discovery without discarding retained reports.
+
+Native previous-launch markers yield only the **inferred** `previous-launch-unclean` warning: suspension, force quit, and OS termination are not proof of a crash, and backgrounding is not a clean shutdown. MetricKit crash/hang delivery is delayed and OS-controlled, not immediate watchdog capture. It supplies a reporting interval rather than an exact original launch/time; those events explicitly use `occurrence_time_basis: metric-interval-end` and `launch_id_basis: metric-interval`, with an interval-derived UUID. JS and native launch markers use `exact` / `process`. A JS boundary cannot observe pre-JS failures, watchdog kills, or native faults; native markers and later MetricKit delivery cover only what iOS actually exposes.
+
+### Manual diagnostic checks
+
+Use a **Debug** build paired to a real gateway granting `write.client-diagnostics`. Open these links while the app is running (a cold-start link also works after the root boundary mounts):
+
+- `com.compoundingtech.smalltalk.starter://diagnostics?mode=global` throws a real timer `TypeError`, preserving the normal RN error UI/handling.
+- `com.compoundingtech.smalltalk.starter://diagnostics?mode=rejection` creates a real unhandled rejected promise.
+- `com.compoundingtech.smalltalk.starter://diagnostics?mode=boundary` throws from a child render, showing the root's non-sensitive recovery notice. Close/reopen afterward to drain the retained report.
+
+The injection listeners/components are gated by `__DEV__`; Release does not execute them. Check node-local `client.launch` / `client.js-error` observations for bounded frames and correct severity/build metadata, and confirm the injection's deliberately private messages/URL never appear there. Repeat offline, relaunch offline, then reconnect/foreground: retained reports should drain once, with server duplicates acknowledged and queue IDs removed only after acknowledgement. With an unpaired device, locked/unavailable Keychain, or absent/ungranted diagnostic capability, verify no diagnostic POST is sent. Exercise foreground/background transitions and force quit/relaunch: an unclean marker must remain an inferred warning, never a claimed crash. MetricKit crash/hang checks require a real device and eventual OS delivery; a synthetic JS injection is not evidence of native capture.
+
+Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRedaction.test.mjs`, covering redaction, both RN error pipelines, forwarding, queue retention/byte/count bounds, serialized captures during upload, native transfer durability, acknowledged-ID filtering, failed removal/relaunch, and persisted backoff.
+`diagnosticsLifecycle.test.mjs` exercises the real scheduler and queue with native platform adapters and a controlled clock: discovery 401/403 stays paused across time and lifecycle triggers, then a replacement pairing resumes and acknowledges retained reports.
+
 ## Build locally
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/ios-app.md), including prerequisites, simulator and device builds, and pairing.
@@ -288,6 +320,54 @@ For screenshots without a real st, `node demoGateway.mjs 8791` serves invented d
 It completes the phone's real device-key verification read-only: the unauthenticated capabilities preflight is the raw advertisement, and pairing answers with an invented host-signed person-root proof and no signing grant, so the phone still runs its own checks.
 
 Generated `ios/`, build output, signing material, local configuration, and proof screenshots are ignored by Git. Do not commit Apple team/device IDs, credentials, machine paths, or private network addresses. Expo SDK 57 needs the `expo-build-properties` scene-lifecycle opt-in for Xcode 27/iOS 27.
+
+## Push registration, opt-in
+
+This slice registers a phone with its paired member; it does **not** send alerts, configure an
+Apple sender key, or handle notification taps. Under Fleet › this connection, **Notifications**
+is a native switch, off by default and saved only on this phone. Enabling requires a live paired
+session, the member's granted `push-registration` version 1 capability, and a push-enabled physical
+iPhone build. Only an intentional switch-on requests iOS notification permission. Launch and
+foreground refreshes read existing permission without prompting; authorized phones acquire a
+direct APNs device token and register again, and token changes replace that registration.
+There is no Expo push service.
+
+Ordinary prebuilds retain their previous signing requirements and do not gain `aps-environment`.
+Expo automatically applies installed notification plugins, so `plugins/withoutPush.js` reserves
+the notification plugin's run-once identity without changing native configuration. To opt in,
+run `ST_IOS_PUSH=1 pnpm exec expo prebuild --platform ios --clean --no-install`, then install pods
+and build as usual. The flag applies the real `expo-notifications` plugin and its development
+entitlement. Keep `ST_IOS_PUSH=1` set for subsequent prebuilds, Metro, bundle exports and Xcode build
+invocations for that target: its Expo runtime configuration also gates native token acquisition.
+A paid Apple Developer membership and Push Notifications enabled for the app's bundle identifier are required for
+physical-device APNs registration; retain signing material only in local configuration.
+
+The app obtains the actual APNs environment through SDK 57
+`expo-application.getIosPushNotificationServiceEnvironmentAsync()`, which reads `aps-environment`
+from the installed provisioning profile. It never guesses from Debug versus Release: a
+development-signed Release build can still use the development environment. Missing entitlement,
+unknown environment and the simulator fail closed. The native bundle identifier and application
+version accompany the token.
+
+Turning the switch off unregisters from every issuer this phone may have registered with,
+including earlier members after switching connections. Before sending any registration, the phone
+durably records only its pairing-profile key as cleanup ownership—not a token or credential.
+That ownership survives restart and is cleared only after confirmed unregistration and durable
+journal removal. An offline or failed opt-out stays visibly pending/failed until its issuer can
+be reached again. Forgetting this device, removing an independently paired member, or replacing
+its pairing fences native work and requires confirmed cleanup before deleting or replacing the
+affected pairing credentials. After expiry or revocation, the saved bearer retains only authority
+to DELETE its exact old pairing incarnation's push registration on its issuer, returning the
+existing `registered: false` confirmation even if the registration was already removed. It cannot
+read, register, or delete a replacement pairing's registration. This is not a live paired session;
+a generic 401/403 or transport failure is not cleanup confirmation. If cleanup or journal removal
+fails, the credentials remain and the phone shows a safe reconnect/retry message.
+Never-enabled phones with no cleanup ownership can still forget while offline.
+Pending native permission/token callbacks are canceled locally on opt-out or forget; push HTTP
+requests have an eight-second abort deadline. The token is held only for native acquisition and
+the paired registration request: it is never persisted in phone preferences, projection caches,
+claims, observations, logs or displayed errors. Fleet device rows show only the member's safe
+registered/environment summary. Revocation or expiry also removes the registration on its issuer.
 
 ## Fabric, an opt-in carrier
 

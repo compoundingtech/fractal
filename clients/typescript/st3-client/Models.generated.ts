@@ -1004,6 +1004,87 @@ export type ClientConnections = {
   member: string;
 };
 
+export type ClientDiagnosticBreadcrumb = "native-start" | "js-start" | "root-mounted" | "foreground" | "background" | "previous-launch-unclean";
+
+export type ClientDiagnosticCaptureSource = "js" | "native-marker" | "metrickit";
+
+export type ClientDiagnosticEvent = {
+  app_version: string;
+  capture_source: ClientDiagnosticCaptureSource;
+  captured_at_unix_ms: ClientDiagnosticMilliseconds;
+  event_id: ClientDiagnosticUuid;
+  launch_id: ClientDiagnosticUuid;
+  launch_id_basis: ClientDiagnosticLaunchIdBasis;
+  native_build: string;
+  occurred_at_unix_ms: ClientDiagnosticMilliseconds;
+  occurrence_time_basis: ClientDiagnosticOccurrenceTimeBasis;
+  os_version: string;
+  payload: ClientDiagnosticPayload;
+  platform: ClientDiagnosticPlatform;
+  runtime_version: string;
+  sequence: number;
+  severity: ClientDiagnosticSeverity;
+  update_id: ("embedded" | ClientDiagnosticUuid);
+};
+
+export type ClientDiagnosticJsErrorName = "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" | "UnknownError";
+
+export type ClientDiagnosticJsFrame = {
+  column: number;
+  line: number;
+  module: ClientDiagnosticJsModule;
+};
+
+export type ClientDiagnosticJsModule = "app" | "react-native" | "unknown";
+
+export type ClientDiagnosticLaunchIdBasis = "process" | "metric-interval";
+
+export type ClientDiagnosticMilliseconds = number;
+
+export type ClientDiagnosticNativeBinary = "app" | "system" | "unknown";
+
+export type ClientDiagnosticNativeFrame = {
+  binary: ClientDiagnosticNativeBinary;
+  offset: string;
+};
+
+export type ClientDiagnosticOccurrenceTimeBasis = "exact" | "metric-interval-end";
+
+export type ClientDiagnosticPayload = ({
+  breadcrumb: ClientDiagnosticBreadcrumb;
+  inferred: boolean;
+  kind: "launch";
+} | {
+  fatal: boolean;
+  frames: Array<ClientDiagnosticJsFrame>;
+  kind: "js-error";
+  name: ClientDiagnosticJsErrorName;
+} | {
+  exception_type: number | null;
+  frames: Array<ClientDiagnosticNativeFrame>;
+  kind: "native-crash";
+  signal: number | null;
+} | {
+  duration_ms: ClientDiagnosticMilliseconds;
+  frames: Array<ClientDiagnosticNativeFrame>;
+  kind: "hang";
+});
+
+export type ClientDiagnosticPlatform = "ios";
+
+export type ClientDiagnosticSeverity = "info" | "warning" | "error" | "fatal";
+
+export type ClientDiagnosticUuid = string;
+
+export type ClientDiagnosticsAck = {
+  acknowledged_event_ids: Array<ClientDiagnosticUuid>;
+};
+
+export type ClientDiagnosticsBatch = {
+  events: Array<ClientDiagnosticEvent>;
+  version: 1;
+};
+
 export type CollectionCommand = ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
@@ -1085,6 +1166,7 @@ export type CollectionFrame = ({
   id: string;
   items: Array<TimelineEntry>;
   kind: "conversation";
+  older_cursor?: string;
   replace: boolean;
   session_id: Id;
 } | {
@@ -1239,6 +1321,7 @@ export type Device = ResourceHeader & {
   person_id?: Id;
   policy_revision?: number;
   principal?: AssistantPrincipal;
+  push?: PushRegistrationStatus;
   scopes: Array<string>;
   sender_class?: AssistantSenderClass;
   session_actor: Id;
@@ -1296,7 +1379,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2177,7 +2260,7 @@ export type PersonPairingBegin = {
   device_name: string;
   full_control?: boolean;
   person_id: string;
-  scopes?: Array<"read.projections" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
+  scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
 };
 
 export type PersonStepParameters = {
@@ -2239,6 +2322,28 @@ export type PublicationDefinition = {
   subject: string;
   token: string;
 };
+
+export type PushEnvironment = "development" | "production";
+
+export type PushRegistration = {
+  app_version: string;
+  bundle_id: string;
+  environment: PushEnvironment;
+  token: string;
+};
+
+export type PushRegistrationResponse = {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  request_id: RequestId;
+  value: PushRegistrationStatus;
+};
+
+export type PushRegistrationStatus = ({
+  registered: false;
+} | {
+  environment: PushEnvironment;
+  registered: true;
+});
 
 export type ReplicatedNotice = {
   complete: boolean;
@@ -2793,7 +2898,7 @@ export type TimelineMessageBody = {
   sender_class?: "external-assistant";
   tags?: Array<string>;
   title?: string;
-  to?: ParticipantRef;
+  to?: TimelineRecipientRef;
 };
 
 export type TimelinePage = {
@@ -2803,6 +2908,8 @@ export type TimelinePage = {
   page: PageInfo;
   session_id: Id;
 };
+
+export type TimelineRecipientRef = string;
 
 export type TimelineRedactionBody = {
   blocks?: Array<TimelineBlock>;

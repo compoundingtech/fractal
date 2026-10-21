@@ -3472,13 +3472,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         .unwrap();
     assert!(summary.exchange.inventory.envelopes.is_empty());
     assert!(!summary.exchange.inventory.digest.is_empty());
-    backend
-        .record_failure(
-            "source",
-            "down",
-            "test outage",
-            Some(smallclaims::replication::ReplicationCarrier::Tailscale),
-        )
+    backend.record_failure("source", "down", "test outage", Some(smallclaims::replication::ReplicationCarrier::Tailscale), None)
         .await
         .unwrap();
     let (success, failure) = store.replication_peer_transport("source");
@@ -3505,8 +3499,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         .unwrap()
         .len();
     for _ in 0..1_440 {
-        backend
-            .record_failure("source", "down", "test outage", Default::default())
+        backend.record_failure("source", "down", "test outage", Default::default(), None)
             .await
             .unwrap();
     }

@@ -1,3 +1,4 @@
+import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { WorldDefinition } from '../kit/world.ts'
 import { syntheticFleetMidRefactor } from './fleetMidRefactor.ts'
 
@@ -10,3 +11,5 @@ export const failedSyncSocketDropped: WorldDefinition = {
   narrative: 'The fleet mid-refactor, seen while the collections socket is down and every reopen fails.',
   selected: { sync: 'socket-dropped' },
 }
+
+export const scenarioDomainFixtureMarker: typeof scenarioDomainFixture = scenarioDomainFixture

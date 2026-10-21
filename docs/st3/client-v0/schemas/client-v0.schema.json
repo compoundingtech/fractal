@@ -7,14 +7,139 @@
   "oneOf": [
     { "$ref": "#/$defs/ObservationReport" },
     { "$ref": "#/$defs/ObservationResponse" },
+    { "$ref": "#/$defs/PushRegistration" },
+    { "$ref": "#/$defs/PushRegistrationResponse" },
     { "$ref": "#/$defs/Envelope" },
     { "$ref": "#/$defs/ErrorEnvelope" },
     { "$ref": "#/$defs/ActionRequest" },
     { "$ref": "#/$defs/PairingBegin" },
     { "$ref": "#/$defs/PairingComplete" },
-    { "$ref": "#/$defs/PairingAdvertisement" }
+    { "$ref": "#/$defs/PairingAdvertisement" },
+    { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "ClientDiagnosticUuid": {
+      "type": "string", "minLength": 36, "maxLength": 36,
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "ClientDiagnosticMilliseconds": {
+      "type": "integer", "minimum": 0, "maximum": 9007199254740991,
+      "description": "Nonnegative JSON-safe integer milliseconds."
+    },
+    "ClientDiagnosticSeverity": {"enum": ["info", "warning", "error", "fatal"]},
+    "ClientDiagnosticCaptureSource": {"enum": ["js", "native-marker", "metrickit"]},
+    "ClientDiagnosticOccurrenceTimeBasis": {
+      "enum": ["exact", "metric-interval-end"],
+      "description": "MetricKit reports an interval end, not an exact diagnostic occurrence time."
+    },
+    "ClientDiagnosticLaunchIdBasis": {
+      "enum": ["process", "metric-interval"],
+      "description": "A MetricKit interval uses a synthetic launch UUID rather than attribution to the receiving process."
+    },
+    "ClientDiagnosticPlatform": {"const": "ios"},
+    "ClientDiagnosticBreadcrumb": {"enum": ["native-start", "js-start", "root-mounted", "foreground", "background", "previous-launch-unclean"]},
+    "ClientDiagnosticJsErrorName": {"enum": ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "UnknownError"]},
+    "ClientDiagnosticJsModule": {"enum": ["app", "react-native", "unknown"]},
+    "ClientDiagnosticNativeBinary": {"enum": ["app", "system", "unknown"]},
+    "ClientDiagnosticJsFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["module", "line", "column"],
+      "properties": {
+        "module": {"$ref": "#/$defs/ClientDiagnosticJsModule"},
+        "line": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "column": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+      }
+    },
+    "ClientDiagnosticNativeFrame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["binary", "offset"],
+      "properties": {
+        "binary": {"$ref": "#/$defs/ClientDiagnosticNativeBinary"},
+        "offset": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[0-9a-f]+$"}
+      }
+    },
+    "ClientDiagnosticPayload": {
+      "description": "Bounded privacy-safe diagnostics; no messages, arbitrary strings, symbol names or raw dumps.",
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "breadcrumb", "inferred"],
+          "properties": {
+            "kind": {"const": "launch"},
+            "breadcrumb": {"$ref": "#/$defs/ClientDiagnosticBreadcrumb"},
+            "inferred": {"type": "boolean"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "name", "fatal", "frames"],
+          "properties": {
+            "kind": {"const": "js-error"},
+            "name": {"$ref": "#/$defs/ClientDiagnosticJsErrorName"},
+            "fatal": {"type": "boolean"},
+            "frames": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticJsFrame"}}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "exception_type", "signal", "frames"],
+          "properties": {
+            "kind": {"const": "native-crash"},
+            "exception_type": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295},
+            "signal": {"type": ["integer", "null"], "minimum": 0, "maximum": 4294967295},
+            "frames": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticNativeFrame"}}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "duration_ms", "frames"],
+          "properties": {
+            "kind": {"const": "hang"},
+            "duration_ms": {"$ref": "#/$defs/ClientDiagnosticMilliseconds"},
+            "frames": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticNativeFrame"}}
+          }
+        }
+      ]
+    },
+    "ClientDiagnosticEvent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "launch_id", "launch_id_basis", "sequence", "occurred_at_unix_ms", "occurrence_time_basis", "captured_at_unix_ms", "app_version", "native_build", "runtime_version", "update_id", "platform", "os_version", "severity", "capture_source", "payload"],
+      "properties": {
+        "event_id": {"$ref": "#/$defs/ClientDiagnosticUuid"},
+        "launch_id": {"$ref": "#/$defs/ClientDiagnosticUuid"},
+        "launch_id_basis": {"$ref": "#/$defs/ClientDiagnosticLaunchIdBasis"},
+        "sequence": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "occurred_at_unix_ms": {"$ref": "#/$defs/ClientDiagnosticMilliseconds"},
+        "occurrence_time_basis": {"$ref": "#/$defs/ClientDiagnosticOccurrenceTimeBasis"},
+        "captured_at_unix_ms": {"$ref": "#/$defs/ClientDiagnosticMilliseconds"},
+        "app_version": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "native_build": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "runtime_version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(\\([A-Za-z0-9][A-Za-z0-9._-]*\\))?$(?![\\s\\S])"},
+        "update_id": {"oneOf": [{"const": "embedded"}, {"$ref": "#/$defs/ClientDiagnosticUuid"}]},
+        "platform": {"$ref": "#/$defs/ClientDiagnosticPlatform"},
+        "os_version": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "severity": {"$ref": "#/$defs/ClientDiagnosticSeverity"},
+        "capture_source": {"$ref": "#/$defs/ClientDiagnosticCaptureSource"},
+        "payload": {"$ref": "#/$defs/ClientDiagnosticPayload"}
+      }
+    },
+    "ClientDiagnosticsBatch": {
+      "description": "Version 1 diagnostics upload. The HTTP request body is limited to 128 KiB; admission validates this serialized-byte bound.",
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "events"],
+      "properties": {
+        "version": {"const": 1},
+        "events": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticEvent"}}
+      }
+    },
+    "ClientDiagnosticsAck": {
+      "description": "Only durably ingested event IDs are acknowledged, including already-ingested duplicates.",
+      "type": "object", "additionalProperties": false,
+      "required": ["acknowledged_event_ids"],
+      "properties": {
+        "acknowledged_event_ids": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/ClientDiagnosticUuid"}}
+      }
+    },
     "AgentEndReason": {
       "type": "object",
       "additionalProperties": false,
@@ -52,6 +177,10 @@
     "ObservationReport": {"type": "object", "additionalProperties": false, "required": ["report_id", "samples"], "properties": {"report_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "minLength": 36, "maxLength": 36}, "samples": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ObservationSample"}}}},
     "ObservationAccepted": {"type": "object", "additionalProperties": false, "required": ["accepted"], "properties": {"accepted": {"const": true}}},
     "ObservationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/ObservationAccepted"}}},
+    "PushEnvironment": {"enum": ["development", "production"], "description": "APNs environment the phone's token was issued for: `development` (sandbox) or `production`."},
+    "PushRegistration": {"type": "object", "additionalProperties": false, "required": ["token", "environment", "bundle_id", "app_version"], "description": "A paired phone's APNs device token. The person and device come only from the paired session; any other field, including a person or device identity, is refused. The token is a secret: it is stored only on the member that issued the pairing and never appears in claims, replication, resources, logs or error messages.", "properties": {"token": {"x-st-codec": "redacted", "type": "string", "pattern": "^(?:[0-9a-fA-F]{2}){1,256}$", "minLength": 2, "maxLength": 512, "description": "Hex-encoded APNs device token, 1–256 bytes."}, "environment": {"$ref": "#/$defs/PushEnvironment"}, "bundle_id": {"type": "string", "pattern": "^[A-Za-z0-9.-]{1,255}$", "minLength": 1, "maxLength": 255}, "app_version": {"type": "string", "pattern": "^[\\x20-\\x7E]{1,64}$", "minLength": 1, "maxLength": 64, "description": "Printable ASCII."}}},
+    "PushRegistrationStatus": {"description": "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["registered"], "properties": {"registered": {"const": false}}}, {"type": "object", "additionalProperties": false, "required": ["registered", "environment"], "properties": {"registered": {"const": true}, "environment": {"$ref": "#/$defs/PushEnvironment"}}}]},
+    "PushRegistrationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/PushRegistrationStatus"}}},
     "PairingAdvertisement": {
       "description": "Static unauthenticated pairing preflight; no envelope, presence update or graph information.",
       "type": "object", "additionalProperties": false,
@@ -84,6 +213,7 @@
     "ActorRef": {"type": "string", "pattern": "^(?:agent|daemon|person)/[^\\s]+$", "x-st-ref": ["agent", "daemon", "person"]},
     "ParticipantRef": {"type": "string", "pattern": "^(?:agent|person|step)/[^\\s]+$", "x-st-ref": ["agent", "person", "step"]},
     "SenderRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Message sender, including an authorized external assistant principal. Not a recipient or actor."},
+    "TimelineRecipientRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority."},
     "MissionState": {"anyOf": [{"enum": [
       "draft",
       "ready",
@@ -301,6 +431,7 @@
             { "$ref": "#/$defs/ConversationSearch" },
             { "$ref": "#/$defs/EventPage" },
             { "$ref": "#/$defs/ActionResult" },
+            { "$ref": "#/$defs/ClientDiagnosticsAck" },
             { "$ref": "#/$defs/PairingChallenge" },
             { "$ref": "#/$defs/PairedSession" },
             { "$ref": "#/$defs/AssistantGrant" },
@@ -1961,6 +2092,7 @@
             "state": { "enum": ["active", "expired", "revoked"] },
             "scopes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
             "expires_at": { "$ref": "#/$defs/Timestamp" },
+            "push": { "$ref": "#/$defs/PushRegistrationStatus", "description": "Push registration state for this pairing. Present only on the member that issued the pairing (registered false when none is stored); omitted by other members. Never includes the token." },
             "principal": { "$ref": "#/$defs/AssistantPrincipal" },
             "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
             "grant_kind": { "enum": ["person", "assistant"] },
@@ -2294,7 +2426,7 @@
         { "if": { "properties": { "type": { "const": "truncation" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/TimelineTruncationBody" } } } }
       ]
     },
-    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/ParticipantRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
+    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/SenderRef"}, "to": {"$ref": "#/$defs/TimelineRecipientRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "sender_class": {"type": "string", "enum": ["external-assistant"], "description": "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text."}, "assistant_grant_id": {"type": "string", "description": "The assistant grant that authorized the send, with sender_class."}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "MessageProvenance": {
       "type": "object", "additionalProperties": false, "required": ["verdict"],
       "description": "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not.",
@@ -3242,7 +3374,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
         }
       }
     },
@@ -3717,7 +3849,8 @@
             "replace": { "type": "boolean" },
             "items": { "type": "array", "items": { "$ref": "#/$defs/TimelineEntry" } },
             "has_more": { "type": "boolean" },
-            "header": { "$ref": "#/$defs/ConversationHeader", "description": "Present when conversation-blocks.v1 is negotiated and at least one header field is available" }
+            "header": { "$ref": "#/$defs/ConversationHeader", "description": "Present when conversation-blocks.v1 is negotiated and at least one header field is available" },
+            "older_cursor": { "type": "string", "description": "Replacement frames only, present whenever has_more is true: the timeline cursor (GET /v1/client/sessions/{id}/timeline?cursor=...) for the entries just before this frame's oldest entry." }
           }
         },
         {

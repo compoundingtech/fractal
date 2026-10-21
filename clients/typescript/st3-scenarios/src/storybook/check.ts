@@ -1,14 +1,41 @@
 import * as React from 'react'
 import { composeStory, type Args, type Meta } from '@storybook/react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { flushSync } from 'react-dom'
+import { createRoot } from 'react-dom/client'
 
 import { ANCHOR_MS, catalog, DEFAULT_WORLD, foldSlice, manualClock, syncStatusAt, type SliceKind, type World } from '../index.ts'
-import { createReadTracker, type ServedSlices } from '../react/index.ts'
-import { resolveScenarioWorld, scenarioGlobalTypes, withScenario, type ScenarioParameter } from './index.ts'
+import { createReadTracker, ScenarioReadBoundary, type ServedSlices } from '../react/index.ts'
+import { scenarioGlobalTypes, validateScenarioDeclaration, type ScenarioMountedWindow, type ScenarioStoryExemption, type ScenarioStoryParameter } from './index.ts'
+import { resolveScenarioWorld, withScenario } from './runtime.ts'
+
+export { resolveScenarioWorld, withScenario } from './runtime.ts'
+
+export type { ScenarioMountedWindow, ScenarioStoryParameter } from './index.ts'
+
+type ConversationEntry = World['slices']['conversation']['state']['threads'][number]['items'][number]
+
+// Each user content entry starts a turn; an assistant-only prefix is one turn.
+// This matches scenario-transcript.story-harness's threadTurns, without importing UI code.
+const mountedEntries = (items: readonly ConversationEntry[], window?: ScenarioMountedWindow): readonly ConversationEntry[] => {
+  if (window === undefined || window._tag === 'all') return items
+  if (!Number.isSafeInteger(window.turns) || window.turns <= 0
+    || !Number.isSafeInteger(window.historyBatch) || window.historyBatch < 0) return []
+  const starts: number[] = []
+  for (const [index, entry] of items.entries()) {
+    if (entry.type === 'content' && entry.role === 'user' && typeof entry.body.text === 'string') starts.push(index)
+    else if (starts.length === 0 && (entry.type === 'tool_call'
+      || entry.type === 'content' && entry.role === 'assistant' && typeof entry.body.text === 'string')) starts.push(index)
+  }
+  // EmbraceScrollViewport mounts short conversations whole (tail + one history batch).
+  if (starts.length <= window.turns + window.historyBatch) return items
+  const start = starts[Math.max(0, starts.length - window.turns)]
+  return start === undefined ? [] : items.slice(start)
+}
 
 export type ScenarioCheck = 1 | 2 | 3 | 4 | 5
 export interface ScenarioCheckFailure {
-  readonly _tag: 'Reads' | 'DataDependence' | 'WorldSwitch' | 'PinnedWorld' | 'UrlState'
+  readonly _tag: 'Reads' | 'DataDependence' | 'WorldSwitch' | 'PinnedWorld' | 'UrlState' | 'MountedWindow'
   readonly check: ScenarioCheck
   readonly message: string
   readonly slice?: SliceKind
@@ -20,6 +47,7 @@ export interface ScenarioStoryCheckResult {
   readonly failures: readonly ScenarioCheckFailure[]
   readonly checks: readonly { readonly check: ScenarioCheck; readonly _tag: 'Passed' | 'Failed' | 'Skipped'; readonly reason?: string }[]
   readonly reads: ReadonlySet<SliceKind>
+  readonly exemptions: readonly ScenarioStoryExemption[]
 }
 
 export interface ScenarioStoryCheckOptions<TArgs extends Args = Args> {
@@ -63,7 +91,7 @@ const containsText = (value: unknown, marker: string): boolean => {
   return Object.values(value).some((item: unknown) => containsText(item, marker))
 }
 
-const markers = (world: World, kind: SliceKind, atMs: number): string[] => {
+const markers = (world: World, kind: SliceKind, atMs: number, window?: ScenarioMountedWindow): string[] => {
   if (world.slices[kind].loading) return []
   let values: (string | null | undefined)[]
   switch (kind) {
@@ -78,7 +106,7 @@ const markers = (world: World, kind: SliceKind, atMs: number): string[] => {
       values = [...state.attention, ...state.messages].map(({ title }) => title)
       break
     }
-    case 'conversation': values = foldSlice(world.slices.conversation, atMs).state.threads.flatMap(({ items }) => items.flatMap((entry) => entry.type === 'content' ? texts(entry.body) : [])); break
+    case 'conversation': values = foldSlice(world.slices.conversation, atMs).state.threads.flatMap(({ items }) => mountedEntries(items, window).flatMap((entry) => entry.type === 'content' ? texts(entry.body) : [])); break
     case 'terminal': values = foldSlice(world.slices.terminal, atMs).state.terminals.flatMap(({ screens }) => screens.at(-1)?.screen.lines.map(({ text }) => text) ?? []); break
     case 'sync': values = []; break
   }
@@ -94,11 +122,11 @@ const wireState = (world: World, kind: SliceKind, atMs: number): string => JSON.
 // Pair selection follows check 2's visible expectations, not incidental wire metadata.
 // Notice-only changes do not distinguish roster rows; sync scripts distinguish renders
 // through their projected status, not capabilities or unexecuted future operations.
-const visibleState = (world: World, kind: SliceKind, atMs: number): string => JSON.stringify({
+const visibleState = (world: World, kind: SliceKind, atMs: number, window?: ScenarioMountedWindow): string => JSON.stringify({
   loading: world.slices[kind].loading,
   content: world.slices[kind].loading ? [] : kind === 'sync'
     ? syncStatusAt(world.slices.sync, atMs, world.now)
-    : markers(world, kind, atMs).sort(),
+    : markers(world, kind, atMs, window).sort(),
 })
 
 /** Finds a visible contrast, including sync transitions that occur after the initial snapshot. */
@@ -108,9 +136,9 @@ const contrastTime = (left: World, right: World, kind: SliceKind, atMs: number):
   return times.find((at) => at >= atMs && JSON.stringify(syncStatusAt(left.slices.sync, at, left.now)) !== JSON.stringify(syncStatusAt(right.slices.sync, at, right.now))) ?? atMs
 }
 
-const contrastFailures = (left: World, right: World, kind: SliceKind, atMs: number, leftMarkup: string, rightMarkup: string): string[] => {
-  const leftMarkers = markers(left, kind, atMs)
-  const rightMarkers = markers(right, kind, atMs)
+const contrastFailures = (left: World, right: World, kind: SliceKind, atMs: number, leftMarkup: string, rightMarkup: string, window?: ScenarioMountedWindow): string[] => {
+  const leftMarkers = markers(left, kind, atMs, window)
+  const rightMarkers = markers(right, kind, atMs, window)
   const sides = [
     { label: left.slices[kind].variant, own: leftMarkers, other: rightMarkers, markup: contentMarkup(leftMarkup), source: left.slices[kind].loading ? undefined : foldSlice(left.slices[kind], atMs).state },
     { label: right.slices[kind].variant, own: rightMarkers, other: leftMarkers, markup: contentMarkup(rightMarkup), source: right.slices[kind].loading ? undefined : foldSlice(right.slices[kind], atMs).state },
@@ -143,16 +171,59 @@ export const scenarioStoryCheck = <TArgs extends Args>(
   meta: Meta<TArgs>,
   options: ScenarioStoryCheckOptions<TArgs> = {},
 ): ScenarioStoryCheckResult => {
-  const parameter: ScenarioParameter | undefined = story.parameters?.scenario === undefined
-    ? meta.parameters?.scenario
-    : { ...meta.parameters?.scenario, ...story.parameters.scenario }
-  if (parameter === undefined) throw new Error('scenarioStoryCheck requires parameters.scenario.slices')
+  const storyParameter: ScenarioStoryParameter | undefined = story.parameters?.scenario
+  const metaParameter: ScenarioStoryParameter | undefined = meta.parameters?.scenario
+  if (storyParameter !== undefined && metaParameter !== undefined && storyParameter._tag !== metaParameter._tag) {
+    throw new Error('a story must not change scenario mode from meta; declare the mode per story or split the meta')
+  }
+  const parameter = storyParameter?._tag === 'slices' && metaParameter?._tag === 'slices'
+    ? { ...metaParameter, ...storyParameter }
+    : storyParameter ?? metaParameter
+  const baselineArgs = Object.assign({}, meta.args, story.args, options.args)
+  validateScenarioDeclaration(parameter, baselineArgs)
+  if (parameter === undefined) throw new Error('Story requires parameters.scenario declaration')
+  if (parameter._tag !== 'slices') {
+    const Composed = composeStory(story, meta, { decorators: [withScenario] })
+    const violations: Error[] = []
+    const element = React.createElement(ScenarioReadBoundary, {
+      reason: `scenario ${parameter._tag} exemption`,
+      onViolation: (error) => { violations.push(error) },
+    }, React.createElement(Composed, baselineArgs))
+    if (typeof document === 'undefined') {
+      renderToStaticMarkup(element)
+    } else {
+      // Browser-only fixtures may use real portals; SSR cannot render that contract.
+      const container = document.createElement('div')
+      document.body.append(container)
+      const errors: unknown[] = []
+      const root = createRoot(container, { onUncaughtError: (error) => { errors.push(error) } })
+      try {
+        flushSync(() => { root.render(element) })
+      } finally {
+        try {
+          flushSync(() => { root.unmount() })
+        } finally {
+          container.remove()
+        }
+      }
+      if (errors.length > 0) throw errors[0]
+    }
+    // React error boundaries (client) and Suspense fallbacks (SSR) can swallow the throw.
+    // The enclosing boundary retains evidence independently of error propagation.
+    if (violations.length > 0) throw violations[0]
+    return {
+      _tag: 'Passed',
+      failures: [],
+      checks: ([1, 2, 3, 4, 5] as const).map((check) => ({ check, _tag: 'Skipped', reason: `${parameter._tag}: ${parameter.reason}` })),
+      reads: new Set(),
+      exemptions: [parameter],
+    }
+  }
   for (const [kind, reason] of Object.entries(parameter.invariant ?? {})) {
     if (typeof reason !== 'string' || reason.trim().length === 0) throw new Error(`scenario invariant ${kind} requires a reason`)
   }
   const now = options.scenarioNow ?? ANCHOR_MS
   const scenario = options.scenario ?? DEFAULT_WORLD
-  const baselineArgs = Object.assign({}, meta.args, story.args, options.args)
   const failures: ScenarioCheckFailure[] = []
   const readKinds = new Set<SliceKind>()
   const skipped: Partial<Record<ScenarioCheck, string>> = {}
@@ -188,6 +259,18 @@ export const scenarioStoryCheck = <TArgs extends Args>(
   const initialMarkup = render(scenario)
   const activeKinds = parameter.slices.filter((kind) => parameter.invariant?.[kind] === undefined)
   const baseWorld = resolveScenarioWorld(parameter, { scenario, scenarioNow: now }, baselineArgs)
+  if (parameter.window?._tag === 'tail') {
+    const window = parameter.window
+    const atMs = options.atMs ?? 0
+    const items = foldSlice(baseWorld.slices.conversation, atMs).state.threads.flatMap((thread) => mountedEntries(thread.items, window))
+    const message = !declared.has('conversation') ? 'mounted window requires a declared conversation slice'
+      : !Number.isSafeInteger(window.turns) || window.turns <= 0 ? 'tail window turns must be a positive safe integer'
+      : !Number.isSafeInteger(window.historyBatch) || window.historyBatch < 0 ? 'tail window historyBatch must be a non-negative safe integer'
+      : items.length === 0 ? 'mounted window selects zero conversation entries'
+      : markers(baseWorld, 'conversation', atMs).length > 0 && markers(baseWorld, 'conversation', atMs, window).length === 0 ? 'mounted window excludes every conversation marker'
+      : undefined
+    if (message !== undefined) failures.push({ _tag: 'MountedWindow', check: 2, slice: 'conversation', message })
+  }
   let variantPairs = 0
   for (const kind of activeKinds) {
     for (const pair of options.contrastPairs?.[kind] ?? CONTRAST_PAIRS[kind]) {
@@ -197,7 +280,7 @@ export const scenarioStoryCheck = <TArgs extends Args>(
       const atMs = contrastTime(left, right, kind, options.atMs ?? 0)
       if (wireState(left, kind, atMs) === wireState(right, kind, atMs)) continue
       variantPairs++
-      const messages = contrastFailures(left, right, kind, atMs, render(scenario, { [kind]: pair[0] }, atMs), render(scenario, { [kind]: pair[1] }, atMs))
+      const messages = contrastFailures(left, right, kind, atMs, render(scenario, { [kind]: pair[0] }, atMs), render(scenario, { [kind]: pair[1] }, atMs), parameter.window)
       failures.push(...messages.map((message): ScenarioCheckFailure => ({ _tag: 'DataDependence', check: 2, slice: kind, variants: pair, message })))
     }
   }
@@ -217,13 +300,13 @@ export const scenarioStoryCheck = <TArgs extends Args>(
       for (const kind of pendingKinds) {
         const atMs = contrastTime(baseWorld, right, kind, options.atMs ?? 0)
         if (wireState(baseWorld, kind, atMs) === wireState(right, kind, atMs)
-          || visibleState(baseWorld, kind, atMs) === visibleState(right, kind, atMs)) continue
+          || visibleState(baseWorld, kind, atMs, parameter.window) === visibleState(right, kind, atMs, parameter.window)) continue
         pendingKinds.delete(kind)
         const leftMarkup = leftMarkupByTime.get(atMs) ?? render(scenario, {}, atMs)
         const rightMarkup = rightMarkupByTime.get(atMs) ?? render(entry.id, {}, atMs)
         leftMarkupByTime.set(atMs, leftMarkup)
         rightMarkupByTime.set(atMs, rightMarkup)
-        const messages = contrastFailures(baseWorld, right, kind, atMs, leftMarkup, rightMarkup)
+        const messages = contrastFailures(baseWorld, right, kind, atMs, leftMarkup, rightMarkup, parameter.window)
         failures.push(...messages.map((message): ScenarioCheckFailure => ({ _tag: 'WorldSwitch', check: 3, slice: kind, message: `${baseWorld.id} / ${entry.id}: ${message}` })))
       }
     }
@@ -253,6 +336,7 @@ export const scenarioStoryCheck = <TArgs extends Args>(
       ? { check, _tag: 'Failed' }
       : skipped[check] === undefined ? { check, _tag: 'Passed' } : { check, _tag: 'Skipped', reason: skipped[check] }),
     reads: readKinds,
+    exemptions: [],
   }
   if (options.assert === true && result._tag === 'Failed') throw new ScenarioStoryCheckError(result)
   return result

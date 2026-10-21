@@ -27,12 +27,29 @@ corpus slot. After merging main, regenerate v3 with
 `cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v3.json`.
 The generator serializes the complete merged registry; do not hand-edit the snapshot.
 
-`claims-v4.json` is the serialization of the registry from the harness-inventory branch
-merged with main at `1dc995076da`, generated with
+`claims-v4.json` is the serialization of the registry that adds the four node-local
+`client.*` diagnostic kinds on top of version 3; v1, v2 and v3 remain unchanged for
+comparisons pinned to those corpora. The simulation includes v4 because its coverage
+test requires those kinds. The generator handles the `client` subject family explicitly.
+A focused regression constructs each diagnostic kind through the same input-generation
+path used by random draws; corpus membership alone is not sufficient coverage.
+After merging main, regenerate v4 with
 `cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v4.json`.
-It adds `harness.inventory.observed`; v1 to v3 remain unchanged. The kind changes the shared
-RNG stream, so v3's never-trim characterization `[5, 34]` does not apply: with v4 all 17 fixed
-seeds trim. After merging main, regenerate v4 the same way; do not hand-edit the snapshot.
+The generator serializes the complete merged registry; do not hand-edit the snapshot.
+
+The fixed v4 seed characterization has only seed 5 without a checkpoint trim;
+the other 16 fixed seeds trim, including seed 34. The diagnostic kinds and their
+`client` subject generation change the shared RNG stream, so v3's `[5, 34]`
+characterization does not apply. Keep the exact per-seed trim assertion when
+updating this characterization for a new corpus.
+
+`claims-v5.json` is the serialization of the registry from the harness-inventory branch
+merged with main's version 4, generated with
+`cargo run -p st3-schema --example claims_json -- fixtures/convergence/claims-v5.json`.
+It adds `harness.inventory.observed`; v1 to v4 remain unchanged. The kind changes the shared
+RNG stream, so v4's never-trim characterization `[5]` does not apply to it: with v5 only
+seed 1597 has no checkpoint trim and the other 16 fixed seeds trim, including seed 5. After merging
+main, regenerate v5 the same way; do not hand-edit the snapshot.
 
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&st3_schema::registry().claims)`

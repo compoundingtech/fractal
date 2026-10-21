@@ -123,6 +123,8 @@ def main(argv):
         inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', summary['record']).split()[2]))['predicate']['observed']['inputs']
         assert inputs['workspace_clean'] == 'true' and inputs['untracked_files'] == 'true' and inputs['stage'] == 'tests', inputs
         assert git(repo, 'for-each-ref', f'refs/notes/evidence/{summary["record"]}') == '', '--out must not create a ref in the checkout'
+        assert git(repo, 'for-each-ref', f'refs/notes/evidence/{summary["tree"]}/{summary["record"]}',
+                   f'refs/tags/evidence/{summary["tree"]}/{summary["record"]}') == '', '--out must not create a ref in the checkout'
         # A job that changed a tracked file signs a tree it did not test: refused, however the facts look.
         (repo / 'a').write_text('changed by the code under test\n')
         modified = run([sys.executable, str(WRAP), '--check', 'linux-tests', '--toolchain-sha256', toolchain, '--signer', signer,
@@ -165,17 +167,20 @@ def main(argv):
         lines = log.read_text().splitlines()
         assert not any('secret-token-xyz' in l or header in l for l in lines if not l.startswith('ENV ')), 'token in an argument'
         assert any(header in l for l in lines if l.startswith('ENV ')), 'token reaches git through the environment'
-        assert git(sink, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').startswith('refs/notes/evidence/')
-        print('passed: --push sends the token through the environment, not an argument, and never prints it')
+        head_tree = git(repo, 'rev-parse', 'HEAD^{tree}')
+        record = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])['record']
+        assert git(sink, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/notes/evidence/', 'refs/tags/') == \
+            f'refs/notes/evidence/{head_tree}/{record} {record}\nrefs/tags/evidence/{head_tree}/{record} {record}'
+        print('passed: --push sends the record as a tag and a note, the token through the environment, not an argument, and never prints it')
 
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1
         git(repo, 'checkout', '--', 'a')
-        before = git(repo, 'for-each-ref', 'refs/notes/evidence/')
+        before = git(repo, 'for-each-ref', 'refs/notes/evidence/', 'refs/tags/')
         touched = wrap(['sh', '-c', 'echo x > new-file'])
         assert touched.returncode == 1 and b'changed while the command ran' in touched.stderr
         (repo / 'new-file').unlink()
-        assert git(repo, 'for-each-ref', 'refs/notes/evidence/') == before, 'a run that changed the tree must leave no note'
+        assert git(repo, 'for-each-ref', 'refs/notes/evidence/', 'refs/tags/') == before, 'a run that changed the tree must leave no note'
         print('passed: a dirty checkout and a run that changes the tree are refused, leaving no note')
 
         # The signer refuses anything it cannot recompute or that is not exactly the request shape.
@@ -205,6 +210,59 @@ def main(argv):
         }.items():
             refused = sign(bad)
             assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
+        # A `nix` record: nix build of a check derivation, naming the output path and the signatures on it. The shapes come
+        # from real `nix path-info --json` output (doc/fleet/factory/nix-evidence/nix-sample-20261020).
+        drv = '/nix/store/wndx1738rbbrs30ap8l6ma5nkxgcjb89-genie-freshness-0.1.0.drv'
+        out = '/nix/store/hh43mxh295bdyfb96mx8qp37ii3dkzx0-genie-freshness-0.1.0'
+        signature = 'test-nix-evidence-1:' + 'A' * 86 + '=='
+        nix_inputs = {'drv_path': drv, 'out_path': out, 'nar_hash': 'sha256-d6xi4mKdjkX2JFicDIv5niSzpyI0m/Hnm8GGAIU04kY=',
+                      'nar_size': '112', 'references': '-', 'cache_hit': 'false', 'nix_signatures': signature,
+                      'nix_key_id': 'test-nix-evidence-1', 'nix_unsigned': 'false'}
+        nix_good = {**good, 'check': 'genie-freshness', 'runner': 'nix', 'command': ['nix', 'build', '.#checks.x86_64-linux.genie-freshness'],
+                    'inputs': {**good['inputs'], **nix_inputs}}
+        def signed_statement(request):
+            answer = json.loads(sign(request).stdout)
+            subprocess.run(['git', '-C', str(repo), 'index-pack', '--stdin'], input=base64.b64decode(answer['object_pack_base64']),
+                           capture_output=True, check=True, env=ENV)
+            return statement(answer['record'])
+
+        accepted = sign(nix_good)
+        assert accepted.returncode == 0, accepted.stderr
+        observed = signed_statement(nix_good)['predicate']['observed']
+        assert observed['runner'] == 'nix' and observed['inputs']['out_path'] == out and observed['inputs']['nar_size'] == '112'
+        assert signed_statement(good)['predicate']['observed']['runner'] == 'wrapper', 'no runner means wrapper'
+        unsigned = {**nix_inputs, 'nix_signatures': 'none', 'nix_key_id': 'none', 'nix_unsigned': 'true'}
+        assert sign({**nix_good, 'inputs': {**good['inputs'], **unsigned}}).returncode == 0, 'an unsigned output is recorded as unsigned'
+        two_refs = ','.join(['/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a', '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b'])
+        assert sign({**nix_good, 'inputs': {**nix_good['inputs'], 'references': two_refs}}).returncode == 0
+        failed = {**nix_good, 'exit_code': 1, 'inputs': {**good['inputs'], 'drv_path': drv}}
+        assert sign(failed).returncode == 0, 'a failed build is recorded with its derivation and no output path'
+
+        def nix_with(**changes):
+            return {**nix_good, 'inputs': {**nix_good['inputs'], **changes}}
+
+        for label, bad in {
+            'unknown runner': {**good, 'runner': 'sekrets'},
+            'runner nix with another command': {**nix_good, 'command': ['sh', '-c', 'true']},
+            'runner nix for another check': {**nix_good, 'check': 'other'},
+            'system not a plain word': {**nix_good, 'command': ['nix', 'build', '.#checks.x/../genie-freshness']},
+            'failed build that names an output': {**nix_good, 'exit_code': 1},
+            'derivation not a .drv': nix_with(drv_path=out),
+            'output named unlike the derivation': nix_with(out_path='/nix/store/hh43mxh295bdyfb96mx8qp37ii3dkzx0-other-0.1.0'),
+            'output outside the store': nix_with(out_path='/tmp/evil-genie-freshness-0.1.0'),
+            'bad nar hash': nix_with(nar_hash='sha256:0ip26j2h11n1kgkz36rl4akv694yz65hr72q4kv4b3lxcbi65b3p'),
+            'nar size not a number': nix_with(nar_size='12 bytes'),
+            'unsorted references': nix_with(references=','.join(reversed(two_refs.split(',')))),
+            'reference that is not a store path': nix_with(references='/etc/passwd'),
+            'cache_hit not a boolean': nix_with(cache_hit='yes'),
+            'signature without a key name': nix_with(nix_signatures='AAAA'),
+            'unsigned flag contradicting the signatures': nix_with(nix_unsigned='true'),
+            'key id not the first signature\'s': nix_with(nix_key_id='someone-else'),
+            'missing output path': {**nix_good, 'inputs': {k: v for k, v in nix_good['inputs'].items() if k != 'out_path'}},
+        }.items():
+            refused = sign(bad)
+            assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
+        print('passed: the signer records runner nix for a nix build of the named check, and refuses malformed paths, hashes, references, signatures and a failed build that names an output')
         # A hostile caller: its PATH holds look-alike tools, its environment names programs for git, and its
         # checkout's own configuration names programs. None of them may run in the signer, and the clock is the signer's.
         production = tmp / 'production-home'
