@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "daemon_load rests every budgeted p99 on at least 300 samples, records the runner's speed and reports reads refused while a published list is withdrawn",
+  "replay": {"status": "none", "detail": "Test and CI only: no claim or projection replay."},
+  "schema": {"status": "none", "detail": "Test and CI only: no schema change."},
+  "rules": {"status": "none", "detail": "Test and CI only: no checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Test and CI only: no daemon or client change."},
+  "downtime": {"status": "none", "detail": "Test and CI only: nothing runs on a daemon."},
+  "manual": {"status": "none", "detail": "Test and CI only: no manual step."},
+  "recovery": {"status": "none", "detail": "Test and CI only: nothing to roll back on a host."}
+}
