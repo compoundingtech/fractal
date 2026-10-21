@@ -141,7 +141,7 @@ describe('fixture-free native Details projection', () => {
     expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Needs your attention')
     expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Request · question')
     const terminals = sections.find(section => section.title === 'Terminals')?.items
-    expect(terminals?._tag === 'Known' ? terminals.value.map(item => item.uri) : []).toEqual(['terminal/example'])
+    expect(terminals?._tag === 'Known' ? terminals.value.map(item => item.uri) : []).toEqual(['terminal/example-details'])
     expect(JSON.stringify(sections.find(section => section.title === 'Missions'))).toContain('1 ready, 0 waiting')
     expect(project({ selectedQueue: observed({ value: { ...queue, agent_id: Native.decodeUnknownSync(Native.Id)('agent/example-other') } }) }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
     expect(project({ selectedQueue: { _tag: 'Observed', freshness: 'live', value: queue, error: { reason: 'ungranted', detail: 'Revoked' } } }).sections.find(section => section.title === 'Missions')?.items._tag).toBe('Unknown')
