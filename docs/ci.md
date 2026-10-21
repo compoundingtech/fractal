@@ -1022,6 +1022,15 @@ fixed seed on pull requests reads that variable and runs its original size here.
 comment why its invariant holds at the smaller size. Run one locally at full scale with
 `ST_TEST_SCALE=full cargo nextest run ...`.
 
+Some test groups run only here. `.config/daily-only.filterset` lists them, one nextest filterset
+per line. `scripts/ci-nextest` leaves them out of every selection, so pull requests, merge groups
+and local runs skip them, unless `CI_TEST_LANE=daily` is set. Only the two `daily-tests` shards set
+it, so the shard inventory proof still covers exactly what each lane runs. Run a moved group locally with
+`CI_TEST_LANE=daily bash scripts/ci-nextest run -E '<its filter>'`. A group moves only after its
+per-pull-request contract tests run on every pull request and this run has been green three days,
+one pull request per group, with the measured time it saves; `scripts/ci-nextest-test` checks the
+selection.
+
 The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
 step and failed steps to the run summary. On red, it opens or comments on the one open issue
 titled `Daily long-lane run failed`. The workflow is not a required check and changes no pull
