@@ -527,6 +527,13 @@ fn chatgpt_discovery_matches_main_golden() {
     // from this branch's TOOLS/schema(). Keep this file immutable. Compared as JSON
     // values because object key order depends on serde_json's preserve_order
     // feature, which smallclaims enables under workspace feature unification only.
+    // Regenerate only in a scratch worktree at that commit: temporarily add a test
+    // in crates/st-chatgpt/src/tests.rs writing serde_json::to_vec(&ListToolsResult {
+    // tools: tool_definitions(), ..Default::default() }) to
+    // crates/st-chatgpt/src/testdata/chatgpt-tools-list.json; run
+    // `cargo test -p st-chatgpt <name>`, then remove the temporary test.
+    // main 787744ffea's crates/fractal-chatgpt/src/lib.rs is byte-identical to
+    // bed66fbea6's crates/st-chatgpt/src/lib.rs.
     let result = ListToolsResult {
         tools: tool_definitions(Profile::ChatGpt),
         ..Default::default()
@@ -598,27 +605,32 @@ fn all_eleven_mcp_output_schemas_pin_envelopes_and_value_contracts() {
 
 #[test]
 fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
-    for (value, error) in [
+    for (value, error, text) in [
         (json!({"api_version":"st3.client.v0","request_id":"request/example",
             "snapshot":{"id":"snapshot/example","host_id":"host/example","store_index":1},
-            "value":{"kind":"page","items":[],"page":{"limit":1,"has_more":false,"next_cursor":null}}}), false),
-        (json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}), true),
-        (json!({"code":"incomplete","http_status":413,"daemon":{"code":"response-budget-exceeded"}}), true),
-        (json!({"code":"daemon-denied","http_status":403,"daemon":{"code":"forbidden"}}), true),
-        (json!({"code":"unavailable","message":"The paired st daemon is unavailable."}), true),
-        (json!({"code":"invalid-daemon-response"}), true),
-        (json!({"code":"unknown-tool"}), true),
+            "value":{"kind":"page","items":[],"page":{"limit":1,"has_more":false,"next_cursor":null}}}), false,
+            r#"{"api_version":"st3.client.v0","request_id":"request/example","snapshot":{"host_id":"host/example","id":"snapshot/example","store_index":1},"value":{"items":[],"kind":"page","page":{"has_more":false,"limit":1,"next_cursor":null}}}"#),
+        (json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}), true,
+            r#"{"code":"invalid-arguments","message":"Use the exact published tool schema."}"#),
+        (json!({"code":"incomplete","http_status":413,"daemon":{"code":"response-budget-exceeded"}}), true,
+            r#"{"code":"incomplete","daemon":{"code":"response-budget-exceeded"},"http_status":413}"#),
+        (json!({"code":"daemon-denied","http_status":403,"daemon":{"code":"forbidden"}}), true,
+            r#"{"code":"daemon-denied","daemon":{"code":"forbidden"},"http_status":403}"#),
+        (json!({"code":"unavailable","message":"The paired st daemon is unavailable."}), true,
+            r#"{"code":"unavailable","message":"The paired st daemon is unavailable."}"#),
+        (json!({"code":"invalid-daemon-response"}), true, r#"{"code":"invalid-daemon-response"}"#),
+        (json!({"code":"unknown-tool"}), true, r#"{"code":"unknown-tool"}"#),
     ] {
         let legacy = serde_json::to_value(tool_result(Profile::ChatGpt, value.clone(), error)).unwrap();
         // Pin the wire fields independently of rmcp's result constructors.
-        let mut expected = json!({"resultType":"complete","content":[{"type":"text","text":value.to_string()}],"isError":error});
+        let mut expected = json!({"resultType":"complete","content":[{"type":"text","text":text}],"isError":error});
         assert_eq!(serde_json::to_vec(&legacy).unwrap(), serde_json::to_vec(&expected).unwrap());
         assert!(legacy.get("structuredContent").is_none());
         let mcp = serde_json::to_value(tool_result(Profile::Mcp, value.clone(), error)).unwrap();
         expected["structuredContent"] = value.clone();
         assert_eq!(mcp, expected);
         assert_eq!(mcp["isError"], error);
-        assert_eq!(mcp["content"][0]["text"], value.to_string());
+        assert_eq!(mcp["content"][0]["text"], text);
         assert_eq!(mcp["structuredContent"], value);
     }
 }
