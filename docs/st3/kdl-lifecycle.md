@@ -36,7 +36,10 @@ the plain-file preview snapshot as it does for publication.
 Publication checks exec gates by default and refuses broken commands (exit codes other than 0
 or 1). A gate that answers "not yet" (exit 1) does not block publication, just as with
 `st missions check`. Use `--no-gate-check` to skip this check. Dry runs without `--check`
-run no commands.
+run no commands. Publication, dry-run checks, and `missions check` check ordinary mission
+and step exec gates, including per-round steps. Loop `until` scripts are listed as
+"not checked, they run after each round", with that reason shown. A running loop still
+evaluates them at every round boundary, after the round has produced its outputs.
 
 `st agents apply` and `st missions publish` are legacy commands. Each prints a one-line notice on stderr
 naming `st apply` as its replacement and accepts `--dry-run` (alias `--preview`). `st agents apply` publishes

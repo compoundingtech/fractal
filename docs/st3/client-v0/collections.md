@@ -20,9 +20,44 @@ Send one JSON command per subscription:
 
 Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
-`person` to attention, and `status` to agents. For `arrangements`, `person: "person/NAME"`
+`person` to attention, and `status` plus exact `agent` to agents. For `arrangements`, `person: "person/NAME"`
 is required: agents explicitly select a fleet person's collection, never an inferred
-owner. Each read checks `read.arrangements` and the selected person's access. For example:
+owner. Each read checks `read.arrangements` and the selected person's access.
+
+To follow one agent's current card, including usage/context, queue preview, workspace
+and current subagents, select its full ID:
+
+```json
+{"kind":"subscribe","id":"agent-details","collection":"agents","agent":"agent/ID"}
+```
+
+This window contains zero or one rows and always has `has_more: false`, independent
+of fleet ordering or the requested limit (which must still be 1–200). An absent or
+historical agent starts empty; creation/current-state entry inserts it, and retirement
+or leaving current state removes it. `status` intersects the exact selector after
+live status overlays. Omitting `agent` retains the bounded fleet window. Other
+collections reject `agent`, and malformed IDs or IDs longer than 256 bytes are refused. The selector does not
+grant authority: every read rechecks the same `read.projections` scope and pairing
+grant as a fleet subscription.
+
+Exact windows construct only the selected card and reuse the existing changed-agent
+key hints for subsequent reads. Unrelated agent changes neither refold the selected
+card nor emit a change frame. They do not build a fleet roster.
+The selected card folds apart from the fleet roster: a warm fleet projection neither
+answers an exact window nor is narrowed or evicted by one.
+
+The existing HTTP `GET /v1/client/agents/{id}` detail read folds only that agent's card; it does
+not require a fleet list read first.
+A daemon that serves exact selectors advertises capability
+`collection.agents.exact-selector` version 1 in `GET /v1/client/capabilities`. An older
+daemon ignores unknown fields and would answer with the fleet window, so a client sends
+`agent` only after the connected daemon granted that capability. The generated clients
+enforce this: Rust `Client::subscribe_agent`, TypeScript `CollectionStream.subscribeAgent`
+and Swift `agentsStream(agent:)` read the capabilities first and fail with an explicit
+error, sending nothing, when it is missing. TypeScript `subscribe` and Rust
+`CollectionStream::subscribe` never send `agent`.
+
+An arrangement window explicitly selects its owner:
 
 ```json
 {"kind":"subscribe","id":"sidebar","collection":"arrangements","person":"person/ada","limit":100}
@@ -44,6 +79,38 @@ subject starts empty. Individual resource byte bounds still apply. Omitting
 Arrangement snapshots and changes carry full typed arrangement resources. Folder or
 placement changes are full resource upserts; retirement sends the arrangement ID in
 `removes`. Glass privacy and its person-only selection are unchanged.
+
+An owner-wide arrangements subscription (no `subject`) also invalidates the complete
+owner inventory, not just the visible prefix. The server reads that owner's inventory
+revision in the same SQLite snapshot as the resources and fence. After the initial
+`snapshot`, a changed owner revision sends the existing `changes` frame even when the
+prefix is identical: `upserts: []`, `removes: []`, unchanged `order` and `has_more`,
+and the current `snapshot` (including `id` and `store_index`). The frame retains the
+subscription `id` and `collection: "arrangements"`; there is no extra revision field.
+Create, rename, retirement, layout edits and replicated materialization advance this
+owner revision, including records outside the count/byte window and older admitted
+claims whose projection was deferred behind a newer local edit. The counter is local
+persistent metadata, bumped in the same transaction as the owner's projected heads,
+with one owner upsert per local edit savepoint and one upsert per touched owner per
+replicated/replay transaction. Existing local write batching is retained: co-committed
+edit savepoints each perform their own upsert. Keys are per owner, not one shared hot row.
+Replay/rebuild also bumps the owners whose heads it touches. Multiple changes may
+coalesce into one reread. Another owner's edits and unrelated routine global commits
+do not send an inventory notice. A selected-subject subscription remains resource-only.
+
+The subscription compares revisions for inequality, not monotonic increase: resetting
+or rebuilding the local database can cause one extra owner notice. Deferred projection,
+replay or a reset may change the owner revision **without advancing the claim index**,
+so the frame's `snapshot.id` and `snapshot.store_index` can equal the previous frame's.
+Do not suppress a changes frame merely because its snapshot fields are unchanged.
+
+Clients needing complete owner inventory must paginate the HTTP arrangements list
+after the initial snapshot and every owner-wide `changes` frame, including empty
+ones. Pin each complete read to its page snapshot/cursors; restart an expired read.
+Keep the subscription open while reading and coalesce concurrent invalidations into
+a follow-up complete read. Bounded prefix contents cannot prove absence or select a
+winner across the full inventory. Reconnect/resync handling remains unchanged.
+
 A window contains 1–200 current items. History remains on the
 corresponding paged HTTP reads. Send `{"kind":"unsubscribe","id":"missions-tab"}`
 to remove a subscription. IDs are chosen by the client and unique on the socket.
@@ -130,7 +197,24 @@ A conversation is one more subscription too. Name an agent or a session:
 {"kind":"subscribe","id":"talk","collection":"conversation","conversation":"agent/ID"}
 ```
 
-An agent's conversation is its current session's timeline with the Smalltalk to or from the agent
+The first frame carries the conversation's newest 200 entries, or fewer when the subscribe
+names an optional `limit` (1 through 200). A replacement frame with `has_more: true` also
+carries `older_cursor`: pass it to `GET /v1/client/sessions/{id}/timeline?cursor=…` for the
+entries just before the frame's oldest entry, then follow that response's `page.next_cursor`.
+A client that pages this way can ask for a small first frame, such as `"limit":20`. When a
+replacement frame has older history, later deltas carry only new entries and revisions of
+entries from that frame onward. A change to an older entry sends a replacement frame instead,
+with the same requested limit and a fresh `older_cursor`. Every replacement frame is an
+authoritative new history snapshot: discard pages read back before it and their cursors, even
+when its window overlaps them, and ignore older-page responses requested before it. Page back
+from the new `older_cursor` to see the revision.
+Native conversation cursors also pin the source's content generation. A generation change
+triggers `replace: true` even when the newest sequence is unchanged and replay would return
+no delta entries. For append-only JSONL harness transcripts, the existing index detects
+file replacement, shrinkage and changes to the last complete record; an interior edit that
+preserves both the file length and the final record does not advance that generation.
+
+An agent's conversation is its current session's timeline with the Fractal to or from the agent
 joined in. The first `conversation` frame carries `id`, `collection` (`conversation`),
 `session_id`, `replace: true`, the newest page of timeline `items`, and `has_more`. Later frames
 carry `replace: false` and the entries that changed since; an entry revised in place arrives
@@ -184,7 +268,12 @@ send the existing `resync`/`error` frames, never inferred zero counts. Clients k
 behavior on older daemons.
 A daemon serves these counts from published rows. What no person changes (missions,
 working agents, machines) is computed once for every selection, at one cut, and again
-when the cut, the roster or the 30-second clock period changes. Each selection counts
+when the cut, the roster or the 30-second clock period changes. The machines they count
+are read again only when a claim about a host, or a run or generation that owns runtimes,
+arrives, when a runtime with new claims (other than its harness reports) starts on, stops
+on or moves to another host so that the set of runtime hosts changes, when operations
+conflict or fleet membership changes, and each clock period, when peers' replication
+successes are read again. Each selection counts
 its alerts from the published attention rows, the same rows its
 attention window shows. The row carries the shared counts' cut. A window that opens a
 new selection is served at once. Before the first publication, the window gets a
@@ -194,6 +283,13 @@ Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
 retain their prior row timestamp so an unchanged count emits no delta.
+
+## Presentations
+
+Optional capability `presentation` version 1 says agent rows carry `presentation`: st's state
+word, list group, why the agent needs someone, and what it holds and has queued (see
+[the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
+lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
 
 ## Screen inventories
 

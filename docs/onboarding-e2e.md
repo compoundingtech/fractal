@@ -47,7 +47,7 @@ Select additional scenarios with repeated `--scenario` and `--ubuntu` flags:
 | Scenario | Fixture and assertion |
 | --- | --- |
 | first-run | Three initial answers in a real PTY; default service yes |
-| no-harness | No expert or mission; missing provider diagnosed within eight seconds |
+| no-harness | No assistant or mission; missing provider diagnosed within eight seconds |
 | claude-policy-absent | Native Claude fixture; driver accepts development dialog; channel receipt |
 | claude-policy-present | Exact disposable managed fragment; approved plugin route |
 | codex | Existing native app-server and TUI fixture; successful message read |
@@ -94,8 +94,8 @@ Provider scenarios use `scripts/st3-boot-canaries` and the Claude adapter in
 runner asserts the exact Selected harness output once, creates its own disposable
 native-driver seat, sends a graph message,
 requires a successful read of that exact message plus route/consent or app-server
-receipts, and stops the seat. It does not depend on the built-in expert or publish
-onboarding. The default provider scenarios retain the expert and one-run checks.
+receipts, and stops the seat. It does not depend on the built-in Fractal Assistant or publish
+onboarding. The default provider scenarios retain the assistant and one-run checks.
 The policy-present fixture runs the candidate's `claude-channel install-policy`
 helper as root inside the disposable guest and verifies ordinary-user readability.
 Optional GitHub probes run as the live test seat, as required by `st gh watch`.
@@ -186,23 +186,23 @@ For macOS, use `scripts/onboarding-mac-test` or `--backend tart` and follow
 cases use a prepared clean Apple Silicon base, native app/signature/launchd checks
 and a GUI-login reboot check. Linux-only and provider-phase options are rejected.
 
-The full expert phase adds two focused scenarios:
+The full assistant phase adds two focused scenarios:
 
-- `expert-lifecycle`: a fresh Codex first-run waits for the focused `Message Expert`
+- `assistant-lifecycle`: a fresh Codex first-run waits for the focused `Message Smalltalk Assistant`
   composer hint with `type or click` before navigating Home. It requires a reachable
-  built-in expert and the exact graph wake read, stops the expert, explicitly
-  cancels `mission-run/st/onboarding`, and repeats ordinary setup twice. The expert
+  built-in Fractal Assistant and the exact graph wake read, stops the assistant, explicitly
+  cancels `mission-run/st/onboarding`, and repeats ordinary setup twice. The assistant
   must stay stopped and non-actionable in history with one historical run. `setup --onboarding` must
   then restore it with a different observed incarnation and add exactly one UUID
-  run alongside cancelled history; the restored expert must read a new exact wake.
+  run alongside cancelled history; the restored assistant must read a new exact wake.
 - `claude-pre-channel`: `setup --harness claude --claude-channel false` must preserve
   the selected Claude harness, print its inline development route and start the
-  built-in expert without the user plugin. The original incarnation must read a
+  built-in Fractal Assistant without the user plugin. The original incarnation must read a
   wake through `server:st3`; user `claude-channel install --no-policy` followed by
   `agents restart` must produce a different reachable incarnation using the
   installed development plugin, accept its consent, and read a new exact wake.
 
-These cases require the expert-seat candidate and reject `--harness-only`.
+These cases require the built-in Assistant candidate and reject `--harness-only`.
 Historical run counts use `missions show` overview fields, including cancelled
 runs; the CLI returns the run itself when exactly one historical run exists.
 Stopped seats can retain historical runtime/reachability fields; their stopped,
@@ -218,8 +218,8 @@ exact post-install wake read, the installed plugin argv and its consent receipt.
 This proves channel recovery; the early restart CLI wait classification remains.
 
 ```sh
-scripts/onboarding-e2e --scenario expert-lifecycle --scenario claude-pre-channel \
+scripts/onboarding-e2e --scenario assistant-lifecycle --scenario claude-pre-channel \
   --scenario claude-policy-absent --scenario claude-policy-present --scenario codex \
-  --ubuntu 24.04 --image onb-sysd2404 --archive /tmp/expert-candidate.tar.gz \
-  --sha256 HEX --out /tmp/expert-proof
+  --ubuntu 24.04 --image onb-sysd2404 --archive /tmp/assistant-candidate.tar.gz \
+  --sha256 HEX --out /tmp/assistant-proof
 ```

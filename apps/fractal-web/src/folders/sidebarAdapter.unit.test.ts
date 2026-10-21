@@ -1,9 +1,10 @@
 import { describe, expect, it } from '@effect/vitest'
-import { ArrangementEditParameters } from '@smalltalk/st3-client/schema'
+import { ArrangementEditParameters, ArrangementKey } from '@fractal/client/schema'
 import { Effect, Schema } from 'effect'
 import * as fc from 'fast-check'
+import { generateNKeysBetween } from 'fractional-indexing'
 import { arrangementSidebarDoc } from './client.ts'
-import { drawnParents, liveAncestor, type FolderDoc } from './core.mts'
+import { drawnParents, liveAncestor } from './core.mts'
 import { optimisticArrangement, type SidebarOperation } from './edit.ts'
 import { boundRows, canDrop, filterSidebarTree, nativeInsertAt, operationsForCreate, operationsForDelete, operationsForMove, operationsForRename, restageBoundMove, restageCreate, restageDelete, restageMove, restageRename, rowStatus, sidebarProjection, sidebarTree, type SidebarDocument, type SidebarSeat } from './sidebarAdapter.ts'
 import type { SidebarMove } from './sidebarContract.ts'
@@ -41,6 +42,15 @@ const apply = (doc: SidebarDocument, operations: readonly SidebarOperation[]): S
 const move = (id: string, target: SidebarMove['target']): SidebarMove => ({ items: [id], target })
 const admissible = (operations: readonly SidebarOperation[]) =>
   Schema.is(Schema.toEncoded(ArrangementEditParameters))({ owner: 'person/example', subject: 'arrangement/person/example/00000000-0000-7000-8000-000000000001', operations })
+const expectCanonicalKey = (key: string) => {
+  expect(Schema.is(ArrangementKey)(key)).toBe(true)
+  expect(new TextEncoder().encode(key).length).toBeLessThanOrEqual(128)
+  const head = key.charCodeAt(0)
+  const integerLength = head >= 97 ? head - 97 + 2 : 90 - head + 2
+  expect(key.length).toBeGreaterThanOrEqual(integerLength)
+  expect(key.length === integerLength || !key.endsWith('0')).toBe(true)
+  expect(key[0] === 'A' && /^0+$/.test(key.slice(1, integerLength))).toBe(false)
+}
 
 describe('sidebar matrix operations', () => {
   it('Create folder appends, normalizes blank names and falls back from a missing parent', () => {
@@ -145,9 +155,9 @@ describe('sidebar matrix operations', () => {
     expect(operationsForMove(doc, move('beta.one', { _tag: 'Into', folder: b }))).toMatchObject([{ op: 'subject.place', subject: 'agent/one', folder: b }])
     expect(canDrop(doc, move('agent/one', { _tag: 'Into', folder: b }))).toEqual({ refused: 'This item is no longer available.' })
   })
-  it('Collapse and expand are tri-state local view intent for folders and host groups', () => {
+  it('Collapse and expand are local view intent for folders and the Unfiled group', () => {
     const doc = setup()
-    const tree = sidebarTree(sidebarProjection(doc), roster, new Map([[a, true], ['host:alpha', false]]))
+    const tree = sidebarTree(sidebarProjection(doc), roster, new Map([[a, true], ['wf/unfiled', false]]))
     expect(tree[0]).toMatchObject({ _tag: 'Folder', collapsed: true })
     expect(tree.at(-1)).toMatchObject({ _tag: 'Group', collapsed: false })
     expect(doc).toEqual(setup())
@@ -155,9 +165,9 @@ describe('sidebar matrix operations', () => {
   it('Show unfiled agents after the complete forest in stable host and seat key order', () => {
     const doc = apply(setup(), [{ op: 'subject.place', subject: 'agent/one', folder: null, key: 'z' }])
     const tree = sidebarTree(sidebarProjection(doc), roster, new Map())
-    expect(tree.map((node) => node.id)).toEqual([a, b, 'host:alpha', 'host:beta'])
+    expect(tree.map((node) => node.id)).toEqual([a, b, 'wf/unfiled'])
     const group = tree[2]!
-    expect(group._tag === 'Group' ? group.children.map((node) => node.id) : []).toEqual(['alpha.new', 'alpha.one'])
+    expect(group._tag === 'Group' ? group.children.map((node) => node.id) : []).toEqual(['alpha.new', 'alpha.one', 'beta.one'])
   })
   it('New and returning agents use unfiled host order or their dormant stored slot without writes', () => {
     const doc = setup()
@@ -185,7 +195,7 @@ describe('sidebar matrix operations', () => {
   it('Search prunes empty folders and keeps ancestors and full sibling order for moves', () => {
     const doc = setup()
     const tree = filterSidebarTree(sidebarTree(sidebarProjection(doc), roster, new Map([[a, true]])), 'Two')
-    expect(tree).toMatchObject([{ id: a, collapsed: true, children: [{ id: 'alpha.two' }] }])
+    expect(tree).toMatchObject([{ id: a, collapsed: false, children: [{ id: 'alpha.two' }] }])
     expect(doc).toEqual(setup())
     expect(operationsForMove(doc, move('alpha.two', { _tag: 'Before', sibling: 'beta.one' }))).toHaveLength(1)
   })
@@ -229,6 +239,43 @@ describe('sidebar matrix operations', () => {
     expect(admissible(operations)).toBe(true)
     expect(sidebarProjection(apply(doc, operations)).folders[0]?.members).toEqual(['agent/one', 'agent/new', 'agent/two'])
     expect(admissible(operationsForCreate(setup(), { parent: null, name: 'Next' }, fresh))).toBe(true)
+  })
+  it('Below-bound native insertion vectors remain unchanged', () => {
+    for (const [keys, index, key] of [
+      [[], 0, 'a0'],
+      [['a0'], 0, 'Zz'],
+      [['a0'], 1, 'a1'],
+      [['Zz', 'a0'], 1, 'ZzV'],
+      [['a0', 'a1'], 1, 'a0V'],
+      [['a0', 'a0V'], 1, 'a0G'],
+    ] as const) expect(nativeInsertAt(keys, index)).toEqual({ key, rekeyed: [] })
+    expect(nativeInsertAt(['a0', 'a0'], 1)).toEqual({ key: 'a1', rekeyed: [[1, 'a2']] })
+  })
+  it('Accepts a 128-byte output unchanged and fully rekeys a would-be 129-byte output', () => {
+    const prefix = `a0${'0'.repeat(125)}`
+    expect(nativeInsertAt(['a0', `${prefix}2`], 1)).toEqual({ key: `${prefix}1`, rekeyed: [] })
+    expectCanonicalKey(`${prefix}1`)
+    expect(nativeInsertAt(['a0', `${prefix}1`], 1)).toEqual({ key: 'a1', rekeyed: [[0, 'a0'], [1, 'a2']] })
+  })
+  it('Repeated same-gap insertion rekeys the full partition before exceeding the st key bound', () => {
+    const siblings = [{ id: 0, key: 'a0' }, { id: 1, key: 'a1' }]
+    let rekeyed = false
+    let inserted = 0
+    for (; inserted < 800 && !rekeyed; inserted++) {
+      const insertion = nativeInsertAt(siblings.map(({ key }) => key), 1)
+      for (const key of [insertion.key, ...insertion.rekeyed.map(([, key]) => key)]) expectCanonicalKey(key)
+      if (insertion.rekeyed.length > 0) {
+        expect(insertion.rekeyed.map(([index]) => index)).toEqual(siblings.map((_, index) => index))
+        const keys = generateNKeysBetween(null, null, siblings.length + 1)
+        expect(insertion).toEqual({ key: keys[1], rekeyed: siblings.map((_, index) => [index, keys[index < 1 ? index : index + 1]]) })
+        rekeyed = true
+      }
+      for (const [index, key] of insertion.rekeyed) siblings[index]!.key = key
+      siblings.splice(1, 0, { id: inserted + 2, key: insertion.key })
+    }
+    expect(rekeyed).toBe(true)
+    expect(siblings.toSorted((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0).map(({ id }) => id))
+      .toEqual([0, ...Array.from({ length: inserted }, (_, index) => inserted + 1 - index), 1])
   })
   it('Dormant stored placements reserve their keys, so appending or rekeying never collides with them', () => {
     const doc = setup()

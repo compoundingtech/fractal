@@ -1,5 +1,5 @@
-# The root remains a package while the legacy st2 runner is present.
-# Shared release identity lives in workspace.package so retiring st2 does not
+# The root remains a package while the legacy fractal-legacy-runner runner is present.
+# Shared release identity lives in workspace.package so retiring fractal-legacy-runner does not
 # change the current binaries' release stamps.
 [workspace]
 members = [
@@ -11,42 +11,82 @@ members = [
   "crates/agent-spec",
   "crates/demo-resolver-wasm",
   "crates/smallclaims",
-  "crates/st-drivers",
-  "crates/st-runtime",
-  "crates/st-storage-version",
-  "crates/st-resource-protocol",
-  "crates/st2-resource-providers",
-  "crates/st2-resource-wasip2",
-  "crates/st-wire",
-  "crates/st3",
-  "crates/st3-client",
-  "crates/st3-client-codegen",
-  "crates/st3-conversation-ui",
-  "crates/st3-feed",
-  "crates/st3-migrate",
-  "crates/st3-schema",
-  "crates/st3-terminal-direct",
-  "crates/st3-ui-model",
-  "crates/stui",
+  "crates/fractal-build-stamp",
+  "crates/fractal-drivers",
+  "crates/fractal-fabric-adapter",
+  "crates/fractal-runtime",
+  "crates/fractal-storage-version",
+  "crates/fractal-resource-protocol",
+  "crates/fractal-resource-providers",
+  "crates/fractal-resource-wasip2",
+  "crates/fractal-wire",
+  "crates/fractal",
+  "crates/fractal-chatgpt",
+  "crates/fractal-daemon",
+  "crates/fractal-e2e",
+  "crates/fractal-kernel",
+  "crates/fractal-telemetry",
+  "crates/fractal-secrets",
+  "crates/fractal-seats-base",
+  "crates/fractal-delivery-base",
+  "crates/fractal-missions-base",
+  "crates/fractal-github-base",
+  "crates/fractal-store",
+  "crates/fractal-delivery",
+  "crates/fractal-missions",
+  "crates/fractal-seats",
+  "crates/fractal-attention",
+  "crates/fractal-evidence",
+  "crates/fractal-github",
+  "crates/fractal-peer",
+  "crates/fractal-reconcile",
+  "crates/fractal-api-core",
+  "crates/fractal-api-client-v0",
+  "crates/fractal-api-mailbox",
+  "crates/fractal-client",
+  "crates/fractal-client-codegen",
+  "crates/fractal-conversation-ui",
+  "crates/fractal-feed",
+  "crates/fractal-migrate",
+  "crates/fractal-schema",
+  "crates/fractal-terminal-direct",
+  "crates/fractal-ui-model",
+  "crates/fractal-tui",
 ]
 default-members = [
   "examples/client-tui",
   ".",
   "crates/agent-spec",
   "crates/smallclaims",
-  "crates/st-drivers",
-  "crates/st-runtime",
-  "crates/st-resource-protocol",
-  "crates/st-wire",
-  "crates/st3",
-  "crates/st3-client",
-  "crates/st3-conversation-ui",
-  "crates/st3-feed",
-  "crates/st3-migrate",
-  "crates/st3-schema",
-  "crates/st3-terminal-direct",
-  "crates/st3-ui-model",
-  "crates/stui",
+  "crates/fractal-build-stamp",
+  "crates/fractal-drivers",
+  "crates/fractal-fabric-adapter",
+  "crates/fractal-runtime",
+  "crates/fractal-resource-protocol",
+  "crates/fractal-wire",
+  "crates/fractal",
+  "crates/fractal-daemon",
+  "crates/fractal-e2e",
+  "crates/fractal-kernel",
+  "crates/fractal-telemetry",
+  "crates/fractal-secrets",
+  "crates/fractal-seats-base",
+  "crates/fractal-delivery-base",
+  "crates/fractal-missions-base",
+  "crates/fractal-github-base",
+  "crates/fractal-store",
+  "crates/fractal-github",
+  "crates/fractal-peer",
+  "crates/fractal-reconcile",
+  "crates/fractal-api-core",
+  "crates/fractal-client",
+  "crates/fractal-conversation-ui",
+  "crates/fractal-feed",
+  "crates/fractal-migrate",
+  "crates/fractal-schema",
+  "crates/fractal-terminal-direct",
+  "crates/fractal-ui-model",
+  "crates/fractal-tui",
 ]
 
 exclude = ["vendor/libghostty-vt-sys"]
@@ -62,23 +102,89 @@ ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 [patch.crates-io]
 libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
 
+# Debug assertions are OFF in the dev and test profiles and ON in release-with-assertions runs
+# (docs/ci.md, "Debug assertions"): measured on the same tree, they cost about 21% of compile CPU
+# and 26% of a cold compile's wall time, and about 14% of a debug-glue-heavy test's CPU (std's
+# unsafe-precondition checks and debug_assert! in every crate). Overflow checks, assert! and
+# bounds checks stay on. To run a build with the assertions: CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true
+# CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true. The profile is part of the tree, so a signed run binds it.
 [profile.dev]
 debug = 1
+debug-assertions = false
+overflow-checks = true
 
 [profile.dev.package."*"]
 debug = 0
 
 [profile.test]
 debug = 1
+debug-assertions = false
+overflow-checks = true
 
 [profile.test.package."*"]
 debug = 0
 
+# The fractal-daemon library unit test is the largest rustc in the workspace; its debug info costs
+# about 2 GB of peak memory and a third of its executable. Backtraces keep function names.
+[profile.test.package.fractal-daemon]
+debug = 0
+
+# Optimize hot third-party code in dev/test while preserving assertions (these four keep
+# debug-assertions on at opt-level 3, where they are cheap) and the existing no-debug-info
+# dependency policy. Workspace crates retain opt-level 0.
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package.sha2]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package.ring]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package.serde_json]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.libsqlite3-sys]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.sha2]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.ring]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.serde_json]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
 [package]
-name = "st2"
+name = "fractal-legacy-runner"
 version.workspace = true
 edition = "2024"
-build = "crates/st-drivers/build.rs"
 description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."
 license = "MIT"
 # Every file in tests/ is a module of one test binary; see tests/integration.rs.
@@ -89,7 +195,7 @@ name = "st2"
 path = "src/main.rs"
 
 [lib]
-name = "st2"
+name = "fractal_legacy_runner"
 path = "src/lib.rs"
 
 [[test]]
@@ -117,7 +223,9 @@ path = "tests/resource_profile_supervisor_e2e.rs"
 # Sync by design: the runner is I/O-light (shell-outs to `pty` plus a
 # folder watch + a sleep), so no tokio. Deps grow per milestone; M0 needs only parse + CLI.
 agent-spec = { path = "crates/agent-spec" }
-st-drivers = { path = "crates/st-drivers" }
+# The build identity: only the binary packages depend on it (see crates/fractal-build-stamp).
+fractal-build-stamp = { path = "crates/fractal-build-stamp" }
+fractal-drivers = { path = "crates/fractal-drivers" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
@@ -126,10 +234,10 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-st2-resource-protocol = { package = "st-resource-protocol", path = "crates/st-resource-protocol" }
-st2-resource-providers = { path = "crates/st2-resource-providers", optional = true }
-st2-resource-wasip2 = { path = "crates/st2-resource-wasip2", optional = true, features = ["runtime"] }
-st2-wire = { package = "st-wire", path = "crates/st-wire" }
+fractal-resource-protocol = { package = "fractal-resource-protocol", path = "crates/fractal-resource-protocol" }
+fractal-resource-providers = { path = "crates/fractal-resource-providers", optional = true }
+fractal-resource-wasip2 = { path = "crates/fractal-resource-wasip2", optional = true, features = ["runtime"] }
+fractal-wire = { package = "fractal-wire", path = "crates/fractal-wire" }
 tempfile = "3"
 tracing = "0.1"
 
@@ -140,12 +248,12 @@ parking_lot = "0.12"
 [features]
 # Sandbox wasm resource-profile resolvers (`agent-spec/profile_wasm`). Off by default: the
 # runner binary carries no wasmtime unless a build opts in.
-wasm-resolver = ["agent-spec/wasm-resolver", "st-drivers/wasm-resolver"]
+wasm-resolver = ["agent-spec/wasm-resolver", "fractal-drivers/wasm-resolver"]
 # Typed Component Model resource providers. This is the sole feature that admits Wasmtime for
-# observation; default members and the default st2 binary remain Wasmtime-free.
+# observation; default members and the default fractal-legacy-runner binary remain Wasmtime-free.
 wasip2-provider-runtime = [
   "wasm-resolver",
-  "dep:st2-resource-providers",
-  "dep:st2-resource-wasip2",
-  "st-drivers/wasip2-provider-runtime",
+  "dep:fractal-resource-providers",
+  "dep:fractal-resource-wasip2",
+  "fractal-drivers/wasip2-provider-runtime",
 ]

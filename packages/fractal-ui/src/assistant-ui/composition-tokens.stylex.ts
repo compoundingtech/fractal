@@ -19,7 +19,6 @@ export const textVars = stylex.defineVars({
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
 })
 
@@ -29,6 +28,10 @@ export const borderVars = stylex.defineVars({
   glassBorder: 'rgba(255, 255, 255, 0.05)',
   controlBorder: 'rgba(255, 255, 255, 0.025)',
   focusBorder: 'rgba(255, 255, 255, 0.08)',
+  /** Nesting line beside fold children and nested lists. */
+  rail: 'rgba(255, 255, 255, 0.1)',
+  /** Block quote rule. */
+  railStrong: 'rgba(255, 255, 255, 0.12)',
 })
 
 export const accentVars = stylex.defineVars({
@@ -36,6 +39,24 @@ export const accentVars = stylex.defineVars({
   primaryHover: '#3061d9',
   onPrimary: '#ffffff',
 })
+
+/** Shared interaction ink; geometry remains in the fixed scale. */
+export const interactionVars = stylex.defineVars({
+  focusRing: accentVars.primary,
+  composerFocusBorder: 'rgba(52, 107, 241, 0.4)',
+  wash: 'rgba(245, 245, 245, 0.06)',
+})
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c
+/**
+ * Literal-name alias of `interactionVars.focusRing` for the global fallback ring
+ * in `tokens.css`. Themes that override `interactionVars` also override this
+ * alias so it resolves at the themed element.
+ */
+export const focusRingBridgeVars = stylex.defineVars({
+  '--fractal-focus-ring': interactionVars.focusRing,
+})
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback
 
 export const statusVars = stylex.defineVars({
   running: '#3b82f6',
@@ -54,6 +75,13 @@ export const statusVars = stylex.defineVars({
   scrollThumbHover: 'rgba(255, 255, 255, 0.12)',
 })
 
+/** DiffPanel-only inks; source previews elsewhere retain their syntax palette. */
+export const diffPanelVars = stylex.defineVars({
+  added: '#7295ed',
+  removed: '#f87171',
+  literal: '#fe9a00',
+})
+
 /** Type scale pairs and font stacks. UI 14/20, meta 12/16, dense 11, code 13, body 14/22.75. */
 export const typeVars = stylex.defineVars({
   fontSans: `-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif`,
@@ -61,12 +89,14 @@ export const typeVars = stylex.defineVars({
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px',
+  codeSize: '13px', codeLeading: '18px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
   trackingWide: '0.1em', trackingEyebrow: '0.2em',
   headingSize: '16px', headingLeading: '24px',
+  /** Text fields on a phone: below 16px, iOS Safari zooms the page when the field takes focus. */
+  touchInputSize: '16px',
 })
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
@@ -80,7 +110,6 @@ export const radiusVars = stylex.defineVars({
 export const spaceVars = stylex.defineVars({
   xs2: '2px', xs: '4px', sm: '6px', md: '8px', lg: '12px', xl: '16px', xxl: '20px',
   zero: '0', hairline: '1px', xxxs: '1px', row: '10px', section: '24px', control: '28px', panel: '32px',
-  proseGap: '10px',
 })
 
 /** Fixed geometry: band heights, lane widths, control sizes, gutters. */
@@ -91,17 +120,24 @@ export const geometryVars = stylex.defineVars({
   sidebarMin: '208px', sidebarDefault: '256px',
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
+  /** Minimum hit target for every control in the narrow (phone) layout. */
+  touchTarget: '44px',
   toolRow: '24px',
-  menuRow: '32px',
+  menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
   drawerDefault: '220px', drawerMin: '120px',
   footer: '40px',
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  toolIndent: '28px', gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
   sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
+  /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
+  workRowColumns: '16px minmax(0, 1fr) auto 16px 80px',
+  durationColumn: '80px', statusWordMax: '20ch',
+  /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
+  textColumn: '22px', railInset: '7.5px',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
@@ -115,11 +151,12 @@ export const geometryVars = stylex.defineVars({
   inventoryColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 48rem)': 'repeat(2, minmax(0, 1fr))', '@media (min-width: 80rem)': 'repeat(4, minmax(0, 1fr))' },
   workshopColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 80rem)': 'minmax(0, 1fr) 340px' },
   contextColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 64rem)': '250px minmax(0, 1fr)' },
-  menuMin: '208px', sectionTitle: '18px', dialogTitle: '20px', switchSelectedLeft: 'calc(100% - 16px)',
+  menuMin: '208px', menuMax: '320px', sectionTitle: '18px', dialogTitle: '20px', switchSelectedLeft: 'calc(100% - 16px)',
   sidebarThree: '68px', workExpandedMax: 'min(18rem, 50dvh)', timelineStub: '16px',
   transcriptFrameHeight: '640px',
   threadViewportMin: '96px',
   polishNarrow: '440px', polishWide: '1440px',
+  changelogMax: '420px', changelogHeight: '560px',
   estimatedMessageHeight: '160px',
 
 })
@@ -135,14 +172,14 @@ export const geometryNumbers = {
   footer: 40,
   drawerMin: 120, drawerMax: 600,
   resizeStep: 8, resizeStepLarge: 32, splitMinRatio: 0.1, splitMaxRatio: 0.9,
-  tooltipOffset: 6, contextOffset: 8, scrollEndTolerance: 1,
+  tooltipOffset: 4, contextOffset: 8, scrollEndTolerance: 1,
   estimatedMessageHeight: 160,
   threadViewportMin: 96,
 } as const
 
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
-  ease: 'ease', linear: 'linear',
+  ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
 
 export const elevationVars = stylex.defineVars({
@@ -161,7 +198,6 @@ export const colorVars = stylex.defineVars({
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
   border: 'rgba(255, 255, 255, 0.06)',
   borderStrong: 'rgba(255, 255, 255, 0.08)',

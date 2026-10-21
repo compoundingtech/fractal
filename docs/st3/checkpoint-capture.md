@@ -1,6 +1,7 @@
 # Checkpoint capture in bounded memory
 
-Status: design, 2026-10-13. Issue #2492. Read [Checkpoints and trimming](checkpoints.md) first; this
+Status: steps 1 and 2 below merged (#2651, #2652); steps 3 and 4 are one change, #2683; step 5
+follows its deploy. Issue #2492. Read [Checkpoints and trimming](checkpoints.md) first; this
 note changes what a checkpoint pass costs, not what it decides. Seals, verifications, digests,
 rules, the proof and the trim keep their meaning, and two members on different sides of this
 change agree on the same checkpoint.
@@ -35,11 +36,15 @@ the history.** Specifically, at any moment it holds at most:
 Everything proportional to the sealed set lives in a staging file on disk: the envelopes, the
 compact claim rows, the drop marks, the new tombstones and the proof's saved answers.
 
-The test states the number. On a synthetic history of 200,000 claims in many small slots, a full
-pass (seal, capture, plan, prove, trim) raises live heap by at most 64 MiB above its starting
-point, measured by a counting allocator. The same pass on four times the history raises it by
-less than 1.5 times as much. The old code fails both assertions. The second assertion is the
-important one: it fails for anything proportional to history, whatever the constant.
+The test (`crates/fractal/tests/checkpoint_memory.rs`) states the number. On a synthetic history of
+4,800 claims in many small slots, a full pass (capture, plan, prove, trim) raises live heap by at
+most 8 MiB above its starting point, measured by a counting allocator. The same pass on four times
+the history raises it by less than 1.5 times as much. The staged pass holds under 1 MiB at both
+sizes; the old capture held 14 MiB and 54 MiB, about 2.7 KB a claim, so it fails both assertions.
+The second assertion is the important one: it fails for anything proportional to history, whatever
+the constant. The sizes are small because the test runs in a debug build in CI, where the proof and
+the trim cost milliseconds a claim; a run at 200,000 and 800,000 claims took 74 minutes there and
+also stayed under 1 MiB.
 
 **Time and I/O.** The capture reads each envelope, record and claim body once, a claim by its ID as
 today's capture does. The plan reads bodies again only for slots whose rule reads bodies (harness
@@ -196,5 +201,6 @@ The proof's copy needs disk as it does today.
 2. Seal identities in key order. The seal pass runs every ten minutes, so it is the first fix.
 3. The staging capture, the staging planner, and the memory budget test.
 4. The proof and the trim reading the staged plan, the scheduler keeping the staging directory,
-   and reuse of a durable plan.
+   and reuse of a durable plan. Steps 3 and 4 shipped together, since the plan in step 3 has no
+   reader until step 4.
 5. A measurement before and after on two members across a daily cut, posted to #2492.

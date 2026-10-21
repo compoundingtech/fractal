@@ -42,7 +42,7 @@ env=dict(os.environ,TERM="xterm-256color")
 for key in ("ST_AGENT","ST3_INCARNATION","ST3_ENDPOINT"): env.pop(key,None)
 proc=subprocess.Popen(request["argv"],stdin=slave,stdout=slave,stderr=slave,env=env,start_new_session=True)
 os.close(slave)
-raw=bytearray(); plain=b""; handled=[]; frame=False; navigated=False; quit_sent=False; home_start=0; initial_screen=""; expert_focused=False
+raw=bytearray(); plain=b""; handled=[]; frame=False; navigated=False; quit_sent=False; home_start=0; initial_screen=""; assistant_focused=False
 deadline=time.monotonic()+request.get("timeout",45)
 rules=[("Your name",b"ada\r"),("This machine's name",b"studio\r"),
        ("Keep st running in the background",b"\r"),("The st daemon is not running. Start it?",b"\r"),
@@ -61,9 +61,9 @@ while time.monotonic()<deadline:
   # Never answer passwords or provider login requests.
   if b"\x1b[?1049h" in raw and b" working" in plain and not frame:
    frame=True; frame_at=time.monotonic()
- focused=bool(re.search(rb"Message Expert[ \t]*\xc2\xb7[ \t]*type or click",plain))
- if frame and not navigated and (not request.get("expect_expert") or focused or time.monotonic()-frame_at>=request.get("expert_focus_timeout",15)):
-  initial_screen=plain.decode(errors="replace"); expert_focused=focused
+ focused=bool(re.search(rb"Message Fractal Assistant[ \t]*\xc2\xb7[ \t]*type or click",plain))
+ if frame and not navigated and (not request.get("expect_assistant") or focused or time.monotonic()-frame_at>=request.get("assistant_focus_timeout",15)):
+  initial_screen=plain.decode(errors="replace"); assistant_focused=focused
   os.write(master,b"\x0b"); time.sleep(0.2); os.write(master,b"home"); time.sleep(0.2); os.write(master,b"\r")
   navigated=True; home_start=len(raw); quit_at=time.monotonic()+2
  if navigated and not quit_sent and time.monotonic()>=quit_at:
@@ -78,13 +78,13 @@ plain=re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]",b"",raw).decode(errors="replace")
 home=re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]",b"",raw[home_start:]).decode(errors="replace") if navigated else ""
 print(json.dumps({"argv":request["argv"],"exit":proc.returncode,"frame":frame,
  "home_navigation":navigated,"home_frame":any(s in home for s in ("Now","Nothing needs you","Checking what needs you")),"quit_sent":quit_sent,"answers":handled,
- "expert_focused":expert_focused,"initial_screen":initial_screen,"restored":b"\x1b[?1049l" in raw,"screen":plain}))
+ "assistant_focused":assistant_focused,"initial_screen":initial_screen,"restored":b"\x1b[?1049l" in raw,"screen":plain}))
 '''
 
 SCENARIOS = ("baseline", "setup", "first-run", "no-harness", "claude-policy-absent",
     "claude-policy-present", "codex", "both", "no-gh", "gh-logged-out", "gh-broken",
     "no-manager", "hostname-localhost", "hostname-spaces", "hostname-long",
-    "existing-store", "linger-on", "linger-off", "expert-lifecycle", "claude-pre-channel", "small-machine", "small-machine-512m")
+    "existing-store", "linger-on", "linger-off", "assistant-lifecycle", "claude-pre-channel", "small-machine", "small-machine-512m")
 
 SMALL_MEMORY={"small-machine":1024**3,"small-machine-512m":512*1024**2}
 
@@ -293,6 +293,14 @@ class Run:
         try: return unwrap(json.loads(r["stdout"]))
         except ValueError: return None
 
+    def require_initial_roster(self):
+        # Health/socket startup is not roster readiness. No polling or implicit CLI wait.
+        r=self.execute("Initial history roster publication",shlex.join(["curl","--silent","--show-error","--fail","--unix-socket",f"/run/user/{self.m.uid}/st3.sock","http://localhost/v1/client/agents?history=true&min_cut=0&limit=200"]),timeout=15)
+        if r["exit"]: raise RuntimeError("initial roster publication failed")
+        payload=json.loads(r["stdout"])
+        if payload.get("snapshot",{}).get("store_index",-1)<0:
+            raise RuntimeError("daemon omitted the served roster cut")
+
     def pty(self,title,argv,**options):
         request=json.dumps({"argv":argv,"timeout":55,**options})
         r=self.execute(title,shlex.join(["python3","-c",PTY_PROBE,request]),timeout=65)
@@ -359,9 +367,9 @@ class Run:
         if scenario in ("gh-logged-out","gh-broken"):
             body="#!/bin/sh\necho 'fixture gh unavailable' >&2\nexit "+("127" if scenario=="gh-broken" else "1")+"\n"
             self.execute("Logged-out/broken gh fixture","mkdir -p ~/.local/bin; printf %s "+shlex.quote(body)+" > ~/.local/bin/gh; chmod +x ~/.local/bin/gh")
-        if scenario in ("claude-policy-absent","claude-policy-present","codex","both","no-gh","gh-logged-out","gh-broken","expert-lifecycle","claude-pre-channel"):
+        if scenario in ("claude-policy-absent","claude-policy-present","codex","both","no-gh","gh-logged-out","gh-broken","assistant-lifecycle","claude-pre-channel"):
             self.install_harnesses(scenario)
-        interactive=scenario in ("first-run","hostname-localhost","hostname-spaces","hostname-long","both","expert-lifecycle")
+        interactive=scenario in ("first-run","hostname-localhost","hostname-spaces","hostname-long","both","assistant-lifecycle")
         if not interactive:
             self.execute("Config merge sentinel","mkdir -p ~/.config/st3; printf '[checkpoint]\\nenabled = false\\n' > ~/.config/st3/config.toml")
         service="true"
@@ -378,19 +386,19 @@ class Run:
             if not self.check("existing-fleet-run",r["exit"]==0,"real unrelated run exists before setup repeats"): return
             existing_before=self.json_cli("Existing runs before setup","missions","ls","--all")
         if interactive:
-            p=self.pty("Scripted first terminal run",[self.st],expect_expert=scenario=="expert-lifecycle"); ok=p.get("frame",False)
+            p=self.pty("Scripted first terminal run",[self.st],expect_assistant=scenario=="assistant-lifecycle"); ok=p.get("frame",False)
             text=p.get("screen","")
             self.check("first-run-questions",all(x in p.get("answers",[]) for x in ("Your name","This machine's name","Keep st running in the background")),"name, machine and default service answered in PTY")
             if scenario=="both":
                 self.check("harness-choice",p.get("answers",[]).count("Which harness")==1,"several harnesses ask one choice; scripted selection is Claude")
-            if scenario=="expert-lifecycle":
-                self.check("expert-ui-focus",p.get("expert_focused",False),"focused Message Expert type-or-click composer hint appeared before navigation")
+            if scenario=="assistant-lifecycle":
+                self.check("assistant-ui-focus",p.get("assistant_focused",False),"focused Message Fractal Assistant type-or-click composer hint appeared before navigation")
         else:
             r=self.execute("Setup flags",shlex.join(argv)); ok=r["exit"]==0; text=self.output(r)
         if not self.check("setup-success",ok,"real candidate setup completed"): return
         if scenario=="claude-pre-channel":
             self.check("setup-inline-route","server:st3" in text and "development channel" in text,"declining plugin installation retains Claude and explains inline development route")
-        if scenario in ("claude-policy-absent","claude-policy-present","codex","both","no-gh","gh-logged-out","gh-broken","expert-lifecycle","claude-pre-channel"):
+        if scenario in ("claude-policy-absent","claude-policy-present","codex","both","no-gh","gh-logged-out","gh-broken","assistant-lifecycle","claude-pre-channel"):
             expected="claude" if scenario.startswith("claude-") or scenario=="both" else "codex"
             selected=re.findall(r"^Selected harness: (claude|codex|opencode|pi|omp)\s*$",text,re.M)
             self.check("setup-selected-harness",selected==[expected],"setup discovers/selects "+expected+" exactly once on daemon login PATH")
@@ -430,7 +438,7 @@ class Run:
                 self.onboarding_checks(scenario)
             elif self.m.args.harness_only and scenario!="no-harness": self.harness_checks(scenario)
             else: self.onboarding_checks(scenario)
-        if scenario=="expert-lifecycle": self.expert_lifecycle_checks()
+        if scenario=="assistant-lifecycle": self.assistant_lifecycle_checks()
         before=self.json_cli("Runs before rerun","missions","ls","--all")
         r=self.cli("Idempotent setup","setup","--person","ada","--node","studio","--yes","--service",service)
         after=self.json_cli("Runs after rerun","missions","ls","--all")
@@ -506,13 +514,13 @@ class Run:
             self.check("fixture-policy",r["exit"]==0 and readable["exit"]==0,"candidate policy helper succeeds and ordinary user can read its fragment")
 
     def harness_checks(self,scenario):
-        """Prove the native driver without depending on the future built-in expert."""
+        """Prove the native driver without depending on the future built-in Fractal Assistant."""
         harness="claude" if scenario.startswith("claude-") or scenario=="both" else "codex"
         subject="agent/fixture/onboarding-harness"
         r=self.execute("Disposable workspace","mkdir -p ~/fixture-workspace")
         if not self.check("fixture-workspace",r["exit"]==0,"private workspace created for the explicit test seat"): return
         r=self.cli("Create disposable provider seat","agents","new","fixture/onboarding-harness","--harness",harness,"--workspace","/home/ada/fixture-workspace",timeout=35)
-        if not self.check("fixture-seat-start",r["exit"]==0,"explicit "+harness+" seat starts without built-in expert"):
+        if not self.check("fixture-seat-start",r["exit"]==0,"explicit "+harness+" seat starts without built-in Fractal Assistant"):
             self.cli("Stop failed fixture seat","agents","stop",subject,"--as","person/ada")
             return
         try:
@@ -551,9 +559,10 @@ class Run:
     def onboarding_checks(self,scenario):
         if scenario=="no-harness":
             self.check("no-harness-explained",bool(re.search(r"(no .*harness|no .*provider|install (claude|codex)|harness.*not .*found)","\n".join(c["stdout"]+c["stderr"] for c in self.commands if c["title"]=="Setup flags"),re.I)),"wizard explains that no provider is installed")
+            self.require_initial_roster()
             seats=self.json_cli("All seats without a harness","agents","ls","--all")
             runs=self.json_cli("All missions without a harness","missions","ls","--all")
-            self.check("no-harness-no-seat",isinstance(seats,dict) and isinstance(seats.get("items"),list) and not any(s["id"]=="agent/st/expert" for s in seats["items"]),"no expert created without a harness; daemon list succeeds")
+            self.check("no-harness-no-seat",isinstance(seats,dict) and isinstance(seats.get("items"),list) and not any(s["id"]=="agent/st/assistant" for s in seats["items"]),"no assistant created without a harness; daemon list succeeds")
             self.check("no-harness-no-mission",isinstance(runs,dict) and isinstance(runs.get("items"),list) and not any(m["id"]=="mission/st/onboarding" for m in runs["items"]),"no onboarding mission created without a harness; daemon list succeeds")
             r=self.cli("Missing harness diagnosis","agents","new","fixture/missing","--harness","claude","--workspace","/home/ada/work",timeout=8)
             text="\n".join(line for line in self.output(r).splitlines() if "weak version" not in line)
@@ -561,16 +570,16 @@ class Run:
         else:
             deadline=time.monotonic()+35
             while True:
-                seats=self.json_cli("Expert seat","agents","show","agent/st/expert","--all")
+                seats=self.json_cli("Assistant seat","agents","show","agent/st/assistant","--all")
                 incarnation=isinstance(seats,dict) and (seats.get("incarnation_id") or seats.get("operational",{}).get("runtime_incarnation"))
                 ready=bool(incarnation and seats.get("reachability")=="reachable" and not seats.get("fault"))
                 if ready or time.monotonic()>=deadline: break
                 time.sleep(1)
-            self.check("expert-incarnation",ready,"expert has a reachable observed incarnation without a fault")
+            self.check("assistant-incarnation",ready,"assistant has a reachable observed incarnation without a fault")
             runs=onboarding_history(self.json_cli("Onboarding runs","missions","show","mission/st/onboarding"))
             self.check("onboarding-once",isinstance(runs,dict) and runs.get("total_runs")==1 and isinstance(runs.get("newest"),list) and len(runs["newest"])==1 and runs["newest"][0]["id"]=="mission-run/st/onboarding","one historical built-in onboarding run with the automatic ID")
-            read,records,reference=self.wake_and_read("agent/st/expert","Expert mailbox fixture")
-            self.check("expert-read-message",read,"native fixture successfully reads the exact graph wake "+str(reference))
+            read,records,reference=self.wake_and_read("agent/st/assistant","Assistant mailbox fixture")
+            self.check("assistant-read-message",read,"native fixture successfully reads the exact graph wake "+str(reference))
             receipts=json.dumps(records)
             if scenario.startswith("claude-policy"):
                 flag="--channels" if scenario.endswith("present") else "--dangerously-load-development-channels"
@@ -578,7 +587,7 @@ class Run:
                 if scenario.endswith("absent"):
                     self.check("claude-dialog",any(x.get("event")=="development-consent" and x.get("accepted") for x in records),"driver answered development dialog")
             if scenario in ("no-gh","gh-logged-out","gh-broken"):
-                self.github_check("agent/st/expert")
+                self.github_check("agent/st/assistant")
             if self.m.args.require_wrap_up:
                 deadline=time.monotonic()+self.m.args.mission_timeout
                 while True:
@@ -616,14 +625,14 @@ class Run:
             if read or time.monotonic()>=deadline: return read,records,reference
             time.sleep(1)
 
-    def expert_lifecycle_checks(self):
-        subject="agent/st/expert"
+    def assistant_lifecycle_checks(self):
+        subject="agent/st/assistant"
         original,ready=self.wait_seat(subject)
-        if not self.check("lifecycle-original-seat",ready,"expert running before stop/cancel"): return
+        if not self.check("lifecycle-original-seat",ready,"assistant running before stop/cancel"): return
         previous=seat_incarnation(original)
-        r=self.cli("Stop built-in expert","agents","stop",subject,"--as","person/ada")
+        r=self.cli("Stop built-in Fractal Assistant","agents","stop",subject,"--as","person/ada")
         stopped,ready=self.wait_seat(subject,stopped=True)
-        if not self.check("expert-stopped",r["exit"]==0 and ready,"explicit stop leaves expert stopped and non-actionable in history"): return
+        if not self.check("assistant-stopped",r["exit"]==0 and ready,"explicit stop leaves assistant stopped and non-actionable in history"): return
         r=self.cli("Cancel original onboarding run","missions","cancel","mission-run/st/onboarding","--reason","fixture","--as","person/ada")
         deadline=time.monotonic()+35
         while True:
@@ -633,32 +642,32 @@ class Run:
             time.sleep(1)
         if not self.check("onboarding-cancelled",r["exit"]==0 and cancelled,"explicit cancellation finishes cleanup before rerun and remains in historical run count"): return
         for n in (1,2):
-            r=self.cli("Repeat setup with stopped expert "+str(n),"setup","--person","ada","--node","studio","--yes","--service","true")
+            r=self.cli("Repeat setup with stopped assistant "+str(n),"setup","--person","ada","--node","studio","--yes","--service","true")
             seat,stopped=self.wait_seat(subject,stopped=True)
             overview=onboarding_history(self.json_cli("Historical runs after stopped setup "+str(n),"missions","show","mission/st/onboarding"))
-            self.check("stopped-setup-"+str(n),r["exit"]==0 and stopped and isinstance(overview,dict) and overview.get("total_runs")==1 and any(x.get("id")=="mission-run/st/onboarding" for x in overview.get("newest",[])),"ordinary setup neither restarts stopped expert nor creates a run")
+            self.check("stopped-setup-"+str(n),r["exit"]==0 and stopped and isinstance(overview,dict) and overview.get("total_runs")==1 and any(x.get("id")=="mission-run/st/onboarding" for x in overview.get("newest",[])),"ordinary setup neither restarts stopped assistant nor creates a run")
         r=self.cli("Explicit onboarding rerun","setup","--person","ada","--node","studio","--yes","--service","true","--onboarding")
         seat,ready=self.wait_seat(subject,previous=previous)
-        self.check("explicit-expert-restart",r["exit"]==0 and ready,"explicit onboarding restores expert with a different observed incarnation")
+        self.check("explicit-assistant-restart",r["exit"]==0 and ready,"explicit onboarding restores assistant with a different observed incarnation")
         overview=onboarding_history(self.json_cli("Historical runs after explicit onboarding","missions","show","mission/st/onboarding"))
         ids=[x["id"] for x in overview.get("newest",[])] if isinstance(overview,dict) else []
         self.check("explicit-onboarding-run",isinstance(overview,dict) and overview.get("total_runs")==2 and len(ids)==2 and "mission-run/st/onboarding" in ids and any(x.startswith("mission-run/st/onboarding/") for x in ids),"explicit rerun adds exactly one UUID run alongside cancelled history")
-        read,records,reference=self.wake_and_read(subject,"Expert explicit-rerun mailbox fixture")
-        self.check("explicit-expert-read",ready and read,"restored expert reads the exact new wake "+str(reference))
+        read,records,reference=self.wake_and_read(subject,"Assistant explicit-rerun mailbox fixture")
+        self.check("explicit-assistant-read",ready and read,"restored assistant reads the exact new wake "+str(reference))
 
     def pre_channel_checks(self):
-        subject="agent/st/expert"
+        subject="agent/st/assistant"
         r=self.execute("No plugin before user installation","python3 -c "+shlex.quote('import json; from pathlib import Path; p=Path.home()/".claude/onboarding-fixture.json"; v=json.loads(p.read_text()) if p.exists() else {}; print(json.dumps(v)); assert "st-channel@st" not in v.get("plugins",[])'))
-        if not self.check("pre-channel-plugin-absent",r["exit"]==0,"expert launched while user plugin is absent"): return
+        if not self.check("pre-channel-plugin-absent",r["exit"]==0,"assistant launched while user plugin is absent"): return
         original,ready=self.wait_seat(subject)
-        if not self.check("pre-channel-incarnation",ready,"pre-install Claude expert has a reachable observed incarnation"): return
+        if not self.check("pre-channel-incarnation",ready,"pre-install Claude assistant has a reachable observed incarnation"): return
         previous=seat_incarnation(original)
         read,records,reference=self.wake_and_read(subject,"Pre-install Claude mailbox fixture",previous)
         argv=[x.get("argv",[]) for x in records if x.get("event")=="provider-argv" and x.get("incarnation")==previous]
         self.check("pre-channel-inline-route",read and any("server:st3" in json.dumps(a) and "plugin:st-channel@st" not in json.dumps(a) for a in argv),"original incarnation reads through inline fallback with no installed plugin")
         r=self.cli("User installs Claude channel without policy","claude-channel","install","--no-policy")
         if not self.check("pre-channel-user-install",r["exit"]==0,"ordinary user installs channel without sudo policy"): return
-        r=self.cli("Restart existing Claude expert","agents","restart",subject,"--as","person/ada",timeout=45)
+        r=self.cli("Restart existing Claude assistant","agents","restart",subject,"--now","--as","person/ada",timeout=45)
         current,ready=self.wait_seat(subject,previous=previous)
         if not self.check("pre-channel-new-incarnation",restart_requested(r,subject) and ready,"restart produces a different current reachable incarnation without a fault; interactive waiting exit is followed by exact read proof"): return
         incarnation=seat_incarnation(current)
@@ -725,7 +734,7 @@ def main():
     parser.add_argument("--image",help="prebuilt Docker image implementing the embedded clean-systemd recipe")
     parser.add_argument("--fixtures",type=Path,default=Path(__file__).resolve().parent/"st3-boot-canaries")
     parser.add_argument("--strict-release",action="store_true")
-    parser.add_argument("--harness-only",action="store_true",help="test a disposable native-driver seat without requiring the built-in expert or onboarding")
+    parser.add_argument("--harness-only",action="store_true",help="test a disposable native-driver seat without requiring the built-in Fractal Assistant or onboarding")
     parser.add_argument("--require-wrap-up",action="store_true",help="also require mission completion; basic native fixtures only read and claim")
     parser.add_argument("--mission-timeout",type=int,default=90)
     parser.add_argument("--no-reboot",action="store_true")
@@ -735,7 +744,7 @@ def main():
     if args.mode and args.scenario: parser.error("use mode or --scenario")
     if any(s in SMALL_MEMORY for s in scenarios) and args.backend!="docker": parser.error("small-machine scenarios require Docker so their container memory limits are set and verified")
     if args.harness_only and args.require_wrap_up: parser.error("--harness-only and --require-wrap-up test different phases; choose one")
-    if args.harness_only and any(s in ("expert-lifecycle","claude-pre-channel") for s in scenarios): parser.error("expert lifecycle and pre-channel scenarios require full expert checks")
+    if args.harness_only and any(s in ("assistant-lifecycle","claude-pre-channel") for s in scenarios): parser.error("assistant lifecycle and pre-channel scenarios require full assistant checks")
     if any(s!="baseline" for s in scenarios) and not args.archive: parser.error("candidate scenarios require --archive")
     if args.backend in ("incus","external","tart") and any(os.environ.get(k) for k in ("CI","GITHUB_ACTIONS","BUILDKITE")):
         parser.error("real-machine backends are manual only and are refused in CI")

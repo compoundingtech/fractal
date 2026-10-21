@@ -4,7 +4,7 @@
  * Text stays real DOM text: native selection/copy, find-in-page and screen readers read it as is.
  */
 
-import type { TerminalLine, TerminalRun, TerminalScreen } from '@smalltalk/st3-client/schema'
+import type { TerminalLine, TerminalRun, TerminalScreen } from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { memo, Suspense, use, type CSSProperties, type ReactNode } from 'react'
 

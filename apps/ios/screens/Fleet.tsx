@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { plainError, type ClientConnection } from '../../../clients/typescript/st3-client';
-import { ActionSheetIOS, Alert, ScrollView, View } from 'react-native';
+import { plainError, type ClientConnection } from '../../../clients/typescript/fractal-client';
+import { ActionSheetIOS, Alert, ScrollView, Switch, Text, View } from 'react-native';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
 import { clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember } from '../presentation';
-import { isUnmanaged, isUnresolved } from '@smalltalk/st3-views';
+import { isUnmanaged, isUnresolved } from '@fractal/views';
 import { useStore } from '../store';
 import { TABS } from '../tabs';
 import { theme } from '../theme';
@@ -93,6 +93,7 @@ export function FleetScreen() {
         <T>route · {carrierInfo.routeText}</T>
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}
         {carrierInfo.issue ? <T color={theme.fault}>{carrierInfo.issue}</T> : null}
+        <NotificationsSetting />
         <Button label="forget this device" color={theme.red} onPress={() => Alert.alert('Forget this device?', 'You will need to pair again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Forget', style: 'destructive', onPress: () => void actions.forget() }])} />
       </View>
       <CarrierSection />
@@ -110,7 +111,7 @@ export function FleetScreen() {
         second={clientDetail(item, now)}
       />)}
       <SectionHeader title="devices" count={data.devices.length} />
-      {data.devices.map(device => <ListRow key={device.id} title={deviceTitle(device, caps?.session_actor)} second={`${deviceDetail(device, now)} · ${device.scopes.join(', ')}`} />)}
+      {data.devices.map(device => <ListRow key={device.id} title={deviceTitle(device, caps?.session_actor)} second={`${deviceDetail(device, now)} · ${device.scopes.join(', ')}${device.push ? device.push.registered ? ` · push registered${device.push.environment ? ` (${device.push.environment})` : ''}` : ' · push not registered' : ''}`} />)}
       <SectionHeader title="tab order" />
       {order.map(tab => <ListRow key={tab} title={tab} right={<T dim>{order.indexOf(tab) + 1}</T>} onPress={() => ActionSheetIOS.showActionSheetWithOptions(
         { title: `Move ${tab}`, options: ['Move up', 'Move down', 'Cancel'], cancelButtonIndex: 2, disabledButtonIndices: [...(order.indexOf(tab) === 0 ? [0] : []), ...(order.indexOf(tab) === TABS.length - 1 ? [1] : [])] },
@@ -120,12 +121,60 @@ export function FleetScreen() {
   </Screen>;
 }
 
+function NotificationsSetting() {
+  const { pushInfo, actions, status } = useStore();
+  const detail = !pushInfo.loaded ? 'Checking notification support…'
+    : pushInfo.cleanup === 'pending' ? 'Remote opt-out is pending. Reconnect to previously registered members before forgetting this phone.'
+    : pushInfo.cleanup === 'failed' ? 'Could not confirm remote opt-out. Pairing credentials are kept; reconnect and retry.'
+    : !pushInfo.environment ? 'Requires a push-enabled build on a physical iPhone.'
+    : status !== 'online' ? 'Connect to your paired member to register. Turning off is saved on this phone.'
+    : !pushInfo.granted ? 'Push registration is unavailable on this paired member.'
+    : pushInfo.status === 'failed' ? 'Could not update registration. Reconnect or turn notifications off and on to try again.'
+    : pushInfo.status === 'permission-denied' ? 'Allow notifications in iOS Settings, or turn this setting off.'
+    : pushInfo.status === 'working' ? 'Updating registration…'
+    : pushInfo.status === 'registered' ? `Registered (${pushInfo.environment}). No alerts are sent yet.`
+    : pushInfo.enabled ? 'Registration is waiting for this connection. No alerts are sent yet.'
+    : 'Off by default. Register this phone for future alerts; no alerts are sent yet.';
+  return <View style={{ paddingVertical: 12, gap: 5 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+      <Text style={{ color: theme.text, fontSize: 17 }}>Notifications</Text>
+      <Switch value={pushInfo.enabled} disabled={!pushInfo.enabled && !pushInfo.canEnable} onValueChange={on => void actions.setPushEnabled(on)} accessibilityLabel="Notifications on this phone" />
+    </View>
+    <Text style={{ color: theme.subtext0, fontSize: 13 }}>{detail}</Text>
+  </View>;
+}
+
 // The carrier: how this phone reaches its member. The saved gateway (Tailscale, the local network or
 // HTTPS) is the default. Fabric is an opt-in, offered only where this build links its bridge, and a
-// fabric that cannot be used falls back to the saved gateway with the reason shown above.
+// fabric that cannot be used falls back to the saved gateway with the reason shown above. Fabric
+// walks the members in the order listed here; a member that refuses stops the walk, and the person
+// picks another member by hand. Each member is paired on its own (the device's own member uses the
+// device's pairing), and the walk skips a member this phone is not paired with yet.
+const PAIRING_TEXT = { device: "this device's pairing", own: 'paired on its own', none: 'not paired yet, so the walk skips it' } as const;
+
 function CarrierSection() {
-  const { carrierInfo, actions, error } = useStore();
+  const { carrierInfo, actions, error, busy } = useStore();
   const [draft, setDraft] = useState('');
+  const [nameDraft, setNameDraft] = useState('');
+  const [pairing, setPairing] = useState({ id: '', code: '', fingerprint: '' });
+  const members = carrierInfo.members;
+  const fabric = carrierInfo.fabric;
+  const memberMenu = (index: number) => {
+    const member = members[index];
+    const unpaired = carrierInfo.pairings[index] === 'none';
+    // The device's own member is paired by pairing the device; any other member on its own.
+    const first = unpaired ? (member.device ? null : 'Pair this phone with it') : 'Use this member';
+    const options = [...(first ? [first] : []), 'Move up', 'Move down', 'Rename', 'Remove', 'Cancel'];
+    const at = first ? 0 : -1;
+    ActionSheetIOS.showActionSheetWithOptions({ title: member.name, options, destructiveButtonIndex: options.length - 2, cancelButtonIndex: options.length - 1 }, picked => {
+      const choice = picked - at;
+      if (choice === 0) { if (unpaired) { setPairing({ id: '', code: '', fingerprint: '' }); actions.startMemberPairing(index); } else actions.pickFabricMember(index); }
+      else if (choice === 1) void actions.moveFabricMember(index, -1);
+      else if (choice === 2) void actions.moveFabricMember(index, 1);
+      else if (choice === 3) Alert.prompt('Rename member', 'The name this phone shows for the member, also when it refuses.', name => void actions.renameFabricMember(index, name), 'plain-text', member.name);
+      else if (choice === 4) void actions.removeFabricMember(index);
+    });
+  };
   useEffect(() => { if (carrierInfo.built) void actions.loadFabricNode(); }, [carrierInfo.built]);
   if (!carrierInfo.built) return null;
   const fabricOn = carrierInfo.choice === 'fabric';
@@ -140,8 +189,35 @@ function CarrierSection() {
       accessibilityLabel={`Fabric, ${fabricOn ? 'on' : 'off'}. Double-tap to turn ${fabricOn ? 'off' : 'on'}.`}
     />
     <View style={{ paddingHorizontal: 12, gap: 2 }}>
-      <T dim>{carrierInfo.target ? `target · ${fabricTargetLabel(carrierInfo.target)}` : 'no fabric target saved'}</T>
-      {fabricOn && (carrierInfo.fabric.phase === 'failed' || carrierInfo.fabric.phase === 'refused') ? <Button label="try fabric again" onPress={() => actions.retryFabric()} /> : null}
+      {members.length ? <T dim>members · tried in this order; a refusal stops at that member</T> : <T dim>no fabric member saved</T>}
+    </View>
+    {members.map((member, index) => {
+      const live = fabric.member === member.name && fabric.phase === 'ready';
+      const refusedHere = fabric.member === member.name && fabric.phase === 'refused';
+      const trying = fabric.member === member.name && fabric.phase === 'dialing';
+      return <ListRow
+        key={`${member.node}/${member.service}`}
+        glyph={live ? '●' : refusedHere ? '✕' : trying ? '…' : '○'}
+        glyphColor={live ? theme.green : refusedHere ? theme.fault : theme.overlay1}
+        title={`${index + 1}. ${member.name}${live ? ' · in use' : refusedHere ? ' · refused' : trying ? ' · trying' : ''}`}
+        second={`${fabricTargetLabel(member)} · ${PAIRING_TEXT[carrierInfo.pairings[index]]}`}
+        onPress={() => memberMenu(index)}
+        accessibilityLabel={`Member ${index + 1}, ${member.name}${live ? ', in use' : refusedHere ? ', refused this phone' : ''}. Double-tap to use, move, rename or remove it.`}
+      />;
+    })}
+    {carrierInfo.pairingMember ? <View style={{ paddingHorizontal: 12, gap: 4 }}>
+      <T soft>Pairing this phone with {carrierInfo.pairingMember.name} on its own. {fabric.phase === 'ready' && fabric.member === carrierInfo.pairingMember.name ? 'Fabric is connected to it.' : fabric.phase === 'failed' || fabric.phase === 'refused' ? fabric.reason : 'Connecting to it over fabric…'}</T>
+      <T dim>On {carrierInfo.pairingMember.name}, start a pairing for this phone and enter its pairing ID, code and fingerprint. This phone's credential for {carrierInfo.pairingMember.name} goes only to {carrierInfo.pairingMember.name}.</T>
+      <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="pairing/…" value={pairing.id} onChangeText={id => setPairing(p => ({ ...p, id }))} />
+      <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} secureTextEntry placeholder="code" value={pairing.code} onChangeText={code => setPairing(p => ({ ...p, code }))} />
+      <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="sha256:… (the member's fingerprint)" value={pairing.fingerprint} onChangeText={fingerprint => setPairing(p => ({ ...p, fingerprint }))} />
+      <Button label={`pair with ${carrierInfo.pairingMember.name}`} disabled={busy || !pairing.id.trim() || !pairing.code.trim() || !pairing.fingerprint.trim()} onPress={() => void actions.pairMember(pairing.id, pairing.code, pairing.fingerprint).then(done => { if (done) setPairing({ id: '', code: '', fingerprint: '' }); })} />
+      <Button label="cancel" onPress={() => actions.cancelMemberPairing()} />
+      {error ? <T color={theme.fault}>{error}</T> : null}
+    </View> : null}
+    <View style={{ paddingHorizontal: 12, gap: 2 }}>
+      {fabric.tried > 1 ? <T dim>tried · {fabric.tried} of {members.length} members</T> : null}
+      {fabricOn && (fabric.phase === 'failed' || fabric.phase === 'refused') ? <Button label={members.length > 1 ? 'try the list again from the top' : 'try fabric again'} onPress={() => actions.retryFabric()} /> : null}
       {carrierInfo.route.kind === 'fabric' ? <>
         <T dim>path · {carrierInfo.path === 'unknown' ? 'not measured yet' : carrierInfo.path}</T>
         <Button label="check the path" onPress={() => void actions.refreshFabricPath()} />
@@ -156,8 +232,8 @@ function CarrierSection() {
     />
     <View style={{ paddingHorizontal: 12, gap: 4 }}>
       <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="node=…&service=…  (paste the member's fabric target)" value={draft} onChangeText={setDraft} />
-      <Button label="save fabric target" onPress={() => void actions.saveFabricTarget(draft).then(saved => { if (saved) setDraft(''); })} disabled={!draft.trim()} />
-      {carrierInfo.target ? <Button label="forget the fabric target" color={theme.red} onPress={() => void actions.clearFabricTarget()} /> : null}
+      <Field autoCorrect={false} placeholder={`name, such as the member's machine (${members.length ? `member ${members.length + 1}` : 'member 1'} if empty)`} value={nameDraft} onChangeText={setNameDraft} />
+      <Button label="add fabric member" onPress={() => void actions.saveFabricTarget(draft, nameDraft).then(saved => { if (saved) { setDraft(''); setNameDraft(''); } })} disabled={!draft.trim()} />
       {error && draft ? <T color={theme.fault}>{error}</T> : null}
       {carrierInfo.node ? <>
         <T dim>this phone's fabric node ID, for the member's grant (public)</T>

@@ -1,17 +1,20 @@
-import type { SidebarAgentRowData, SidebarAgentStatus } from '@smalltalk/fractal-ui/assistant-ui'
+import type { SidebarAgentRowData, SidebarAgentStatus } from '@fractal/ui/assistant-ui'
 import type { Agent } from '../data/source.ts'
 
-/** Presentation of one actual roster observation. No per-row reads or inferred usage. */
-export const sidebarRow = ({ agent, stale, now }: {
-  readonly agent: Agent; readonly stale: boolean; readonly now: number
+/**
+ * Presentation of one actual roster observation. No per-row reads or inferred usage. A stale roster keeps each
+ * row's last-observed status (working stays distinct from idle); freshness alone marks it frozen.
+ */
+export const sidebarRow = ({ agent, stale }: {
+  readonly agent: Agent; readonly stale: boolean
 }): SidebarAgentRowData => {
-  const status: SidebarAgentStatus = stale ? 'stale' : agent.state === 'retired' ? 'retired'
+  const status: SidebarAgentStatus = agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
     : agent.state === 'stopped' || agent.state === 'ended' ? 'ended'
     : agent.state === 'desired' || agent.state === 'starting' ? 'pending'
     : !agent.connected ? 'offline' : agent.activity === 'errored' ? 'stale' : agent.activity
   const validTimestamp = (value: number | undefined) => value !== undefined && Number.isFinite(value) &&
-    Number.isFinite(now) && value <= now && value >= 0 && value <= 8640000000000000 ? value : undefined
+    value >= 0 && value <= 8640000000000000 ? value : undefined
   const lastActivityAt = validTimestamp(agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined)
   const statusSince = validTimestamp(agent.statusSince)
   const knownStatuses = ['idle', 'working', 'waiting', 'errored', 'retired', 'suspended', 'stopped', 'ended', 'desired', 'starting', 'offline']

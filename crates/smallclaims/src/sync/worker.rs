@@ -1,5 +1,5 @@
-//! The sync worker: who it dials and how it backs off, the exchange, heal and checkpoint
-//! adoption it runs with each peer, and the signed routes it answers on.
+//! The sync worker: who it dials and how it backs off, the exchange and checkpoint adoption it
+//! runs with each peer, and the signed routes it answers on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -22,19 +22,16 @@ use tokio::sync::watch;
 
 use super::{
     Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING, EXCHANGE_PATH, FleetAuth,
-    HEADER_SIGNATURE, HEAL_PATH, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PEER_API_VERSION,
+    HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PEER_API_VERSION,
     PeerResponse, accepts_deflate, deflate, deflated, inflate,
 };
 use crate::fleet::transport::{
-    Fabric, FabricGrantRefusal, LocalTransports, Route, bindable_tailnet_addresses,
-    default_fabric_protocol, is_tailnet_address, local_addresses, parse_route, resolve_tool,
-    routes_from_endpoints, tailscale_addresses,
+    Fabric, FabricError, FabricErrorClass, FabricGrantRefusal, LocalTransports, Route,
+    bindable_tailnet_addresses, default_fabric_protocol, is_tailnet_address, local_addresses,
+    parse_route, resolve_tool, routes_from_endpoints, tailscale_addresses,
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
-use crate::replication::{
-    InventoryCheckpoint, ReplicationExchange, ReplicationHealAnswer, ReplicationHealQuery,
-    ReplicationHealRequest, ReplicationHealStep, ReplicationInventory,
-};
+use crate::replication::{InventoryCheckpoint, ReplicationExchange, ReplicationInventory};
 use crate::store::{CheckpointManifest, CheckpointManifestPage, CheckpointManifestRequest};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -44,6 +41,158 @@ const EXCHANGE_POLL_BUDGET: Duration = Duration::from_secs(300);
 const OVERLOAD_RETRY: Duration = Duration::from_secs(5);
 const MAX_EXCHANGE_JOBS: usize = 4;
 const MAX_OVERLOAD_POLLS: usize = 60;
+
+const LEAVE_RECEIPT_PATH: &str = "/v1/replication/leave-receipt";
+/// Bounds receiver-only replication access when the authenticated receipt never arrives.
+const LEAVE_RECEIPT_GRACE: Duration = Duration::from_secs(120);
+
+/// Proofs and receipts survive worker restarts. Keys, not host names, identify incarnations.
+#[derive(Clone, Default, serde::Deserialize, Serialize)]
+struct LeaveState {
+    confirmer: Option<String>,
+    completed: BTreeSet<String>,
+    awaiting: BTreeSet<String>,
+    #[serde(default)]
+    receiver_first_receive_unix_ms: BTreeMap<String, u128>,
+    #[serde(default)]
+    receiver_deadlines_unix_ms: BTreeMap<String, u128>,
+    pending: BTreeMap<String, LeaveProof>,
+    #[serde(skip)]
+    persistence_error: Option<String>,
+}
+
+#[derive(Clone, serde::Deserialize, Serialize)]
+struct LeaveProof {
+    body: String,
+    headers: BTreeMap<String, String>,
+    request_digest: String,
+}
+
+async fn save_leave_state(fleet: &FleetContext, state: &LeaveState) -> Result<()> {
+    // Lock order is leave state -> settings flock. Settings-flock holders must
+    // use an earlier leave snapshot, never acquire fleet.leave while holding it.
+    if let Some(directory) = &fleet.state_dir {
+        let directory = directory.clone();
+        let own = fleet.own_key.clone();
+        let bytes = serde_json::to_vec(state)?;
+        tokio::task::spawn_blocking(move || {
+            let _lock = FleetFile::lock_settings(&directory)?;
+            let file = FleetFile::load(&directory)?.context("fleet settings retired")?;
+            if let Some(own) = own {
+                anyhow::ensure!(
+                    MemberKey::load(&file.node_key_path(&directory))?.public() == own,
+                    "fleet incarnation changed while recording leave completion"
+                );
+            }
+            crate::fleet::join::write_private(&directory.join("fleet/leave-carriers.json"), &bytes)
+        })
+        .await??;
+    }
+    Ok(())
+}
+
+/// Read-only local-adapter contract. Membership and leave receipts share one worker generation.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct FleetLeaveSnapshot {
+    pub fleet_id: Option<String>,
+    pub own_member_key: Option<String>,
+    pub membership: FleetView,
+    pub members: Vec<FleetLeaveMember>,
+    pub persistence_error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct FleetLeaveMember {
+    pub member_key: String,
+    pub state: FleetLeaveStatus,
+    pub grace_deadline_unix_ms: Option<u128>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FleetLeaveStatus {
+    AwaitingConfirmation,
+    Confirmed,
+    Unconfirmed,
+}
+
+impl FleetContext {
+    /// Never refreshes membership, writes receipts, or starts/renews grace.
+    pub async fn leave_snapshot(&self, fleet_id: Option<String>) -> FleetLeaveSnapshot {
+        let _refresh = self.view_refresh.lock().await;
+        let leave = self.leave.lock().await;
+        let membership = self.view.read().expect("fleet view lock poisoned").clone();
+        let now = crate::store::now_ms();
+        let members = membership
+            .members
+            .iter()
+            .filter(|member| member.state == "ended" && member.ended.as_deref() == Some("left"))
+            .map(|member| {
+                let deadline = leave
+                    .receiver_deadlines_unix_ms
+                    .get(&member.member_key)
+                    .copied();
+                let state = if leave.completed.contains(&member.member_key) {
+                    FleetLeaveStatus::Confirmed
+                } else if leave.awaiting.contains(&member.member_key)
+                    && leave.persistence_error.is_none()
+                    && deadline.is_some_and(|deadline| now < deadline)
+                {
+                    FleetLeaveStatus::AwaitingConfirmation
+                } else {
+                    FleetLeaveStatus::Unconfirmed
+                };
+                FleetLeaveMember {
+                    member_key: member.member_key.clone(),
+                    state,
+                    grace_deadline_unix_ms: deadline,
+                }
+            })
+            .collect();
+        FleetLeaveSnapshot {
+            fleet_id,
+            own_member_key: self.own_key.clone(),
+            membership,
+            members,
+            persistence_error: leave.persistence_error.clone(),
+        }
+    }
+}
+
+/// Private process boundary: the daemon proxies reads to the live worker, not its journal.
+pub fn leave_state_socket(state_dir: &Path) -> PathBuf {
+    state_dir.join("fleet/leave-state.sock")
+}
+
+fn bind_leave_state_socket(state_dir: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let path = leave_state_socket(state_dir);
+    std::fs::create_dir_all(path.parent().context("leave socket parent")?)?;
+    let reservation = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.with_extension("sock.lock"))?;
+    // The persistent inode fences concurrent workers, including startup before listen.
+    if unsafe { libc::flock(reservation.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!(
+            "leave authority already reserved: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let listener = tokio::net::UnixListener::bind(&path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok((reservation, listener))
+}
 
 struct ExchangeJobs {
     peers: std::sync::Mutex<BTreeMap<String, ExchangeJob>>,
@@ -59,7 +208,22 @@ impl Default for ExchangeJobs {
     }
 }
 
-type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, String>;
+use crate::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+
+fn exchange_failure(
+    error: anyhow::Error,
+    phase: ReplicationFailurePhase,
+    started: std::time::Instant,
+    status: Option<StatusCode>,
+) -> anyhow::Error {
+    let failure = ReplicationExchangeFailure::from_error(
+        &error, phase, started.elapsed(), status.map(|status| status.as_u16()),
+    );
+    let display = error.to_string();
+    error.context(failure).context(display)
+}
+
+type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, ReplicationExchangeFailure>;
 
 struct ExchangeJob {
     digest: String,
@@ -73,13 +237,6 @@ const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Recently working HTTP routes can return without any transport presence event. Probe
 /// briefly without exporting inventories or writing failures; long absences stay quiet.
 const PEER_PROBE_WINDOW: Duration = Duration::from_secs(5 * 60);
-
-/// A heal question can make the peer replay its graph from nothing, which takes 41 seconds on a
-/// 2 GB store and longer under load.
-const HEAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
-/// Questions one heal asks before it gives up until the next.
-const HEAL_QUESTION_LIMIT: usize = 48;
 
 /// What every route on the peer listener shares: the store, this node, its fleet auth, and
 /// what it knows of the fleet. A runtime adds its own routes with this as their state.
@@ -131,6 +288,8 @@ impl<B> PeerState<B> {
 #[derive(Clone)]
 pub struct FleetContext {
     view: Arc<std::sync::RwLock<FleetView>>,
+    /// Serialize membership publication with pre-import leave journaling and snapshots.
+    view_refresh: Arc<tokio::sync::Mutex<()>>,
     /// Bumped whenever the view changes, so the dial set follows membership.
     view_changed: watch::Sender<u64>,
     config_peers: BTreeSet<String>,
@@ -162,6 +321,7 @@ pub struct FleetContext {
     activity: Arc<std::sync::RwLock<BTreeMap<String, tokio::time::Instant>>>,
     activity_changed: watch::Sender<u64>,
     exchange_jobs: Arc<ExchangeJobs>,
+    leave: Arc<tokio::sync::Mutex<LeaveState>>,
 }
 
 impl FleetContext {
@@ -170,6 +330,7 @@ impl FleetContext {
     pub fn legacy(config_peers: BTreeSet<String>) -> Self {
         Self {
             view: Arc::default(),
+            view_refresh: Arc::default(),
             view_changed: watch::channel(0).0,
             config_peers,
             configured_fabric_peers: BTreeMap::new(),
@@ -188,6 +349,7 @@ impl FleetContext {
             online: Arc::default(),
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
+            leave: Arc::default(),
             exchange_jobs: Arc::default(),
         }
     }
@@ -203,6 +365,7 @@ impl FleetContext {
     ) -> Self {
         Self {
             view: Arc::new(std::sync::RwLock::new(store.fleet_view().unwrap())),
+            view_refresh: Arc::default(),
             view_changed: watch::channel(0).0,
             config_peers: config_peers.iter().map(|peer| (*peer).into()).collect(),
             configured_fabric_peers: BTreeMap::new(),
@@ -222,6 +385,7 @@ impl FleetContext {
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
             exchange_jobs: Arc::default(),
+            leave: Arc::default(),
         }
     }
 
@@ -260,7 +424,7 @@ impl FleetContext {
 
     /// Record that a member refused this node for good, so it stops dialing and `st3 doctor`
     /// can say what happened.
-    fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
+    async fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
         if self.removed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
@@ -268,23 +432,48 @@ impl FleetContext {
             "st3: {reported_by} refused this node ({}): {}; it stops syncing",
             removed.code, removed.message
         );
-        #[cfg(feature = "test-support")]
-        removal_write_barrier("before-lock");
-        if let Err(error) = self.persist_removal(reported_by, removed) {
+        // The settings lock is a blocking flock, and endpoint publication holds it across a
+        // request to the daemon. Waiting for it on a runtime thread can keep that request from
+        // finishing, so the lock is never released and the removal is never written.
+        let (state_dir, own_key) = (self.state_dir.clone(), self.own_key.clone());
+        let (reported_by, code, message) = (
+            reported_by.to_owned(),
+            removed.code.clone(),
+            removed.message.clone(),
+        );
+        let persisted = tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "test-support")]
+            removal_write_barrier("before-lock");
+            let persisted = Self::persist_removal(
+                state_dir.as_deref(),
+                own_key.as_deref(),
+                &reported_by,
+                &RemovedFromFleet { code, message },
+            );
+            #[cfg(feature = "test-support")]
+            if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
+                std::fs::write(
+                    Path::new(&directory).join("finished"),
+                    b"refusal writer finished",
+                )
+                .expect("publish removal writer completion");
+            }
+            persisted
+        })
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("the refusal writer stopped: {error}")));
+        if let Err(error) = persisted {
             eprintln!("st3: cannot persist fleet refusal: {error:#}");
-        }
-        #[cfg(feature = "test-support")]
-        if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
-            std::fs::write(
-                Path::new(&directory).join("finished"),
-                b"refusal writer finished",
-            )
-            .expect("publish removal writer completion");
         }
     }
 
-    fn persist_removal(&self, reported_by: &str, removed: &RemovedFromFleet) -> Result<()> {
-        let Some(state_dir) = &self.state_dir else {
+    fn persist_removal(
+        state_dir: Option<&Path>,
+        own_key: Option<&str>,
+        reported_by: &str,
+        removed: &RemovedFromFleet,
+    ) -> Result<()> {
+        let Some(state_dir) = state_dir else {
             return Ok(());
         };
         let _lock = FleetFile::lock_settings(state_dir)?;
@@ -298,7 +487,7 @@ impl FleetContext {
         }
         // A foreground worker may outlive leave and a new join. Its old signed refusal
         // cannot end the new local incarnation, even when the fleet and node name match.
-        if let Some(own) = &self.own_key
+        if let Some(own) = own_key
             && MemberKey::load(&file.node_key_path(state_dir))?.public() != own
         {
             return Ok(());
@@ -406,7 +595,7 @@ impl WorkerConfig {
 }
 
 /// Keep `backend`'s store in step with the fleet until the process ends: dial every listening
-/// member, answer members that dial in, heal, adopt checkpoints, and redeem joins. Bump `wake`
+/// member, answer members that dial in, adopt checkpoints, and redeem joins. Bump `wake`
 /// whenever the store has something new to send. `routes` serve beside the sync routes on the
 /// same listener, with the same state.
 pub async fn run<B: Backend>(
@@ -415,6 +604,7 @@ pub async fn run<B: Backend>(
     wake: watch::Sender<u64>,
     routes: Router<PeerState<B>>,
 ) -> Result<()> {
+    let (_leave_reservation, leave_listener) = bind_leave_state_socket(&config.state_dir)?;
     let mut settings_tasks = tokio::task::JoinSet::new();
     let fleet_id = config.fleet_id.as_str();
     let secret_file = config.secret_file.as_path();
@@ -453,8 +643,15 @@ pub async fn run<B: Backend>(
     } else {
         None
     };
+    let leave_path = config.state_dir.join("fleet/leave-carriers.json");
+    let leave = match tokio::fs::read(&leave_path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("decode leave carrier receipts")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LeaveState::default(),
+        Err(error) => return Err(error).context("read leave carrier receipts"),
+    };
     let fleet = FleetContext {
         view: Arc::default(),
+        view_refresh: Arc::default(),
         view_changed: watch::channel(0).0,
         transports: Arc::new(std::sync::RwLock::new(LocalTransports {
             tailscale: false,
@@ -502,18 +699,24 @@ pub async fn run<B: Backend>(
         activity: Arc::default(),
         activity_changed: watch::channel(0).0,
         exchange_jobs: Arc::default(),
+        leave: Arc::new(tokio::sync::Mutex::new(leave)),
     };
-    tokio::spawn(keep_connectivity_current(fleet.clone()));
+    tokio::spawn(crate::task_cpu::account(
+        "replication.connectivity",
+        keep_connectivity_current(fleet.clone()),
+    ));
     if let Some(fabric) = fabric.clone() {
-        tokio::spawn(keep_fabric_presence_current(fabric, fleet.clone()));
+        tokio::spawn(crate::task_cpu::account(
+            "replication.fabric_presence",
+            keep_fabric_presence_current(fabric, fleet.clone()),
+        ));
     }
     backend.ready().await;
     let notify = wake;
     refresh_fleet_view(&backend, &fleet).await;
-    tokio::spawn(keep_fleet_view_current(
-        backend.clone(),
-        fleet.clone(),
-        notify.subscribe(),
+    tokio::spawn(crate::task_cpu::account(
+        "replication.fleet_view",
+        keep_fleet_view_current(backend.clone(), fleet.clone(), notify.subscribe()),
     ));
     let state = PeerState {
         backend: backend.clone(),
@@ -527,15 +730,18 @@ pub async fn run<B: Backend>(
     for peer in config.peers.iter().filter(|peer| peer.url.is_empty()) {
         let backend = backend.clone();
         let name = peer.name.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
-                super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
-                let _ = backend
-                    .record_failure(&name, "down", "no recent inbound exchange")
-                    .await;
-            }
-        });
+        tokio::spawn(crate::task_cpu::account(
+            "replication.peer_failure",
+            async move {
+                loop {
+                    tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
+                    super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
+                    let _ = backend
+                        .record_failure(&name, "down", "no recent inbound exchange", None, None)
+                        .await;
+                }
+            },
+        ));
     }
     start_outbound(
         backend.clone(),
@@ -572,14 +778,17 @@ pub async fn run<B: Backend>(
             endpoints.update(|set| set.tailscale = vec![address]);
         }
         if let Some(tailscale) = tailscale {
-            tokio::spawn(keep_tailnet_current(
-                tailscale,
-                bound_address.map(|address| (address.port(), app.clone())),
-                tailnet.map(|address| address.ip()),
-                endpoints.clone(),
-                fleet_transports,
-                notify_for_transports,
-                fleet.connectivity_changed.subscribe(),
+            tokio::spawn(crate::task_cpu::account(
+                "replication.tailnet",
+                keep_tailnet_current(
+                    tailscale,
+                    bound_address.map(|address| (address.port(), app.clone())),
+                    tailnet.map(|address| address.ip()),
+                    endpoints.clone(),
+                    fleet_transports,
+                    notify_for_transports,
+                    fleet.connectivity_changed.subscribe(),
+                ),
             ));
         }
         if let (Some(fabric), Some(address)) = (fabric, loopback) {
@@ -587,24 +796,41 @@ pub async fn run<B: Backend>(
                 .fabric_protocol
                 .clone()
                 .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
-            settings_tasks.spawn(keep_fabric_exposed(
-                fabric,
-                protocol,
-                address,
-                endpoints.clone(),
-                fleet.connectivity_changed.subscribe(),
-                config.state_dir.clone(),
-                file.clone(),
+            settings_tasks.spawn(crate::task_cpu::account(
+                "replication.fabric_exposure",
+                keep_fabric_exposed(
+                    fabric,
+                    protocol,
+                    address,
+                    endpoints.clone(),
+                    fleet.connectivity_changed.subscribe(),
+                    config.state_dir.clone(),
+                    file.clone(),
+                ),
             ));
         }
-        settings_tasks.spawn(keep_endpoints_published(
-            backend,
-            file.mode.as_str(),
-            endpoints.clone(),
-            config.state_dir.clone(),
-            file.clone(),
+        settings_tasks.spawn(crate::task_cpu::account(
+            "replication.publish_endpoints",
+            keep_endpoints_published(
+                backend,
+                file.mode.as_str(),
+                endpoints.clone(),
+                config.state_dir.clone(),
+                file.clone(),
+            ),
         ));
     }
+    let leave_fleet = fleet.clone();
+    let leave_fleet_id = config.fleet_id.clone();
+    let leave_app = Router::new().route(
+        "/v1/internal/fleet/leave-state",
+        axum::routing::get(move || {
+            let fleet = leave_fleet.clone();
+            let fleet_id = leave_fleet_id.clone();
+            async move { axum::Json(fleet.leave_snapshot(Some(fleet_id)).await) }
+        }),
+    );
+    let serving_leave = async move { axum::serve(leave_listener, leave_app).await };
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
         let Some(listener) = listener else {
@@ -621,6 +847,7 @@ pub async fn run<B: Backend>(
     };
     tokio::select! {
         result = serving => result,
+        result = serving_leave => result.map_err(Into::into),
         result = settings_task_failure(&mut settings_tasks) => result,
     }
 }
@@ -874,7 +1101,57 @@ async fn keep_fabric_presence_current(fabric: Fabric, fleet: FleetContext) {
 }
 
 async fn refresh_fleet_view<B: Backend>(backend: &B, fleet: &FleetContext) {
+    let _refresh = fleet.view_refresh.lock().await;
+    refresh_fleet_view_locked(backend, fleet).await;
+}
+
+async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext) {
     if let Ok(view) = backend.fleet_view().await {
+        {
+            let mut leave = fleet.leave.lock().await;
+            let mut updated = leave.clone();
+            updated.persistence_error = None;
+            updated.awaiting.retain(|key| {
+                view.members.iter().any(|member| {
+                    member.member_key == *key
+                        && member.state == "ended"
+                        && member.ended.as_deref() == Some("left")
+                })
+            });
+            updated.receiver_deadlines_unix_ms.retain(|key, _| {
+                view.members.iter().any(|member| {
+                    member.member_key == *key
+                        && member.state == "ended"
+                        && member.ended.as_deref() == Some("left")
+                })
+            });
+            updated
+                .receiver_first_receive_unix_ms
+                .retain(|key, _| updated.awaiting.contains(key));
+            // Only a confirmed leave gets a deadline, anchored to the durable
+            // pre-import receive time so a crash cannot restart its grace.
+            for key in &updated.awaiting {
+                if let Some(first) = updated.receiver_first_receive_unix_ms.get(key) {
+                    updated
+                        .receiver_deadlines_unix_ms
+                        .entry(key.clone())
+                        .or_insert_with(|| first.saturating_add(LEAVE_RECEIPT_GRACE.as_millis()));
+                }
+            }
+            if updated.awaiting != leave.awaiting
+                || updated.receiver_deadlines_unix_ms != leave.receiver_deadlines_unix_ms
+                || updated.receiver_first_receive_unix_ms != leave.receiver_first_receive_unix_ms
+                || leave.persistence_error.is_some()
+            {
+                match save_leave_state(fleet, &updated).await {
+                    Ok(()) => *leave = updated,
+                    Err(error) => {
+                        eprintln!("cannot persist receiver leave grace: {error:#}");
+                        leave.persistence_error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+        }
         let mut current = fleet.view.write().expect("fleet view lock poisoned");
         if *current != view {
             *current = view;
@@ -920,8 +1197,10 @@ async fn lock_current_settings(
     let state_dir = state_dir.to_path_buf();
     let settings = settings.clone();
     tokio::task::spawn_blocking(move || {
-        let lock = FleetFile::lock_settings(&state_dir)?;
-        Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
+        crate::task_cpu::blocking("replication.settings", || {
+            let lock = FleetFile::lock_settings(&state_dir)?;
+            Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
+        })
     })
     .await?
 }
@@ -965,6 +1244,240 @@ pub fn dial_targets(
     targets
 }
 
+/// Select one authenticated identity after export, before any self-left payload is sent.
+/// A timeout cannot move the selector: the first peer may already have admitted the leave.
+async fn select_leave_confirmer<B: Backend>(
+    backend: &B,
+    fleet: &FleetContext,
+    peer: &str,
+) -> Result<()> {
+    let Some(own) = &fleet.own_key else {
+        return Ok(());
+    };
+    let view = backend.fleet_view().await?;
+    if !view.members.iter().any(|member| {
+        member.member_key == *own
+            && member.state == "ended"
+            && member.ended.as_deref() == Some("left")
+    }) {
+        return Ok(());
+    }
+    let peer_member = view
+        .members
+        .iter()
+        .find(|member| member.name == peer && member.state == "current")
+        .context("leave needs a current authenticated confirmer")?;
+    anyhow::ensure!(
+        peer_member.mode == "listening",
+        "leave confirmer has no listener: dial-out member {peer} cannot receive the completion receipt"
+    );
+    let peer_key = peer_member.member_key.clone();
+    let mut leave = fleet.leave.lock().await;
+    if let Some(selected) = &leave.confirmer {
+        anyhow::ensure!(
+            *selected == peer_key,
+            "leave confirmation pending with another member identity; retry the selected member or leave offline"
+        );
+    } else {
+        let mut updated = leave.clone();
+        updated.confirmer = Some(peer_key);
+        save_leave_state(fleet, &updated).await?;
+        *leave = updated;
+    }
+    Ok(())
+}
+
+/// Conservative pre-admission filter, not an authorization decision. CBOR text strings
+/// contain their UTF-8 bytes verbatim; false positives only protect until the signed
+/// membership fold below proves whether the sender actually left.
+fn may_carry_direct_leave(exchange: &ReplicationExchange, key: &str) -> bool {
+    // A signature can admit a previously held, unsealed leave payload as well.
+    if exchange
+        .signatures
+        .iter()
+        .any(|signature| signature.member_key == key)
+    {
+        return true;
+    }
+    let marker = b"fleet.member-left";
+    exchange.envelopes.iter().any(|envelope| {
+        envelope.member_key.as_deref() == Some(key)
+            && envelope
+                .payload
+                .bytes()
+                .is_ok_and(|bytes| bytes.windows(marker.len()).any(|part| part == marker))
+    })
+}
+
+async fn receive_from_peer<B: Backend>(
+    backend: &B,
+    fleet: &FleetContext,
+    peer: &str,
+    fleet_id: &str,
+    exchange: &ReplicationExchange,
+    round_trip: Option<Duration>,
+    carrier: crate::replication::ReplicationCarrier,
+) -> Result<crate::replication::ReplicationReceiveResponse> {
+    let _refresh = fleet.view_refresh.lock().await;
+    let before = backend.fleet_view().await?;
+    let protect = before
+        .members
+        .iter()
+        .find(|member| {
+            member.name == peer
+                && member.state == "current"
+                && may_carry_direct_leave(exchange, &member.member_key)
+        })
+        .map(|member| member.member_key.clone());
+    if let Some(key) = &protect {
+        let mut leave = fleet.leave.lock().await;
+        let mut updated = leave.clone();
+        updated.awaiting.insert(key.clone());
+        // Fresh authoritative current membership proves no departure has yet
+        // consumed grace, even if a previous provisional exchange was interrupted.
+        updated.receiver_deadlines_unix_ms.remove(key);
+        updated
+            .receiver_first_receive_unix_ms
+            .insert(key.clone(), crate::store::now_ms());
+        save_leave_state(fleet, &updated).await?;
+        *leave = updated;
+    }
+    let received = backend
+        .receive(peer, fleet_id, exchange, round_trip, carrier)
+        .await?;
+    if received.changed {
+        backend.changed().await;
+    }
+    if received.changed || protect.is_some() {
+        refresh_fleet_view_locked(backend, fleet).await;
+    }
+    Ok(received)
+}
+
+/// Application authority ends immediately. Receiver carriers last until receipt or expiry;
+/// the leaving node's own carrier remains CLI-owned and is never confirmed by expiry.
+#[cfg(test)]
+fn retained_leave_members(view: &FleetView, own_key: &str, leave: &LeaveState) -> BTreeSet<String> {
+    retained_leave_members_at(view, own_key, leave, crate::store::now_ms())
+}
+
+#[cfg(test)]
+fn retained_leave_members_at(
+    view: &FleetView,
+    own_key: &str,
+    leave: &LeaveState,
+    now: u128,
+) -> BTreeSet<String> {
+    view.members
+        .iter()
+        .filter(|member| {
+            member.state == "ended"
+                && member.ended.as_deref() == Some("left")
+                && (member.member_key == own_key
+                    || (leave.awaiting.contains(&member.member_key)
+                        && leave.persistence_error.is_none()
+                        && leave
+                            .receiver_deadlines_unix_ms
+                            .get(&member.member_key)
+                            .is_some_and(|deadline| now < *deadline)
+                        && !leave.completed.contains(&member.member_key)))
+        })
+        .map(|member| member.member_key.clone())
+        .collect()
+}
+
+/// An ended member may acknowledge our signed refusal, never exchange ordinary data.
+async fn receive_leave_receipt<B: Backend>(
+    State(state): State<PeerState<B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let result = async {
+        let sender =
+            state
+                .auth
+                .verify_sender(&headers, "POST", LEAVE_RECEIPT_PATH, &body, None, None)?;
+        anyhow::ensure!(
+            sender.member_signature_valid,
+            "leave receipt needs a member signature"
+        );
+        let key = sender
+            .member_key
+            .as_deref()
+            .context("leave receipt has no member key")?;
+        {
+            let view = state.fleet.view.read().expect("fleet view lock poisoned");
+            anyhow::ensure!(
+                view.members.iter().any(|member| {
+                    member.name == sender.name
+                        && member.member_key == key
+                        && member.state == "ended"
+                        && member.ended.as_deref() == Some("left")
+                }),
+                "leave receipt is not from the exact left member"
+            );
+        }
+        let proof: LeaveProof = serde_json::from_slice(&body)?;
+        let proof_headers =
+            proof
+                .headers
+                .iter()
+                .try_fold(HeaderMap::new(), |mut headers, (name, value)| {
+                    headers.insert(
+                        name.parse::<axum::http::HeaderName>()?,
+                        value.parse::<HeaderValue>()?,
+                    );
+                    Ok::<_, anyhow::Error>(headers)
+                })?;
+        let issuer = state.auth.verify_sender(
+            &proof_headers,
+            "RESPONSE",
+            EXCHANGE_PATH,
+            proof.body.as_bytes(),
+            Some(&state.node),
+            Some(&proof.request_digest),
+        )?;
+        anyhow::ensure!(
+            issuer.member_signature_valid && issuer.member_key == state.fleet.own_key,
+            "leave proof was not issued by this member"
+        );
+        let proof: PeerResponse<Value> = serde_json::from_str(&proof.body)?;
+        anyhow::ensure!(
+            proof.value["code"] == "member-left" && proof.value["member_key"] == key,
+            "receipt does not acknowledge this member's leave"
+        );
+        {
+            let mut leave = state.fleet.leave.lock().await;
+            let mut updated = leave.clone();
+            updated.completed.insert(key.to_owned());
+            updated.awaiting.remove(key);
+            updated.receiver_deadlines_unix_ms.remove(key);
+            updated.receiver_first_receive_unix_ms.remove(key);
+            updated.persistence_error = None;
+            save_leave_state(&state.fleet, &updated).await?;
+            *leave = updated;
+        }
+        let response = signed_response_for(
+            &state,
+            LEAVE_RECEIPT_PATH,
+            &FleetAuth::body_digest(&body),
+            0,
+            serde_json::json!({"acknowledged": key}),
+        )?;
+        // External adapters poll this authority; this handler never changes transport policy.
+        // A cut ACK leaves the sender unconfirmed and its durable proof retryable.
+        Ok::<_, anyhow::Error>(response)
+    }
+    .await;
+    result.unwrap_or_else(|error| {
+        (
+            StatusCode::FORBIDDEN,
+            format!("leave receipt refused: {error:#}"),
+        )
+            .into_response()
+    })
+}
+
 /// Reread membership on every graph change and at least every 30 seconds.
 async fn keep_fleet_view_current<B: Backend>(
     backend: B,
@@ -988,7 +1501,10 @@ async fn keep_fleet_view_current<B: Backend>(
 pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>) -> Router {
     Router::new()
         .route(EXCHANGE_PATH, post(receive_exchange))
-        .route(HEAL_PATH, post(receive_heal))
+        .route(
+            LEAVE_RECEIPT_PATH,
+            post(receive_leave_receipt).layer(DefaultBodyLimit::max(16_384)),
+        )
         .route(
             CHECKPOINT_PATH,
             post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
@@ -1015,62 +1531,68 @@ fn start_outbound<B: Backend>(
 ) {
     // One dialer per target. Targets follow membership: a new listening member gets a dialer,
     // and a member that ends or turns dial-out loses its dialer.
-    tokio::spawn(async move {
-        let mut view_changes = fleet.view_changed.subscribe();
-        let mut dialers: BTreeMap<String, Dialer> = BTreeMap::new();
-        let mut transport_changes = notify.subscribe();
-        loop {
-            let targets = {
-                let view = fleet.view.read().expect("fleet view lock poisoned");
-                let local = *fleet.transports.read().expect("transport lock poisoned");
-                let mut targets = dial_targets(&view, &node, &config_peers, local);
-                // Until membership names the sponsor, dial it the way the join reached it.
-                if let Some((sponsor, routes)) = &fleet.bootstrap
-                    && view.members.iter().all(|member| member.name != *sponsor)
-                {
+    tokio::spawn(crate::task_cpu::account(
+        "replication.outbound",
+        async move {
+            let mut view_changes = fleet.view_changed.subscribe();
+            let mut dialers: BTreeMap<String, Dialer> = BTreeMap::new();
+            let mut transport_changes = notify.subscribe();
+            loop {
+                let targets = {
+                    let view = fleet.view.read().expect("fleet view lock poisoned");
+                    let local = *fleet.transports.read().expect("transport lock poisoned");
+                    let mut targets = dial_targets(&view, &node, &config_peers, local);
+                    // Until membership names the sponsor, dial it the way the join reached it.
+                    if let Some((sponsor, routes)) = &fleet.bootstrap
+                        && view.members.iter().all(|member| member.name != *sponsor)
+                    {
+                        targets
+                            .entry(sponsor.clone())
+                            .or_insert_with(|| routes.clone());
+                    }
                     targets
-                        .entry(sponsor.clone())
-                        .or_insert_with(|| routes.clone());
-                }
-                targets
-            };
-            dialers.retain(|name, (_, task)| {
-                let keep = targets.contains_key(name);
-                if !keep {
-                    task.abort();
-                }
-                keep
-            });
-            for (name, routes) in targets {
-                if let Some((current, _)) = dialers.get(&name) {
-                    if *current.borrow() != routes {
-                        current.send_replace(routes);
+                };
+                dialers.retain(|name, (_, task)| {
+                    let keep = targets.contains_key(name);
+                    if !keep {
+                        task.abort();
                     }
-                    continue;
-                }
-                let (routes, route_changes) = watch::channel(routes);
-                let task = tokio::spawn(dial_peer(
-                    backend.clone(),
-                    node.clone(),
-                    name.clone(),
-                    route_changes,
-                    auth.clone(),
-                    fleet.clone(),
-                    notify.subscribe(),
-                ));
-                dialers.insert(name, (routes, task));
-            }
-            tokio::select! {
-                changed = view_changes.changed() => {
-                    if changed.is_err() {
-                        return;
+                    keep
+                });
+                for (name, routes) in targets {
+                    if let Some((current, _)) = dialers.get(&name) {
+                        if *current.borrow() != routes {
+                            current.send_replace(routes);
+                        }
+                        continue;
                     }
+                    let (routes, route_changes) = watch::channel(routes);
+                    let task = tokio::spawn(crate::task_cpu::account(
+                        "replication.dial_peer",
+                        dial_peer(
+                            backend.clone(),
+                            node.clone(),
+                            name.clone(),
+                            route_changes,
+                            auth.clone(),
+                            fleet.clone(),
+                            notify.subscribe(),
+                        ),
+                    ));
+                    dialers.insert(name, (routes, task));
                 }
-                _ = transport_changes.changed() => {}
-                _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
+                tokio::select! {
+                    changed = view_changes.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                    _ = transport_changes.changed() => {}
+                    _ = tokio::time::sleep(worker_interval(Duration::from_secs(30))) => {}
+                }
             }
-        }
-    });
+        },
+    ));
 }
 
 /// Exchange with one peer for as long as it stays a target, trying its routes in order.
@@ -1095,9 +1617,11 @@ async fn dial_peer<B: Backend>(
     // once, even though the peer dialed in recently.
     let mut moving = false;
     let mut route = 0_usize;
+    let mut preferred_retry = None;
     let mut last_http_success = None;
-    let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
-    let mut last_attempt_unix_ms = crate::store::now_ms();
+    // Routes whose one early attempt after an outage is spent, until a probe sees them down again
+    // or an exchange over them succeeds. See `wait_peer_retry`.
+    let mut early_spent = BTreeSet::new();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1137,9 +1661,7 @@ async fn dial_peer<B: Backend>(
                     .get(&name)
                     .cloned();
                 if let Some(offered) = offered
-                    && let Ok(current) = backend
-                        .guard_summary(auth.fleet_id())
-                        .await
+                    && let Ok(current) = backend.guard_summary(auth.fleet_id()).await
                 {
                     // The other side already knows this inventory and is draining both
                     // queues. Notifications from that exchange must not trigger a reverse
@@ -1165,11 +1687,6 @@ async fn dial_peer<B: Backend>(
                 continue;
             }
         }
-        // Grant refusals belong to the route. Graph writes, inbound exchanges, presence
-        // and local network changes cannot make that member grant this service.
-        if routes.has_changed().unwrap_or(false) {
-            refused.clear();
-        }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
         let attempt_started = tokio::time::Instant::now();
@@ -1177,108 +1694,81 @@ async fn dial_peer<B: Backend>(
         let selected = {
             let routes = routes.borrow_and_update();
             let now = tokio::time::Instant::now();
-            refused.retain(|(route, until)| routes.contains(route) && *until > now);
-            (0..routes.len())
-                .map(|offset| routes[(route.wrapping_add(offset)) % routes.len()].clone())
-                .find(|candidate| !refused.iter().any(|(route, _)| route == candidate))
-        };
-        if selected.is_none() && !refused.is_empty() {
-            let deadline = refused.iter().map(|(_, until)| *until).min().unwrap();
-            record_worker(
-                &backend,
-                &name,
-                "backoff",
-                last_attempt_unix_ms,
-                Some(deadline.saturating_duration_since(tokio::time::Instant::now())),
-            )
-            .await;
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => {}
-                _ = routes.changed() => { refused.clear(); }
+            if preferred_retry.is_some_and(|deadline| now >= deadline) {
+                route = 0;
+                preferred_retry = None;
             }
-            continue;
-        }
-        last_attempt_unix_ms = attempt_unix_ms;
-        record_worker(&backend, &name, "exchange", attempt_unix_ms, None).await;
+            (!routes.is_empty()).then(|| routes[route % routes.len()].clone())
+        };
+        let preferred_route = selected
+            .as_ref()
+            .map(|selected| routes.borrow().first() == Some(selected));
+        record_worker(
+            &backend,
+            &name,
+            "exchange",
+            attempt_unix_ms,
+            None,
+            preferred_route.map(|preferred| (preferred, preferred_retry)),
+        )
+        .await;
+        let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
         let is_http = matches!(selected, Some(Route::Http(_)));
+        let fabric_route = selected
+            .clone()
+            .filter(|route| matches!(route, Route::Fabric { .. }));
         let url = match selected {
-            Some(Route::Http(url)) => Some(url),
-            Some(selected @ Route::Fabric { .. }) => {
-                let Route::Fabric { node, protocol } = &selected else {
-                    unreachable!()
-                };
-                match &fleet.fabric {
-                    Some(fabric) => match fabric.dial(node, protocol).await {
-                        Ok(address) => Some(format!("http://{address}")),
-                        Err(error) => {
-                            if error.is::<FabricGrantRefusal>() {
-                                refused.push((
-                                    selected,
-                                    tokio::time::Instant::now() + fabric_refusal_delay(),
-                                ));
-                                super::telemetry::record_error(
-                                    &name, super::telemetry::ErrorReason::Refused,
-                                );
-                                let _ = backend
-                                    .record_failure(&name, "refused", &error.to_string())
-                                    .await;
-                                route = route.wrapping_add(1);
-                                continue;
-                            }
-                            super::telemetry::record_error(
-                                &name, super::telemetry::ErrorReason::Down,
-                            );
-                            let _ = backend
-                                .record_failure(&name, "down", &error.to_string())
-                                .await;
-                            None
-                        }
-                    },
-                    None => None,
-                }
-            }
-            None => None,
+            Some(Route::Http(url)) => Ok(url),
+            Some(Route::Fabric { node, protocol }) => match &fleet.fabric {
+                Some(fabric) => fabric
+                    .dial(&node, &protocol)
+                    .await
+                    .map(|address| format!("http://{address}")),
+                None => Err(anyhow::Error::new(RouteFailure::CarrierUnavailable)),
+            },
+            None => Err(anyhow::Error::new(RouteFailure::CarrierUnavailable)),
         };
-        let Some(url) = url else {
-            route = route.wrapping_add(1);
-            let delay = retry_delay(backoff.next(), &fleet, &name);
-            record_worker(&backend, &name, "backoff", attempt_unix_ms, Some(delay)).await;
-            if wait_peer_retry(
-                &backend,
-                attempt_unix_ms,
-                delay,
-                &mut routes,
-                &mut inbound_changes,
-                &mut activity_changes,
-                &mut connectivity,
-                &fleet,
-                &name,
-                attempt_started,
-                last_http_success.as_ref(),
-                &http,
-            )
-            .await
-            {
-                backoff = PeerBackoff::default();
-            }
-            continue;
-        };
+        let url = url.map_err(|error| {
+            let failure = ReplicationExchangeFailure::from_error(
+                &error, ReplicationFailurePhase::Dial, attempt_started.elapsed(), None,
+            );
+            let display = error.to_string();
+            error.context(failure).context(display)
+        });
         let peer = PeerConfig {
             name: name.clone(),
-            url,
+            url: url.as_ref().cloned().unwrap_or_default(),
         };
-        match exchange(&http, &backend, &node, &peer, &auth, &fleet).await {
-            Ok((moved, heal_now)) => {
+        let result = match url {
+            Ok(_) => exchange_via(&http, &backend, &node, &peer, &auth, &fleet, carrier).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(moved) => {
+                if route > 0 {
+                    // Keep a working fallback while a transient preferred-route failure cools
+                    // down. Busy successful exchanges must not keep postponing its retry.
+                    preferred_retry.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + worker_interval(Duration::from_secs(60))
+                    });
+                } else {
+                    preferred_retry = None;
+                }
                 if is_http {
                     last_http_success = Some((peer.url.clone(), tokio::time::Instant::now()));
                 }
+                early_spent.remove(&peer.url);
                 backoff = PeerBackoff::default();
                 must_send = false;
-                if heal_now {
-                    record_worker(&backend, &name, "heal", attempt_unix_ms, None).await;
-                    heal(&backend, &node, &peer, &auth, &fleet).await;
-                }
-                record_worker(&backend, &name, "idle", attempt_unix_ms, None).await;
+                record_worker(
+                    &backend,
+                    &name,
+                    "idle",
+                    attempt_unix_ms,
+                    None,
+                    preferred_route.map(|preferred| (preferred, preferred_retry)),
+                )
+                .await;
                 if moved {
                     // One exchange carries a bounded batch. Keep going at once while envelopes
                     // still move instead of leaving the rest of a backlog to the timer, or to
@@ -1301,19 +1791,34 @@ async fn dial_peer<B: Backend>(
                     tokio::time::sleep_until(not_before).await;
                 }
             }
-            Err(error) => {
+            Err(mut error) => {
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
-                    fleet.mark_removed(&peer.name, removed);
+                    fleet.mark_removed(&peer.name, removed).await;
                     continue;
                 }
-                // A peer can leave an HTTP stream open without making progress. Once that
-                // exchange times out, discard the pooled connection so the next attempt opens
-                // a fresh stream, and try the next route.
-                http = replication_http_client();
-                route = route.wrapping_add(1);
+                // `fabric dial` never connects, so the member's refusal reaches us only as a
+                // tunnel that closed. Ask Fabric whether that is what happened.
+                if let (Some(fabric_route), Some(fabric)) = (&fabric_route, &fleet.fabric)
+                    && route_failure(&error) != RouteFailure::Application
+                    && let Route::Fabric { node, protocol } = fabric_route
+                    && let Some(refusal) = fabric.refusal(node, protocol).await
+                {
+                    let refusal = anyhow::Error::from(refusal);
+                    let failure = ReplicationExchangeFailure::from_error(
+                        &refusal, ReplicationFailurePhase::Dial, attempt_started.elapsed(), None,
+                    );
+                    let display = refusal.to_string();
+                    error = refusal.context(failure).context(display);
+                }
+                if advance_failed_route(&mut route, &error) {
+                    // A stalled or broken stream must not be reused on the next attempt.
+                    http = replication_http_client();
+                }
                 let overloaded = error.is::<PeerOverloaded>();
                 let status = if overloaded {
                     "overloaded"
+                } else if error.is::<FabricGrantRefusal>() {
+                    "refused"
                 } else if error.to_string().contains("signature")
                     || error.to_string().contains("fleet")
                 {
@@ -1321,11 +1826,24 @@ async fn dial_peer<B: Backend>(
                 } else {
                     "down"
                 };
-                let _ = backend
-                    .record_failure(&peer.name, status, &error.to_string())
+                let mut failure = ReplicationExchangeFailure::from_error(
+                    &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
+                );
+                if overloaded {
+                    failure.code = "replication-overloaded".into();
+                }
+                let _ = backend.record_failure(&peer.name, status, &error.to_string(), Some(carrier), Some(&failure))
                     .await;
                 let delay = retry_delay(backoff.next(), &fleet, &name);
-                record_worker(&backend, &name, "backoff", attempt_unix_ms, Some(delay)).await;
+                record_worker(
+                    &backend,
+                    &name,
+                    "backoff",
+                    attempt_unix_ms,
+                    Some(delay),
+                    preferred_route.map(|preferred| (preferred, preferred_retry)),
+                )
+                .await;
                 if wait_peer_retry(
                     &backend,
                     attempt_unix_ms,
@@ -1343,6 +1861,11 @@ async fn dial_peer<B: Backend>(
                     },
                     last_http_success.as_ref(),
                     &http,
+                    (is_http
+                        && route_failure(&error) != RouteFailure::Application
+                        && exchange_unanswered(&error))
+                    .then_some(peer.url.as_str()),
+                    &mut early_spent,
                 )
                 .await
                 {
@@ -1359,6 +1882,7 @@ async fn record_worker<B: Backend>(
     phase: &str,
     last_attempt: u128,
     delay: Option<Duration>,
+    route: Option<(bool, Option<tokio::time::Instant>)>,
 ) {
     // Visibility must not turn a blocked daemon read into a longer replication deadline.
     let _ = tokio::time::timeout(
@@ -1370,6 +1894,15 @@ async fn record_worker<B: Backend>(
                 last_attempt_at_unix_ms: last_attempt,
                 next_retry_at_unix_ms: delay
                     .map(|delay| crate::store::now_ms() + delay.as_millis()),
+                route_is_preferred: route.map(|(preferred, _)| preferred),
+                preferred_retry_at_unix_ms: route
+                    .and_then(|(preferred, deadline)| if preferred { None } else { deadline })
+                    .map(|deadline| {
+                        crate::store::now_ms()
+                            + deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .as_millis()
+                    }),
             },
         ),
     )
@@ -1390,16 +1923,126 @@ fn retry_delay(delay: Duration, fleet: &FleetContext, name: &str) -> Duration {
     }
 }
 
-/// Probe grants again without depending on Fabric's event version. Even the shortest jitter
-/// allows at most three dials per hour, including the first refusal. Never apply worker caps.
-fn fabric_refusal_delay() -> Duration {
-    let mut random = [0; 2];
-    let _ = getrandom::fill(&mut random);
-    fabric_refusal_delay_with_jitter(u16::from_le_bytes(random))
+/// Route policy is intentionally separate from health/diagnostic labels. Unknown errors
+/// (including local backend errors containing network causes) stay on the current route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouteFailure {
+    Application,
+    Connect,
+    Stream,
+    Timeout,
+    CarrierUnavailable,
 }
 
-fn fabric_refusal_delay_with_jitter(jitter: u16) -> Duration {
-    Duration::from_millis(1800 * (800 + u64::from(jitter) % 401))
+impl std::fmt::Display for RouteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "replication route failure: {self:?}")
+    }
+}
+
+impl std::error::Error for RouteFailure {}
+
+fn route_failure(error: &anyhow::Error) -> RouteFailure {
+    if let Some(class) = error.downcast_ref::<RouteFailure>() {
+        return *class;
+    }
+    if error
+        .downcast_ref::<FabricError>()
+        .is_some_and(|error| error.class == FabricErrorClass::Fault)
+    {
+        return RouteFailure::CarrierUnavailable;
+    }
+    RouteFailure::Application
+}
+
+fn advance_failed_route(route: &mut usize, error: &anyhow::Error) -> bool {
+    let advance = route_failure(error) != RouteFailure::Application;
+    if advance {
+        *route = route.wrapping_add(1);
+    }
+    advance
+}
+
+/// Only call at the outbound HTTP send boundary, never around backend work.
+fn request_route_failure(error: reqwest::Error) -> anyhow::Error {
+    let class = if error.is_builder() || error.is_redirect() || error.is_status() {
+        RouteFailure::Application
+    } else if error.is_timeout() {
+        RouteFailure::Timeout
+    } else if error.is_connect() {
+        RouteFailure::Connect
+    } else {
+        stream_route_failure(&error)
+    };
+    anyhow::Error::new(error).context(class)
+}
+
+/// Reading raw response bytes can fail on transport or HTTP framing. Reqwest's
+/// broad "decode" category alone does not distinguish these.
+fn response_route_failure(error: reqwest::Error) -> anyhow::Error {
+    let class = if error.is_timeout() {
+        RouteFailure::Timeout
+    } else {
+        stream_route_failure(&error)
+    };
+    anyhow::Error::new(error).context(class)
+}
+
+/// Reqwest's request/decode categories also include HTTP parser failures. Only
+/// typed stream evidence permits failover; protocol and unknown causes stay put.
+fn stream_route_failure(error: &(dyn std::error::Error + 'static)) -> RouteFailure {
+    let mut cause = Some(error);
+    let mut stream = false;
+    while let Some(error) = cause {
+        if let Some(error) = error.downcast_ref::<hyper::Error>() {
+            if error.is_parse() || error.is_user() {
+                return RouteFailure::Application;
+            }
+            stream |= error.is_incomplete_message()
+                || error.is_closed()
+                || error.is_body_write_aborted();
+        }
+        // Tokio-rustls reports post-handshake alerts/bad records inside an I/O
+        // InvalidData wrapper. The kind alone is ambiguous (HTTP framing can use
+        // it too), so require the typed TLS cause rather than widening all I/O.
+        stream |= error.is::<rustls::Error>();
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            stream |= error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<rustls::Error>());
+            stream |= matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        cause = error.source();
+    }
+    if stream {
+        RouteFailure::Stream
+    } else {
+        RouteFailure::Application
+    }
+}
+
+/// Whether an exchange failed before the peer sent any response head: its connection could not
+/// be made, or was closed, reset or aborted before an answer. reqwest 0.12.28 with hyper 1.11.0
+/// reports these as a connect error, or as a request error with no status that is not a
+/// timeout. A timeout after connecting is not this: that peer was reached and stalled. Neither
+/// is any answer, however it failed (an error status, a redirect loop, a body cut off after its
+/// head), nor a fault building the request here.
+fn exchange_unanswered(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|error| {
+            error.is_connect()
+                || (error.is_request() && error.status().is_none() && !error.is_timeout())
+        })
 }
 
 /// Failed connections have no graph wake dependency: unrelated local writes must not
@@ -1439,6 +2082,8 @@ async fn wait_peer_retry<B: Backend>(
     attempt_started: tokio::time::Instant,
     last_http_success: Option<&(String, tokio::time::Instant)>,
     http: &reqwest::Client,
+    unanswered: Option<&str>,
+    early_spent: &mut BTreeSet<String>,
 ) -> bool {
     let started = tokio::time::Instant::now();
     let mut deadline = started + delay;
@@ -1503,7 +2148,20 @@ async fn wait_peer_retry<B: Backend>(
                     .timeout(PEER_PROBE_TIMEOUT).send().await.is_ok()
             }, if probe_url.is_some() => {
                 next_probe = tokio::time::Instant::now() + PEER_PROBE_INTERVAL;
-                if alive {
+                let probed = probe_url.unwrap();
+                if !alive {
+                    // The route is down: its next recovery may be retried early once more.
+                    early_spent.remove(probed.as_str());
+                } else if unanswered == Some(probed.as_str()) && !early_spent.contains(probed.as_str()) {
+                    // The failed exchange got no answer on this route, and the route answers
+                    // now: the outage has ended, so retry now rather than up to 30 seconds after
+                    // the failure. Once per outage: a later failure keeps the cap below until a
+                    // probe sees the route down again. The backoff count is kept.
+                    early_spent.insert(probed.clone());
+                    record_worker(backend, name, "backoff", last_attempt_unix_ms,
+                        Some(Duration::ZERO), None).await;
+                    return false;
+                } else {
                     // Transport is alive, but another expensive exchange has just failed.
                     // Retain backoff and allow at most one attempt every 30 seconds at the cap.
                     // A cheap probe is not authenticated activity. It must not refresh
@@ -1512,7 +2170,7 @@ async fn wait_peer_retry<B: Backend>(
                     if capped < deadline {
                         deadline = capped;
                         record_worker(backend, name, "backoff", last_attempt_unix_ms,
-                            Some(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
+                            Some(deadline.saturating_duration_since(tokio::time::Instant::now())), None).await;
                     }
                 }
             }
@@ -1523,14 +2181,7 @@ async fn wait_peer_retry<B: Backend>(
 /// A worker timer. `ST3_WORKER_INTERVAL_MS` caps every one of them, so tests of several nodes on
 /// one machine need not wait out the 30- and 60-second defaults.
 fn worker_interval(default: Duration) -> Duration {
-    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
-    CAP.get_or_init(|| {
-        std::env::var("ST3_WORKER_INTERVAL_MS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .map(Duration::from_millis)
-    })
-    .map_or(default, |cap| cap.min(default))
+    super::capped(default, super::worker_timer_cap())
 }
 
 /// The HTTP client one dialer exchanges with: short connects, and a bound on each exchange.
@@ -1548,7 +2199,7 @@ async fn receive_exchange<B: Backend>(
     body: Bytes,
 ) -> Response {
     let body = if deflated(&headers) {
-        match inflate(&body) {
+        match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
             Err(error) => {
                 return (
@@ -1643,38 +2294,49 @@ async fn receive_exchange<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                let result = async {
-                    let received = state
-                        .backend
-                        .receive(&relay, state.auth.fleet_id(), &request, None)
-                        .await?;
-                    if received.changed {
-                        state.backend.changed().await;
-                        refresh_fleet_view(&state.backend, &state.fleet).await;
-                    }
-                    if received.receipt.received != 0 {
-                        state
-                            .outbound_notify
-                            .send_modify(|generation| *generation = generation.saturating_add(1));
-                    }
-                    let response = state
-                        .backend
-                        .export(
+            tokio::spawn(crate::task_cpu::account(
+                "replication.exchange",
+                async move {
+                    let _permit = permit;
+                    let started = std::time::Instant::now();
+                    let result = async {
+                        let received = receive_from_peer(
+                            &state.backend,
+                            &state.fleet,
+                            &relay,
                             state.auth.fleet_id(),
-                            &request.inventory,
-                            false,
-                            &request.signature_requests,
+                            &request,
+                            None,
+                            Default::default(),
                         )
-                        .await?;
+                        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
+                        if received.receipt.received != 0 {
+                            state.outbound_notify.send_modify(|generation| {
+                                *generation = generation.saturating_add(1)
+                            });
+                        }
+                        let response = state
+                            .backend
+                            .export(
+                                state.auth.fleet_id(),
+                                &request.inventory,
+                                false,
+                                &request.signature_requests,
+                            )
+                            .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
+                        select_leave_confirmer(&state.backend, &state.fleet, &relay)
+                            .await
+                            .map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))?;
 
-                    Ok::<_, anyhow::Error>(response)
-                }
-                .await
-                .map_err(|error| format!("replication request failed: {error:#}"));
-                done.send_replace(Some(result));
-            });
+                        Ok::<_, anyhow::Error>(response)
+                    }
+                    .await
+                    .map_err(|error| ReplicationExchangeFailure::from_error(
+                        &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
+                    ));
+                    done.send_replace(Some(result));
+                },
+            ));
         }
         jobs.get(&relay).unwrap().answer.clone()
     };
@@ -1719,17 +2381,17 @@ async fn receive_exchange<B: Backend>(
                 .await
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Ok(Some(Err(message))) => {
+        Ok(Some(Err(failure))) => {
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &relay, &answer);
-            signed_error_response(
-                &state,
-                &request_digest,
-                0,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &message,
-            )
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            let response = signed_response(&state, &request_digest, 0, serde_json::json!({
+                "code": failure.code,
+                "failure": failure,
+            }));
+            response.map(|mut response| {
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(None) => {
             finish_exchange_job(&state.fleet, &relay, &answer);
@@ -1783,78 +2445,6 @@ fn signed_overload<B>(state: &PeerState<B>, request_digest: &str) -> Response {
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-}
-
-async fn receive_heal<B: Backend>(
-    State(state): State<PeerState<B>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let body = if deflated(&headers) {
-        match inflate(&body) {
-            Ok(body) => Bytes::from(body),
-            Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("heal request body: {error:#}"),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        body
-    };
-    let sender = match state
-        .auth
-        .verify_sender(&headers, "POST", HEAL_PATH, &body, None, None)
-    {
-        Ok(sender) => sender,
-        Err(error) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                format!("heal authentication failed: {error:#}"),
-            )
-                .into_response();
-        }
-    };
-    let request_digest = FleetAuth::body_digest(&body);
-    if let Err(refusal) = state.fleet.accept(&sender) {
-        return signed_refusal(&state, &request_digest, &refusal)
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-    }
-    state.fleet.note_activity(&sender.name);
-    let result = async {
-        let request: ReplicationHealRequest =
-            serde_json::from_slice(&body).context("decode the heal request")?;
-        anyhow::ensure!(
-            request.fleet_id == state.auth.fleet_id(),
-            "the peer belongs to another fleet"
-        );
-        let answer = state
-            .backend
-            .heal_answer(&sender.name, state.auth.fleet_id(), &request.query)
-            .await?;
-        if matches!(
-            answer,
-            ReplicationHealAnswer::Swapped { .. } | ReplicationHealAnswer::Replayed { .. }
-        ) {
-            state.backend.changed().await;
-        }
-        let response = signed_response_for(&state, HEAL_PATH, &request_digest, 0, answer)?;
-        deflate_response(response, accepts_deflate(&headers)).await
-    }
-    .await;
-    result.unwrap_or_else(|error| {
-        signed_error_response_for(
-            &state,
-            HEAL_PATH,
-            &request_digest,
-            0,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("heal request failed: {error:#}"),
-        )
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-    })
 }
 
 /// Answer a member or config peer with one page of a checkpoint's manifest. It is authenticated
@@ -1947,12 +2537,20 @@ async fn fetch_checkpoint_manifest_page(
         .body(body)
         .send()
         .await
+        .map_err(request_route_failure)
         .with_context(|| format!("checkpoint request to peer {} failed", peer.name))?;
     let status = response.status();
     let headers = response.headers().clone();
-    let bytes = response.bytes().await?.to_vec();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(response_route_failure)?
+        .to_vec();
     let bytes = if deflated(&headers) {
-        inflate(&bytes)?
+        inflate(
+            &bytes,
+            &format!("the checkpoint manifest page from peer {}", peer.name),
+        )?
     } else {
         bytes
     };
@@ -2183,8 +2781,7 @@ pub fn signed_error_response_for<B: Backend>(
 }
 
 /// Run one exchange with `peer`: send this node's summary, take what the peer sends, push what
-/// it lacks, and adopt a checkpoint it advertises. Returns whether envelopes moved either way and
-/// whether a heal is due.
+/// it lacks, and adopt a checkpoint it advertises. Returns whether envelopes moved either way.
 pub async fn exchange<B: Backend>(
     http: &reqwest::Client,
     backend: &B,
@@ -2192,13 +2789,89 @@ pub async fn exchange<B: Backend>(
     peer: &PeerConfig,
     auth: &FleetAuth,
     fleet: &FleetContext,
-) -> Result<(bool, bool)> {
+) -> Result<bool> {
+    // This entry point receives only an HTTP URL, which may already be a Fabric tunnel.
+    // Only dial_peer retains the selected Route and can supply defensible carrier evidence.
+    exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
+}
+
+async fn finish_leave_receipt(
+    http: &reqwest::Client,
+    peer: &PeerConfig,
+    node: &str,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+) -> Result<()> {
+    let proof = fleet
+        .leave
+        .lock()
+        .await
+        .pending
+        .get(&peer.name)
+        .cloned()
+        .context("member-left response has no durable receipt proof")?;
+    let (ack, _): (Value, bool) = post_signed_to(
+        http,
+        peer,
+        node,
+        auth,
+        fleet,
+        LEAVE_RECEIPT_PATH,
+        &proof,
+        false,
+    )
+    .await
+    .context("leave receipt is still pending; retain settings and retry")?;
+    anyhow::ensure!(
+        ack["acknowledged"].as_str() == fleet.own_key.as_deref(),
+        "leave receipt acknowledgement names another identity"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exchange_via<B: Backend>(
+    http: &reqwest::Client,
+    backend: &B,
+    node: &str,
+    peer: &PeerConfig,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    carrier: crate::replication::ReplicationCarrier,
+) -> Result<bool> {
+    if fleet.leave.lock().await.pending.contains_key(&peer.name) {
+        finish_leave_receipt(http, peer, node, auth, fleet).await?;
+        return Err(RemovedFromFleet {
+            code: "member-left".into(),
+            message: "leave receipt confirmed".into(),
+        }
+        .into());
+    }
     let mut telemetry = super::telemetry::Round::new(&peer.name);
-    let result = exchange_inner(http, backend, node, peer, auth, fleet, &mut telemetry).await;
+    let result = exchange_inner(
+        http,
+        backend,
+        node,
+        peer,
+        auth,
+        fleet,
+        &mut telemetry,
+        carrier,
+    )
+    .await;
+    if result
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<RemovedFromFleet>())
+        .is_some_and(|removed| removed.code == "member-left")
+    {
+        finish_leave_receipt(http, peer, node, auth, fleet).await?;
+    }
     telemetry.finish(&result);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exchange_inner<B: Backend>(
     http: &reqwest::Client,
     backend: &B,
@@ -2207,101 +2880,99 @@ async fn exchange_inner<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
     telemetry: &mut super::telemetry::Round,
-) -> Result<(bool, bool)> {
-    let mut heal_now = false;
-    // One compact round, then at most one full-inventory round if the compact prefix
-    // cannot make progress. Payloadless checkpoint identities can differ indefinitely.
-    for full_inventory in [false, true] {
-        let first = backend
-            .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
-            .await?
+    carrier: crate::replication::ReplicationCarrier,
+) -> Result<bool> {
+    // One compact round. Each side lists the ranges that differ a few at a time, from a different
+    // range on each answer, so successive rounds compare every range without either side ever
+    // sending its whole inventory (a million identities, 228 MB, on a busy fleet). Ranges that
+    // differ only by payloadless checkpoint identities never settle this way; checkpoint-lineage
+    // reconciliation, not more envelope requests, settles those.
+    let attempt = std::time::Instant::now();
+    let first = backend
+        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalExport, attempt, None))?
+        .exchange;
+    let own_checkpoint = first.inventory.checkpoint.clone();
+    let query = ReplicationExchange {
+        envelopes: Vec::new(),
+        ..first
+    };
+    let started = std::time::Instant::now();
+    let (remote, peer_inflates) =
+        post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    let round_trip = started.elapsed();
+    let different = remote.inventory.digest != query.inventory.digest;
+    let received = receive_from_peer(
+        backend,
+        fleet,
+        &peer.name,
+        auth.fleet_id(),
+        &remote,
+        Some(round_trip),
+        carrier,
+    )
+    .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
+    telemetry.pull(received.receipt.received);
+    // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
+    // or keeps being sent, envelopes that are never stored must not keep the worker busy.
+    let pulled = received.receipt.received != 0;
+    let mut pushed = false;
+    let mut pulled_follow_up = false;
+    // A follow-up also carries the signatures the peer asked for, even when both sides hold
+    // the same envelopes.
+    if different || !remote.signature_requests.is_empty() {
+        let push = backend
+            .export(
+                auth.fleet_id(),
+                &remote.inventory,
+                false,
+                &remote.signature_requests,
+            )
+            .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, attempt, None))?
             .exchange;
-        let own_checkpoint = first.inventory.checkpoint.clone();
-        let mut query = ReplicationExchange {
-            envelopes: Vec::new(),
-            ..first
-        };
-        if full_inventory {
-            // Keep the digest: an empty listing is not proof of an empty inventory.
-            // Existing peers answer a request without buckets with their complete inventory.
-            query.inventory.buckets.clear();
-        }
         let started = std::time::Instant::now();
-        let (remote, peer_inflates) =
-            post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+        // A peer that says it takes compressed requests gets a large push compressed.
+        let (response, _) =
+            post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
         let round_trip = started.elapsed();
-        let different = remote.inventory.digest != query.inventory.digest;
-        let received = backend
-            .receive(&peer.name, auth.fleet_id(), &remote, Some(round_trip))
-            .await?;
+        // The peer stores a push before it answers, so its inventory moved if the push landed.
+        pushed = !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
+        telemetry.push(push.envelopes.len(), pushed);
+        let received = receive_from_peer(
+            backend,
+            fleet,
+            &peer.name,
+            auth.fleet_id(),
+            &response,
+            Some(round_trip),
+            carrier,
+        )
+        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
         telemetry.pull(received.receipt.received);
-        // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
-        // or keeps being sent, envelopes that are never stored must not keep the worker busy.
-        let pulled = received.receipt.received != 0;
-        heal_now |= received.receipt.heal;
-        if received.changed {
-            backend.changed().await;
-        }
-        let mut pushed = false;
-        let mut pulled_follow_up = false;
-        // A follow-up also carries the signatures the peer asked for, even when both sides hold
-        // the same envelopes.
-        if different || !remote.signature_requests.is_empty() {
-            let push = backend
-                .export(
-                    auth.fleet_id(),
-                    &remote.inventory,
-                    false,
-                    &remote.signature_requests,
-                )
-                .await?
-                .exchange;
-            let started = std::time::Instant::now();
-            // A peer that says it takes compressed requests gets a large push compressed.
-            let (response, _) =
-                post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
-            let round_trip = started.elapsed();
-            // The peer stores a push before it answers, so its inventory moved if the push landed.
-            pushed =
-                !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
-            telemetry.push(push.envelopes.len(), pushed);
-            let received = backend
-                .receive(&peer.name, auth.fleet_id(), &response, Some(round_trip))
-                .await?;
-            telemetry.pull(received.receipt.received);
-            pulled_follow_up = received.receipt.received != 0;
-            heal_now |= received.receipt.heal;
-            if received.changed {
-                backend.changed().await;
-            }
-        }
-        let adopted = match &remote.inventory.checkpoint {
-            Some(advertised) => {
-                adopt_advertised_checkpoint(
-                    http,
-                    backend,
-                    node,
-                    peer,
-                    auth,
-                    fleet,
-                    own_checkpoint.as_ref(),
-                    advertised,
-                )
-                .await
-            }
-            None => false,
-        };
-        if adopted {
-            backend.changed().await;
-        }
-        let progressed = pulled || pulled_follow_up || pushed || adopted;
-        if progressed || !different || remote.inventory.buckets.is_empty() {
-            return Ok((progressed, heal_now));
-        }
+        pulled_follow_up = received.receipt.received != 0;
     }
-    // A full comparison can still differ only by tombstones. Let the worker rest;
-    // checkpoint-lineage reconciliation, not more envelope requests, must settle those.
-    Ok((false, heal_now))
+    let adopted = match &remote.inventory.checkpoint {
+        Some(advertised) => {
+            adopt_advertised_checkpoint(
+                http,
+                backend,
+                node,
+                peer,
+                auth,
+                fleet,
+                own_checkpoint.as_ref(),
+                advertised,
+            )
+            .await
+        }
+        None => false,
+    };
+    if adopted {
+        backend.changed().await;
+        refresh_fleet_view(backend, fleet).await;
+    }
+    let progressed = pulled || pulled_follow_up || pushed || adopted;
+    Ok(progressed)
 }
 
 /// When an adoption last failed, by this node and the checkpoint's drop digest, so a manifest
@@ -2388,69 +3059,6 @@ async fn adopt_advertised_checkpoint<B: Backend>(
     }
 }
 
-/// Heal with one peer: carry each question the main daemon asks to the peer, and each answer
-/// back, until the main daemon reports the heal. A peer that cannot be asked ends the heal with
-/// the reason, which the main daemon reports.
-pub async fn heal<B: Backend>(
-    backend: &B,
-    node: &str,
-    peer: &PeerConfig,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-) {
-    let mut telemetry = super::telemetry::Heal::new(&peer.name);
-    heal_inner(backend, node, peer, auth, fleet, &mut telemetry).await;
-    telemetry.finish();
-}
-
-async fn heal_inner<B: Backend>(
-    backend: &B,
-    node: &str,
-    peer: &PeerConfig,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-    telemetry: &mut super::telemetry::Heal,
-) {
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(HEAL_TIMEOUT)
-        .build()
-        .expect("the heal HTTP client configuration is valid");
-    let mut query = ReplicationHealQuery::Ranges;
-    for _ in 0..HEAL_QUESTION_LIMIT {
-        telemetry.question();
-        let request = ReplicationHealRequest {
-            fleet_id: auth.fleet_id().to_owned(),
-            query,
-        };
-        let answer = match post_signed_to::<_, ReplicationHealAnswer>(
-            &http, peer, node, auth, fleet, HEAL_PATH, &request, true,
-        )
-        .await
-        {
-            Ok((answer, _)) => answer,
-            Err(error) => {
-                telemetry.error(&error);
-                ReplicationHealAnswer::Failed {
-                    message: format!("{} could not answer: {error:#}", peer.name),
-                }
-            }
-        };
-        match backend.heal_next(&peer.name, answer).await {
-            Ok(ReplicationHealStep::Ask { query: next }) => query = next,
-            Ok(ReplicationHealStep::Done { report }) => {
-                telemetry.complete(&report);
-                break;
-            }
-            Err(error) => {
-                telemetry.error(&error);
-                break;
-            }
-        }
-    }
-    backend.changed().await;
-}
-
 #[derive(Debug)]
 pub(super) struct PeerOverloaded {
     pub(super) retry_after: Duration,
@@ -2462,6 +3070,29 @@ impl std::fmt::Display for PeerOverloaded {
     }
 }
 impl std::error::Error for PeerOverloaded {}
+
+fn overloaded_error(
+    retry_after: Duration,
+    started: std::time::Instant,
+    http_status: Option<u16>,
+) -> anyhow::Error {
+    let failure = ReplicationExchangeFailure {
+        code: "replication-overloaded".into(),
+        phase: if http_status.is_some() {
+            ReplicationFailurePhase::ResponseBody
+        } else {
+            ReplicationFailurePhase::RequestHeaders
+        },
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        http_status,
+        cause: if http_status.is_some() {
+            "authenticated peer is overloaded"
+        } else {
+            "exchange polling budget elapsed before response headers"
+        }.into(),
+    };
+    anyhow::Error::new(PeerOverloaded { retry_after }).context(failure)
+}
 
 /// Send one signed exchange, compressed when `compress` is set and the body is large, and return
 /// the peer's verified answer and whether the peer takes compressed requests.
@@ -2476,10 +3107,15 @@ async fn post_signed<B: Backend>(
     exchange: &ReplicationExchange,
     compress: bool,
 ) -> Result<(ReplicationExchange, bool)> {
+    if !exchange.envelopes.is_empty() || !exchange.signatures.is_empty() {
+        select_leave_confirmer(backend, fleet, &peer.name).await?;
+    }
     let deadline = tokio::time::Instant::now() + EXCHANGE_POLL_BUDGET;
     let attempted = crate::store::now_ms();
+    let started = std::time::Instant::now();
+    let mut last_overload = None;
     for _ in 0..MAX_OVERLOAD_POLLS {
-        record_worker(backend, &peer.name, "exchange", attempted, None).await;
+        record_worker(backend, &peer.name, "exchange", attempted, None, None).await;
         let result = match tokio::time::timeout_at(
             deadline,
             post_signed_to(
@@ -2497,33 +3133,67 @@ async fn post_signed<B: Backend>(
         {
             Ok(result) => result,
             Err(_) => {
-                return Err(PeerOverloaded {
-                    retry_after: OVERLOAD_RETRY,
-                }
-                .into());
+                return Err(last_overload.unwrap_or_else(|| {
+                    overloaded_error(OVERLOAD_RETRY, started, None)
+                }));
             }
         };
         match result {
             Err(error) if error.is::<PeerOverloaded>() => {
                 let delay = error.downcast_ref::<PeerOverloaded>().unwrap().retry_after;
-                record_worker(backend, &peer.name, "overload", attempted, Some(delay)).await;
+                record_worker(
+                    backend,
+                    &peer.name,
+                    "overload",
+                    attempted,
+                    Some(delay),
+                    None,
+                )
+                .await;
                 if tokio::time::timeout_at(deadline, tokio::time::sleep(delay))
                     .await
                     .is_err()
                 {
-                    return Err(PeerOverloaded {
-                        retry_after: OVERLOAD_RETRY,
-                    }
-                    .into());
+                    return Err(error);
                 }
+                last_overload = Some(error);
             }
             result => return result,
         }
     }
-    Err(PeerOverloaded {
-        retry_after: OVERLOAD_RETRY,
+    Err(last_overload.unwrap_or_else(|| overloaded_error(OVERLOAD_RETRY, started, None)))
+}
+
+/// What an unsigned refusal from `peer` says: its status and, only for the bodies this protocol's
+/// own unsigned refusals carry or for a size refusal, a fixed reason. Any other body is counted,
+/// never quoted, since nothing vouches for what it contains.
+fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
+    let reason = [
+        (
+            "replication request body:",
+            "it could not read the request body (larger than it accepts, or not valid deflate)",
+        ),
+        (
+            "replication authentication failed:",
+            "it could not authenticate the request",
+        ),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| body.starts_with(prefix.as_bytes()))
+    .map(|(_, reason)| reason)
+    .or_else(|| {
+        (status == StatusCode::PAYLOAD_TOO_LARGE)
+            .then_some("the request body is larger than it accepts")
+    });
+    match reason {
+        Some(reason) => {
+            format!("peer {peer} refused the exchange with an unsigned {status}: {reason}")
+        }
+        None => format!(
+            "peer {peer} answered an unsigned {status} ({} body bytes, not shown)",
+            body.len()
+        ),
     }
-    .into())
 }
 
 /// Send one signed request to a peer path and return the peer's verified answer, as
@@ -2559,32 +3229,38 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     let response = request
         .send()
         .await
-        .with_context(|| {
-            format!(
-                "replication request to peer {} failed before headers within {} seconds at `{endpoint}`",
-                peer.name,
-                REPLICATION_EXCHANGE_TIMEOUT.as_secs()
-            )
-        })?;
+        .map_err(request_route_failure)
+        .map_err(|error| exchange_failure(error, ReplicationFailurePhase::RequestHeaders, started, None))?;
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response
         .bytes()
         .await
-        .with_context(|| {
-            format!(
-                "replication response body from peer {} failed after {} ms",
-                peer.name,
-                started.elapsed().as_millis()
-            )
-        })?
+        .map_err(response_route_failure)
+        .map_err(|error| exchange_failure(error, ReplicationFailurePhase::ResponseBody, started, Some(status)))?
         .to_vec();
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
+    // Both signature names require authentication, including refusals. Switch senders only
+    // after every member accepts aliases; sunset 60 days after the first shipping release.
+    let unsigned =
+        !headers.contains_key(HEADER_SIGNATURE) && !headers.contains_key("x-fractal-signature");
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     // A build older than a path answers an unsigned 404.
-    if status == StatusCode::NOT_FOUND && headers.get(HEADER_SIGNATURE).is_none() {
-        anyhow::bail!("peer {} runs a build without `{path}`", peer.name);
+    if status == StatusCode::NOT_FOUND && unsigned {
+        return Err(exchange_failure(anyhow::anyhow!("peer build lacks the requested endpoint"), ReplicationFailurePhase::Verify, started, Some(status)));
+    }
+    // Any other refusal without the fleet's signature is reported by its status, before the
+    // signature check would report only a missing header and hide why the exchange failed. Its
+    // body is never trusted as data; an unsigned success still fails the signature check below.
+    if !status.is_success() && unsigned {
+        return Err(exchange_failure(anyhow::anyhow!(unsigned_refusal(&peer.name, status, &bytes)), ReplicationFailurePhase::Verify, started, Some(status)));
     }
     let bytes = if deflated(&headers) {
-        inflate(&bytes)?
+        inflate(
+            &bytes,
+            &format!("the answer to `{path}` from peer {}", peer.name),
+        )
+        .map_err(|error| exchange_failure(error, ReplicationFailurePhase::ResponseBody, started, Some(status)))?
     } else {
         bytes
     };
@@ -2595,7 +3271,18 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         &bytes,
         Some(&peer.name),
         Some(&request_digest),
-    )?;
+    ).map_err(|error| exchange_failure(error, ReplicationFailurePhase::Verify, started, Some(status)))?;
+    if path == LEAVE_RECEIPT_PATH {
+        let leave = fleet.leave.lock().await;
+        let selected = leave
+            .confirmer
+            .as_ref()
+            .context("leave receipt has no selected confirmer")?;
+        anyhow::ensure!(
+            responder.member_signature_valid && responder.member_key.as_ref() == Some(selected),
+            "leave receipt acknowledgement is not signed by the selected confirmer"
+        );
+    }
     if let Err(refusal) = fleet.accept(&responder) {
         anyhow::bail!(
             "peer {} failed member authentication ({}): {}",
@@ -2627,16 +3314,45 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                 .and_then(|value| value["retry_after_ms"].as_u64())
                 .unwrap_or(5000)
                 .clamp(5000, 30_000);
-            return Err(PeerOverloaded {
-                retry_after: Duration::from_millis(millis),
-            }
-            .into());
+            return Err(overloaded_error(
+                Duration::from_millis(millis), started, Some(status.as_u16()),
+            ));
         }
         let about_us = refusal
             .as_ref()
             .and_then(|value| value["member_key"].as_str())
             .is_some_and(|key| Some(key) == fleet.own_key.as_deref());
-        if matches!(code, "member-removed" | "member-left") && about_us {
+        if path == EXCHANGE_PATH && matches!(code, "member-removed" | "member-left") && about_us {
+            if code == "member-left" && path == EXCHANGE_PATH {
+                let proof = LeaveProof {
+                    body: String::from_utf8(bytes)?,
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| Ok((name.to_string(), value.to_str()?.to_owned())))
+                        .collect::<Result<_>>()?,
+                    request_digest,
+                };
+                let mut leave = fleet.leave.lock().await;
+                let responder_key = responder
+                    .member_key
+                    .as_ref()
+                    .context("leave proof needs a member key")?;
+                anyhow::ensure!(
+                    responder.member_signature_valid,
+                    "leave proof needs a member signature"
+                );
+                if let Some(selected) = &leave.confirmer {
+                    anyhow::ensure!(
+                        selected == responder_key,
+                        "leave acknowledgement came from a different member than the selected confirmer"
+                    );
+                }
+                let mut updated = leave.clone();
+                updated.confirmer = Some(responder_key.clone());
+                updated.pending.insert(peer.name.clone(), proof);
+                save_leave_state(fleet, &updated).await?;
+                *leave = updated;
+            }
             let message = refusal
                 .as_ref()
                 .and_then(|value| value["message"].as_str())
@@ -2647,18 +3363,43 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
             }
             .into());
         }
-        anyhow::bail!(
-            "peer {} returned {status}: {}",
-            peer.name,
-            String::from_utf8_lossy(&bytes)
-        );
+        // Only authenticated, allowlisted machine codes survive. Never retain peer prose.
+        let safe_code = match code {
+            code @ ("replication-exchange-metadata-too-large"
+                | "replication-request-failed"
+                | "member-conflicted"
+                | "member-signature-required"
+                | "member-left"
+                | "member-removed"
+                | "not-a-member") => code,
+            _ => "replication-peer-rejected",
+        };
+        return Err(ReplicationExchangeFailure {
+            code: safe_code.into(),
+            phase: if matches!(
+                safe_code, "member-conflicted" | "member-signature-required"
+                    | "member-left" | "member-removed" | "not-a-member"
+            ) {
+                ReplicationFailurePhase::Verify
+            } else {
+                refusal.as_ref()
+                    .and_then(|value| serde_json::from_value(value["failure"]["phase"].clone()).ok())
+                    .unwrap_or(ReplicationFailurePhase::ResponseBody)
+            },
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            http_status: Some(status.as_u16()),
+            cause: "authenticated peer rejected the exchange; body withheld".into(),
+        }.into());
     }
     let response: PeerResponse<R> =
-        serde_json::from_slice(&bytes).context("decode the signed peer response")?;
-    anyhow::ensure!(
-        response.api_version == PEER_API_VERSION,
-        "the peer API version differs"
-    );
+        serde_json::from_slice(&bytes).context("decode the signed peer response")
+            .map_err(|error| exchange_failure(error, ReplicationFailurePhase::Verify, started, Some(status)))?;
+    if response.api_version != PEER_API_VERSION {
+        return Err(exchange_failure(
+            anyhow::anyhow!("the peer API version differs"),
+            ReplicationFailurePhase::Verify, started, Some(status),
+        ));
+    }
     fleet.note_activity(&peer.name);
     Ok((response.value, accepts_deflate(&headers)))
 }
@@ -2666,3 +3407,9 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "transport_error_tests.rs"]
+mod transport_error_tests;
+#[cfg(test)]
+#[path = "unsigned_refusal_tests.rs"]
+mod unsigned_refusal_tests;

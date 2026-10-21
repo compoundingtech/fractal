@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Restore a backup's pre-migration history that a later membership claim keys from its first sequence",
+  "replay": {
+    "status": "none",
+    "detail": "Claim replay and projections are unchanged. Restore admits the same archived envelopes the source admitted, then replays them as before."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, index or trigger change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and live fleet admission are unchanged; members need no coordinated upgrade."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No API, protocol or archive format change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration or restart requirement."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual action required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Backup restore no longer holds archived envelopes as unsigned or fenced by membership claims replayed ahead of them in writer order, because an archive holds only envelopes its source admitted. A restore of a database written by v0.3.17 or earlier that failed with 'backup contains N unadmitted envelopes' (a member migrated without a writer floor, whose pre-migration envelopes were relayed unsigned) now succeeds and can simply be run again; restores that already succeeded produce the same log."
+  }
+}
