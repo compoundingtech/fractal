@@ -146,6 +146,26 @@ live set alone is over `cap_records`, nothing live is deleted, the set is printe
 first run in an empty repository took 463 s (most of it fetching every record and 40 days of main's trees); a second
 run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
 
+**The lock window.** A tag ruleset on `refs/tags/evidence/**` (no deletion, no update) refuses GC's own deletions too,
+so `--lock-config FILE` names three commands, run without a shell: `unlock`, `relock` and `check` (exit 0 only while the
+protection is on). `scripts/evidence-gc-lock.example.json` has them for the ruleset through `gh api`; moving the
+credential to a sekrets profile is a change of that file alone. The order: migrations and note deletions first
+(nothing protects notes), then `check` (found off: relock, delete no tag, exit 4), a listing of the remote's evidence
+tags, `unlock`, the tag deletions, `relock` in a `finally` that also runs on SIGTERM, SIGINT and SIGHUP (retried three
+times), `check` again, and a second listing. A tag that disappeared or moved without being in the plan, or a protection
+that is not on at the end, is an alarm (exit 4). One line on stderr records it:
+`evidence-gc-lock v1 unlocked_at=... relocked_at=... window_s=... tags_deleted=N unexplained=N final=on`.
+`--relock-only` runs `relock` and `check` alone.
+
+**Where it runs.** `scripts/evidence-gc.timer` (daily, 03:40 UTC) starts `scripts/evidence-gc.service`, a systemd
+user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
+`scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
+`~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
+cannot change what deletes), runs it with `--fetch --apply` and the lock config in `~/.config/evidence-gc/lock.json`
+when present, keeps 30 days of summaries and plans, and stores each summary as a new version of the st document
+`doc/fleet/factory/evidence-gc/runs`. The unit's `ExecStopPost` runs `--relock-only` after every stop, so even a run
+killed inside its window leaves the protection on.
+
 **Safety.** It fails closed: if a commit named by `--head` cannot be turned into a tree, or no branch tip is known at
 all, `--apply` deletes nothing. A failed remote push leaves the local refs alone. A second run finds nothing to do.
 Refs outside the evidence namespaces and refs that are not well-formed records are never touched. The first layout
@@ -177,7 +197,7 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
 3. The verifier and the gate read tags first and notes as the legacy layout (done); then the producers write each
    record as a tag and a note (done, see "Tags, written and read first" above). Writing notes stops once no gate that
    still runs reads notes only.
-4. GC as a pure plan of whole trees (done), then the tag ruleset with GC's window around its deletions, and the
+4. GC as a pure plan of whole trees (done), GC's lock window and its timer (done), then the tag ruleset, and the
    signed log.
 
 ## Trust and custody
