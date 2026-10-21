@@ -73,14 +73,19 @@ and migrates its input: use an additional consistent SQLite copy, never the unto
 
 Choose a tag from [releases](https://github.com/compoundingtech/smalltalk/releases). Run this on **each machine**, entering the same tag; it downloads without touching running services:
 
+For releases shipping the rename, use the canonical `fractal-*` archives. The
+`smalltalk-*` copies remain available through 2026-11-01; when deliberately
+installing a retained pre-rename tag (such as v0.3.17), use that historical prefix
+in the two archive names below instead. Historical release bytes are unchanged.
+
 ```sh
-printf 'Release tag to install (for example v0.3.16): '
+printf 'Release tag to install: '
 read -r st_tag
 mkdir -p "$HOME/smalltalk-install/$st_tag"
 cd "$HOME/smalltalk-install/$st_tag"
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) archive=smalltalk-x86_64-unknown-linux-gnu.tar.gz ;;
-  Darwin-arm64) archive=smalltalk-aarch64-apple-darwin.tar.gz ;;
+  Linux-x86_64) archive=fractal-x86_64-unknown-linux-gnu.tar.gz ;;
+  Darwin-arm64) archive=fractal-aarch64-apple-darwin.tar.gz ;;
   *) echo 'This guide covers Linux x86_64 and Apple Silicon only'; exit 1 ;;
 esac
 release="https://github.com/compoundingtech/smalltalk/releases/download/$st_tag"
