@@ -1,4 +1,4 @@
-import type { ArrangementPage, EnvelopeOf } from '@smalltalk/st3-client'
+import type { ArrangementPage, EnvelopeOf } from '@fractal/client'
 import { describe, expect, it, vi } from 'vitest'
 import { st3InventoryGateway } from './arrangements.ts'
 import { testCapabilities, testSelection, testSnapshot } from '../folders/testGateway.ts'

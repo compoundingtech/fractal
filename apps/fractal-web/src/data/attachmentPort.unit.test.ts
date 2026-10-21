@@ -1,5 +1,5 @@
-import { St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 
@@ -43,7 +43,7 @@ const attachmentClient = ({
   readonly reply?: (url: URL) => Response | Promise<Response>
 } = {}) => {
   const calls: { readonly url: URL; readonly init?: RequestInit }[] = []
-  const client = new St3Client({
+  const client = new FractalClient({
     baseUrl: 'https://gateway.invalid',
     fetchImpl: async (input, init) => {
       const url = new URL(String(input))

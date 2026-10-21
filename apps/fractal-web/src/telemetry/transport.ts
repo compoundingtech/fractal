@@ -1,5 +1,5 @@
 import * as Atom from 'effect/reactivity/Atom'
-import { wrapTraceFetch, type St3Options } from '@st3/sdk/effect'
+import { wrapTraceFetch, type St3Options } from '@fractal/sdk/effect'
 
 import { getDebug, incrDebug, setDebug } from './meters.tsx'
 
