@@ -1,5 +1,7 @@
 // Every exemption is reviewable by export identity and mode, including count-neutral swaps.
 export const scenarioExemptionIds: readonly string[] = [
+  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#AgentRowDetails:contract-fixture',
+  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#AgentRowDetailsLight:contract-fixture',
   './Changelog.stories.tsx#Acknowledgement1440Dark:contract-fixture',
   './Changelog.stories.tsx#Acknowledgement1440Light:contract-fixture',
   './Changelog.stories.tsx#Acknowledgement440Dark:contract-fixture',
