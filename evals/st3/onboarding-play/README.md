@@ -35,7 +35,7 @@ problem stops the whole eval; a paid run is never retried. Reports go to `report
 ## What is judged (`judge.sh`)
 
 The judge is pure: it scores one evidence bundle, so it is tested without a harness
-(`self-test.sh`, and `cargo test -p st3 --test integration onboarding_eval`).
+(`self-test.sh`, and `cargo test -p fractal --test integration onboarding_eval`).
 
 - **Time to the first agent-to-agent message**, from the graph (default budget 180 s, reported).
 - **Acts one and two complete**, from the graph and the demo folder: the second agent is declared,

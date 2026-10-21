@@ -396,7 +396,7 @@ const bindProfileCleanup = new Function('memberProfileKey', 'ownProfiles', 'push
 assert.equal(pushRouteDeclarations.size, 2);
 const bindPushRoutes = new Function('context', ts.transpile(`
   const { useMemo, proof, credential, PROFILE_KEY, url, isFabricGatewayId, ownProfiles,
-    connectUrl, clientCredential, pushIssuer, pushGranted, status, St3Client, pushWrite,
+    connectUrl, clientCredential, pushIssuer, pushGranted, status, FractalClient, pushWrite,
     gatewayFetch, clientName, app } = context;
   const ${pushRouteDeclarations.get('pushIssuers').getText(storeSource)};
   const ${pushRouteDeclarations.get('pushRemote').getText(storeSource)};
@@ -411,7 +411,7 @@ test('real Fabric issuer routes allow retired-bearer cleanup without restoring r
       url: 'fabric:A', isFabricGatewayId: value => value.startsWith('fabric:'),
       ownProfiles: new Map([['B', { url: 'fabric:B', credential: 'other-bearer' }]]),
       connectUrl: 'http://127.0.0.1:12345', clientCredential: bearer, pushIssuer: 'A', pushGranted, status,
-      St3Client: class {
+      FractalClient: class {
         constructor(options) { this.options = options; }
         async pushUnregister() {
           calls.push([this.options.baseUrl, this.options.credential()]);
