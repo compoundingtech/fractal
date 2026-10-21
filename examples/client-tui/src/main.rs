@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use st3_client::{Client, discover_unix_endpoint, set_client_name};
-use st3_client_tui::{App, send};
+use fractal_client::{Client, discover_unix_endpoint, set_client_name};
+use fractal_client_tui::{App, send};
 use std::{sync::mpsc, time::Duration};
 
 #[tokio::main]
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     ));
     let (updates, incoming) = mpsc::channel();
     let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(st3_feed::run(
+    let task = tokio::spawn(fractal_feed::run(
         Client::unix_as(socket, &args[0]),
         updates,
         receiver,

@@ -1,6 +1,6 @@
 import { it } from '@effect/vitest'
-import { catalog, loadWorld, type World } from '@smalltalk/st3-scenarios'
-import { createReplay, manualClock, type ManualClock } from '@smalltalk/st3-scenarios/replay'
+import { catalog, loadWorld, type World } from '@fractal/scenarios'
+import { createReplay, manualClock, type ManualClock } from '@fractal/scenarios/replay'
 import { Effect } from 'effect'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
 import { liveSource, type LiveSource } from './liveSource.ts'

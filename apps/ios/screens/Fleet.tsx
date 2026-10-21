@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { plainError, type ClientConnection } from '../../../clients/typescript/st3-client';
+import { plainError, type ClientConnection } from '../../../clients/typescript/fractal-client';
 import { ActionSheetIOS, Alert, ScrollView, Switch, Text, View } from 'react-native';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
 import { clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember } from '../presentation';
-import { isUnmanaged, isUnresolved } from '@smalltalk/st3-views';
+import { isUnmanaged, isUnresolved } from '@fractal/views';
 import { useStore } from '../store';
 import { TABS } from '../tabs';
 import { theme } from '../theme';

@@ -8,11 +8,11 @@ test('app, kit and client modules select their importers through the import grap
   assert.deepEqual(selectTests([
     modified('apps/fractal-web/src/shell/AgentFolders.tsx'),
     ['A', 'packages/fractal-ui/src/assistant-ui/shell.ts'],
-    modified('clients/typescript/st3-client/Schema.generated.ts'),
+    modified('clients/typescript/fractal-client/Schema.generated.ts'),
     modified('apps/fractal-web/src/shell/AgentFolders.css'),
   ]), { mode: 'related', files: [
     'apps/fractal-web/src/shell/AgentFolders.tsx', 'packages/fractal-ui/src/assistant-ui/shell.ts',
-    'clients/typescript/st3-client/Schema.generated.ts', 'apps/fractal-web/src/shell/AgentFolders.css',
+    'clients/typescript/fractal-client/Schema.generated.ts', 'apps/fractal-web/src/shell/AgentFolders.css',
   ] })
 })
 

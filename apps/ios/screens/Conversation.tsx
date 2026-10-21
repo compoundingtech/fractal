@@ -5,16 +5,16 @@ import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { St3Client, TimelineEntry } from '../../../clients/typescript/st3-client';
-import type { ConversationContentRef } from '../../../clients/typescript/st3-client';
-import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@smalltalk/st3-views';
+import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
+import type { ConversationContentRef } from '../../../clients/typescript/fractal-client';
+import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
 import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
 import { wholeText, wholeTextFailure } from '../messageBody';
 import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
@@ -533,7 +533,7 @@ const EntryView = memo(function EntryView(props: { entry: ConversationEntry; con
 });
 
 type NativeImage = { uri: string; size: number };
-type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: St3Client | null };
+type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: FractalClient | null };
 
 // Class lifecycle owns native measurement and invalidates late responses on unmount.
 // All mounted images share the viewport queue; FlatList overscan never authorizes reads.
