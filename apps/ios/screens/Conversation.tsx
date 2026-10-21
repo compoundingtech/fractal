@@ -5,16 +5,18 @@ import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { St3Client, TimelineEntry } from '../../../clients/typescript/st3-client';
-import type { ConversationContentRef } from '../../../clients/typescript/st3-client';
-import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@smalltalk/st3-views';
+import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
+import type { ConversationContentRef } from '../../../clients/typescript/fractal-client';
+import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
-import { agentGlyph, agentModel, agentName, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
+import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
 import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
+import { wholeText, wholeTextFailure } from '../messageBody';
+import { draftSize, messageLimit, restoreDraft, sendReason } from '../composer';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from '../visibleConversationImages';
@@ -30,7 +32,7 @@ import { AlertsStrip } from './Alerts';
 const RULES: ConversationRules = rules;
 const c = tokenColor;
 
-const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
+const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
 // `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
 type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
@@ -61,11 +63,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     const current = timelineNow.current;
     const sessionId = current.sessionId;
     if (!dragged.current || !current.hasOlder || current.older.loading || !sessionId || status !== 'online') return;
+    // A replacement can arrive while this page is loading, even for the same session.
+    const request = { sessionId, historyVersion: current.historyVersion };
     const keep = (next: Conversation<TimelineEntry>) => { rememberBounded(conversationCache.current, target, next, 24); return next; };
-    setTimeline(previous => olderLoading(previous));
+    setTimeline(previous => olderLoading(previous, request));
     void actions.olderTimeline(sessionId, current.older, current.entries[0]).then(
-      page => setTimeline(previous => keep(applyOlderPage(previous, sessionId, page))),
-      error => setTimeline(previous => olderFailed(previous, error instanceof Error ? error.message : String(error))),
+      page => setTimeline(previous => keep(applyOlderPage(previous, request, page))),
+      error => setTimeline(previous => olderFailed(previous, request, error instanceof Error ? error.message : String(error))),
     );
   };
   // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
@@ -110,6 +114,10 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   // Images to send with the next message, picked or pasted, and why any were refused.
   const [images, setImages] = useState<Picked[]>([]);
   const [imageIssue, setImageIssue] = useState('');
+  // Why the last send did not go, shown above the box while its text is back in it.
+  const [sendIssue, setSendIssue] = useState('');
+  const limit = messageLimit(caps);
+  const sizeInfo = useMemo(() => draftSize(draft, limit), [draft, limit]);
   const stopListening = useRef<(() => Promise<string>) | null>(null);
   const box = useRef<TextInput>(null);
   /** Empty the message box. Clearing it natively too lets it shrink back to one line; with the
@@ -263,7 +271,9 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     if (!agent || (!text && !sending.length)) return;
     const item: Pending = { id: `pending-${Date.now()}`, text, at: nowClock(), ...(sending.length ? { images: sending.length } : {}) };
     setPending(previous => [...previous, item]);
-    if (spoken === undefined) emptyBox();
+    // The words sent from dictation include what was in the box, so it empties either way; a send that
+    // does not go puts the text back, and one that st acknowledged leaves it empty.
+    emptyBox();
     setImages([]); setImageIssue('');
     // To the newest, where the message appears: animated from nearby, a jump from far up, since an
     // animation across the whole conversation reads as the list scrolling everything again.
@@ -271,8 +281,23 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
     const sent = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
+    setSendIssue('');
     // Images that did not go stay ready to send again.
     if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
+    if (sent.how === 'failed') {
+      // The text goes back in the box, whatever the reason: only a send st acknowledged clears it. Words
+      // typed while it was on its way stay after it. The cache holds the box's text even if the person
+      // has left the conversation, so the text is there when they come back.
+      const restored = restoreDraft(draftCache.current.get(target) ?? '', text);
+      if (restored) rememberBounded(draftCache.current, target, restored, 24);
+      draftTouched.current = true;
+      if (tags) setDictated(true);
+      setDraft(restored);
+      saveDrafts();
+      setPending(previous => previous.filter(candidate => candidate.id !== item.id));
+      setSendIssue(`Not sent: ${sendReason(sent.error, false)}`);
+      return;
+    }
     settle(item.id, sent);
   }
   // An unconfirmed message goes again as the same request, so st keeps at most one of it.
@@ -323,16 +348,17 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     setListening(false);
     const words = stop ? (await stop()).trim() : '';
     if (then === 'cancel' || !words) return;
-    if (then === 'send') { await send(draft.trim() ? `${draft.trimEnd()} ${words}` : words); emptyBox(); return; }
+    if (then === 'send') { await send(draft.trim() ? `${draft.trimEnd()} ${words}` : words); return; }
     const text = draft.trim() ? `${draft.trimEnd()} ${words}` : words;
     setDraft(text); rememberBounded(draftCache.current, target, text, 24);
     setDictated(true);
   }
   // Debug builds only: type a message and send it, as a person would, so a recording can show
-  // what the list does on send (EXPO_PUBLIC_ST3_TEST_SEND).
+  // what the list does on send (EXPO_PUBLIC_FRACTAL_TEST_SEND).
   const [devSend, setDevSend] = useState(0);
   useEffect(() => {
-    const text = __DEV__ ? process.env.EXPO_PUBLIC_ST3_TEST_SEND : undefined;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    const text = __DEV__ ? (process.env.EXPO_PUBLIC_FRACTAL_TEST_SEND ?? process.env.EXPO_PUBLIC_ST3_TEST_SEND) : undefined;
     if (!text || !loaded || !agent) return;
     // `\n` in the variable is a new line, so a recording can show a tall box after a send.
     const typed = setTimeout(() => setDraft(`${text.replaceAll('\\n', '\n')} ${new Date().toISOString().slice(11, 19)}`), 3_000);
@@ -341,10 +367,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [loaded, agent?.id]);
   useEffect(() => { if (devSend) void send(); }, [devSend]);
   // Debug builds only: scroll back to the oldest entry every few seconds, as a person reading
-  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_ST3_TEST_SCROLL_BACK
+  // back would, so a recording can show earlier pages arriving (EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK
   // is how many times).
   useEffect(() => {
-    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    let left = __DEV__ ? Number(process.env.EXPO_PUBLIC_FRACTAL_TEST_SCROLL_BACK ?? process.env.EXPO_PUBLIC_ST3_TEST_SCROLL_BACK ?? 0) : 0;
     if (!left || !loaded) return;
     const timer = setInterval(() => {
       if (left-- <= 0) { clearInterval(timer); return; }
@@ -426,6 +453,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       </View>)}
       {imageIssue ? <T color={theme.waiting} style={{ flex: 1 }}>{imageIssue}</T> : null}
     </View> : null}
+    {sendIssue || sizeInfo.note ? <View style={styles.tray} accessibilityLiveRegion="polite"><T color={sendIssue || sizeInfo.over ? theme.waiting : theme.overlay1} style={{ flex: 1 }}>{sendIssue || sizeInfo.note}</T></View> : null}
     <View style={[styles.composer, { paddingBottom: bottom }]}>
       <Pressable accessibilityRole="button" accessibilityLabel="Attach an image" hitSlop={8} onPress={attach} disabled={images.length >= MAX_IMAGES} style={styles.prompt}>
         <T color={images.length >= MAX_IMAGES ? theme.overlay0 : theme.accent} style={{ fontSize: 18 }}>＋</T>
@@ -435,7 +463,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         <Field
           ref={box}
           value={draft}
-          onChangeText={text => { draftTouched.current = true; setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
+          onChangeText={text => { draftTouched.current = true; setSendIssue(''); setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
           placeholder={`Message ${title}`}
           multiline
           style={[styles.input, canDictate ? { paddingRight: 36 } : null]}
@@ -446,7 +474,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
           <T style={{ fontSize: 17 }}>🎙</T>
         </Pressable> : null}
       </View>
-      <Button label="send" disabled={!canSend || (!draft.trim() && !images.length)} onPress={() => void send()} style={styles.send} />
+      <Button label="send" disabled={!canSend || sizeInfo.over || (!draft.trim() && !images.length)} onPress={() => void send()} style={styles.send} />
     </View>
     </View> : session ? <View style={[styles.composer, { paddingBottom: bottom }]}><T dim>{session.managed === false ? 'not started by st · read only' : 'this session has ended · read only'}</T></View> : null}
   </KeyboardAvoidingView>;
@@ -459,7 +487,7 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   const work = agent.current_work?.[0];
   return <View style={styles.strip}>
     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentWord(state)}</T>
+      <T bold color={color}>{glyph} </T><T bold>{agentName(agent)}</T><T color={color}>  {agentReported(agent) ?? agentWord(state)}</T>
       <View style={{ flex: 1 }} />
       <T color={harnessColor(harness)}>{harness}</T><T dim>{agentModel(agent) ? ` · ${agentModel(agent)}` : ''} · {agent.host_id?.replace(/^host\//, '') ?? '?'}</T>
     </View>
@@ -505,7 +533,7 @@ const EntryView = memo(function EntryView(props: { entry: ConversationEntry; con
 });
 
 type NativeImage = { uri: string; size: number };
-type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: St3Client | null };
+type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: FractalClient | null };
 
 // Class lifecycle owns native measurement and invalidates late responses on unmount.
 // All mounted images share the viewport queue; FlatList overscan never authorizes reads.
@@ -669,6 +697,7 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
   const look = folds(body) ? rule.between_others : rule.involving_you;
   const [height, setHeight] = useState(0);
   const limit = RULES.tool.collapsed_rows * LINE;
+  const whole = useWholeText(body.whole);
   const long = folds(body) && height > limit;
   const mark = body.from !== 'you' ? null : body.delivered ? rule.delivered : rule.sent;
   // Simplified, mail between others is two lines until tapped: who to whom and the subject, then
@@ -687,12 +716,33 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
     <View style={long && !open ? { maxHeight: limit, overflow: 'hidden' } : null}>
       {/* Measured at its full height and never shrunk by the fold: a measurement the fold could
           change would fold and unfold the mail in a loop. */}
-      <View style={{ flexShrink: 0 }} onLayout={event => { const next = event.nativeEvent.layout.height; setHeight(previous => Math.max(previous, next)); }}>{body.text ? <Markdown selectable={false} text={body.text} color={c(look.text)} /> : null}</View>
+      <View style={{ flexShrink: 0 }} onLayout={event => { const next = event.nativeEvent.layout.height; setHeight(previous => Math.max(previous, next)); }}>{whole.text ?? body.text ? <Markdown selectable={false} text={whole.text ?? body.text} color={c(look.text)} /> : null}</View>
     </View>
+    {body.whole && !(whole.text && !whole.note) ? <Pressable accessibilityRole="button" accessibilityLabel="Show the whole message" disabled={whole.loading} onPress={whole.load} hitSlop={6}>
+      <T color={c(RULES.tool.collapse.color)}>{whole.loading ? '  loading the whole message…' : `  show the whole message · ${kib(body.whole.bytes)}`}</T>
+    </Pressable> : null}
+    {whole.note ? <T color={theme.waiting} style={{ fontSize: 12 }}>{whole.note}</T> : null}
     {body.images ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>{body.images.map(image => <MailImageView key={image.sha256} image={image} />)}</View> : null}
     {long ? <T color={c(RULES.tool.collapse.color)}>{open ? `  ${RULES.tool.collapse.text}` : '  … more · tap to show'}</T> : null}
   </Pressable>;
 });
+
+function kib(bytes: number) { return bytes < 1024 ? `${bytes} bytes` : `${Math.round(bytes / 102.4) / 10} KiB`; }
+
+/** The whole text of a long message, read from st on request: the text, a note on why it is partial or missing, and a way to ask. */
+function useWholeText(whole: { message: string; bytes: number } | undefined) {
+  const { actions } = useStore();
+  const [state, setState] = useState<{ text?: string; note?: string; loading: boolean }>({ loading: false });
+  const load = () => {
+    if (!whole) return;
+    setState(previous => ({ ...previous, loading: true }));
+    actions.messageBody(whole.message).then(
+      answer => setState({ ...wholeText(answer), loading: false }),
+      error => setState(previous => ({ text: previous.text, note: wholeTextFailure(error), loading: false })),
+    );
+  };
+  return { ...state, load };
+}
 
 // An image a message carries, read from st when shown. Its box keeps one size while it loads,
 // so the conversation does not move under the reader.

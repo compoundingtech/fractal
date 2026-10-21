@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { LocalQuality, QUALITY_HISTORY_KEY, QUALITY_MAX_BYTES, QUALITY_RUN_KEY, readQualityLaunchClock } from './quality.ts';
-import { SLO_COUNTERS, SLO_HISTOGRAMS, isQualityHour } from '../../clients/typescript/st3-views/slo.ts';
+import { SLO_COUNTERS, SLO_HISTOGRAMS, isQualityHour } from '../../clients/typescript/fractal-views/slo.ts';
 import { qualityRows, qualityVisibility } from './qualityView.ts';
 
 function fixture(mark = null, fails = false) {
@@ -88,7 +89,7 @@ test('hourly writer is bounded and content-free, and Fleet aggregates only the l
   const report = f.quality.report();
   assert.equal(report.last.window_start, Math.floor(f.wall() / 3600_000) * 3600 - 3600);
   assert.equal(report.day.counters.active_ms, 24 * 3600_000);
-  assert.equal(qualityRows(report.last, report.day).length, 12);
+  assert.equal(qualityRows(report.last, report.day).length, 14);
   f.advance(25 * 3600_000); assert.equal(f.quality.report().last, null); assert.equal(f.quality.report().day, null);
 });
 test('full numeric buffers report overflow; unavailable storage never rejects the app lifecycle', async () => {
@@ -132,4 +133,17 @@ test('unavailable startup getters and synchronous native storage failures never 
   const clock = { now: () => 0, wall: () => Date.parse('2026-01-01T12:00:00Z'), after() {}, cancel() {}, frame() {} };
   const recorder = new LocalQuality(storage, clock, 'ios', 'build-test');
   await recorder.ready; await recorder.flush(); recorder.foreground(false); await recorder.flush();
+});
+
+test('diagnostics wrapper preserves main quality instrumentation on the original root views (structure only)', () => {
+  const source = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
+  assert.match(source, /export default function App\(\) \{\s*return <DiagnosticsBoundary><AppContent \/><\/DiagnosticsBoundary>;\s*\}/);
+  const content = source.slice(source.indexOf('function AppContent()'), source.indexOf('export default function App()'));
+  assert.match(content, /if \(!fontsLoaded\) return <View onLayout=\{qualityLayout\}/);
+  assert.match(content, /return <SafeAreaProvider onLayout=\{qualityLayout\}>/);
+  assert.match(source, /const qualityLayout = \(\) => quality\.commit\(\);/);
+  assert.match(source, /useLayoutEffect\(\(\) => \{\s*if \(!proofSession\) quality\.commit\(shownMask,/);
+  const boundary = readFileSync(new URL('./DiagnosticsBoundary.tsx', import.meta.url), 'utf8');
+  assert.match(boundary, /componentDidCatch\(error: unknown\): void \{ captureJsError\(error, true\); \}/);
+  assert.match(boundary, /if \(this\.state\.failed\) return <View/);
 });

@@ -1,9 +1,9 @@
-import type { Mission, MissionStepPresentation, PresentationActor } from '../../clients/typescript/st3-client';
+import type { Mission, MissionStepPresentation, PresentationActor } from '../../clients/typescript/fractal-client';
 import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
 
-// The Missions list, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list):
+// The Missions list, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs missions_list):
 // one word per mission naming who has to move, in fixtures/clients/words.json order. st serves the
 // word, each step and who must act on the mission row (Mission.presentation,
 // docs/clients/ui-contract.md, Mission); the phone keeps no derivation of its own.
