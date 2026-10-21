@@ -104,7 +104,8 @@ stream_checks() {
   lane "Synthetic fixtures" bash apps/fractal-web/scripts/ci/fixtures-gate.sh
   lane "Extension registry" node --experimental-strip-types --test apps/fractal-web/src/extensions/registry.unit.test.ts
   lane "Folders core" node --test apps/fractal-web/src/folders/core.node-test.mjs
-  lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.config.ts
+  lane "SDK typecheck" pnpm --filter @fractal/sdk typecheck
+  lane "SDK unit tests" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.config.ts
 }
 
 stream_app() {
@@ -152,7 +153,7 @@ exclusive_lanes() {
   if first_shard; then
     # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.
     lane "App replay browser e2e" node apps/fractal-web/scripts/replay-e2e.mjs
-    lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.perf.config.ts
+    lane "SDK frame CPU budgets" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.perf.config.ts
   fi
   if [ "${KIT_INPUTS:-true}" = true ]; then
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays

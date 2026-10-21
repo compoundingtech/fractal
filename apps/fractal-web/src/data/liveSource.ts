@@ -40,6 +40,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { BrowserSt3Platform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -126,11 +127,14 @@ const terminalUnavailable = (error: AttachFailure): Feed<never> => {
 /** Connect retained workbench projections through one SDK runtime and frame writer. */
 export const liveSource = ({
   options,
+  adoptEarlyCollections = false,
   telemetryLayer,
   ux,
   sessionTraceLayer,
 }: {
   readonly options: St3Options
+  /** The live page opts in; replay and other retained sources never take a page-global socket. */
+  readonly adoptEarlyCollections?: boolean
   /** Browser root owns sampling and observers; the SDK shares its scoped tracer/exporter. */
   readonly telemetryLayer?: Layer.Layer<never> | undefined
   readonly ux?: () => UxTelemetry
@@ -247,6 +251,7 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
+      Layer.provide(BrowserSt3Platform({ adoptEarlyCollections })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(

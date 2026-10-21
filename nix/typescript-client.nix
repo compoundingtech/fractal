@@ -29,7 +29,7 @@ let
       ../pnpm-workspace.yaml
       ../pnpm-source-inputs.json
       ../apps/fractal-web/package.json
-      ../apps/fractal-web/packages/fractal-sdk/package.json
+      ../packages/fractal-sdk/package.json
       ../apps/ios/package.json
       ../clients/typescript/fractal-client/package.json
       ../clients/typescript/fractal-scenarios/package.json

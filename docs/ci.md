@@ -823,7 +823,7 @@ negative step attempts are rejected, while person assignees are valid actor refe
 
 The SDK unit lane uses an injected clock to guard task yielding and bounded decode/order
 work deterministically, including the >150KB roster burst. `SDK frame CPU budgets`
-runs separately with `apps/fractal-web/packages/fractal-sdk/vitest.perf.config.ts`: after
+runs separately with `packages/fractal-sdk/vitest.perf.config.ts`: after
 warming, seven fixed observations guard the median worst task below 16ms of calling-thread
 CPU, total burst CPU below 50ms, and a one-row delta below 16ms. These are not retries.
 Calling-thread CPU excludes host descheduling and unrelated Node worker-thread CPU.

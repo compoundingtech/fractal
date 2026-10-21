@@ -85,7 +85,7 @@
       "sample_one_in": 5,
       "inputs": [
         "apps/fractal-web/package.json",
-        "apps/fractal-web/packages/fractal-sdk/package.json",
+        "packages/fractal-sdk/package.json",
         "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",

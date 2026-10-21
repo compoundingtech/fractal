@@ -131,6 +131,40 @@ the macOS 26.5 and 27 SDKs.
 The script builds and installs `st3` and `fractal-migrate`, and makes `st` a symlink to
 the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fixed app bundle; see [macOS installation and signing](st3/macos-installation.md). A source install also needs [`pty`](https://github.com/compoundingtech/pty-rust) on `PATH`.
 
+## Shared TypeScript SDK
+
+`packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
+`@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
+trace-context propagation without browser startup or UI dependencies.
+`St3Live(options)` works without an application platform layer; callers can supply
+an explicit socket in options for custom transports and tests.
+
+Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
+adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
+policy. The app supplies those through `St3Platform`; the neutral SDK does not
+adopt a browser bootstrap socket or install browser visibility policy by default.
+`@fractal/sdk/admission` exposes the admission primitives used by that adapter.
+
+`St3.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+existing window collection and the descriptor's `decodeRow` decodes its rows.
+Optional `spec.descriptor` is a stable local decoder ID for independent decoder
+and admission identity; it is never sent on the wire. The watch shares the scoped
+follow lifecycle and multiplexed socket; it does not introduce another wire format.
+
+`St3Options.credential` resolves a bearer credential for each HTTP request and
+socket open. It is not an actor selector. The `client` option is only a reported
+client/build label, never authenticated identity or authority. An explicit
+credential bypasses browser bootstrap socket adoption; non-browser socket
+factories must honor the provided credential headers.
+
+The SDK is a root workspace member, not a nested app package. Its standalone
+Node suite and typecheck run with:
+
+```sh
+pnpm --filter @fractal/sdk test
+pnpm --filter @fractal/sdk typecheck
+```
+
 ## Fractal web diagnostics member
 
 Run `mr apply --worktree-mode auto` before entering `nix develop .#web` or

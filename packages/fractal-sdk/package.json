@@ -4,18 +4,29 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./admission": "./src/effect/admission.ts",
     "./effect": "./src/effect/mod.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@fractal/client": "workspace:^",
     "effect": "4.0.0"
   },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0",
+    "@types/node": "24.10.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
+  },
   "$genie": {
     "source": "package.json.genie.ts",
     "warning": "DO NOT EDIT - changes will be overwritten",
     "workspaceClosureDirs": [
-      "apps/fractal-web/packages/fractal-sdk",
-      "clients/typescript/fractal-client"
+      "clients/typescript/fractal-client",
+      "packages/fractal-sdk"
     ]
   }
 }

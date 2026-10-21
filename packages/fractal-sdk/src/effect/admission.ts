@@ -1,17 +1,16 @@
 /**
  * Follow admission: which follows hold one of the collections socket's subscription slots.
  *
- * Pure bookkeeping, no I/O. One entry per follow key. Visibility is recorded per key even before
- * the follow opens (the UI marks a pane visible on mount, then reads its data), and a key never
- * seen defaults to visible: opening a follow means something wants it now.
+ * Pure bookkeeping, no I/O. Host policy supplies visibility and eviction priorities.
+ * Without a policy every follow remains visible and admission refuses rather than evicts.
  *
  * Slots live in one pool by default. With `conversationSlots` set, conversation follows own a
  * dedicated lane of that size and every other follow (windows, terminals) owns the rest, so
  * neither side can starve the other. Within a lane:
  *
  * - Opening below the lane cap admits.
- * - Opening at the cap evicts the least-recently-visible invisible follow of that lane.
- * - Visible follows are never evicted; with none invisible the open is refused (`Full`).
+ * - Opening at the cap evicts the lowest-priority eligible follow supplied by host policy.
+ * - Visible follows are never evicted; with none eligible the open is refused (`Full`).
  * - A server subscription limit lowers the refused lane's cap to what that lane actually held
  *   without the refused key, then runs the same eviction for the refused follow. The server's
  *   cap is global, so repeated refusals converge each lane downward independently.
@@ -25,10 +24,11 @@ export type AdmissionResult<K> =
 /** Which slot lane a follow admits into; only conversation follows get a dedicated budget. */
 export type FollowLane = 'conversation' | 'shared'
 
-interface Visibility {
-  readonly visible: boolean
-  /** Logical time the follow was last visible; the smallest invisible one is evicted first. */
-  readonly lastVisible: number
+/** Host-owned eviction policy. Undefined priority makes a follow ineligible for eviction. */
+export interface AdmissionPolicy<K> {
+  readonly isVisible: (key: K) => boolean
+  readonly setVisible: (args: { readonly key: K; readonly visible: boolean }) => void
+  readonly priority: (key: K) => number | undefined
 }
 
 /** The admission table for one socket. */
@@ -61,9 +61,11 @@ export interface Admission<K> {
 export const makeAdmission = <K>({
   cap: initialCap,
   conversationSlots,
+  policy,
 }: {
   readonly cap: number
   readonly conversationSlots?: number
+  readonly policy?: AdmissionPolicy<K>
 }): Admission<K> => {
   if (!Number.isSafeInteger(initialCap) || initialCap < 1) {
     throw new RangeError(`maxFollows must be a positive integer, got ${initialCap}`)
@@ -86,14 +88,12 @@ export const makeAdmission = <K>({
   let singleCap = initialCap
   let conversationCap = lanes?.conversation ?? 0
   let sharedCap = lanes === undefined ? initialCap : lanes.shared
-  let clock = 0
   const single = new Set<K>()
   const conversations = new Set<K>()
   const shared = new Set<K>()
   const laneSets = lanes === undefined ? undefined : { conversation: conversations, shared }
-  const visibility = new Map<K, Visibility>()
 
-  const isVisible = (key: K) => visibility.get(key)?.visible ?? true
+  const isVisible = (key: K) => policy?.isVisible(key) ?? true
 
   const setFor = (lane: FollowLane): Set<K> =>
     laneSets === undefined ? single : laneSets[lane]
@@ -107,15 +107,15 @@ export const makeAdmission = <K>({
     else sharedCap = value
   }
 
-  const leastRecentlyVisible = (except: K | undefined, pool: Set<K>): K | undefined => {
+  const evictionCandidate = (except: K | undefined, pool: Set<K>): K | undefined => {
     let candidate: K | undefined
     let oldest = Number.POSITIVE_INFINITY
     for (const key of pool) {
       if (key === except) continue
-      const entry = visibility.get(key)
-      if (entry === undefined || entry.visible) continue
-      if (entry.lastVisible < oldest) {
-        oldest = entry.lastVisible
+      if (isVisible(key)) continue
+      const priority = policy?.priority(key)
+      if (priority !== undefined && priority < oldest) {
+        oldest = priority
         candidate = key
       }
     }
@@ -129,7 +129,7 @@ export const makeAdmission = <K>({
     const pool = setFor(lane)
     const evicted: K[] = []
     while (pool.size > cap) {
-      const key = leastRecentlyVisible(undefined, pool)
+      const key = evictionCandidate(undefined, pool)
       if (key === undefined) break
       pool.delete(key)
       evicted.push(key)
@@ -145,7 +145,7 @@ export const makeAdmission = <K>({
       pool.add(key)
       return { _tag: 'Admitted', evict: undefined }
     }
-    const evict = leastRecentlyVisible(key, pool)
+    const evict = evictionCandidate(key, pool)
     if (evict === undefined) return { _tag: 'Full' }
     pool.delete(evict)
     pool.add(key)
@@ -161,15 +161,7 @@ export const makeAdmission = <K>({
       laneSets === undefined ? single : (new Set([...conversations, ...shared]) as ReadonlySet<K>),
     isVisible,
     open: (key, lane = 'shared') => openIn(key, lane),
-    setVisible: ({ key, visible }) => {
-      clock += 1
-      const previous = visibility.get(key)
-      // An invisible follow's `lastVisible` is the moment it stopped being visible.
-      visibility.set(key, {
-        visible,
-        lastVisible: visible || previous?.visible !== false ? clock : previous.lastVisible,
-      })
-    },
+    setVisible: (args) => policy?.setVisible(args),
     close: (key) => {
       single.delete(key)
       conversations.delete(key)
