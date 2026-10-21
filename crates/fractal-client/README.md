@@ -53,6 +53,13 @@ instead of stranding cleanup; remaining watches rejoin on one fresh connection.
 Queue overflow likewise reconnects rather than retaining more commands. Dropping
 the last `FollowClient` handle shuts down immediately, without waiting for the peer
 to read or acknowledge a close handshake; retained receiver streams then end.
+The write liveness contract matches the server's eight-second collection send
+deadline: if any command, including cleanup's unsubscribe, cannot flush in eight
+seconds, the client drops the socket and reconciles retained watches on reconnect.
+Pending cleanup remains tracked until its unsubscribe flushes or the socket resets,
+even after the subscription leaves the routing table. Reset is the terminal release
+action for a stuck unsubscribe, because only delivery or socket loss releases the
+server-side subscription.
 
 Reconnect and resync retain the last window as stale until a new snapshot arrives.
 Each resubscribe uses a new wire ID so queued frames from older generations cannot

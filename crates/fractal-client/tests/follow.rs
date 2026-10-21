@@ -156,7 +156,7 @@ async fn two_models_share_socket_and_last_clone_unsubscribes() {
         .clone()
         .watch(
             AttentionDescriptor {
-                person: Some("person/follow-test".into()),
+                person: Some("person/robin".into()),
             },
             10,
         )
@@ -164,7 +164,7 @@ async fn two_models_share_socket_and_last_clone_unsubscribes() {
         .unwrap();
     let attention_command = command(&mut socket).await;
     assert_eq!(attention_command["collection"], "attention");
-    assert_eq!(attention_command["person"], "person/follow-test");
+    assert_eq!(attention_command["person"], "person/robin");
     assert!(attention_command.get("actor").is_none());
     assert!(attention_command.get("status").is_none());
     let attention_id = attention_command["id"].as_str().unwrap();

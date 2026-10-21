@@ -20,6 +20,9 @@ const MAX_ROWS: usize = 200;
 const MAX_PENDING_WRITES: usize = MAX_WATCHES * 2;
 const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+// Match the server collection send contract (COLLECTION_SEND_TIMEOUT). A command
+// that cannot flush in eight seconds terminates the socket, releasing server slots.
+const SEND_DEADLINE: Duration = Duration::from_secs(8);
 
 /// Maps a collection selector to its decoded row. Implementations decode raw rows once,
 /// without passing through `Resource::Unknown` or serializing a model back to JSON.
@@ -369,6 +372,9 @@ struct Connection {
     socket: Option<CollectionStream>,
     writing: Option<Write>,
     outgoing: VecDeque<Value>,
+    cleanup_pending: usize,
+    writing_cleanup: bool,
+    write_deadline: Option<tokio::time::Instant>,
 }
 
 impl Connection {
@@ -377,6 +383,9 @@ impl Connection {
             socket: Some(socket),
             writing: None,
             outgoing: VecDeque::new(),
+            cleanup_pending: 0,
+            writing_cleanup: false,
+            write_deadline: None,
         }
     }
     fn connected(&self) -> bool {
@@ -386,6 +395,9 @@ impl Connection {
         self.writing = None;
         self.socket = None;
         self.outgoing.clear();
+        self.cleanup_pending = 0;
+        self.writing_cleanup = false;
+        self.write_deadline = None;
     }
     fn enqueue(&mut self, command: Value) {
         if !self.connected() {
@@ -397,6 +409,9 @@ impl Connection {
             // an arbitrarily long command queue.
             self.reset();
         } else {
+            if command["kind"] == "unsubscribe" {
+                self.cleanup_pending += 1;
+            }
             self.outgoing.push_back(command);
         }
     }
@@ -404,10 +419,25 @@ impl Connection {
         if self.socket.is_some() && !self.outgoing.is_empty() {
             let mut socket = self.socket.take().unwrap();
             let command = self.outgoing.pop_front().unwrap();
+            self.writing_cleanup = command["kind"] == "unsubscribe";
+            self.write_deadline = Some(tokio::time::Instant::now() + SEND_DEADLINE);
             self.writing = Some(Box::pin(async move {
                 let sent = socket.send(&command).await;
                 (socket, sent)
             }));
+        }
+    }
+    fn finish_write(&mut self, socket: CollectionStream, sent: Result<(), ClientError>) {
+        self.writing = None;
+        self.write_deadline = None;
+        if sent.is_ok() {
+            if self.writing_cleanup {
+                self.cleanup_pending -= 1;
+            }
+            self.writing_cleanup = false;
+            self.socket = Some(socket);
+        } else {
+            self.reset();
         }
     }
 }
@@ -429,12 +459,7 @@ async fn run(
         if let Some(write) = &mut connection.writing
             && let Poll::Ready((socket, sent)) = futures_util::poll!(write.as_mut())
         {
-            connection.writing = None;
-            if sent.is_ok() {
-                connection.socket = Some(socket);
-            } else {
-                connection.reset();
-            }
+            connection.finish_write(socket, sent);
         }
         let closed: Vec<_> = entries
             .iter()
@@ -457,7 +482,15 @@ async fn run(
         }
         connection.start_write();
         tokio::select! {
-            _ = dropped.notified() => {},
+            _ = dropped.notified() => {
+                // Cleanup remains cancellable after its entry leaves the routing
+                // table, until the unsubscribe itself has actually flushed.
+                if connection.cleanup_pending != 0 && connection.writing.is_some() {
+                    connection.reset();
+                }
+            },
+            _ = async { tokio::time::sleep_until(connection.write_deadline.unwrap()).await },
+                if connection.write_deadline.is_some() => connection.reset(),
             add = commands.recv() => {
                 // The last client handle is the connection's shutdown authority.
                 // Drop, rather than flush/close-await, a potentially blocked socket.
@@ -475,9 +508,7 @@ async fn run(
                 let _ = add.accepted.send(Ok(()));
             },
             (socket, sent) = async { connection.writing.as_mut().unwrap().await }, if connection.writing.is_some() => {
-                connection.writing = None;
-                if sent.is_ok() { connection.socket = Some(socket); }
-                else { connection.reset(); }
+                connection.finish_write(socket, sent);
             },
             frame = async { connection.socket.as_mut().unwrap().next().await }, if connection.socket.is_some() => {
                 match frame {
@@ -563,10 +594,17 @@ mod tests {
         assert!(futures_util::poll!(pending[0].as_mut()).is_ready());
     }
 
-    async fn backpressured_connection() -> (Connection, tokio::net::UnixStream) {
+    async fn connection_with_filler() -> (
+        Connection,
+        tokio::net::UnixStream,
+        std::os::unix::net::UnixStream,
+    ) {
         use std::os::fd::AsRawFd;
         use tokio_tungstenite::tungstenite::protocol::Role;
-        let (sender, peer) = tokio::net::UnixStream::pair().unwrap();
+        let (sender, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        sender.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let filler = sender.try_clone().unwrap();
         let send_bytes: libc::c_int = 1024;
         // SAFETY: sender owns a live socket fd; the option points to a correctly
         // sized initialized c_int for the duration of this synchronous syscall.
@@ -582,6 +620,8 @@ mod tests {
             },
             0
         );
+        let sender = tokio::net::UnixStream::from_std(sender).unwrap();
+        let peer = tokio::net::UnixStream::from_std(peer).unwrap();
         let socket = CollectionStream {
             socket: crate::TerminalSocket::Unix(
                 tokio_tungstenite::WebSocketStream::from_raw_socket(sender, Role::Client, None)
@@ -591,7 +631,11 @@ mod tests {
             heard: crate::Heard::new(),
             subscribed: HashMap::new(),
         };
-        let mut connection = Connection::new(socket);
+        (Connection::new(socket), peer, filler)
+    }
+
+    async fn backpressured_connection() -> (Connection, tokio::net::UnixStream) {
+        let (mut connection, peer, _filler) = connection_with_filler().await;
         connection.enqueue(serde_json::json!({"kind":"subscribe", "id":"blocked", "collection":"attention", "person":"x".repeat(MAX_COMMAND_BYTES - 512)}));
         connection.start_write();
         // The peer deliberately never reads. Prove an actual pending socket
@@ -660,5 +704,115 @@ mod tests {
         connection.enqueue(serde_json::json!({"kind":"unsubscribe", "id":"overflow"}));
         assert!(!connection.connected());
         assert!(connection.outgoing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_started_unsubscribe_cannot_outlive_send_deadline() {
+        use futures_util::StreamExt;
+        use std::io::Write;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (connection, peer, mut filler) = connection_with_filler().await;
+        let mut peer =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(peer, Role::Server, None).await;
+        let (commands, receiver) = mpsc::channel(MAX_WATCHES);
+        let dropped = Arc::new(Notify::new());
+        let client = FollowClient {
+            commands,
+            dropped: dropped.clone(),
+        };
+        let worker = tokio::spawn(run(
+            Client::unix("unused-follow-test.sock"),
+            connection,
+            receiver,
+            dropped,
+        ));
+        let first = client
+            .watch(AttentionDescriptor::default(), 1)
+            .await
+            .unwrap();
+        peer.next().await.unwrap().unwrap(); // subscribe has flushed
+        let mut retained = client
+            .watch(AttentionDescriptor::default(), 1)
+            .await
+            .unwrap();
+        peer.next().await.unwrap().unwrap(); // second subscribe has flushed
+        assert_eq!(retained.next().await.unwrap().freshness, Freshness::Pending);
+        // Fill the same socket's send buffer while the worker has no active send.
+        // After this point the peer stays alive but never reads, so cleanup's
+        // unsubscribe (not an earlier subscribe) is the write that blocks.
+        loop {
+            match filler.write(&[0; 1024]) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill send buffer: {error}"),
+            }
+        }
+        drop(filler);
+        drop(first);
+        tokio::time::timeout(SEND_DEADLINE + Duration::from_secs(1), async {
+            loop {
+                if retained.next().await.unwrap().freshness == Freshness::Stale {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("cleanup must reset its blocked unsubscribe socket");
+        // The client remains live throughout cleanup; shutdown is not what
+        // released the server-side subscription.
+        drop(client);
+        worker.await.unwrap();
+        drop(peer);
+    }
+
+    #[tokio::test]
+    async fn stuck_unsubscribe_keeps_cleanup_state_until_deadline_reset() {
+        use futures_util::StreamExt;
+        let (mut connection, peer, mut filler) = connection_with_filler().await;
+        use std::io::Write;
+        loop {
+            match filler.write(&[0; 1024]) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill send buffer: {error}"),
+            }
+        }
+        drop(filler);
+        connection.enqueue(serde_json::json!({"kind":"unsubscribe", "id":"released"}));
+        connection.start_write();
+        assert!(futures_util::poll!(connection.writing.as_mut().unwrap().as_mut()).is_pending());
+        assert_eq!(connection.cleanup_pending, 1);
+        assert!(connection.writing_cleanup);
+        let deadline = connection.write_deadline.unwrap();
+        let (commands, receiver) = mpsc::channel(MAX_WATCHES);
+        let dropped = Arc::new(Notify::new());
+        let client = FollowClient {
+            commands,
+            dropped: dropped.clone(),
+        };
+        let worker = tokio::spawn(run(
+            Client::unix("unused-follow-test.sock"),
+            connection,
+            receiver,
+            dropped,
+        ));
+        let mut retained = client
+            .watch(AttentionDescriptor::default(), 1)
+            .await
+            .unwrap();
+        assert_eq!(retained.next().await.unwrap().freshness, Freshness::Pending);
+        tokio::time::timeout(SEND_DEADLINE + Duration::from_secs(1), async {
+            loop {
+                if retained.next().await.unwrap().freshness == Freshness::Stale {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("send deadline resets socket without another lifecycle event");
+        assert!(tokio::time::Instant::now() >= deadline);
+        drop(client);
+        worker.await.unwrap();
+        drop(peer);
     }
 }
