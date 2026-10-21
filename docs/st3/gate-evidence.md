@@ -200,6 +200,40 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
 4. GC as a pure plan of whole trees (done), GC's lock window and its timer (done), then the tag ruleset, and the
    signed log.
 
+### The evidence log (in progress)
+
+A ruleset is GitHub's, and GitHub must not be the only thing that protects evidence (`doc/fleet/factory/skip-ci-plan`,
+"Portable evidence"). `scripts/evidence-log` keeps a copy of every trusted record on a host we hold and a signed,
+append-only list of them; GitHub is only its transport. No inbound port and no new account: a systemd user timer
+(`scripts/evidence-log.timer`, every 2 minutes) runs `scripts/evidence-log-timer`, which reads the script from
+`origin/main` and pulls over outbound HTTPS.
+
+One pull lists the remote's evidence refs and fetches, by name, only those whose object is new, with full history: a
+shallow copy sends every shallow root on every fetch (13 s to fetch 20 records into a copy of 5,000) and cannot push a
+record back. It accepts a record that is well formed and
+signed by a key main's `.st/evidence-keys` trusts for the signer the record names, keeps it under `refs/evidence-copy/`
+(never pruned), and appends one line per record and check to the log. An input-index ref is logged under its key only
+when the record carries that key. It then commits the log, every time, even with nothing new: the commit is signed by
+the log key and its message carries its time, so a verifier can refuse a head that is not fresh. `--publish` pushes the
+head to `refs/evidence-log/main`; a logged record the remote no longer has is reported (`missing`, exit 4), and
+`--restore` pushes it back. `evidence-log gc --plan FILE` appends a GC line for each tree and input key of an
+evidence-gc plan and drops their copies; it runs before the plan's deletions, so a pull does not restore them.
+
+The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
+`record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
+one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
+through `st sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
+log key list is `~/.config/evidence-log/log-keys` until main pins `.st/evidence-log-key`, and a pull never extends a
+head that list does not sign. The signer starts without the caller's loader variables.
+
+Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
+checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
+GC migrates or removes them). A pull with 46 new records took 7.7 s, one with none 0.8 s. The log's files held 426 KB.
+
+The copy never becomes a partial clone, and no git call may fetch lazily (`GIT_NO_LAZY_FETCH`): in a partial clone a
+presence check of a missing record fetches it with no negotiation, that is with its whole history (3.4 GB before the
+first record was logged, in the first measurement).
+
 ## Trust and custody
 
 The CLI never takes a JSON payload or a signing key. `put` imports an
