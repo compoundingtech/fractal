@@ -140,7 +140,7 @@ move observers after acknowledgements.
 
 [`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
-the writer, daemon CPU, and this member's database size. Every daemon builds the file in. CI's daemon_load reads the same file.
+the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
 
 The request-latency read adds `targets` and `paths` to `routes`. Each target and each path keeps
@@ -246,6 +246,18 @@ allows. A budget is an allowance that resets: each account's weekly and 5-hour l
 the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
+
+The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
+percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
+`NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
+over; a name may declare several percentiles. A `[[count]]` is at most `max_per_hour` events an
+hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci/NAME`, and one
+series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
+time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
+workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
+nextest passed only on a retry and merge groups ejected from the queue, none an hour). Nothing
+feeds these series yet, so each lists as `no-data` with its target; they are not in the
+request-latency read, its gauges or `st doctor`.
 
 `st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
