@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use crate::SeatsStoreCore as _;
 use std::time::Duration;
 use anyhow::{Context as _, Result};
 use axum::Router;
@@ -3660,4 +3661,70 @@ async fn inbound_only_peer_syncs_both_ways_between_isolated_daemons() {
     for server in servers {
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn signed_inventory_read_preserves_owner_unavailable_http_status() {
+    let root = tempfile::tempdir().unwrap();
+    let subject = "agent/proof/inventory";
+    let store = Arc::new(Store::open_memory("owner").unwrap());
+    store.apply_internal(
+        &crate::graph::parse_intent("version 2\nagent \"proof/inventory\" { harness \"omp\" {} }\n", "owner").unwrap(),
+        "inventory-proof",
+    ).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+        fields: serde_json::from_value(serde_json::json!({"status":"running",
+            "runtime_id":"proof/inventory", "incarnation_id":"inventory:one", "terminal":false})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    // Genuine owner failure: the local native observation spool is unreadable SQLite.
+    // No mocked handler or transport supplies the error being asserted.
+    let observations = root.path().join("drivers")
+        .join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24]).join("observations");
+    fs::create_dir_all(&observations).unwrap();
+    fs::write(observations.join(fractal_drivers::harness_events::DATABASE), "invalid native spool").unwrap();
+    let socket = root.path().join("st3.sock");
+    let main = crate::api::AppState {
+    owning_person: None,
+        store, notify: Arc::new(tokio::sync::Notify::new()), event_notify: watch::channel(0_u64).0,
+        node: "owner".into(), state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
+        fleet_id: None, configured_peers: vec!["source".into()], client_relay: None,
+        native_session_home: None, planner_default: crate::model::PlannerSpec::default(),
+    };
+    let serving = socket.clone();
+    let server = tokio::spawn(async move {
+        crate::api::serve_unix(&serving, crate::api::router(main)).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let auth = FleetAuth::test("fleet-test", &[4; 32]);
+    let peer = PeerState::new(MainBackend::new(socket), "owner".into(), auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["source".into()])));
+    let digest = hex::encode(Sha256::digest(format!("{subject}:inventory:one").as_bytes()));
+    let body = serde_json::to_vec(&ClientReadRequest {
+        authority_actor: "person/test".into(), relay: None,
+        request: ClientReadOperation::HarnessInventory { agent_id: subject.into(),
+            query: fractal_client::HarnessInventoryQuery {
+                owner_host_id: "host/owner".into(), session_id: format!("session/{}", &digest[..24]),
+                native_session_id: "native-one".into(), runtime_incarnation: "inventory:one".into(),
+                collection: "files".into(), directory: String::new(), prefix: String::new(),
+                limit: Some(1), cursor: None,
+            } },
+    }).unwrap();
+    let mut request = Request::builder().method("POST").uri(CLIENT_READ_PATH)
+        .body(Body::from(body.clone())).unwrap();
+    *request.headers_mut() = auth.request_headers_for(CLIENT_READ_PATH, "source", &body).unwrap();
+    let response = peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice)).oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), MAX_CLIENT_READ_BYTES).await.unwrap();
+    server.abort();
+    auth.verify(&headers, "RESPONSE", CLIENT_READ_PATH, &bytes, Some("owner"),
+        Some(&FleetAuth::body_digest(&body))).unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"]["code"], "inventory-unavailable");
 }

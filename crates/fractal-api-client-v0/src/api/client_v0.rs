@@ -39,6 +39,7 @@ pub mod assistant;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
 pub mod search;
@@ -105,6 +106,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
         .route("/v1/client/status-history/{*id}", get(status_history))
+        .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
         .route("/v1/client/lanes", get(lanes))
         .route("/v1/client/lanes/{*id}", get(lane_detail))
         .route(

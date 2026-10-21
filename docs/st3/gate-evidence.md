@@ -109,45 +109,58 @@ Every gate member of every pull request and merge-group run adds one ref, so the
 keeps it bounded. It is the one tool that reads the whole namespace; nothing on a hot path does.
 
 ```sh
-scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk            # dry run: prints counts per reason
-scripts/evidence-gc --fetch --remote origin --github compoundingtech/smalltalk --apply    # migrates and deletes locally and on the remote
+scripts/evidence-gc --fetch --remote origin                       # dry run: prints the plan's counts per reason
+scripts/evidence-gc --fetch --remote origin --plan-out plan.json  # the same, and the plan with its inputs, to recompute it
+scripts/evidence-gc --fetch --remote origin --apply               # deletes exactly the plan's refs, locally and on the remote
 ```
 
-**Keep set.** A note applies to the exact tree it names, so a note of a superseded pull request head is not
-needed. Kept: records of each open pull request's *current* head tree and of each merge-queue tip while it is
-queued (`open-pr-head`); records of the trees of main's first-parent commits of the last `--keep-main-days`
-(default 3: `main-window`); and an input-index ref (`refs/tags/evidence/input/<check>/<key>/<record>` or
-`refs/notes/evidence-input/<check>/<key>/<record>`) whose
-key still equals what a protected head tree (or main's tip) projects to for that check, so unchanged-input
-reuse keeps working (`input-key`). Everything else is kept for `--grace-hours` (default 24, a note written for a
-head the listing raced with) and then deleted. The first layout is read from the note: a protected record is
-migrated to `refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), an
-unprotected one is deleted. A record's tag and note get the same decision and count as one record.
+**A pure plan.** `gc_plan(records, index, live trees, live keys, retention, as_of)` is a function of git data alone,
+so anyone with the same refs gets the same plan; the output names its `inputs_sha256` and `plan_sha256`, and
+`--plan-out` writes the inputs beside the plan. Applying it deletes exactly the refs it names. Its inputs:
 
-**Bounds.** Both count records, not refs, so filing each record twice during the move to tags does not halve them.
-`--soft` (default 3,000): above it the oldest unprotected records go first, both names of each. `--cap` (default
-5,000): if the protected set alone is over it, nothing protected is deleted, the set is printed and the exit status is 3, so
-a job summary shows it; publishers never fail a job over the cap. Output: refs, records and advertised bytes
-before and after, and the count per reason.
+- **live trees**: the tree of every branch tip committed within `branch_days` of `as_of` (`--fetch` reads every
+  `refs/heads/*` into `refs/evidence-gc/tips/*`; open pull request heads and merge-queue tips are branches, so no pull
+  request API is asked), plus `--head`/`--heads-from`; and the trees of main's first-parent commits within `main_days`
+  of `as_of`, main's tip always.
+- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs.
+- **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
+  change: `main_days` (3), `branch_days` (30), `grace_hours` (24), `soft_records` (3,000), `cap_records` (5,000).
+- **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
-**Sizing (2026-10-19 numbers).** A main tree that was tested carries 11.4 records on average and about 60 main
-trees a day have records, so the main window costs about 690 refs a day; the 265 open pull requests have 50 trees
-with records (289 refs) between them. The protected set is therefore about 290 + 690 x days: 2.4k for 3 days (the
-default), 5.1k for 7 days. A 7-day window needs `--cap 8000 --soft 6000`; with the default cap of 5,000 it would
-raise the alert every day. The main window serves a re-run or a push on the exact tree of a recent main commit,
-which happens within hours, so 3 days is generous.
+**Whole trees.** A tree's records are deleted together or not at all, and a live tree's never; an input key's index
+refs likewise. The verifier decides a tree from that tree's records and its input key's records, so no verdict of a
+live tree can change. A dead tree that is pushed again is a new tree: its verdict is its old one, no record (the check
+runs), or what its input key alone says, as for any new tree with the same inputs. Deleting records one at a time by
+age, as the first version did, could remove a failure and keep the pass dated within the two-minute margin after it,
+which the failure still shadowed: that tree then verified. `scripts/evidence-gc-test` checks these properties on 400
+random worlds against a model of the verifier, and end to end with the verifier on real records.
 
-**Safety.** It fails closed: if a head commit cannot be turned into a tree, `--apply` deletes nothing (exit 1). A
-failed remote push leaves the local refs alone. A second run finds nothing to do. Refs outside the evidence namespaces
-and refs that are not well-formed records are never touched. Take a bundle first when running it by hand:
+**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is kept (a record written moments
+ago for a head the listing raced with) unless more than `soft_records` records remain: then dead groups go oldest
+first by their newest record. Records are counted, not refs, so a record filed as a tag and a note counts once. If the
+live set alone is over `cap_records`, nothing live is deleted, the set is printed and the exit status is 3.
+
+**Measured 2026-10-21** (a dry run against the remote): 5,021 refs, 4,562 records; 960 branch tips within 30 days
+(their trees hold 434 refs) and 217 main trees within 3 days (2,593 refs); 155 dead trees and 22 dead keys are deleted
+(629 refs), and 1,077 refs more over the soft limit, leaving 3,000 records, 2,970 of them live, and 3,315 refs. The
+first run in an empty repository took 463 s (most of it fetching every record and 40 days of main's trees); a second
+run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
+
+**Safety.** It fails closed: if a commit named by `--head` cannot be turned into a tree, or no branch tip is known at
+all, `--apply` deletes nothing. A failed remote push leaves the local refs alone. A second run finds nothing to do.
+Refs outside the evidence namespaces and refs that are not well-formed records are never touched. The first layout
+(`refs/notes/evidence/<record>`) is read from the note: in a live tree it is migrated to
+`refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), in a dead tree it goes
+with the tree. Take a bundle first when running it by hand:
 `git bundle create evidence-notes.bundle 'refs/tags/evidence/*' 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
 
 ### Records as tags (in progress)
 
 No ruleset can protect `refs/notes/*` (GitHub refuses the target pattern), so anyone with write access can delete a
 newer failing record and let an older pass decide again, and git keeps no trace of the deletion. The records are
-therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no deletion, no update), whose only
-bypass is the App that `evidence-gc` uses. Until then the exposure is bounded: nothing rejects, a pull request skip is
+therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no deletion, no update) that GC turns off
+only around its own deletions; the ruleset is an extra, and the protection that does not depend on GitHub is a signed log
+of every record kept on a host we hold (`doc/fleet/factory/skip-ci-plan`, "Portable evidence"). Until then the exposure is bounded: nothing rejects, a pull request skip is
 undone by the merge queue's full run, and one run in five is sampled. The order, each step its own pull request:
 
 1. The tag release workflow ignores `evidence/**` tags (done).
@@ -164,7 +177,8 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
 3. The verifier and the gate read tags first and notes as the legacy layout (done); then the producers write each
    record as a tag and a note (done, see "Tags, written and read first" above). Writing notes stops once no gate that
    still runs reads notes only.
-4. The tag ruleset, and `evidence-gc` moves to the App.
+4. GC as a pure plan of whole trees (done), then the tag ruleset with GC's window around its deletions, and the
+   signed log.
 
 ## Trust and custody
 

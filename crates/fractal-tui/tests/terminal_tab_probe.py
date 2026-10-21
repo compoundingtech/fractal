@@ -431,7 +431,8 @@ def matrix(tab):
         case("ownership/" + name, raw)
     start = len(tab.input())
     tab.send(b"\x1c")
-    wait_for(tab.status, lambda s: s and s["detached"], "Ctrl-backslash detach")
+    tab.send(b"c")
+    wait_for(tab.status, lambda s: s and s["detached"], "Ctrl-backslash then c detach")
     assert tab.input()[start:] == b"", "detach leaked into child"
     rows.append({"case": "ownership/ctrl-backslash", "sent": "1c", "received": "", "detached": True})
     assert tab.relay_error is None, tab.relay_error
@@ -580,6 +581,7 @@ def controls_and_images(worker):
             time.sleep(0.07)
             assert tab.input()[before:] == b"", "palette leaked repeat/release input"
             tab.send(b"\x1c")
+            tab.send(b"c")
             wait_for(tab.status, lambda s: s and s["detached"], "detach through palette")
             assert tab.input()[before:] == b""
             rows.append({"case": "ownership/palette-and-detach", "received": "", "detached": True})

@@ -153,6 +153,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     // Streams and terminals: they stay open, or need a live `pty`.
     (
+        "GET /v1/client/harness-inventory/{*id}",
+        "needs a live managed harness session fenced by owner host, session and runtime incarnation; returns one bounded page (at most 200 entries) of that session's files, skills or commands",
+    ),
+    (
         "GET /v1/mailbox",
         "requires an authenticated native driver; the load test models seat waits with event long-polls",
     ),
