@@ -110,7 +110,10 @@ pub(super) fn migrate(transaction: &Transaction<'_>) -> Result<()> {
         }
     }
     let carried = transaction
-        .prepare("SELECT id FROM claims WHERE kind='step-run.carried'")?
+        .prepare(/* sqlite-large-value: allow-for-now lv-h42d310774469 owner=st3_store::store::mission_projection_upgrade TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT claims.id FROM claims WHERE claims.kind='step-run.carried' ORDER BY {}",
+            canonical::order_sql("claims", false)
+        ))?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in carried {

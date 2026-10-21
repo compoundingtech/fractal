@@ -3,7 +3,7 @@
   "version": 1,
   "replay": {
     "status": "changed",
-    "detail": "Carried blocker reasons follow the referenced source step at the carry canonical cut, including historical carries without reason fields. Persistent store open repairs old terminal dates from matching own terminal claims and reconciles carried rows once, without appending claims or replaying the entire graph."
+    "detail": "Carried blocker reasons follow the referenced source step at the carry canonical cut, including historical carries without reason fields. Persistent store open repairs old terminal dates from matching own terminal claims and reconciles carried rows once, without appending claims or replaying the entire graph. Reasons are carried for every carried status, including ready or working, matching the originating revision adoption; they are not restricted to blocked steps."
   },
   "schema": {
     "status": "none",
