@@ -188,6 +188,10 @@ export const createTypeScriptGraph = (rootNames: readonly string[], options: ts.
     const query = specifier.slice(specifier.indexOf('?'))
     if (!specifier.startsWith('.') || !/^\?(?:raw|url|inline|no-inline)$/.test(query)) return undefined
     const base = normalized(path.resolve(path.dirname(importer), assetBasePath(specifier)))
+    // Unlike raw/url, inline flags do not turn executable modules into assets.
+    // Only recognized non-code formats may use these flags as graph leaves.
+    if ((query === '?inline' || query === '?no-inline')
+      && !/\.(?:html|txt|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|json|jsonl)$/.test(base)) return undefined
     return host.fileExists(base) ? base : undefined
   }
   const resolutionCache = ts.createModuleResolutionCache(host.getCurrentDirectory(), file => file, compilerOptions)

@@ -360,6 +360,26 @@ for (const [path, module] of Object.entries(storyModules)) {
   }
 }
 
+const fixtureGraphEntries = (
+  exempt: ReadonlyMap<string, ReadonlySet<ExemptStoryMode>>,
+  deferredAppIds: readonly string[],
+) => {
+  const entries = new Map([...exempt].map(([file, modes]) => [nodePath.resolve(uiSource, file), modes]))
+  for (const id of deferredAppIds) {
+    const file = id.slice(0, id.lastIndexOf('#'))
+    if (!exempt.has(file)) entries.set(nodePath.resolve(uiSource, file), new Set<ExemptStoryMode>())
+  }
+  return entries
+}
+
+test('declared slices in an app-like CSF pass normal rules without the forbidden-domain graph', () => {
+  const appPath = './../../../apps/example/src/Slices.stories.tsx'
+  expect(scenarioStoryCheck(AllStates, meta)._tag).toBe('Passed')
+  expect(fixtureGraphEntries(new Map(), []).has(nodePath.resolve(uiSource, appPath))).toBe(false)
+  expect(fixtureGraphEntries(new Map(), [`${appPath}#Deferred`]).has(nodePath.resolve(uiSource, appPath))).toBe(true)
+  expect(fixtureGraphEntries(new Map([[appPath, new Set<ExemptStoryMode>(['primitive'])]]), []).has(nodePath.resolve(uiSource, appPath))).toBe(true)
+})
+
 test('exempt CSF runtime import graphs cannot reach domain fixture roots', () => {
   const started = performance.now()
   expect([...exemptFiles.keys()].filter(file => sliceFiles.has(file)), 'Slice and exempt stories must use separate CSF files').toEqual([])
@@ -378,11 +398,9 @@ test('exempt CSF runtime import graphs cannot reach domain fixture roots', () =>
   }
   const allKitSources = ts.sys.readDirectory(kitRoot, ['.ts', '.tsx'], ['**/node_modules/**', '**/*.test.ts', '**/*.test.tsx'])
   const markerRoots = [...allKitSources, policy.projectionHarness].filter(file => requiresDomainMarker(file, policy))
-  const entries = new Map([...exemptFiles].map(([file, modes]) => [nodePath.resolve(uiSource, file), modes]))
-  // Undeclared app debt still receives the runtime graph check, not an exemption.
-  for (const file of Object.keys(storyModules)) {
-    if (file.startsWith('./../../../apps/')) entries.set(nodePath.resolve(uiSource, file), exemptFiles.get(file) ?? new Set())
-  }
+  // Only exemptions and actual undeclared app debt forbid domain fixture roots.
+  // Declared slice CSFs consume the kit normally, regardless of their location.
+  const entries = fixtureGraphEntries(exemptFiles, undeclaredApp)
   const configPath = nodePath.resolve(uiSource, '../tsconfig.json')
   const config = ts.readConfigFile(configPath, ts.sys.readFile)
   if (config.error !== undefined) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'))

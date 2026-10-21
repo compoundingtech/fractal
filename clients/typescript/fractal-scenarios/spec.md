@@ -1272,8 +1272,9 @@ breaks a scenario fails in the same pull request.
   exactly the undeclared app story ids and its own count independently of the blocked-PR
   ratchet. Declaring a mode or removing a story requires removing its app deferral; new app
   stories must declare modes. Deferred app CSFs still pass the runtime import-graph check.
-  Vite's documented `?raw`, `?url`, `?inline` and `?no-inline` asset queries are leaves only
-  when their base file exists; forbidden domain roots and primitive fixture paths remain
+  Vite's `?raw` and `?url` imports are leaves only when their base file exists.
+  The `?inline` and `?no-inline` flags are leaves only for recognized non-code assets;
+  executable modules fail closed. Forbidden domain roots and primitive fixture paths remain
   forbidden even as raw assets. Unknown queries fail closed. The Scenario toolbar switches
   slice stories. Contract-fixture stories convert once scenario data can express them.
 - Mounted conversation stories declare the real consumer mount policy and pass marker/contrast

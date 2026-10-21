@@ -49,6 +49,8 @@ const sources: Readonly<Record<string, string>> = {
   [source('raw-marked.stories.ts')]: "import text from './marked-data.ts?raw'; export const story = text",
   [source('unknown-query.stories.ts')]: "import text from './page.html?unknown'; export const story = text",
   [source('raw-code.stories.ts')]: "import text from './catalog-bridge.ts?raw'; export const story = text",
+  [source('inline-code.stories.ts')]: "import { value } from './catalog-bridge.ts?inline'; export const story = value",
+  [source('no-inline-code.stories.ts')]: "import { value } from './catalog-bridge.ts?no-inline'; export const story = value",
 }
 const graph = createTypeScriptGraph(Object.keys(sources).filter(file => file.endsWith('.ts')), {
   target: ts.ScriptTarget.ESNext,
@@ -127,6 +129,15 @@ test.each(['html', 'font', 'raw-code'])('Vite asset imports are leaves: %s', nam
 })
 test.each(['inline', 'no-inline'])('documented Vite %s assets are leaves', query => {
   expect(graph.resolve(`./font.ttf?${query}`, source('font.stories.ts'))).toBe(`${source('font.ttf')}?${query}`)
+})
+test.each(['inline-code', 'no-inline-code'])('inline flags cannot hide executable catalog imports: %s', name => {
+  expect(check(`${name}.stories.ts`, 'primitive').violations.join('\n')).toContain('unresolved runtime import')
+})
+test.each(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts', 'module.css'])('inline flags fail closed for %s code', extension => {
+  const file = source(`executable.${extension}`)
+  const seeded = createTypeScriptGraph([], {}, { [file]: 'export const value = 1' })
+  expect(seeded.resolve(`./executable.${extension}?inline`, source('inline-code.stories.ts'))).toBeUndefined()
+  expect(seeded.resolve(`./executable.${extension}?no-inline`, source('inline-code.stories.ts'))).toBeUndefined()
 })
 test.each(['missing-asset', 'unknown-query'])('asset imports fail closed: %s', name => {
   expect(check(`${name}.stories.ts`, 'contract-fixture').violations.join('\n')).toContain('unresolved runtime import')
