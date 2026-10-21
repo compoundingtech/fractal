@@ -2,9 +2,9 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
-import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import { FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -147,7 +147,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       else throw new TypeError('Unexpected native request')
       return Response.json({ ...recording.cases.agent.payload, value })
     } }
-    const client = new St3Client(options)
+    const client = new FractalClient(options)
     const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [nativeRow('first')] }))
     const source: DataSource = { ...fixtureSource({ world: { now: 10000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), mode: 'live', agents,
       subjectReads: gatewaySubjectReads({ options, registry, discovery: client }),

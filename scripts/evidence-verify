@@ -294,7 +294,8 @@ def project(repo, tree, paths):
     with tempfile.TemporaryDirectory() as scratch:
         env = {'GIT_INDEX_FILE': os.path.join(scratch, 'index')}
         git(repo, 'update-index', '-z', '--index-info', stdin=b''.join(entries), env=env)
-        return git(repo, 'write-tree', env=env).decode().strip()
+        # --missing-ok: a tree id does not depend on its blobs being here, and in a partial clone checking them fetches them.
+        return git(repo, 'write-tree', '--missing-ok', env=env).decode().strip()
 
 
 def kind_of(runner):
@@ -420,9 +421,13 @@ def load(repo, commit, tree=None):
     if parents != [subject]:
         return None
     # The signed statement already names the tree. When the subject commit is present it must
-    # agree; when it is not (shallow fetch), the signer's claim stands.
+    # agree; when it is not (shallow fetch), the signer's claim stands. Never fetched to find out: in a partial
+    # clone (the gate's checkout after it deepens with blob:none) a missing commit is fetched lazily with no
+    # negotiation, that is with its whole history, about 3.4 s each; a record found by input key names another
+    # tree's commit, so 34 of them took a verify to 55 s and past the gate's 30 s.
     try:
-        present = git(repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', subject + '^{tree}').decode().strip()
+        present = git(repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', subject + '^{tree}',
+                      env={'GIT_NO_LAZY_FETCH': '1'}).decode().strip()
     except Failure:
         present = None
     if present is not None and present != tree:

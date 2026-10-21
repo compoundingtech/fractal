@@ -1,9 +1,9 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ThreadHeader } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { ResourceCardV1, ResourceChipV1, type ResourceData, type ResourceFile } from '@smalltalk/fractal-ui/assistant-ui/resources'
-import { SyncLine } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import { ThreadHeader } from '@fractal/ui/assistant-ui/shell'
+import { ResourceCardV1, ResourceChipV1, type ResourceData, type ResourceFile } from '@fractal/ui/assistant-ui/resources'
+import { SyncLine } from '@fractal/ui/assistant-ui/sync'
 import type { Agent } from '../data/source.ts'
 import { sidebarRow } from './sidebarRow.ts'
 

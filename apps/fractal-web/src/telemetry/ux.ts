@@ -1,5 +1,5 @@
 import { Context, Exit, Option, Tracer } from 'effect'
-import type { SyncStatus } from '@st3/sdk/effect'
+import type { SyncStatus } from '@fractal/sdk/effect'
 
 export const uxSpanNames = ['wf.ux.open', 'wf.ux.open.phase', 'wf.ux.reload', 'wf.ux.switch', 'wf.ux.switch.data_ready', 'wf.ux.first_frame', 'wf.sync.transition', 'wf.ux.send_echo', 'wf.ux.alert_landed'] as const
 export const uxAttributeNames = ['wf.ux.surface', 'wf.ux.budget_ms', 'wf.ux.budget_phase', 'wf.ux.budget_met', 'wf.ux.shell_ms', 'wf.ux.roster_after_shell_ms', 'wf.ux.cache', 'wf.ux.slot_count', 'wf.ux.data_ready_ms', 'wf.ux.painted', 'wf.ux.outcome', 'wf.subscription.kind', 'wf.sync.from', 'wf.sync.to', 'wf.sync.stage', 'wf.sync.previous_ms', 'wf.sync.reconnect_ms'] as const
@@ -24,7 +24,7 @@ export const afterNextPaint = (callback: () => void): (() => void) => {
   }
 }
 
-/** st's `alert_landed_p95_ms_lt` (clients/typescript/st3-views/slo.ts): an answered alert leaves within 2 s. */
+/** st's `alert_landed_p95_ms_lt` (clients/typescript/fractal-views/slo.ts): an answered alert leaves within 2 s. */
 const ALERT_LANDED_BUDGET_MS = 2000
 
 interface Operation {

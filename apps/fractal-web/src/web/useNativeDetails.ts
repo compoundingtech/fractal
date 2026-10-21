@@ -5,7 +5,7 @@ import * as React from 'react'
 import { useAgent, useAgentRow, useClockDeadline, useDataSource, useNowSnapshot, useSubjectList } from '../data/react.tsx'
 import { nativeSessionStartReason, projectNativeDetails, type NativeDetailsObservation } from '../data/nativeDetails.ts'
 import { unavailable, type DataSource, type Feed } from '../data/source.ts'
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
 
 export type { NativeDetailsObservation } from '../data/nativeDetails.ts'

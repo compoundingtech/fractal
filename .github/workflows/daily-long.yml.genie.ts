@@ -4,6 +4,7 @@ import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import {
   buildEnv,
   commonSetupSteps,
+  fractalWebRunnerStep,
   isolationVmSteps,
   linuxActionlintConfig,
   linuxRunner,
@@ -135,7 +136,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
         command: ['bash', 'scripts/ci-perf', 'cost'],
         env: { CARGO_PROFILE_DEV_OPT_LEVEL: '1' },
         extraLogs: '${{ runner.temp }}/perf/',
-        before: [perfStoresCache('cost')],
+        before: [fractalWebRunnerStep, perfStoresCache('cost')],
       }),
       if: onMain,
     },

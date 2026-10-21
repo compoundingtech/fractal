@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import type { AgentDeclaration } from '@smalltalk/st3-client/schema'
+import type { AgentDeclaration } from '@fractal/client/schema'
 
 /** Public-safe declared intent: never retain raw paths, argv, env values or reference targets. */
 export interface NativeDeclarations {

@@ -6,7 +6,7 @@ import * as React from 'react'
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
 import { colorVars as c, geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
-import { HumanTime } from '@smalltalk/fractal-ui/human-time'
+import { HumanTime } from '@fractal/ui/human-time'
 
 import { useDataSource } from '../../data/react.tsx'
 import { agentTodosAtom, type TodoState } from './model.ts'

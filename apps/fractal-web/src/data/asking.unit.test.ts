@@ -1,5 +1,5 @@
-import { Agent, Attention, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { describe, expect, it } from 'vitest'
 
 import { askingAgentRefs } from './asking.ts'

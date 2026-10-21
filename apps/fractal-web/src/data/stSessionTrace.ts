@@ -1,5 +1,5 @@
-import { St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 import { Context, DateTime, Duration, Effect, Layer, Option, Schema } from 'effect'
 
 import {
@@ -95,7 +95,7 @@ export const stSessionTraceLayer = Layer.effect(SessionTraceProvider,
 const rangeMs = { '1d': 86_400_000, '7d': 604_800_000, '30d': 2_592_000_000 } as const
 
 /** Native usage establishes the root join; the existing subject reader supplies the roster meters. */
-export const gatewayStSessionTraceFactsLayer = (client: St3Client) => Layer.effect(StSessionTraceFacts,
+export const gatewayStSessionTraceFactsLayer = (client: FractalClient) => Layer.effect(StSessionTraceFacts,
   Effect.gen(function* () {
     const subjects = yield* SubjectReadPort
     return {
@@ -139,6 +139,6 @@ export const gatewayStSessionTraceFactsLayer = (client: St3Client) => Layer.effe
   }),
 )
 
-export const gatewaySessionTraceLayer = (client: St3Client) => stSessionTraceLayer.pipe(
+export const gatewaySessionTraceLayer = (client: FractalClient) => stSessionTraceLayer.pipe(
   Layer.provide(gatewayStSessionTraceFactsLayer(client)),
 )

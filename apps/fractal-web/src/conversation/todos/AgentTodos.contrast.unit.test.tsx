@@ -29,7 +29,7 @@ vi.mock('@stylexjs/stylex', () => {
   }
 })
 
-import { compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { compositionLightTheme } from '@fractal/ui/assistant-ui/shell'
 import { colorVars } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { AgentTodos } from './AgentTodos.tsx'
 import { projectTodos } from './model.ts'

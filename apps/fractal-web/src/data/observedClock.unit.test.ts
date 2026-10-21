@@ -1,4 +1,4 @@
-import type { ConnectionState } from '@st3/sdk/effect'
+import type { ConnectionState } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it } from 'vitest'

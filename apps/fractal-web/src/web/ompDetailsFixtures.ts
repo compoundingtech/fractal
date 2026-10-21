@@ -1,6 +1,6 @@
 import * as Atom from 'effect/reactivity/Atom'
-import { Agent, UsagePeriod, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { Agent, UsagePeriod, decodeUnknownSync } from '@fractal/client/schema'
+import type * as Native from '@fractal/client/schema'
 import { ompAgentWire, ompDeclarationsNotReported, ompNow, ompUsagePeriodWire } from '../../../../packages/fractal-ui/src/assistant-ui/details/omp-fixtures.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, type DataSource, type Feed } from '../data/source.ts'

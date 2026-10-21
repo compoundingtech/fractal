@@ -1,4 +1,4 @@
-import type { DetailsOverview, TraceSeries, TraceCoverage } from '@smalltalk/fractal-ui/assistant-ui'
+import type { DetailsOverview, TraceSeries, TraceCoverage } from '@fractal/ui/assistant-ui'
 import type { Feed } from '../data/source.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
 

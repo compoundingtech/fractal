@@ -1,5 +1,5 @@
-import { ClientError, St3Client, type ClientOptions } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, FractalClient, type ClientOptions } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 import { Effect, Fiber, Schedule, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -25,16 +25,16 @@ const failure = (error: unknown): Feed<never> => unavailable({
 /** Reuse the source registry, SDK codecs and getter-poll lifecycle used by SubjectReads. */
 export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
   readonly options: ClientOptions
-  readonly discovery: St3Client
+  readonly discovery: FractalClient
   readonly registry: AtomRegistry.AtomRegistry
   readonly now: () => number
 }): NativeDetailsSource => {
-  const reader = <T>(read: (client: St3Client) => Promise<T>): Atom.Atom<Feed<T>> => {
+  const reader = <T>(read: (client: FractalClient) => Promise<T>): Atom.Atom<Feed<T>> => {
     let retained: T | undefined
     return Atom.make((get): Feed<T> => {
       const readOnce = Effect.tryPromise({
         try: async (signal) => {
-          const client = new St3Client({ ...options, fetchImpl: (input, init) => {
+          const client = new FractalClient({ ...options, fetchImpl: (input, init) => {
             signal.throwIfAborted()
             return (options.fetchImpl ?? globalThis.fetch)(input, { ...init, signal })
           } })

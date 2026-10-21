@@ -27,7 +27,7 @@ import type { RegisteredRenderer, RegisteredSubjectRenderer, Registry } from '..
 import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import type { Feed } from '../data/source.ts'
-import type { DetailsDisplayObservation, DetailsSection, TraceAccumulationWindow, TraceCoverage, TraceFact, TraceSubagent } from '@smalltalk/fractal-ui/assistant-ui'
+import type { DetailsDisplayObservation, DetailsSection, TraceAccumulationWindow, TraceCoverage, TraceFact, TraceSubagent } from '@fractal/ui/assistant-ui'
 
 export interface AgentRowProps {
   readonly agentRef: string

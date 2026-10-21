@@ -3,9 +3,9 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { St3Client } from '@smalltalk/st3-client'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import { FractalClient } from '@fractal/client'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Option from 'effect/Option'
@@ -134,7 +134,7 @@ describe('native observations mounted on the production kit Details pane', () =>
       return Response.json({ ...recording.cases.agent.payload, value })
     } }
     const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents,
-      nativeDetails: gatewayNativeDetails({ options, registry, discovery: new St3Client(options), now: () => 10_000 }),
+      nativeDetails: gatewayNativeDetails({ options, registry, discovery: new FractalClient(options), now: () => 10_000 }),
     }
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef={row.id} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
     await act(async () => { await vi.waitFor(() => expect(host.querySelector('[data-details-sync-state]')?.getAttribute('data-details-sync-state')).toBe('Failed')) })

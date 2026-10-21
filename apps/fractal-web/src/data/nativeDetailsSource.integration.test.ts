@@ -1,6 +1,6 @@
 import { it } from '@effect/vitest'
-import { St3Client } from '@smalltalk/st3-client'
-import { openAgent } from '@st3/sdk/effect'
+import { FractalClient } from '@fractal/client'
+import { openAgent } from '@fractal/sdk/effect'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -10,7 +10,7 @@ import { gatewayNativeDetails } from './nativeDetailsSource.ts'
 import { gatewaySubjectReads } from './subjectReadPort.ts'
 import { nativeDetailsTiming } from './nativeDetails.ts'
 import type { Feed } from './source.ts'
-import * as Native from '@smalltalk/st3-client/schema'
+import * as Native from '@fractal/client/schema'
 
 const nextFeed = <T>({ registry, atom, predicate }: { readonly registry: AtomRegistry.AtomRegistry; readonly atom: Atom.Atom<Feed<T>>; readonly predicate: (feed: Feed<T>) => boolean }) => Effect.acquireUseRelease(
   Effect.sync(() => {
@@ -36,7 +36,7 @@ describe('real native Details getter adapters', () => {
       if (fail) throw new TypeError('Connection lost')
       return Response.json(envelope(usage))
     } }
-    const facts = gatewayNativeDetails({ options, discovery: new St3Client(options), registry, now: () => 604805000 })
+    const facts = gatewayNativeDetails({ options, discovery: new FractalClient(options), registry, now: () => 604805000 })
     const mountA = registry.mount(facts.usagePeriod)
     const mountB = registry.mount(facts.usagePeriod)
     yield* Effect.addFinalizer(() => Effect.sync(() => { mountA(); mountB() }))
@@ -66,7 +66,7 @@ describe('real native Details getter adapters', () => {
       if (deny) return Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'forbidden', message: 'read.declarations denied', retryable: false, request_id: 'request/denied', details: {} }, { status: 403 })
       return Response.json(envelope(declaration))
     } }
-    const facts = gatewayNativeDetails({ options, discovery: new St3Client(options), registry, now: () => 5000 })
+    const facts = gatewayNativeDetails({ options, discovery: new FractalClient(options), registry, now: () => 5000 })
     const atom = facts.declarations({ agentRef: 'agent/example', revision: 'observation-one' })
     const release = registry.mount(atom)
     yield* Effect.addFinalizer(() => Effect.sync(release))
@@ -96,7 +96,7 @@ describe('real native Details getter adapters', () => {
       reads.push(url)
       return Response.json(envelope(declaration))
     } }
-    const facts = gatewayNativeDetails({ options, discovery: new St3Client(options), registry, now: () => 5000 })
+    const facts = gatewayNativeDetails({ options, discovery: new FractalClient(options), registry, now: () => 5000 })
     const query = { agentRef: 'agent/example', revision: '1' }
     const releasePublic = registry.mount(facts.declarations(query))
     const releaseRaw = registry.mount(facts.rawDeclarations(query))
@@ -138,7 +138,7 @@ describe('real native Details getter adapters', () => {
       started(signal)
       return promise
     } }
-    const facts = gatewayNativeDetails({ options, discovery: new St3Client(options), registry, now: () => 5000 })
+    const facts = gatewayNativeDetails({ options, discovery: new FractalClient(options), registry, now: () => 5000 })
     const releaseA = registry.mount(facts.usagePeriod)
     const releaseB = registry.mount(facts.usagePeriod)
     yield* Effect.addFinalizer(() => Effect.sync(() => { releaseA(); releaseB() }))

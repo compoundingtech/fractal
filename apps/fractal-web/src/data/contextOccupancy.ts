@@ -1,4 +1,4 @@
-import type { DecodedUsageSummary } from '@st3/sdk/effect'
+import type { DecodedUsageSummary } from '@fractal/sdk/effect'
 import * as DateTime from 'effect/DateTime'
 import type { Known } from './source.ts'
 

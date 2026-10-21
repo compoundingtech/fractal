@@ -1,5 +1,5 @@
-import * as Native from '@smalltalk/st3-client/schema'
-import { decodeResourceRow, openAgent, type DecodedAgent } from '@st3/sdk/effect'
+import * as Native from '@fractal/client/schema'
+import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { createProjections } from './projections.ts'

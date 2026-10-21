@@ -1,5 +1,5 @@
-import type { ClientOptions } from '@smalltalk/st3-client'
-import { Agent } from '@smalltalk/st3-client/schema'
+import type { ClientOptions } from '@fractal/client'
+import { Agent } from '@fractal/client/schema'
 import { DateTime, Effect, Schema, Stream } from 'effect'
 import { describe, expect, it } from 'vitest'
 

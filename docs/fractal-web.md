@@ -539,7 +539,7 @@ roster-loading fallback that enabled a canonical terminal subject without runtim
 the first-control assertion must fail even if the settled control is correctly disabled.
 
 `data/liveSource.ts` resolves an agent's terminal runtime and passes the decoded runtime
-and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@st3/sdk/effect`.
+and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@fractal/sdk/effect`.
 The first attach consumes that observation rather than reading the same runtime twice.
 Admission identity remains the runtime ID; the observation is not a runtime cache.
 Reconnects and resyncs read the runtime afresh before obtaining another attachment.

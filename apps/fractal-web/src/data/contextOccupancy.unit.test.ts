@@ -1,5 +1,5 @@
-import { Agent as NativeAgent, decodeUnknownSync, UsageSummary, type UsageSummaryEncoded } from '@smalltalk/st3-client/schema'
-import { openAgent } from '@st3/sdk/effect'
+import { Agent as NativeAgent, decodeUnknownSync, UsageSummary, type UsageSummaryEncoded } from '@fractal/client/schema'
+import { openAgent } from '@fractal/sdk/effect'
 import { describe, expect, it } from 'vitest'
 import * as Option from 'effect/Option'
 import { contextOccupancy } from './contextOccupancy.ts'
