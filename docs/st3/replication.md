@@ -691,6 +691,11 @@ The inventory is a set, not a high-water cursor. Sparse delivery and two candida
 
 The inventory is compact. It carries one digest per writer range of 256 sequences, and it lists identities only for ranges whose digests differ. A peer sends a range the other side lacks entirely, and it sends identities within a differing range only after the other side has listed that complete range and verified its count and digest. An ordinary two-phase exchange makes progress in both directions without sending the whole authority log. A peer without range digests receives and sends the full identity list, as before.
 
+An equal-digest answer retains its range digests even though it lists no identities or payloads.
+Equality applies to the exported snapshot only: a concurrent local or replicated write may make
+that digest stale before the next export. Retaining the ranges keeps that next request compact
+instead of accidentally selecting the older peer's full-inventory answer path.
+
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
@@ -955,7 +960,7 @@ Each store stage counts only the time it holds the store's write connection, so 
 not count another's wait. Round trips are this node's own requests to its peers, including the
 peer's work to answer them. SQLite time is every statement the daemon ran; each commit waits for
 a disk flush. `/v1/replication/status` carries the same numbers as `timings`.
-`crates/st3/tests/first_sync.rs` uses them to profile an empty node syncing from a peer; `cargo test --release -p st3 --test integration first_sync:: -- --nocapture` runs it.
+`crates/fractal/tests/first_sync.rs` uses them to profile an empty node syncing from a peer; `cargo test --release -p fractal --test integration first_sync:: -- --nocapture` runs it.
 
 A node is catching up while a peer measured in the last five minutes holds more envelopes than one
 exchange carries. During that time its projections can show early history as current: a request
@@ -1198,6 +1203,21 @@ worker's locally initiated success can still have carrier `unknown`.
 Restart clears both records;
 absence means evidence is unavailable, even when durable last-seen status exists.
 Worker phase changes, connectivity events and separate probes do not rewrite them.
+
+The replication-status JSON failed record also carries optional `failure` metadata:
+`code`, `phase`, `elapsed_ms`, optional `http_status`, and a bounded sanitized `cause`.
+The phases are `dial`, `local-export`, `request-headers`, `response-body`, `verify`,
+`local-receive`, and `follow-up-export`; they describe the failing operation, not the
+carrier. Authenticated peer backend failures preserve allowlisted machine codes such
+as `replication-exchange-metadata-too-large` and the backend phase. The elapsed time
+is the local outbound attempt's duration, including any dial and polling time, not
+a remote clock measurement. Local daemon failures retain their typed API codes.
+
+Causes retain safe error categories and typed I/O kinds, not free-form error/source
+displays, URLs, credentials, claim content, request bodies, or unsigned peer prose.
+Success records omit `failure`. Older worker requests and older observations without
+details remain readable and do not invent a cause. Carrier-only client sync notices
+remain unchanged; use replication-status JSON for the diagnostic details.
 
 The worker captures a Fabric route before converting it to its loopback tunnel
 URL. Fabric currently supplies no direct/relay evidence for that exact dial or

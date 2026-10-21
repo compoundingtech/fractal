@@ -80,6 +80,7 @@ pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 mod document_pages;
+pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
@@ -765,7 +766,7 @@ pub const SCHEMA: &str = core_schema!("", "");
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
+pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -993,6 +994,7 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
         })?;
+        claim_ranges::install(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1ef8ba031b42 owner=smallclaims::store TODO=trace-statement-and-value-representation */ writer_heads::SCHEMA).map_err(Into::into)
         })?;
@@ -1458,7 +1460,7 @@ impl PeerSyncProgress {
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
             .is_some_and(|(since, compared)| {
-                compared.saturating_sub(since) >= REPLICATION_DIVERGED_AFTER_MS
+                compared.saturating_sub(since) >= replication_settle_intervals_ms().1
             });
         Some(sync)
     }
@@ -4105,6 +4107,53 @@ pub fn peer_up(last_success_at: Option<u128>, failed_since: bool, now: u128) -> 
 /// so a shorter difference can still settle by itself.
 pub const REPLICATION_DIVERGED_AFTER_MS: u128 = 2 * CATCH_UP_PROJECTION_INTERVAL_MS as u128;
 
+/// The catch-up projection interval and the divergence window in force, in milliseconds:
+/// `CATCH_UP_PROJECTION_INTERVAL_MS` and `REPLICATION_DIVERGED_AFTER_MS`, unless
+/// `ST3_WORKER_INTERVAL_MS` caps worker timers (tests of several nodes on one machine). The
+/// window stays twice the catch-up interval under any cap, so a catching-up peer's deferred
+/// projection still settles before the pair counts as diverged.
+pub fn replication_settle_intervals_ms() -> (u64, u128) {
+    replication_settle_intervals_for(crate::sync::worker_timer_cap())
+}
+
+fn replication_settle_intervals_for(cap: Option<std::time::Duration>) -> (u64, u128) {
+    let catch_up = crate::sync::capped(
+        std::time::Duration::from_millis(CATCH_UP_PROJECTION_INTERVAL_MS),
+        cap,
+    );
+    // At least a millisecond, so a zero cap still leaves the window longer than the deferral.
+    let catch_up = u64::try_from(catch_up.as_millis()).unwrap_or(u64::MAX).max(1);
+    (catch_up, 2 * u128::from(catch_up))
+}
+
+#[cfg(test)]
+mod settle_interval_tests {
+    use super::*;
+
+    #[test]
+    fn unset_the_intervals_are_the_thirty_and_sixty_second_defaults() {
+        assert_eq!(replication_settle_intervals_for(None), (30_000, 60_000));
+        assert_eq!(
+            replication_settle_intervals_for(None),
+            (CATCH_UP_PROJECTION_INTERVAL_MS, REPLICATION_DIVERGED_AFTER_MS)
+        );
+        if std::env::var_os("ST3_WORKER_INTERVAL_MS").is_none() {
+            assert_eq!(replication_settle_intervals_ms(), (30_000, 60_000));
+        }
+    }
+
+    #[test]
+    fn under_any_cap_divergence_waits_twice_the_catch_up_deferral() {
+        for cap_ms in [0, 1, 300, 29_999, 30_000, 30_001, 120_000] {
+            let cap = std::time::Duration::from_millis(cap_ms);
+            let (catch_up, diverged) = replication_settle_intervals_for(Some(cap));
+            assert_eq!(catch_up, cap_ms.clamp(1, CATCH_UP_PROJECTION_INTERVAL_MS), "cap {cap_ms}");
+            assert_eq!(diverged, 2 * u128::from(catch_up), "cap {cap_ms}");
+            assert!(diverged > u128::from(catch_up), "cap {cap_ms}");
+        }
+    }
+}
+
 /// Sequences per compact inventory range. A range digest lets two peers skip every range they
 /// already share, so an exchange lists only the identities in ranges that differ.
 pub const REPLICATION_BUCKET_WIDTH: u64 = 256;
@@ -5685,6 +5734,46 @@ impl Store {
         document_pages::read(self, name, prefix, history, after, limit)
     }
 
+    /// One version of a document, as `list_documents_page` lists it: `hash`, or the name's
+    /// latest version without one.
+    pub fn document_version(&self, name: &str, hash: Option<&str>) -> Result<Option<DocumentVersion>> {
+        let Some(hash) = hash else {
+            return Ok(self.list_documents_page(Some(name), None, false, None, 1)?.pop());
+        };
+        let connection = self.readers.get();
+        connection
+            .query_row(
+                "SELECT d.name, d.hash, b.size, d.created_index,
+                        d.hash=(SELECT n.hash FROM documents n
+                    WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1),
+                        d.binding_claim_id, c.accepted_at_unix_ms, c.actor, c.origin
+                 FROM documents d JOIN blobs b ON b.hash=d.hash
+                 JOIN claims c ON c.id=d.binding_claim_id
+                 WHERE d.name=?1 AND d.hash=?2",
+                params![name, hash],
+                |row| {
+                    Ok(DocumentVersion {
+                        name: row.get(0)?,
+                        hash: row.get(1)?,
+                        size: row.get(2)?,
+                        created_index: row.get(3)?,
+                        latest: row.get::<_, i64>(4)? != 0,
+                        binding_claim_id: row.get(5)?,
+                        created_at_unix_ms: row.get::<_, String>(6)?.parse().map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        owner: row.get::<_, Option<String>>(7)?.or(row.get(8)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn claim_by_id(&self, id: &str) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         connection
@@ -6397,6 +6486,9 @@ impl Store {
                 ..if same {
                     ReplicationInventory {
                         digest: snapshot.inventory.digest.clone(),
+                        // Equality is only true for this snapshot. Keep range proofs so a
+                        // concurrent write cannot turn this answer into a full-inventory query.
+                        buckets: snapshot.buckets.clone(),
                         ..Default::default()
                     }
                 } else {
@@ -6651,7 +6743,7 @@ impl Store {
         // Only a response to our own dial is carrier evidence for a locally initiated
         // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
         if asks {
-            self.record_replication_exchange_transport(relay, true, received_at, carrier);
+            self.record_replication_exchange_transport(relay, true, received_at, carrier, None);
         }
         drop(timing);
         self.replication_timers
@@ -7155,7 +7247,7 @@ impl Store {
             self.last_replication_projection_unix_ms
                 .load(Ordering::Acquire),
         );
-        if since < CATCH_UP_PROJECTION_INTERVAL_MS && self.replication_catching_up() {
+        if since < replication_settle_intervals_ms().0 && self.replication_catching_up() {
             self.defer_replication_projection();
             return Ok(None);
         }
@@ -7773,11 +7865,12 @@ impl Store {
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<bool> {
         let failed_at = now_ms();
         let changed = self.record_peer_failure(peer, status, error)?;
         if let Some(carrier) = carrier {
-            self.record_replication_exchange_transport(peer, false, failed_at, carrier);
+            self.record_replication_exchange_transport(peer, false, failed_at, carrier, failure);
         }
         Ok(changed)
     }
@@ -8154,6 +8247,7 @@ impl Store {
         success: bool,
         at_unix_ms: u128,
         carrier: crate::replication::ReplicationCarrier,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) {
         let mut peers = self
             .replication_sync
@@ -8169,9 +8263,13 @@ impl Store {
             .as_ref()
             .is_none_or(|previous| previous.at_unix_ms <= at_unix_ms)
         {
-            *record = Some(crate::replication::ReplicationExchangeTransport::new(
+            let mut transport = crate::replication::ReplicationExchangeTransport::new(
                 at_unix_ms, carrier,
-            ));
+            );
+            if !success {
+                transport.failure = failure.cloned();
+            }
+            *record = Some(transport);
         }
     }
 

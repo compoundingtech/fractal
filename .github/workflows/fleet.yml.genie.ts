@@ -1,3 +1,4 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { withQueueWatch } from './queue-watch.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave, optionalQueueCacheSave } from './build-snapshot.ts'
@@ -7,11 +8,14 @@ import {
   defaultActionlintConfig,
   githubWorkflow,
   nixDevelopStep,
+  plainFlakeSetupSteps,
 } from '../../repos/effect-utils/genie/external.ts'
 import {
   afterPickRunner,
   buildEnv,
   commonSetupSteps,
+  fullHistoryCheckoutSteps,
+  megarepoApplyStep,
   fractalWebJobs,
   isolationVmSteps,
   testArchiveProducer,
@@ -27,6 +31,7 @@ import {
   evidenceStepNames,
   evidenceLaneNames,
   evidenceStepSteps,
+  nixEvidenceSteps,
   linuxStageRunner,
   linuxStageRunsOn,
   mailStageRunsOn,
@@ -35,6 +40,7 @@ import {
   primaryTestRunsOn,
   testBuildRunsOn,
   pnpmStoreEnv,
+  readOnlyBinaryCaches,
   supportingLinuxRunsOn,
   supportingStageRunsOn,
   secondaryStageRunsOn,
@@ -271,7 +277,7 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
   ],
 }]))
 
-export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
   on: {
     pull_request: { types: readyPullRequestTypes },
@@ -330,7 +336,7 @@ export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         { name: 'Test release and PR classification safety', run: 'python3 scripts/release_notes_test.py' },
         {
           name: 'Require a fresh fragment on the effective PR or queue merge',
@@ -384,6 +390,7 @@ fi`,
       ...evidenceStepJob(),
       steps: skipIfCovered('genie-freshness', [
         ...genieSetupSteps,
+        megarepoApplyStep,
         { ...nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }), id: 'freshness' },
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
         ...evidenceStepSteps('genie-freshness', ['bash', 'scripts/ci-genie-freshness'], ['freshness']),
@@ -402,7 +409,9 @@ fi`,
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: skipIfCovered('typescript-client', [
         // A pull request needs its history: the signing guard lists the commits between the base and the head.
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': "${{ github.event_name == 'pull_request' && '0' || '1' }}", 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        megarepoApplyStep,
         // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
         { uses: 'actions/setup-node@v4', with: { 'node-version': '24.18.0' } },
         {
@@ -421,12 +430,30 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
             key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}',
           },
         },
-        // Corepack provisions the root manifest's pnpm@12.7.0; the workspace forbids install scripts.
-        { name: 'Install the frozen workspace', id: 'install', env: pnpmStoreEnv, run: 'corepack enable\npnpm install --frozen-lockfile' },
-        { name: 'Check the client, shared views and iOS consumers', id: 'client', run: 'bash scripts/ci-typescript-client' },
+        // The web shell stages the pinned pnpm source inputs before the frozen root install.
+        { ...nixDevelopStep({ name: 'Install the frozen workspace', flake: '.#web', command: ['pnpm', 'install', '--frozen-lockfile'] }), id: 'install', env: pnpmStoreEnv },
+        { ...nixDevelopStep({ name: 'Check the client, shared views and iOS consumers', flake: '.#web', command: ['bash', 'scripts/ci-typescript-client'] }), id: 'client' },
         ...evidenceStepSteps('typescript-client', ['bash', 'scripts/ci-typescript-client'], ['install', 'client']),
       ]),
     },
+    // Shadow: the same checks as Nix derivations, signed as `nix` records on a ci1 runner (merge groups only). Not a
+    // required check, not in any `needs`, and its notes are retained but not published until the verifier accepts
+    // the `nix` kind. Without the Nix daemon's signing key the records are unsigned and a verifier rejects them.
+    ...Object.fromEntries(['genie-freshness', 'typescript-client'].map((check) => [`nix-evidence-${check}`, {
+      name: `nix-evidence-${check}`,
+      needs: [pickRunnerJobId],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+      'runs-on': supportingStageRunsOn,
+      'timeout-minutes': 20,
+      'continue-on-error': true,
+      ...evidenceStepJob(),
+      defaults: { run: { shell: 'bash' } },
+      steps: [
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        ...nixEvidenceSteps(check),
+      ],
+    }])),
     'linux-test-build': {
       name: 'linux-test-build',
       ...afterPickRunner,
@@ -577,7 +604,7 @@ done`,
       steps: [
         // The tested commit with its whole history: a note's parent is that commit, and the server
         // refuses a push from a shallow repository.
-        { name: 'Check out the tested commit', 'continue-on-error': true, uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, { name: 'Check out the tested commit', 'continue-on-error': true }),
         {
           name: 'Take the signer scripts from the base commit',
           id: 'base',
@@ -664,4 +691,4 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check."}))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))

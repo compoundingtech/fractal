@@ -143,75 +143,6 @@
     "projection": "agents",
     "wakes_reconciler": true
   },
-  "agent.renamed": {
-    "kind": "agent.renamed",
-    "subjects": [
-      "agent"
-    ],
-    "fields": {
-      "declaration": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "from": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "agent",
-          "mission"
-        ]
-      },
-      "owner_host": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "preserved_incarnation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "previous_revision": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "request": {
-        "value_type": "object",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "to": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "agent",
-          "mission"
-        ]
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": "agents",
-    "wakes_reconciler": true
-  },
   "agent.retired": {
     "kind": "agent.retired",
     "subjects": [
@@ -590,6 +521,606 @@
     "cardinality": "append",
     "projection": "checkpoints",
     "wakes_reconciler": false
+  },
+  "client.hang": {
+    "kind": "client.hang",
+    "subjects": [
+      "client"
+    ],
+    "fields": {
+      "app_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "capture_source": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "js",
+          "native-marker",
+          "metrickit"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "captured_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "event_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "process",
+          "metric-interval"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "native_build": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurred_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurrence_time_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "exact",
+          "metric-interval-end"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "os_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "paired_device": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "pairing_grant": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "payload": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "platform": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "ios"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "sequence": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "severity": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "info",
+          "warning",
+          "error",
+          "fatal"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "update_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false,
+    "retention": "local"
+  },
+  "client.js-error": {
+    "kind": "client.js-error",
+    "subjects": [
+      "client"
+    ],
+    "fields": {
+      "app_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "capture_source": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "js",
+          "native-marker",
+          "metrickit"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "captured_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "event_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "process",
+          "metric-interval"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "native_build": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurred_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurrence_time_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "exact",
+          "metric-interval-end"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "os_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "paired_device": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "pairing_grant": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "payload": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "platform": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "ios"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "sequence": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "severity": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "info",
+          "warning",
+          "error",
+          "fatal"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "update_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false,
+    "retention": "local"
+  },
+  "client.launch": {
+    "kind": "client.launch",
+    "subjects": [
+      "client"
+    ],
+    "fields": {
+      "app_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "capture_source": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "js",
+          "native-marker",
+          "metrickit"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "captured_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "event_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "process",
+          "metric-interval"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "native_build": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurred_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurrence_time_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "exact",
+          "metric-interval-end"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "os_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "paired_device": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "pairing_grant": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "payload": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "platform": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "ios"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "sequence": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "severity": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "info",
+          "warning",
+          "error",
+          "fatal"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "update_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false,
+    "retention": "local"
+  },
+  "client.native-crash": {
+    "kind": "client.native-crash",
+    "subjects": [
+      "client"
+    ],
+    "fields": {
+      "app_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "capture_source": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "js",
+          "native-marker",
+          "metrickit"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "captured_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "event_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "launch_id_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "process",
+          "metric-interval"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "native_build": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurred_at_unix_ms": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "occurrence_time_basis": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "exact",
+          "metric-interval-end"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "os_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "paired_device": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "pairing_grant": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "payload": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "person_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "platform": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "ios"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "runtime_version": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "sequence": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "severity": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "info",
+          "warning",
+          "error",
+          "fatal"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "update_id": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false,
+    "retention": "local"
   },
   "daemon.diagnostic": {
     "kind": "daemon.diagnostic",
@@ -4125,75 +4656,6 @@
     "source_kdl": [
       "mission"
     ]
-  },
-  "mission.renamed": {
-    "kind": "mission.renamed",
-    "subjects": [
-      "mission"
-    ],
-    "fields": {
-      "declaration": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "from": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "agent",
-          "mission"
-        ]
-      },
-      "owner_host": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "preserved_incarnation": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "previous_revision": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "request": {
-        "value_type": "object",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "to": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "agent",
-          "mission"
-        ]
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": "missions",
-    "wakes_reconciler": true
   },
   "observer.observed": {
     "kind": "observer.observed",
@@ -8399,27 +8861,6 @@
         "immutable": false,
         "reference": false
       },
-      "assistant_grant_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "assistant_owner": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "person"
-        ]
-      },
-      "assistant_session_actor": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "attempt": {
         "value_type": "integer",
         "required": false,
@@ -8441,15 +8882,6 @@
       "key": {
         "value_type": "string",
         "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "sender_class": {
-        "value_type": "string",
-        "required": false,
-        "values": [
-          "external-assistant"
-        ],
         "immutable": false,
         "reference": false
       },

@@ -40,8 +40,8 @@ Use CLI and the terminal UI from the same release source. Current client version
 | Client | Version/evidence boundary |
 | --- | --- |
 | CLI and the terminal UI | v0.3.17 archives embed source `f4cec96e`; native release CI checks both tools. This is not a cross-version client guarantee. |
-| TypeScript `@smalltalk/st3-client` | Repository-private package version `0.1.0`; CI contract/schema tests run against its source revision. The package number does not identify the daemon source. |
-| Swift `St3Client` / iOS app | In-tree client source and client-v0 capability contract; no separate released client-version compatibility matrix is claimed. Fresh-device app onboarding is separate evidence. |
+| TypeScript `@fractal/client` | Repository-private package version `0.1.0`; CI contract/schema tests run against its source revision. The package number does not identify the daemon source. |
+| Swift `FractalClient` / iOS app | In-tree client source and client-v0 capability contract; no separate released client-version compatibility matrix is claimed. Fresh-device app onboarding is separate evidence. |
 
 The Swift and TypeScript clients share the client-v0 contract; optional features are negotiated
 with the responding daemon.

@@ -101,7 +101,7 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none', showSeat
   </main>
 }
 const meta = {
-  title: 'Fractal UI/Hierarchy r1', component: Hierarchy, parameters: { layout: 'fullscreen' },
+  title: 'Fractal UI/Hierarchy r1', component: Hierarchy, parameters: { scenario: { _tag: 'contract-fixture', reason: "Local regression toggles and reasoning fixtures isolate hierarchy acceptance contracts." }, layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: false, failure: 'none' },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failure: { control: 'select', options: failures, description: 'Select one old behavior. Its production-component play must fail after Apply selected regression re-renders the tree.' } },
 } satisfies Meta<typeof Hierarchy>
