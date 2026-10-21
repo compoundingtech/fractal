@@ -1573,7 +1573,7 @@ fn append_generated_claim(
 fn generated_mission_publications_replicate_as_canonical_missions() {
     let mut world = World::new(1, Sabotage::None);
     let mut input = world.claim_of(&corpus()["mission.published"], 0).unwrap();
-    input.actor = Some(PERSON.into());
+    input.actor = Some("person/robin".into());
     let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
     let mission: fractal_daemon::model::MissionSpec =
         serde_json::from_value(claim.body.clone()).unwrap();
