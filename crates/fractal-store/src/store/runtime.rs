@@ -4,8 +4,6 @@
 
 use super::*;
 
-/// smalltalk's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
-/// the graph for the caches its reads use.
 /// The newest complete roster in each history mode, and the page order of the current one.
 #[derive(Default)]
 pub struct PreviousRoster {
@@ -13,6 +11,8 @@ pub struct PreviousRoster {
     pub page_refs: Option<AgentResourcesEntry>,
 }
 
+/// smalltalk's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
+/// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct SmalltalkRuntime {
     /// Committed launch-source invalidation, independent of append frontiers.
