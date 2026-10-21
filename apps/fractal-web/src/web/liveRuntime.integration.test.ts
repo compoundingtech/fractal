@@ -3,7 +3,8 @@ import * as FetchHttpClient from 'effect/http/FetchHttpClient'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 // Isolate the page's transport ownership; use the real telemetry and OTLP exporter.
-vi.mock('../data/liveSource.ts', () => ({ liveSource: () => ({}) }))
+const source = vi.hoisted(() => vi.fn(() => ({ dispose: vi.fn(async () => {}) })))
+vi.mock('../data/liveSource.ts', () => ({ liveSource: source }))
 vi.mock('virtual:build-identity', () => ({
   buildIdentity: { machineVersion: 'test' }, deploymentId: undefined,
 }))
@@ -84,4 +85,28 @@ it('exports to the explicitly configured traces endpoint', async () => {
   expect(fetch.mock.calls.every(([request]) => String(request) === endpoint)).toBe(true)
   expect(sendBeacon).not.toHaveBeenCalled()
   expect(errors).not.toHaveBeenCalled()
+})
+
+it('uses replay transports without early adoption and closes replay with the page source', async () => {
+  vi.stubGlobal('window', { location: { origin: 'https://example.test', search: '' } })
+  const { createPageRuntime } = await import('./liveRuntime.ts')
+  const replay = {
+    socket: vi.fn(),
+    fetch: vi.fn(),
+    actions: [],
+    served: () => new Set<never>(),
+    close: vi.fn(),
+  }
+  const { live, telemetry } = createPageRuntime(replay)
+  expect(source).toHaveBeenLastCalledWith(expect.objectContaining({
+    options: expect.objectContaining({
+      baseUrl: 'https://example.test', maxFollows: 8, conversationSlots: 'advertised',
+      adoptEarlyCollections: false, socket: replay.socket, fetch: replay.fetch,
+    }),
+  }))
+  const underlying = source.mock.results.at(-1)!.value!
+  await live.dispose()
+  expect(underlying.dispose).toHaveBeenCalledOnce()
+  expect(replay.close).toHaveBeenCalledOnce()
+  telemetry.ux.dispose()
 })

@@ -1,6 +1,6 @@
 // What the message box does around a send: how long the text may be, what to say when a send is
 // refused, and how the text comes back. Plain functions, so they are tested without the app.
-import { INLINE_MAX_BYTES, utf8Bytes } from '@smalltalk/st3-views';
+import { INLINE_MAX_BYTES, utf8Bytes } from '@fractal/views';
 
 /** How a send that did not go ended: `unconfirmed` means st may have taken it. */
 export type SendFailure = { reason: string; unconfirmed: boolean };

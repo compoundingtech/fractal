@@ -121,7 +121,7 @@ A recorded call behaves as the real call would:
 - A log that cannot be opened or written is skipped without output. A FIFO without a reader does
   not hold the command.
 
-[`crates/st3/tests/command_recorder.rs`](../../crates/st3/tests/command_recorder.rs) compares
+[`crates/fractal/tests/command_recorder.rs`](../../crates/fractal/tests/command_recorder.rs) compares
 recorded and direct calls for each of these.
 
 ## Creation receipts
