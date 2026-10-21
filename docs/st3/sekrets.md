@@ -5,9 +5,12 @@ Sekrets runs any command line tool with a credential the caller never reads. A s
 command with that profile, runs it with the profile's home and environment, and hands back only
 the command's output and exit status.
 
-Sekrets is opt-in and Linux-first. A host without a gateway behaves exactly as before: `st
-sekrets` says sekrets is not set up, and nothing else changes. The design is section 10 of the
-resource graph plan; this document describes what is built.
+Sekrets is opt-in and Linux-first. On a host without a gateway, `st sekrets profiles` reports
+that sekrets is not set up. This document describes the installed gateway and its commands.
+
+Root-enrolled Linux system services can use an exact command grant without a daemon or a
+person login. See [run-only programs](sekrets-programs.md) for CI caller identity, private
+checkout mounts and signer key isolation; enrollment and installation require operator setup.
 
 ## Model
 
@@ -25,6 +28,16 @@ resource graph plan; this document describes what is built.
   command is allowed when some allow rule matches and no deny rule does. `*` matches exactly one
   argument. Options before a subcommand (`gh -R other/repo pr create`) match no allow prefix
   unless one names them. Presets make a policy one word; `st sekrets presets` lists them.
+  `gh-agent` covers what agents use gh for (pull requests, issues, runs, workflows, releases,
+  search, labels, variables and `gh api`) and never `gh auth token`, `auth status -t`, `secret`,
+  `alias`, `extension` or `config`.
+- **Passed files.** A deny rule can name file options, which read the file their value names
+  (`--body-file`, `--input`), and field options, which read one after `@` (`-F key=@file`).
+  Those are allowed only with the caller's standard input (`-`) or a file the caller passed. For
+  gh, `st sekrets` opens each such file itself, as the caller, passes it as a descriptor and
+  rewrites the argument to `/dev/fd/N`, so `gh pr edit 7 --body-file /tmp/notes.md` works as
+  written while no argument can make the command read a file of the sekrets user's, such as the
+  profile's own login.
 - **Grant.** The owner gives an agent, a pattern of agents (`agent/web/**`) or another
   person the use of a profile, with a policy and an optional expiry. A call through a grant must
   pass both the profile's policy and the grant's, so a grant can only narrow. A grant to an agent
@@ -37,6 +50,10 @@ resource graph plan; this document describes what is built.
   `sekret.refused`, `sekret.changed`). Entries and claims carry who called, which profile, the
   arguments and the exit status. They never carry a credential or a command's output. Arguments
   are recorded, so pass a secret with `st sekrets put`, never as an argument.
+- **Retention.** Nothing is kept forever. The claims are local observations of the gateway's
+  host: they age out with the local observation log (`observations.retention`, seven days by
+  default) and, when `[observations.otlp]` is set, go to OpenTelemetry for longer history. The
+  gateway keeps its own log for seven days, long enough to bridge a daemon that was offline.
 
 ## Who is calling
 
@@ -60,15 +77,72 @@ A process that is neither is refused as unidentified. A person's own terminal in
 terminal, or a terminal st started) is in the service manager, so the person calls from a login
 session.
 
+`st sekrets` finds the daemon as other st commands do: `--endpoint`, then `ST3_ENDPOINT`, then the
+configured socket, and only over a Unix socket. `st sekrets enable` registers the key of the
+daemon found that way, so a person enables from a login environment whose `ST3_ENDPOINT`, if set,
+names their own daemon.
+
+### Tiles
+
+A [tile](tiles.md) is an agent with its own Unix user, and the kernel names it without any
+daemon's word. When the caller's Unix user is a tile's in root's tile registry
+(`tile_registry` in the gateway configuration, `/etc/st-tiles/tiles.toml` by default), the
+caller is that tile's agent, working for the tile's person, when its process runs in the tile's
+slice (`/st_tiles.slice/st_tiles-NAME.slice/`), which only root can place it in. Anywhere else,
+such as a login session or a user manager, the same Unix user is unidentified. An attestation
+from a tile changes nothing: no daemon speaks for a tile. A Unix user that is both a person in the
+gateway configuration and a tile in the registry is refused, because a tile is never a person.
+The registry is read for each connection, so a change applies to the next call, and grants work
+as for any agent (`st sekrets grant ada/agent-gh --to agent/web/atlas ...`). The tile's person
+comes from the registry, which does not make anyone a sekrets person: profiles and grants
+belong to people in the gateway configuration, so a tile whose person is not there has nothing
+to use. The caller is classified once, when it connects, from the process `SO_PEERCRED` names.
+If that process exits and its number is reused before the gateway reads its cgroup, the reused
+process must still run as the tile's Unix user in the tile's slice to be taken for the tile, and
+only the tile's own processes do; a reused number anywhere else is unidentified.
+
+When the registry names the gateway's socket (`sekrets_socket`), every tile reaches it at the
+client's default `/run/st-sekrets/gateway.sock`, and a tile is refused at launch when that socket
+is missing. A command a tile runs through sekrets runs in the gateway's sandbox in the profile's
+home: the gateway never binds a directory a tile passes, since a tile's checkout lives in its own
+mount namespace, and it tells the caller so. Qualifying git and gh from tiles is a later step.
+
 While seats run as their person's Unix user, the line between seats of the same person is only as
 strong as that user's files: a seat that reads its daemon's node key, or moves itself into another
 seat's cgroup, can pass for another seat of the same person. It can never pass for the person, for
 another person, or for another person's seat, and it can never read the store. Seats under their
-own Unix user (plan phase 8) close that. The same holds for a seat that logs in to its own host
+own Unix user, [tiles](tiles.md), close that. The same holds for a seat that logs in to its own host
 over ssh with a key it added to its person's `authorized_keys`: it then runs in a login session.
 Until seats run as another user, keep a person's own profile on a policy that leaves out the
 commands that print credentials (`no-credential-printing`), and remove credentials from the
-person's home (`st sekrets adopt`, the next step).
+person's home.
+
+## Authorized requests
+
+The st daemon, and st commands such as gates, call GitHub's API themselves. With a sekrets
+profile they do it without ever holding the token: each request goes to the gateway, which adds
+the profile's token and returns the response. It is one request and one response over the
+gateway socket, not a proxy.
+
+- The caller is `host/NODE`: the process signs a statement with the node key its person
+  registered (`st sekrets enable`), bound to its pid, cgroup and the gateway's nonce, as a seat's
+  daemon does for a seat. A person in a login session can also call with their own profiles.
+- The profile and the grant must allow `http METHOD github`; the `github-api` preset allows any
+  method. Grant it to the node: `st sekrets grant ada/daemon-gh --to host/alder --preset github-api`.
+- Only URLs under the gateway's `github_api` base (`https://api.github.com` unless root's
+  configuration says otherwise) are reachable. A request that carries its own `Authorization` or
+  `Cookie` header is refused; host and hop-by-hop headers are dropped; the gateway adds
+  `Authorization: Bearer TOKEN`.
+- Redirects are never followed: a 3xx comes back as it is. Every response header (ETag, Link,
+  rate limits) and the raw body come back; a 4xx or 5xx is a response, not an error. Nothing is
+  retried. Request bodies are limited to 16 MiB and response bodies to 64 MiB; each request has 60
+  seconds.
+- The token is a value put into the profile (`GH_TOKEN` or `GITHUB_TOKEN`), else the profile's gh
+  login, read once and kept until a 401 says it changed.
+- Each request is logged by method, path and status, never with the token or the body.
+
+In Rust: `fractal_daemon::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
+returns the response or `Unavailable` (no gateway or no node key), `Refused` or `Transport`.
 
 ## The sandbox
 
@@ -94,9 +168,11 @@ The gateway runs each command as the sekrets user inside bubblewrap:
   than the checkout. A `.git` that is a symbolic link, or a gitdir file or `commondir` naming a
   directory outside the passed checkout, is refused: git would follow it to a configuration the
   gateway never sanitized.
-- The checkout is read-only to the command, so `git push` through sekrets pushes the branch and
-  exits 0 but cannot record the remote-tracking ref or `-u` upstream in the checkout; run
-  `git fetch` and `git branch --set-upstream-to` as the caller afterwards.
+- The checkout is read-only to the command: it runs as the sekrets user, which owns none of the
+  caller's files. `git push` through sekrets pushes the branch and exits 0 but cannot record the
+  remote-tracking ref or `-u` upstream in the checkout; run `git fetch` and
+  `git branch --set-upstream-to` as the caller afterwards. Commands that write files into the
+  checkout (`gh pr checkout`, `gh repo clone`, `gh run download`) do not work through sekrets.
 - The command and every tool it runs come from the gateway's configured path. Each directory and
   file on the way must belong to root (or the sekrets user) and be writable by no one else, so no
   person or seat can change what runs as sekrets. A command is a name, never a path.
@@ -142,4 +218,5 @@ can run, list what it may use, read its person's log and lock; it changes nothin
   rules (`st rules`) restrict writes and have no grants to read from; when signed grants land,
   the gateway will take its grants from them.
 - `st sekrets adopt`, which moves existing logins out of the person's home, is the next step.
-- A model API proxy, macOS, and seats under their own Unix user are later phases.
+- A model API proxy and macOS are later phases. Seats run as tiles once a harness runs in a
+  tile (tiles design step 2).

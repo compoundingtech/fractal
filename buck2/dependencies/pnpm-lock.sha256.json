@@ -1,0 +1,31 @@
+{
+  "schema": "effect-utils/buck2-pnpm-sha256/v2",
+  "lockfileFingerprint": "sha256:58c81bd8e20e94f8774bf9211d742e395439c2d1d4cbe7f4044c7ac17e04b490",
+  "source": "pnpm-lock.yaml",
+  "generator": "buck2/dependencies/pnpm-lock.sha256.json.genie.ts",
+  "regenerate": "devenv tasks run genie:run",
+  "packages": {
+    "effect@4.0.0": {
+      "bins": {},
+      "classification": "public",
+      "integrity": "sha512-ooc1TG5t+FfzgYnFz2ff6BBKyZ7EwBRVXC7c4RhQUAD6/TZ2gTXXMeb4WX7a19ozQo4J73/QW+S00YAIresoMQ==",
+      "packageIdentity": "effect@4.0.0",
+      "registryUrl": "https://registry.npmjs.org/effect/-/effect-4.0.0.tgz",
+      "sha256": "eff6ca16140c491380cfdb4bcbc51be6a51f1ac2d402ebc8420e76ccf3e0e19a",
+      "sizeBytes": 8913724
+    },
+    "typescript@6.0.3": {
+      "bins": {
+        "tsc": "bin/tsc",
+        "tsserver": "bin/tsserver"
+      },
+      "classification": "public",
+      "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
+      "packageIdentity": "typescript@6.0.3",
+      "registryUrl": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+      "sha256": "33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a",
+      "sizeBytes": 4515854
+    }
+  },
+  "fingerprint": "sha256:1f739884fdbd77e49240f31faacc27efab3328582c33497ec811efa737aed18f"
+}

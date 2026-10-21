@@ -1,15 +1,15 @@
-import type { Agent, Attention, Mission, MissionStep, WorkState } from '../../clients/typescript/st3-client';
+import type { Agent, Attention, Mission, MissionStep, WorkState } from '../../clients/typescript/fractal-client';
 import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
 
-// The Missions tab, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list,
+// The Missions list, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs missions_list,
 // adapt.rs missions): one word per mission naming who has to move, in this order.
 export const WORDS = ['decision', 'stalled', 'unstaffed', 'unclaimed', 'queued', 'working', 'watching', 'held', 'idle', 'done', 'failed', 'cancelled'] as const;
 export type Word = typeof WORDS[number];
 
 export function wordName(word: Word): string {
-  return word === 'decision' ? 'needs you' : word;
+  return word === 'decision' ? 'alert' : word;
 }
 
 export function wordStyle(word: Word, spinner = '⠿'): { glyph: string; color: string } {
@@ -31,11 +31,6 @@ export function wordStyle(word: Word, spinner = '⠿'): { glyph: string; color: 
 
 export const MISSION_LEGEND: ReadonlyArray<Word> = ['decision', 'stalled', 'unstaffed', 'queued', 'watching', 'working', 'idle', 'done'];
 
-/** Whether an agentless step only holds its run open, by the names the fleet uses for them. */
-export function keepsOpen(path: string): boolean {
-  const name = path.split('/').pop() ?? path;
-  return ['keep-watch', 'retire', 'steward-intake', 'standing', 'keep-open'].includes(name) || name.endsWith('-retirement');
-}
 
 type QueueAgent = Pick<Agent, 'state' | 'fault' | 'next_work_id' | 'upcoming_work_ids'>;
 function queuedFor<A extends QueueAgent>(agents: A[], work: string): A | undefined {
@@ -60,7 +55,7 @@ export function missionWord(mission: Pick<Mission, 'id' | 'state' | 'run_details
   if (state === 'completed') return 'done';
   if (state === 'failed' || states.includes('failed')) return 'failed';
   if (state === 'cancelled') return 'cancelled';
-  if (work.length && work.every(step => step.state === 'completed' || (activeStep(stepState(step.state)) && step.agentless && keepsOpen(step.path))) && work.some(step => step.state !== 'completed')) return 'watching';
+  if (work.length && work.every(step => step.state === 'completed' || (activeStep(stepState(step.state)) && step.agentless && step.keep_open)) && work.some(step => step.state !== 'completed')) return 'watching';
   if (states.some(activeStep)) return 'working';
   const ready = work.find(step => step.state === 'ready' && !step.claimant);
   if (ready) {
@@ -84,10 +79,6 @@ export function missionTitle(mission: Pick<Mission, 'id' | 'title'>): string {
   return `${scope} · ${name}`;
 }
 
-/** st's own loop rounds and CI plumbing, folded away until the person asks. */
-export function isSystemMission(id: string): boolean {
-  return id.startsWith('mission/__st3/') || id.split('/').includes('ci');
-}
 
 export type MissionRow = { mission: Mission; word: Word; title: string; path: string; age: string; done: number; total: number; system: boolean; progress?: string };
 export function missionRows(missions: Mission[], attention: Attention[], agents: Agent[], showSystem: boolean, now = Date.now()): { rows: MissionRow[]; hidden: number } {
@@ -101,7 +92,7 @@ export function missionRows(missions: Mission[], attention: Attention[], agents:
       age: ago(mission.updated_at, now),
       done: steps.filter(step => step.state === 'completed').length,
       total: steps.length,
-      system: isSystemMission(mission.id),
+      system: mission.system === true,
       // What a step in hand last reported: the status of a run in progress.
       progress: steps.filter(step => ['claimed', 'working', 'running'].includes(step.state)).map(step => step.last_progress?.split(/\s+/).filter(Boolean).join(' ')).find(Boolean),
     };
@@ -151,4 +142,13 @@ export function stepStyle(state: string, spinner = '⠿'): StepStyle {
   const style = stepStyles[stepState(state) as WorkState];
   if (!style) return { glyph: '▱', color: theme.surface2, word: 'later', rank: 5 };
   return activeStep(stepState(state)) ? { ...style, glyph: spinner } : style;
+}
+
+/** Match every search word against a mission's title, path, status and progress. */
+export function filterMissionRows(rows: MissionRow[], filter: string): MissionRow[] {
+  const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+  return words.length ? rows.filter(row => {
+    const text = `${row.title} ${row.path} ${wordName(row.word)} ${row.progress ?? ''}`.toLowerCase();
+    return words.every(word => text.includes(word));
+  }) : rows;
 }

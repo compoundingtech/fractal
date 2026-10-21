@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require a disjoint, complete union of the two real nextest selections."""
+"""Require a disjoint, complete union of every real nextest shard selection."""
 import json
 import os
 from pathlib import Path
@@ -22,29 +22,37 @@ def selected(output):
     return tests
 
 
-def verify(full, first, second):
-    if not full or not first or not second:
-        raise ValueError("full inventory and both shards must be nonempty")
-    if first & second:
-        raise ValueError(f"shards overlap: {sorted(first & second)}")
-    if first | second != full:
-        raise ValueError(f"incomplete shards: missing={sorted(full - (first | second))}; extra={sorted((first | second) - full)}")
+def verify(full, *shards):
+    if not full or len(shards) not in (2, 4) or not all(shards):
+        raise ValueError("full inventory and every shard must be nonempty; count must be two or four")
+    union = set()
+    for shard in shards:
+        if union & shard:
+            raise ValueError(f"shards overlap: {sorted(union & shard)}")
+        union |= shard
+    if union != full:
+        raise ValueError(f"incomplete shards: missing={sorted(full - union)}; extra={sorted(union - full)}")
 
 
 def main():
+    partition = os.environ.get("CI_TEST_PARTITION", "hash:1/2")
+    if partition not in ("hash:1/2", "hash:1/4"):
+        raise ValueError("inventory proof must run on the first of two or four shards")
+    count = int(partition.rsplit("/", 1)[1])
+    partitions = [""] + [f"hash:{i}/{count}" for i in range(1, count+1)]
     inventories = []
-    for partition in ("", "hash:1/2", "hash:2/2"):
+    for partition in partitions:
         output = subprocess.check_output(
             ["bash", "scripts/ci-nextest", "list", "--message-format", "json"],
             env={**os.environ, "CI_TEST_PARTITION": partition}, text=True)
         inventories.append(selected(output))
     verify(*inventories)
     proof = {"revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-             "full": sorted(inventories[0]), "hash:1/2": sorted(inventories[1]), "hash:2/2": sorted(inventories[2])}
+             "full": sorted(inventories[0]), **{key:sorted(tests) for key,tests in zip(partitions[1:],inventories[1:])}}
     logs = Path(os.environ["RUNNER_TEMP"]) / "ci-logs"
     logs.mkdir(parents=True, exist_ok=True)
     (logs / "test-partitions.json").write_text(json.dumps(proof, indent=2) + "\n")
-    message = f"Shard inventory verified: {len(inventories[0])} selected tests = {len(inventories[1])} + {len(inventories[2])}; no overlap or omissions."
+    message = f"Shard inventory verified: {len(inventories[0])} selected tests = {' + '.join(str(len(s)) for s in inventories[1:])}; no overlap or omissions."
     print(message, flush=True)
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
         stream.write(message + "\n")

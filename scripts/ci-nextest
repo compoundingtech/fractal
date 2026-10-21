@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Select Cargo targets before building; nextest's ci filter only selects tests after the build.
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+# Compile the workspace and preserve the selected test binaries with nextest filters.
 set -euo pipefail
 action=${1:?usage: scripts/ci-nextest run|list [nextest options]}
 shift
@@ -10,7 +11,7 @@ esac
 
 partition=()
 if [[ -n "${CI_TEST_PARTITION:-}" ]]; then
-  [[ "$CI_TEST_PARTITION" =~ ^hash:[12]/2$ ]] || { echo 'invalid CI_TEST_PARTITION' >&2; exit 2; }
+  [[ "$CI_TEST_PARTITION" =~ ^hash:([12]/2|[1234]/4)$ ]] || { echo 'invalid CI_TEST_PARTITION' >&2; exit 2; }
   if [[ " $* " != *" --no-run "* ]]; then partition=(--partition "$CI_TEST_PARTITION"); fi
 fi
 
@@ -23,14 +24,73 @@ if [[ "$action" == run && " $* " != *" --no-run "* && "${GITHUB_ACTIONS:-}" == t
   fi
 fi
 
-# Use the same selections for --no-run and execution, on Linux and macOS. Keep both groups
-# running after a test failure, as the ci profile does with fail-fast = false.
-status=0
-cargo nextest "$action" --workspace --exclude st2 --locked --profile ci "${partition[@]}" "$@" || status=$?
-# These are the st2 targets with selected tests. Its lib/bin unit tests, event_e2e and
-# resource_profile_supervisor_e2e are entirely excluded by the ci profile. The integration
-# target is only partly filtered, so it (and its required st2 executable) must still build.
-# When adding a st2 test target, update this list alongside .config/nextest.toml.
-cargo nextest "$action" -p st2 --test integration --test agent_resource --test driver_expansion \
-  --locked --profile ci "${partition[@]}" "$@" || status=$?
-exit "$status"
+launch=(exec)
+# Local runs on Linux keep the tests' temporary files in tmpfs. Their SQLite stores sync every WAL commit to
+# disk, and that wait, not CPU, is most of the wall time of the file-store tests (the st3 library set: 251 s
+# on /dev/shm against 407 s on disk with the same CPU, scratch peak about 0.5 GiB either way; four convergence
+# seeds: 48 s against 160 s). CI never takes this branch, so the hosted runs keep real disks and every test that
+# syncs to one. It applies only when TMPDIR is unset or one of the two ordinary directories, and when /dev/shm
+# has 4 GiB free (a check at start, not a reservation: concurrent local runs share that RAM); ST_NEXTEST_TMPDIR=disk turns it off, and a TMPDIR you set yourself is kept.
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if [[ "$action" == run && -z "${GITHUB_ACTIONS:-}" && "$(uname -s)" == Linux && "${FRACTAL_NEXTEST_TMPDIR-${ST_NEXTEST_TMPDIR:-}}" != disk ]]; then
+  case "${TMPDIR:-}" in
+    ''|/tmp|/tmp/|/var/tmp|/var/tmp/)
+      if [[ -d /dev/shm && -w /dev/shm ]] && [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ]]; then
+        # One directory per run, removed when the run ends. A run killed with SIGKILL leaves it behind in RAM:
+        # sweep with `find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`.
+        nextest_scratch=$(mktemp -d /dev/shm/st-nextest.XXXXXX) && {
+          export TMPDIR=$nextest_scratch
+          trap 'rm -rf "$nextest_scratch"' EXIT
+          trap 'exit 143' TERM INT HUP
+          launch=()
+          echo "ci-nextest: test temporary files in $nextest_scratch (ST_NEXTEST_TMPDIR=disk to use the disk)" >&2
+        }
+      fi ;;
+  esac
+fi
+
+# Keep the former workspace and three legacy integration targets in one invocation.
+# Intersect caller filtersets with this binary selection, including when callers ignore
+# the profile's default test filter. Multiple caller filtersets retain nextest's union.
+if [[ -n "${CI_TEST_EXTRACTED:-}" ]]; then
+  target="$CI_TEST_EXTRACTED/workspace/target"
+  selection=$(python3 scripts/ci-nextest-targets --metadata "$target/nextest/cargo-metadata.json")
+else
+  selection=$(python3 scripts/ci-nextest-targets)
+fi
+# Groups that left the pull-request shards for the daily run. Only the daily shards
+# (CI_TEST_LANE=daily) select them; everything else, local runs included, leaves them out.
+daily_only=$(awk 'NF && !/^[[:space:]]*#/ { printf "%s(%s)", (n++ ? " or " : ""), $0 }' \
+  "$(dirname "$0")/../.config/daily-only.filterset")
+if [[ "${CI_TEST_LANE:-}" != daily && -n "$daily_only" ]]; then
+  selection="($selection) and not ($daily_only)"
+fi
+arguments=()
+filters=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -E|--filterset|--filter-expr)
+      [[ $# -ge 2 && -n "$2" ]] || { echo 'missing nextest filterset' >&2; exit 2; }
+      filters+=("$2"); shift 2 ;;
+    --filterset=*|--filter-expr=*) filters+=("${1#*=}"); shift ;;
+    -E?*) filters+=("${1#-E}"); shift ;;
+    *) arguments+=("$1"); shift ;;
+  esac
+done
+if [[ ${#filters[@]} -gt 0 ]]; then
+  requested=""
+  for filter in "${filters[@]}"; do
+    if [[ -n "$requested" ]]; then requested+=" or "; fi
+    requested+="($filter)"
+  done
+  selection="($selection) and ($requested)"
+fi
+if [[ -n "${CI_TEST_EXTRACTED:-}" ]]; then
+  [[ " ${arguments[*]} " != *" --no-run "* ]] || { echo 'archive consumers must not rebuild' >&2; exit 2; }
+  target="$CI_TEST_EXTRACTED/workspace/target"
+  "${launch[@]}" cargo nextest "$action" --binaries-metadata "$target/nextest/binaries-metadata.json" \
+    --cargo-metadata "$target/nextest/cargo-metadata.json" --target-dir-remap "$target" \
+    --workspace-remap "$CI_TEST_WORKSPACE" --profile ci -E "$selection" "${partition[@]}" "${arguments[@]}"
+else
+  "${launch[@]}" cargo nextest "$action" --workspace --locked --profile ci -E "$selection" "${partition[@]}" "${arguments[@]}"
+fi

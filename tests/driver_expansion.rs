@@ -1,14 +1,18 @@
+#[macro_use]
+#[path = "../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use st2::driver::{
+use fractal_legacy_runner::driver::{
     CHANNEL_DEV_CONSENT_REQUIRED, CHANNEL_NO_INBOX_TRANSPORT, CHANNEL_NOT_REGISTERED,
     CHANNEL_ROUTE_UNKNOWN, claude_channel_advisories,
 };
-use st2::materialize::materialize_agent;
-use st2::reconcile::{TaskCompileContext, compile_generated_tasks};
-use st2::{discover, driver::expand_driver};
+use fractal_legacy_runner::materialize::materialize_agent;
+use fractal_legacy_runner::reconcile::{TaskCompileContext, compile_generated_tasks};
+use fractal_legacy_runner::{discover, driver::expand_driver};
 
 fn assert_snapshot(input: &str, expected: &str) {
     let temp = tempfile::tempdir().unwrap();
@@ -98,7 +102,7 @@ fn pi_deliver_wraps_the_authored_launch_without_rendering_anything() {
         ),
     )
     .unwrap();
-    let (specs, _) = st2::discover_file(&catalog, &path).unwrap();
+    let (specs, _) = fractal_legacy_runner::discover_file(&catalog, &path).unwrap();
     let mut spec = specs.into_iter().next().unwrap();
     let executable = catalog.join("bin/st2");
     fs::create_dir_all(executable.parent().unwrap()).unwrap();
@@ -151,7 +155,7 @@ fn opaque_session_driver_materializes_without_rewriting_or_adding_launch_tasks()
 }"#,
     )
     .unwrap();
-    let (specs, errors) = st2::discover_file(&catalog, &path).unwrap();
+    let (specs, errors) = fractal_legacy_runner::discover_file(&catalog, &path).unwrap();
     assert!(errors.is_empty(), "{errors:?}");
     let mut spec = specs.into_iter().next().unwrap();
     let original_task = spec.tasks[0].clone();
@@ -168,11 +172,11 @@ fn opaque_session_driver_materializes_without_rewriting_or_adding_launch_tasks()
 
 #[test]
 fn cli_prints_each_snapshot_without_changing_its_input() {
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/driver");
+    let fixtures = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/driver");
     for provider in ["claude", "codex", "pi", "omp"] {
         let input = fixtures.join(format!("{provider}.in.kdl"));
         let before = fs::read(&input).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args(["--catalog"])
             .arg(&fixtures)
             .args(["driver", "expand"])
@@ -229,9 +233,9 @@ fn claude_driver_uses_the_packaged_channel_without_project_mcp_state() {
         ),
     )
     .unwrap();
-    let (driver, _) = st2::discover_file(&catalog, &driver_path).unwrap();
+    let (driver, _) = fractal_legacy_runner::discover_file(&catalog, &driver_path).unwrap();
     let mut driver = driver.into_iter().next().unwrap();
-    assert!(!st2::hooks::required_by_codex_agent(&driver, "h", &catalog));
+    assert!(!fractal_legacy_runner::hooks::required_by_codex_agent(&driver, "h", &catalog));
     let executable = catalog.join("bin/st2");
     fs::create_dir_all(executable.parent().unwrap()).unwrap();
     fs::write(&executable, "test binary").unwrap();
@@ -270,7 +274,7 @@ fn claude_driver_uses_the_packaged_channel_without_project_mcp_state() {
     // The driver still registers lifecycle hooks. The channel plugin is machine state, not a file
     // in the product workspace.
     let hooks = tempfile::tempdir().unwrap().keep();
-    st2::hooks::install_at(&hooks, false).unwrap();
+    fractal_legacy_runner::hooks::install_at(&hooks, false).unwrap();
     unsafe { std::env::set_var("ST_HOOKS", &hooks) };
     materialize_agent(&catalog, &driver, "h").unwrap();
     assert!(!driver_workspace.join(".mcp.json").exists());
@@ -283,7 +287,7 @@ fn claude_driver_uses_the_packaged_channel_without_project_mcp_state() {
 
 #[test]
 fn claude_mcp_is_canonical_and_claude_is_a_hidden_alias() {
-    let help = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let help = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["driver", "--help"])
         .output()
         .unwrap();
@@ -300,7 +304,7 @@ fn claude_mcp_is_canonical_and_claude_is_a_hidden_alias() {
     );
 
     for command in ["claude-mcp", "claude"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args(["driver", command, "--help"])
             .output()
             .unwrap();
@@ -312,7 +316,7 @@ fn claude_mcp_is_canonical_and_claude_is_a_hidden_alias() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let old = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let old = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("--catalog")
         .arg(temp.path())
         .args(["driver", "claude", "--identity", "missing"])
@@ -321,7 +325,7 @@ fn claude_mcp_is_canonical_and_claude_is_a_hidden_alias() {
     let old_error = String::from_utf8(old.stderr).unwrap();
     assert!(old_error.contains("`st2 driver claude` is deprecated"));
 
-    let current = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let current = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("--catalog")
         .arg(temp.path())
         .args(["driver", "claude-mcp", "--identity", "missing"])
@@ -330,7 +334,7 @@ fn claude_mcp_is_canonical_and_claude_is_a_hidden_alias() {
     let current_error = String::from_utf8(current.stderr).unwrap();
     assert!(!current_error.contains("deprecated"));
 
-    let implicit = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let implicit = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .env("ST_AGENT", "missing")
         .arg("--catalog")
         .arg(temp.path())
@@ -357,7 +361,7 @@ fn legacy_claude_shell_launch_keeps_its_source_under_the_session_wrapper() {
 "#,
     )
     .unwrap();
-    let (mut specs, _) = st2::discover_file(&catalog, &path).unwrap();
+    let (mut specs, _) = fractal_legacy_runner::discover_file(&catalog, &path).unwrap();
     let executable = catalog.join("bin/st2");
     fs::create_dir_all(executable.parent().unwrap()).unwrap();
     fs::write(&executable, "test binary").unwrap();
@@ -403,7 +407,7 @@ fn ambiguous_driver_source_neither_compiles_nor_materializes() {
         ),
     )
     .unwrap();
-    let (specs, _) = st2::discover_file(&catalog, &path).unwrap();
+    let (specs, _) = fractal_legacy_runner::discover_file(&catalog, &path).unwrap();
     let mut spec = specs.into_iter().next().unwrap();
     let before = spec.clone();
     let executable = catalog.join("bin/st2");
@@ -428,11 +432,11 @@ fn ambiguous_driver_source_neither_compiles_nor_materializes() {
     assert!(!workspace.join(".mcp.json").exists());
 }
 
-fn spec_from(catalog: &Path, body: &str) -> st2::spec::AgentSpec {
+fn spec_from(catalog: &Path, body: &str) -> fractal_legacy_runner::spec::AgentSpec {
     let path = catalog.join("agent.kdl");
     fs::create_dir_all(catalog).unwrap();
     fs::write(&path, body).unwrap();
-    let (specs, errors) = st2::discover_file(catalog, &path).unwrap();
+    let (specs, errors) = fractal_legacy_runner::discover_file(catalog, &path).unwrap();
     assert!(errors.is_empty(), "{errors:?}");
     specs.into_iter().next().unwrap()
 }

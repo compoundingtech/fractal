@@ -10,9 +10,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use st2::agents::roster;
-use st2::message::send_to_inbox;
-use st2::status::{State, set_state, status_path};
+use fractal_legacy_runner::agents::roster;
+use fractal_legacy_runner::message::send_to_inbox;
+use fractal_legacy_runner::status::{State, set_state, status_path};
 
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -102,7 +102,7 @@ fn roster_projects_presence_name_and_enrich_across_the_catalog() {
     )
     .unwrap();
     send_to_inbox(
-        &st2::message::inbox_dir(&root.join("example-linux/st2-claude")),
+        &fractal_legacy_runner::message::inbox_dir(&root.join("example-linux/st2-claude")),
         "example-linux.cos-claude",
         None,
         None,
@@ -111,7 +111,7 @@ fn roster_projects_presence_name_and_enrich_across_the_catalog() {
     )
     .unwrap();
     let restored = send_to_inbox(
-        &st2::message::inbox_dir(&root.join("example-linux/st2-claude")),
+        &fractal_legacy_runner::message::inbox_dir(&root.join("example-linux/st2-claude")),
         "example-linux.cos-claude",
         Some("already handled"),
         None,
@@ -119,10 +119,10 @@ fn roster_projects_presence_name_and_enrich_across_the_catalog() {
         "must not count twice",
     )
     .unwrap();
-    let archive = st2::message::archive_dir(&root.join("example-linux/st2-claude"));
+    let archive = fractal_legacy_runner::message::archive_dir(&root.join("example-linux/st2-claude"));
     fs::create_dir_all(&archive).unwrap();
     fs::copy(
-        st2::message::inbox_dir(&root.join("example-linux/st2-claude")).join(&restored),
+        fractal_legacy_runner::message::inbox_dir(&root.join("example-linux/st2-claude")).join(&restored),
         archive.join(&restored),
     )
     .unwrap();
@@ -200,7 +200,7 @@ fn roster_json_and_human_output_distinguish_retirement_from_presence() {
         "retirement is declaration state, not a replacement presence value"
     );
 
-    let json = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let json = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--json", "--enrich"])
@@ -227,7 +227,7 @@ fn roster_json_and_human_output_distinguish_retirement_from_presence() {
     assert_eq!(rows[1]["status"], "busy");
     assert_eq!(rows[1]["retired"], true);
 
-    let selected = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let selected = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--identity", "h.live", "--json"])
@@ -242,7 +242,7 @@ fn roster_json_and_human_output_distinguish_retirement_from_presence() {
     assert_eq!(selected.as_array().unwrap().len(), 1);
     assert_eq!(selected[0]["identity"], "h.live");
 
-    let absent = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let absent = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--identity", "h.missing", "--json"])
@@ -254,7 +254,7 @@ fn roster_json_and_human_output_distinguish_retirement_from_presence() {
             .contains("expected exactly one Agent Spec with identity `h.missing`, found 0")
     );
 
-    let filtered_out = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let filtered_out = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args([
@@ -274,7 +274,7 @@ fn roster_json_and_human_output_distinguish_retirement_from_presence() {
             .contains("Agent Spec `h.live` does not match status `busy`")
     );
 
-    let human = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let human = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h"])
@@ -315,7 +315,7 @@ fn roster_json_appends_agent_id_address_and_nullable_bus_address() {
         &retired_agent_kdl("retired", "h"),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--json"])
@@ -402,7 +402,7 @@ fn exact_identity_rejects_duplicates_before_status_filtering() {
     )
     .unwrap();
 
-    let selected = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let selected = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args([
@@ -430,7 +430,7 @@ fn exact_identity_rejects_incomplete_catalog_discovery() {
     write(root, "valid/worker.kdl", &agent_kdl("worker", "h"));
     write(root, "h/worker/agent.kdl", "this is malformed KDL {");
 
-    let selected = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let selected = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--identity", "h.worker", "--json"])
@@ -443,7 +443,7 @@ fn exact_identity_rejects_incomplete_catalog_discovery() {
     );
     assert!(stderr.contains("h/worker/agent.kdl"));
 
-    let ordinary = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let ordinary = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--json"])
@@ -470,7 +470,7 @@ fn exact_identity_rejects_incomplete_catalog_traversal() {
         return;
     }
 
-    let selected = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let selected = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--identity", "h.worker", "--json"])
@@ -508,7 +508,7 @@ agent "two" {
 "#,
     );
 
-    let selected = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let selected = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("agents")
         .arg(root)
         .args(["--host", "h", "--identity", "h.two", "--json"])
@@ -538,8 +538,8 @@ fn roster_derives_unknown_from_a_stale_version_1_heartbeat() {
     assert_eq!(roster(root, "example-linux")[0].status, State::Available);
 
     // Backdate the embedded heartbeat past the stale window → unknown.
-    let stale_ms = st2::message::now_ms()
-        - u64::try_from((st2::status::STATUS_STALE + Duration::from_secs(60)).as_millis()).unwrap();
+    let stale_ms = fractal_legacy_runner::message::now_ms()
+        - u64::try_from((fractal_legacy_runner::status::STATUS_STALE + Duration::from_secs(60)).as_millis()).unwrap();
     fs::write(&sp, format!("available\nv1 {stale_ms}\n")).unwrap();
     assert_eq!(roster(root, "example-linux")[0].status, State::Unknown);
 }
@@ -549,14 +549,14 @@ fn roster_derives_unknown_from_a_stale_version_1_heartbeat() {
 /// beside it derives `unknown` — the wedge case the record exists for.
 #[test]
 fn roster_joins_a_real_context_record_independently_of_observed_state() {
-    use st2::harness_context::{Compaction, CompactionTrigger, Harness, Reading, Writer};
+    use fractal_legacy_runner::harness_context::{Compaction, CompactionTrigger, Harness, Reading, Writer};
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     // A harness-context write stages under the catalog control plane and validates canonical
     // `<catalog>/agents/<host>/<identity>` ancestry ("Replicated-path discipline"), so this
     // fixture must be a real catalog rather than a bare host/identity pair.
-    fs::create_dir_all(root.join(st2::catalog_lock::CONTROL_DIR)).unwrap();
+    fs::create_dir_all(root.join(fractal_legacy_runner::catalog_lock::CONTROL_DIR)).unwrap();
     write(
         root,
         "agents/example-linux/filling/agent.kdl",
@@ -576,7 +576,7 @@ fn roster_joins_a_real_context_record_independently_of_observed_state() {
             used_percent: Some(92.0),
             model: Some("claude-opus-5".to_string()),
             cost_usd: Some(3.5),
-            rate_limits: st2::harness_context::RateLimits {
+            rate_limits: fractal_legacy_runner::harness_context::RateLimits {
                 five_hour: Some(100.0),
                 seven_day: Some(55.0),
                 ..Default::default()
@@ -597,7 +597,7 @@ fn roster_joins_a_real_context_record_independently_of_observed_state() {
     assert!(!context.stale);
 
     for form in [vec!["--json"], vec!["--json", "--enrich"]] {
-        let out = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let out = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .arg("agents")
             .arg(root)
             .args(["--host", "example-linux"])
@@ -623,7 +623,7 @@ fn roster_joins_a_real_context_record_independently_of_observed_state() {
     }
 
     let human = |root: &Path| {
-        let out = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let out = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .arg("agents")
             .arg(root)
             .args(["--host", "example-linux"])
@@ -658,7 +658,7 @@ fn roster_joins_a_real_context_record_independently_of_observed_state() {
     );
 
     // …and no record at all still reads `-`.
-    fs::remove_file(st2::harness_context::harness_context_path(&agent_dir)).unwrap();
+    fs::remove_file(fractal_legacy_runner::harness_context::harness_context_path(&agent_dir)).unwrap();
     assert_eq!(human(root), "example-linux.filling\tbusy\tobs:-\tctx:-\t\t\n");
 }
 
@@ -668,7 +668,7 @@ fn roster_uses_version_1_origin_time_for_last_activity() {
     let root = tmp.path();
     write(root, "example-linux/idle/agent.kdl", &agent_kdl("idle", "example-linux"));
     let sp = status_path(&root.join("example-linux/idle"));
-    let heartbeat_ms = st2::message::now_ms() - 1_000;
+    let heartbeat_ms = fractal_legacy_runner::message::now_ms() - 1_000;
     fs::write(&sp, format!("available\nv1 {heartbeat_ms}\n")).unwrap();
 
     let row = &roster(root, "example-linux")[0];
@@ -681,9 +681,9 @@ fn status_cli_writes_and_reads_the_version_1_record() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     write(root, "h/worker/agent.kdl", &agent_kdl("worker", "h"));
-    let before = st2::message::now_ms();
+    let before = fractal_legacy_runner::message::now_ms();
 
-    let set = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let set = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["status", "h.worker", "--set", "busy", "--root"])
         .arg(root)
         .args(["--host", "h"])
@@ -696,7 +696,7 @@ fn status_cli_writes_and_reads_the_version_1_record() {
     );
     assert_eq!(String::from_utf8(set.stdout).unwrap(), "status: busy\n");
 
-    let after = st2::message::now_ms();
+    let after = fractal_legacy_runner::message::now_ms();
     let raw = fs::read_to_string(status_path(&root.join("h/worker"))).unwrap();
     let lines: Vec<&str> = raw.lines().collect();
     assert_eq!(lines.len(), 2);
@@ -709,7 +709,7 @@ fn status_cli_writes_and_reads_the_version_1_record() {
     assert!((before..=after).contains(&timestamp));
     assert!(raw.ends_with('\n'));
 
-    let get = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let get = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["status", "h.worker", "--root"])
         .arg(root)
         .args(["--host", "h"])

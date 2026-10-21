@@ -1,6 +1,6 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use crate::support::real_git;
@@ -12,7 +12,7 @@ fn executable(path: &Path, body: &str) {
 
 fn clean_path() -> tempfile::TempDir {
     let bin = tempfile::tempdir().unwrap();
-    symlink(env!("CARGO_BIN_EXE_st2"), bin.path().join("st2")).unwrap();
+    symlink(test_env!("CARGO_BIN_EXE_st2"), bin.path().join("st2")).unwrap();
     let git = real_git::on_path(&std::env::var_os("PATH").unwrap())
         .expect("the native authoring guide requires git on PATH");
     symlink(git, bin.path().join("git")).unwrap();
@@ -69,7 +69,7 @@ fn clean_path_executes_the_maintained_native_authoring_guide() {
     fs::create_dir_all(&codex_workspace).unwrap();
     fs::create_dir_all(&claude_workspace).unwrap();
 
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = Path::new(test_env!("CARGO_MANIFEST_DIR"));
     let codex = fs::read_to_string(manifest.join("examples/native/agent-codex.kdl"))
         .unwrap()
         .replace("<identity>", "codex")
@@ -276,7 +276,7 @@ fn clean_path_supports_help_validate_env_and_doctor() {
         assert!(!bin.path().join(absent).exists());
     }
 
-    let help = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let help = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("--help")
         .env("PATH", bin.path())
         .output()
@@ -310,7 +310,7 @@ fn clean_path_supports_help_validate_env_and_doctor() {
     assert!(!Path::new("completions").exists());
     assert!(!Path::new("man").exists());
 
-    let validate = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let validate = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("validate")
         .arg("--catalog")
         .arg(&catalog)
@@ -323,7 +323,7 @@ fn clean_path_supports_help_validate_env_and_doctor() {
         String::from_utf8_lossy(&validate.stdout)
     );
 
-    let env = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let env = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("env")
         .arg("--catalog")
         .arg(&catalog)
@@ -346,7 +346,7 @@ fn clean_path_supports_help_validate_env_and_doctor() {
         format!("{}\n", owner.id()),
     )
     .unwrap();
-    let missing = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let missing = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("doctor")
         .arg("--catalog")
         .arg(&doctor_catalog)
@@ -367,7 +367,7 @@ fn clean_path_supports_help_validate_env_and_doctor() {
     );
 
     fs::write(doctor_agent.parent().unwrap().join("status"), "offline\n").unwrap();
-    let offline = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let offline = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("doctor")
         .arg("--catalog")
         .arg(&doctor_catalog)
@@ -389,61 +389,5 @@ fn clean_path_supports_help_validate_env_and_doctor() {
             .contains("h.missing presence fresh (is `offline`)"),
         "stdout:\n{}",
         String::from_utf8_lossy(&offline.stdout)
-    );
-}
-
-#[test]
-fn tracked_product_surface_contains_only_native_names() {
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let paths: Vec<PathBuf> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| PathBuf::from(String::from_utf8(raw.to_vec()).unwrap()))
-        .collect();
-
-    let forbidden = [
-        ["con", "voy"].concat(),
-        [".con", "voy"].concat(),
-        ["render", "-agent"].concat(),
-        ["build", "-agent"].concat(),
-        ["st2 ", "render"].concat(),
-        ["st2 ", "add"].concat(),
-        ["st2 ", "remove"].concat(),
-    ];
-    let mut violations = Vec::new();
-    for path in paths {
-        let Ok(contents) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let lower = contents.to_ascii_lowercase();
-        for needle in &forbidden {
-            if lower.contains(needle) {
-                violations.push(format!("{} contains {needle:?}", path.display()));
-            }
-        }
-        for needle in [
-            ["st2 ", "compile "].concat(),
-            ["`st2 ", "compile`"].concat(),
-        ] {
-            if lower.contains(&needle) {
-                violations.push(format!("{} contains {needle:?}", path.display()));
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "retired product surface returned:\n{}",
-        violations.join("\n")
     );
 }

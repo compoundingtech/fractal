@@ -116,7 +116,7 @@ fn ledger_at(root: &Path, path: &str) -> Option<serde_json::Value> {
 fn up_once(root: &Path, bin: &Path) -> Output {
     let home = root.parent().unwrap().join("home");
     fs::create_dir_all(&home).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["up", "--catalog", root.to_str().unwrap()])
         .args(["--host", "h", "--once"])
         .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()))
@@ -667,8 +667,8 @@ fn a_contended_authoring_lock_skips_the_pass_instead_of_blocking_it() {
     seat(&catalog, "gone", RETIRED);
     seed_ledger(&catalog, &[("gone", 8 * DAY_MS)]);
 
-    let held = st2::CatalogLock::exclusive(&catalog).unwrap();
-    let request = st2::catalog_archive::AutoArchiveRequest {
+    let held = fractal_legacy_runner::CatalogLock::exclusive(&catalog).unwrap();
+    let request = fractal_legacy_runner::catalog_archive::AutoArchiveRequest {
         catalog: catalog.clone(),
         host: "h".to_owned(),
         grace: Duration::from_secs(7 * 24 * 60 * 60),
@@ -677,7 +677,7 @@ fn a_contended_authoring_lock_skips_the_pass_instead_of_blocking_it() {
     // Off-thread with a deadline: a blocking acquisition would hang the test rather than fail it.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(st2::catalog_archive::auto_archive(request));
+        let _ = tx.send(fractal_legacy_runner::catalog_archive::auto_archive(request));
     });
     let outcome = rx
         .recv_timeout(Duration::from_secs(30))
@@ -703,7 +703,7 @@ fn direct_actor(root: &Path, identity: &str) {
 
 fn st2(root: &Path, bin: &Path, args: &[&str]) -> Output {
     let home = root.parent().unwrap().join("home");
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["--catalog", root.to_str().unwrap()])
         .args(args)
         .env("PATH", bin)

@@ -5,6 +5,34 @@ new one such as a new Nix store path. The daemon adopts every running seat; it d
 This document explains how each seat's message path follows the new binary without ending the
 provider session, and how st reports a seat whose message path did not.
 
+## Self-restarts at a turn boundary
+
+`st agents restart agent/example/worker --as agent/example/worker` returns
+`Restart pending` immediately when that seat's fresh harness report shows a turn in flight.
+The daemon preserves the request across its own restarts and waits for a fresh report from the
+same incarnation saying both idle and quiescent. It then uses the ordinary restart path, keeping
+the declaration, restart budget, receipts and native-session continuation behavior.
+The request is superseded by a later explicit restart, a stop, a replacement declaration or a new
+incarnation. Slice 1 exposes the pending result in the CLI response; show, roster and cancellation
+surfaces are deferred to a later change.
+
+Another actor's restart remains immediate. `--now` also requests an immediate restart, including
+from the seat itself. A dead runtime, stale report, missing report or report from another
+incarnation does not qualify a new request for deferral. Once accepted as pending, a request
+never forces a restart: if no fresh idle and quiescent boundary arrives within 30 minutes, the
+daemon raises one attention item for that request. It stays pending even if the harness stops
+reporting. The attention item clears when the request reaches the boundary or is superseded.
+
+The pending request uses the existing `runtime.action.requested` vocabulary with the string
+`action="restart-when-idle"`, its declaration evidence and old incarnation. No registry, SQL
+schema, checkpoint rule or client-v0 field changes. An older reconciler only selects
+`action="restart"`, so it leaves this pending request alone indefinitely: it neither restarts
+the seat nor raises the 30-minute attention item. Only an upgraded reconciler supplies those
+behaviors. A pending request recorded through an upgraded API and routed to an older runtime
+owner therefore silently does nothing until that owner upgrades; use an explicit immediate
+restart if interruption is intended. Older APIs also lack self-deferral, so upgrade the API
+and the runtime owner before relying on the turn boundary.
+
 ## Harness admission at the next launch
 
 Before starting an unseen installed omp or OpenCode build, st measures its native delivery
@@ -108,7 +136,7 @@ lookup, and receipt publication failures have separate diagnostics and retry wit
 at 30 seconds. Retained handoffs are inspected only to recover missing receipts from exact native
 proof. Boot and reconnect never authorize a fresh offer of delivered-but-unread mail.
 
-`st doctor` and stui count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
+`st doctor` and the terminal UI count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
 retained mail for retired seats. Boot never clears that backlog. To deliberately archive it across
 all mailboxes, run `st conversations cleanup --all --older-than 1h`. Add `--dry-run` to list matching
 message IDs first, or replace `--all` with `--as AGENT` to clean one mailbox. Cleanup archives as each
@@ -121,7 +149,52 @@ Epochs are allocated by the daemon, independently of wall-clock time. An initial
 request token; a lost acknowledgement retries that same epoch, and retired tokens cannot allocate
 another epoch after replacement. Reexec carries the returned epoch and token. Only an explicit
 `stale-mailbox-session` ends a subscription as fenced. Store/read worker failures close its socket
-and the current owner reconnects after one second without creating a receipt or replaying old mail.
+and the current owner reconnects without creating a receipt or replaying old mail. A driver waits
+between half a second and a second and a half, at random, before it reconnects or retries a call
+the daemon could not take. A deploy re-executes every driver and restarts the daemon in the same
+few seconds. With a fixed pause, every driver would reach the new daemon in the instant it starts
+to listen.
+
+A driver resumed in a new binary then waits a random share of 30 seconds before it sends the
+daemon what its seat's delivery does not need. That covers the harness events its hooks wrote
+during the deploy, Claude attachment checks, its native session, harness publications, subagents
+and work renewals. Its mailbox, receipts, delivery control and the provider's exit do not wait. At
+hetz2's 07:30:58Z restart on 2026-10-14, about 60 resumed drivers sent all of this in the new
+daemon's first eight seconds. It added about seven seconds of writer time to those eight seconds,
+and write-acks queued behind it. A launched driver does not wait.
+
+Only a binary replacement starts this wait, and a replacement only arrives with a deploy, when
+every seat's driver re-executes at once. `st agents resume`, a restart and Claude channel recovery
+launch a fresh driver, which does not wait. A re-executed driver keeps its seat's incarnation, and
+`st agents suspend` reads the newest quiet report for that incarnation with no age limit, so a seat
+that was quiet before the deploy can be suspended at once. A seat whose harness changed state
+during the deploy, such as a turn that finished while the daemon was down, reports its new state
+only when its wait ends. A suspend sent before then is refused for up to 30 seconds.
+
+Claude's MCP handshake is local to its stdio child and does not wait for the daemon, so a daemon
+outage cannot consume Claude's 30-second MCP startup timeout.
+
+The push channel answers initialization and metadata requests while incarnation discovery and
+binding retry. A fresh binding also keeps waiting when its own nonterminal hook activity precedes
+`runtime.running`; those hooks allocate no ownership and cannot revive an exited incarnation.
+Matching `ended` or `indeterminate` hook states remain terminal rather than waiting for startup.
+If that runtime observation never arrives, the existing bounded seat-restart recovery still
+bounds the missing-channel episode. After initialization and binding, a failed
+initialization-diagnostic POST retries the identical claim and idempotency key until acknowledged. The existing one-second tick
+schedules retries after 1, 2, 4, 8, 16 and then 30 seconds, capped there while failures continue.
+MCP requests and EOF remain responsive while that POST is pending.
+The initialization diagnostic carries no native activity state. Native readiness comes from
+hooks or the driver's push-only hookless grace. No attachment is reported and no mailbox is
+read until binding succeeds. When the daemon returns, the same initialized child attaches; a later transport outage reconnects using
+its existing fence. Native handoff tracking and receipts prevent replay. EOF cancels a pending
+attachment immediately, leaving no detached reconnect worker. An omitted plugin, an uninitialized
+MCP client, or a child Claude has already closed still needs the bounded seat-restart recovery;
+st does not type into the provider to recreate its channel.
+
+A resumed push channel whose saved incarnation differs from the live incarnation refuses
+before mailbox binding, instead of continuing until a later fence. The non-push `claude-mcp`
+path also skips the synchronous daemon-incarnation wait; its existing filesystem protocol and
+owned readiness writer remain unchanged. This does not add a non-push readiness fallback.
 
 OMP todo observation does not own delivery's lifetime. If the local PTY incarnation is ahead of
 the graph, the channel retains the latest validated todo snapshot while delivery continues. Its
@@ -134,10 +207,9 @@ The drain separates captured account metadata from producer facts, then promotes
 accounting claims. Todo retries use normalized prepared claims; rebuilding a rejected claim
 retires its malformed slot atomically without discarding the underlying pending snapshot.
 
-Already-running seats keep the legacy delivery path when their binary follows a deploy. The new
-transport starts at the next ordinary seat restart; deploys do not force providers to restart.
-The compatibility paths and legacy marketplace entry remain until operations has switched the
-seat declarations. New Claude declarations use `plugin:st-channel@st`, from `plugins/claude`.
+A seat launched by a build without push delivery or without the `current/st3` link keeps its old
+path and reports `legacy` or `outdated` until it is restarted. New Claude declarations use
+`plugin:st-channel@st`, from `plugins/claude`.
 
 Rollback to a binary from before push delivery requires restarting seats that started with `push`.
 The historical resume format does not negotiate these new fence and pending-read fields; an older
@@ -163,11 +235,8 @@ returns, quiet seats recover their current observation without a provider restar
 Heartbeats remain evidence-gated: missing, ended, superseded, or disconnected provider observations
 are never kept alive merely because an outer process still exists.
 
-A long-lived process keeps executing the file it started from. Linux names that image
-`PATH (deleted)` once the file is replaced. Before this change the processes above kept talking to
-the new daemon with the old code, and the old driver's control loop ended on a response it did not
-understand while its provider kept running. Messages then stayed `sent`, and only a harness restart
-brought delivery back.
+A long-lived process keeps executing the file it started from; Linux names that image
+`PATH (deleted)` once the file is replaced.
 
 ## Following a replaced binary
 
@@ -214,7 +283,7 @@ and failed messages, its unsent reports, and any partial frame; it skips the hel
 extension already has its session context. Both channels read stdin on a thread that polls with a
 short timeout and is joined before the exec, so no byte they took from the pipe is lost.
 
-A driver's control loop now ends only when its provider ends. A failed publish is logged and retried,
+A driver's control loop ends only when its provider ends. A failed publish is logged and retried,
 and delivery runs before every other publish on each tick, so no observation can hold a message back.
 
 ## Reporting a stale path
@@ -282,10 +351,6 @@ is proven to be that recipient's native outer driver. An ordinary CLI history re
 another recipient, or a channel process's history query does not count. Claude's MCP child
 watches inbox files; the outer `driver claude` process supplies the mailbox poll.
 
-A daemon started from a new path, such as a new Nix store path, moves its seats through the
-`STATE_DIR/current/st3` link. Seats launched before that link existed have `ST3_BIN` set to the
-executable path they started from. A Nix store path never changes, so those seats keep delivering
-with their old code and report `outdated`, naming the path they follow, until they are restarted.
 
 The Home Manager module installs a real executable at `services.smalltalk.stateDir/bin/st3`
 and provides `st` as a relative symlink there. Activation copies a changed build to a temporary

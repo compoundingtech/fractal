@@ -127,8 +127,8 @@ fn owned_test_child_group_dies_after_hard_parent_death() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
-    assert!(st2::host_lock::process_alive(leader_pid));
-    assert!(st2::host_lock::process_alive(descendant_pid));
+    assert!(fractal_legacy_runner::host_lock::process_alive(leader_pid));
+    assert!(fractal_legacy_runner::host_lock::process_alive(descendant_pid));
 
     unsafe {
         libc::kill(owner.id() as i32, libc::SIGKILL);
@@ -136,15 +136,15 @@ fn owned_test_child_group_dies_after_hard_parent_death() {
     owner.terminate();
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while (st2::host_lock::process_alive(leader_pid)
-        || st2::host_lock::process_alive(descendant_pid))
+    while (fractal_legacy_runner::host_lock::process_alive(leader_pid)
+        || fractal_legacy_runner::host_lock::process_alive(descendant_pid))
         && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }
     let survivors = [leader_pid, descendant_pid]
         .into_iter()
-        .filter(|pid| st2::host_lock::process_alive(*pid))
+        .filter(|pid| fractal_legacy_runner::host_lock::process_alive(*pid))
         .collect::<Vec<_>>();
     for pid in &survivors {
         unsafe {
@@ -168,7 +168,7 @@ fn st2_up_boots_a_specs_team() {
         return;
     }
 
-    let bin = env!("CARGO_BIN_EXE_st2");
+    let bin = test_env!("CARGO_BIN_EXE_st2");
     let bin_dir = Path::new(bin).parent().unwrap();
     let tmp = tempfile::tempdir().unwrap(); // short /tmp/.tmpXXXX path → PTY_ROOT fits the socket limit
     let spec_dir = tmp.path().join("cell");
@@ -260,7 +260,7 @@ team "t" {
 /// refuse it (nothing to supervise) and point at `st2 eval`. No `pty` needed (it errors before any boot).
 #[test]
 fn st2_up_refuses_an_eval_only_file() {
-    let bin = env!("CARGO_BIN_EXE_st2");
+    let bin = test_env!("CARGO_BIN_EXE_st2");
     let tmp = tempfile::tempdir().unwrap();
     let cell = tmp.path().join("cell");
     std::fs::create_dir_all(&cell).unwrap();
@@ -299,7 +299,7 @@ fn st2_down_tears_down_a_spec_fleet() {
         eprintln!("SKIP st2_down_tears_down_a_spec_fleet: `pty` not on PATH");
         return;
     }
-    let bin = env!("CARGO_BIN_EXE_st2");
+    let bin = test_env!("CARGO_BIN_EXE_st2");
     let bin_dir = Path::new(bin).parent().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let spec_dir = tmp.path().join("cell");
@@ -421,7 +421,7 @@ fn st2_up_once_atomically_respawns_a_hard_killed_agent() {
         eprintln!("SKIP st2_up_once_atomically_respawns_a_hard_killed_agent: `pty` not on PATH");
         return;
     }
-    let bin = env!("CARGO_BIN_EXE_st2");
+    let bin = test_env!("CARGO_BIN_EXE_st2");
     let bin_dir = Path::new(bin).parent().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let spec_dir = tmp.path().join("cell");
@@ -528,7 +528,7 @@ fn st2_up_spec_supervises_and_respawns_a_killed_agent() {
         eprintln!("SKIP st2_up_spec_supervises_and_respawns_a_killed_agent: `pty` not on PATH");
         return;
     }
-    let bin = env!("CARGO_BIN_EXE_st2");
+    let bin = test_env!("CARGO_BIN_EXE_st2");
     let bin_dir = Path::new(bin).parent().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let spec_dir = tmp.path().join("cell");

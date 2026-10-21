@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AppState, ScrollView, Share, View } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { API_VERSION, ClientError, St3Client } from '../../../clients/typescript/st3-client';
+import { API_VERSION, FractalClient } from '../../../clients/typescript/fractal-client';
+import { verifyUnpairedFabricGateway } from '../fabricGatewayProof';
 import { dialFabric, fabricIdentity, fabricStats, stopFabric } from '../modules/st-fabric';
 import type { FabricProfile, FabricProofInput } from '../fabricProof';
 import { FabricSession, nativeRefusedAfter, type ProofState } from '../fabricSession';
@@ -25,7 +26,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
       const native = await fabricStats();
       samples.current = [...samples.current.slice(-31), { phase, at: new Date().toISOString(), native }];
       // No pairing link, bearer, listener URL, member address, message content or NodeID.
-      const text = JSON.stringify({ wirePin: 'v0.2.30 / 8bd9017', iroh: '1.0.2', mode: input.mode ?? 'auto',
+      const text = JSON.stringify({ wirePin: 'v0.2.41 / 84c3208', iroh: '1.0.2', mode: input.mode ?? 'auto',
         events: latest.current?.events ?? [], samples: samples.current,
         batteryLimit: 'Coarse device battery fraction, not energy attribution; charging samples cannot establish battery cost.' }, null, 2);
       setReport(text);
@@ -39,18 +40,15 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
     const held = new FabricSession({
       dial: () => dialFabric(input.node, input.service, input.address, input.mode),
       pair: async url => {
-        const unpaired = new St3Client({ baseUrl: url });
-        let refused = false;
-        try { await unpaired.capabilities(); }
-        catch (error) { if (error instanceof ClientError && [401, 403].includes(error.status)) refused = true; else throw error; }
-        if (!refused) throw new Error('Test gateway accepted an unpaired client');
+        const unpaired = new FractalClient({ baseUrl: url });
+        await verifyUnpairedFabricGateway(url);
         const publicKey = Array.from(Crypto.getRandomBytes(32), byte => byte.toString(16).padStart(2, '0')).join('');
         const pairing = await unpaired.completePairing(input.id!, { api_version: API_VERSION, code: input.code!, device_public_key: publicKey });
         return pairing.value.credential;
       },
       authenticate: async (url, credential) => {
         try {
-          const caps = await new St3Client({ baseUrl: url, credential: () => credential }).capabilities();
+          const caps = await new FractalClient({ baseUrl: url, credential: () => credential }).capabilities();
           return caps.value.session_actor;
         } catch (error) {
           if (nativeRefusedAfter(await fabricStats(), admissionFloor)) await held.refuse();
@@ -70,7 +68,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
           }).catch(() => {});
         },
       });
-      if (state.ready) setResult(`Capabilities received\nUnpaired client: refused\nAPI: ${API_VERSION}\nActor: ${state.actor}\nWire pin: v0.2.30 / 8bd9017\nIroh: 1.0.2`);
+      if (state.ready) setResult(`Capabilities received\nUnpaired client: refused\nAPI: ${API_VERSION}\nActor: ${state.actor}\nWire pin: v0.2.41 / 84c3208\nIroh: 1.0.2`);
       else setResult(state.issue || 'Fabric session is stopped or connecting.');
     });
     held.record('input', { pairing: !!input.id, fullClient: !!input.fullClient });
@@ -81,7 +79,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
         setNode(own);
         console.info(`Fabric proof public node: ${own}`);
         if (!input.id || !input.code) {
-          setResult('Grant this public node ID only the test gateway service, then open a proof pairing link. Add client=1 to use Home and conversations.');
+          setResult('Grant this public node ID only the test gateway service, then open a proof pairing link. Add client=1 to use Now and conversations.');
           return;
         }
         const before = await fabricStats();

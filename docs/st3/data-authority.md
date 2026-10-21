@@ -1,17 +1,33 @@
 # st data authority
 
-This document classifies each SQLite table in schema version 16.
-
-Schema version 16 upgrades schema versions 10 through 15 in place. Envelope payloads are stored
-as their exact decoded bytes. Existing base64 TEXT rows convert to BLOBs after startup in bounded
-writer-queue transactions; each transaction commits its progress cursor with the converted bytes.
-Mixed TEXT/BLOB stores remain readable after interruption. This version changes no indexes, and
-older binaries reject it. Version 15 added the shared canonical document `binding_key` and its
-index, with existing keys backfilled once from claims.
+This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
+(`crates/fractal-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
+are listed in `SHARED_TABLES` there and in the production projection digests. Replicated storage tables
+have their own logical authority digests; local physical fields and caches are outside those identities.
 
 The claim log and immutable blobs are the durable graph authority.
 
-A claim kind of `local` retention (`st3 schema show KIND`) is an observation that only the node
+`local_push_registrations` is member-local secret authority, not a shared projection or a
+rebuildable cache. Its token and registration metadata come from an authenticated phone;
+pairing claims constrain ownership and lifetime but cannot reconstruct the token. Rows
+survive daemon restarts and stay outside graph replication, exports and projection digests.
+Explicit unregistration, pairing revocation/replacement and expiry remove them. Deleting
+or losing this local table loses registrations; recovery requires the phone to register
+again with a valid locally issued pairing, not a graph replay. Full local database backups
+contain these secrets and must remain private; a graph-only backup cannot recover them.
+
+## Large inline values
+
+New storage work must avoid unbounded large inline SQLite objects, including variable
+metadata and index keys. Use a reviewed bounded physical representation or reference
+without reducing the logical input contract or rejecting valid historical data.
+[Large SQLite values](large-values.md) defines the transitional source inventory,
+allow-for-now owner/TODO markers, static guard coverage and cleanup plan. No numeric
+large-value threshold is accepted; the guard checks source-site exceptions, not sizes.
+
+## Retention and local observations
+
+A claim kind of `local` retention (`st schema show KIND`) is an observation that only the node
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
 no batch, no envelope and no digest, so it never replicates and trimming it never changes what a
 peer holds. Every node computes the same graph from the same admitted claims. The daemon trims
@@ -39,13 +55,6 @@ replicates when the harness stops working.
 A node can also send every local observation to an OpenTelemetry collector. The exporter is off
 unless the config names a collector:
 
-Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
-the turn ID, model, agent, mission run, and step on the producing node. `local_usage_seen` makes
-replayed provider responses idempotent across harness incarnations; `local_usage_totals` keeps
-monotonic cumulative buckets even after the observation log is trimmed. The node replicates
-`harness.usage` response rollups by agent, incarnation, model, mission step, and host. Fleet usage
-queries subtract the last rollup before a period from the last rollup inside it.
-
 ```toml
 [observations.otlp]
 endpoint = "http://127.0.0.1:4318"             # OTLP/HTTP JSON base URL
@@ -59,6 +68,14 @@ Each local observation becomes one OTLP log record in OTLP/HTTP JSON:
   `st3.local_id`;
 - the resource names `service.name = st` and `st3.node`; the scope is `st.observations`.
 
+Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
+the turn ID, model, agent, mission run, and step on the producing node. `local_usage_responses` remembers
+each counted provider response, so replay across harness incarnations does not count it again;
+`local_usage_spend` keeps cumulative buckets per agent incarnation, model, account, mission run and
+step, and host even after the observation log is trimmed, and `local_usage_provenance` their pricing. The node replicates
+`harness.usage` response rollups by agent, incarnation, model, mission step, and host. Fleet usage
+queries subtract the last rollup before a period from the last rollup inside it.
+
 Claude event hooks submit `harness.telemetry` observations to their local daemon. They retain
 the counter recorded at the shared hook's actual application point, bounded warning/error logs,
 operation times and the hook exit code. No collector or SDK exporter runs in a hook. Submission
@@ -71,7 +88,7 @@ as monotonic delta points on `/v1/metrics`, and one `st.hook.claude-observe` ope
 `/v1/traces`. Metric labels remain the bounded hook/event vocabulary; subject and incarnation
 identities appear only in logs and spans. Span IDs are stable when a batch is retried. Collector
 configuration lives in `[observations.otlp]`; `OTEL_EXPORTER_OTLP_*` in a native seat no longer
-controls an exporter in its hooks. The legacy st2 product's exporter remains separately testable.
+controls an exporter in its hooks.
 
 Fresh native seats publish activity, context, account limits and normalized timeline operations
 through an st-owned observation outbox, `st-harness-events.sqlite`, in their explicit observation
@@ -85,6 +102,15 @@ inside the daemon's writer transaction. Source runtime, spool sequence, claim ki
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
 
+Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
+at most 64 per thread. At either limit a thread evicts its least recently used connection;
+at the global limit a thread with no cached connection reads without caching. Atomic slot
+reservations bound retained connections without a global query lock, and closing a connection
+releases its slot, including on thread exit. Only connections are retained: each check opens
+a fresh read transaction and releases it before returning, so subsequent checks observe
+committed producer writes without retaining a WAL snapshot. Reads still validate the spool
+format and provider/runtime binding; replacing the spool inode invalidates its connection.
+
 The outbox is transport recovery state, not graph authority. The daemon retains each admitted
 observation under its existing local/latest/durable policy. Producer snapshots remain local
 coalescing and ownership evidence; timeline producers read only the previous matching entry and
@@ -95,14 +121,8 @@ An evidence deadline queues derived unknown once after fifteen minutes without f
 a concurrent heartbeat supersedes that deadline. Native transcripts and session bindings retain
 their existing source paths.
 
-The outbox is enabled only before a fresh provider launch. An already-running provider adopted
-by a replacement binary retains the polled record transport until ordinary restart, and the
-separately maintained st2 product keeps its record transport. Deploy the matching daemon before
-restarting providers into event publication. Rollback to a binary without event-outbox support
-requires an operations-coordinated provider restart, recovery of any unacknowledged outbox,
-and archiving the drained outbox before starting the old producer;
-an old binary cannot adopt an event-producing provider. This work does not restart shared
-services or seats automatically.
+The outbox is enabled only when a provider launches fresh. A provider that a replacement binary
+adopts keeps the polled record transport until its next restart.
 
 The exporter keeps its cursor in `meta` and moves it only after the collector accepts a batch of
 at most 512 observations, including every log/metric/trace request that batch needs. Delivery is
@@ -140,62 +160,144 @@ reconciliation continue. Input already handed to a harness cannot be recalled.
 A replacement adopting an older Codex/OpenCode provider imports a still-fresh DND once with its
 original expiry. The store admits that import only when no graph hold decision exists, inside
 the writer transaction, so an explicit graph release cannot be overwritten by adoption. Fresh
-launches ignore historical status files. Old wrapper images retain their existing behavior
-until replacement/restart; the separately maintained catalog product keeps its own status/DND
-transport. Deploy the matching daemon API with the new driver binary: a new driver talking to
-an older daemon keeps the provider running and holds new Codex/OpenCode handoffs until that API
-is available. This change does not replace mailbox or harness-observation transport.
+launches ignore historical status files.
 
 Runtime observations and harness observations remain separate claims. The status projection puts
 runtime fields in `actual` and the current incarnation's harness fields in `harness`.
 
 All other tables are indexes, projections, local capabilities, or transport recovery state.
 
+Shared outcomes, selected source identities and durable action fences must agree when replicas
+hold the same logical claims. A daemon, eval, repair or reader filtering one origin still follows
+that rule. Local transport/history cursors, cache invalidation, publication cadence and
+authorization secrets do not choose shared winners.
+
 A seat queue has no table. Each read derives the order from the `step_runs` projection and the
 replicated `agent.queue.moved` claims on the agent subject, so every replica computes the same
 order from the same admitted claims.
 
-| Table | Class | Rebuild or recovery source |
+| Table | Scope | Role and recovery source |
 |---|---|---|
-| `meta` | Local store metadata | Store initialization and configured node identity |
-| `batches` | Claim-log authority | Accepted local and replicated batch headers |
-| `claims` | Claim-log authority | Accepted local and replicated claims |
-| `blobs` | Content authority | Posted bytes, verified by SHA-256 |
-| `local_blob_uploads` | Local upload ledger | Who uploaded each attachment file; quota and early read access only |
-| `local_blobs` | Local upload staging | Bytes awaiting a durable claim reference; promotion into `blobs` commits with that claim |
-| `operations` | Projection | Claim `_operation` metadata |
-| `documents` | Projection | `doc.bound` claims and blobs |
-| `desired` | Projection | Selected `intent.desired` heads |
-| `events` | Projection | Effective accepted claims |
-| `resource_observations` | Shared projection | Latest canonical `resource.observed` claim per resource subject; indexed by resource kind and opener |
+| `account_limit_readings` | Local | Account quota readings for this host; never replicated. |
+| `account_limit_seats` | Local | Local assignment of seats to account quota windows. |
+| `agent_message_days` | Local cache | Rebuildable eligible-message timestamps and daily recipient counts, plus a deduplicated queue of changed messages, over this node's retained send claims. They accelerate the daily usage estimate, are not replicated, and do not add shared identities to projection digests. |
+| `agent_message_sends` | Local cache | Rebuildable eligible-message timestamps and daily recipient counts, plus a deduplicated queue of changed messages, over this node's retained send claims. They accelerate the daily usage estimate, are not replicated, and do not add shared identities to projection digests. |
+| `arrangement_registers` | Shared projection | Canonical arrangement register operations derived from admitted claims. |
+| `arrangements` | Shared projection | Selected canonical arrangement declarations and state; changed_index is a local arrival cursor. |
+| `batches` | Shared storage, with stated local fields | Shared log metadata: origin/sequence/hash/accepted time; primary ordering inputs. Storage rather than an outcome projection. |
+| `blobs` | Shared content authority | Immutable bytes/hash/size carried by durable claims or admitted blob records; included in shared projection digests. |
+| `capabilities` | Local | Local secret-bearing authorization tokens, expiry/use bookkeeping. |
+| `checkpoint_capture_epoch` | Local | Capture invalidation epoch, monotonic envelope/time guard bounds and trigger-migration version. Store-local physical rowid frontiers and capture timing are not replicated projection outcomes and are outside shared digests. |
+| `checkpoint_claims` | Shared storage, with stated local fields | Shared immutable dropped-claim/evidence/ancestry/operation identity. Digest logical live/tombstoned identity where relevant; nodes may have trimmed at different times. |
+| `checkpoint_envelopes` | Shared storage, with stated local fields | Shared immutable dropped-envelope identity. Live and trimmed nodes represent the same inventory using envelopes versus tombstones, so digest their logical union rather than treating trim progress as divergence. |
+| `checkpoints` | Local | Local seal/verification/trim/adoption ledger and rowid high water; nodes legitimately occupy different protocol stages. Shared protocol facts are checkpoint.* claims. |
+| `claim_signature_candidates`, `claim_signature_sources` | Shared current state | Distinct normalized carried signatures per live immutable claim and their carrying writers. Retained candidates remain durable authority input even if envelope history later becomes trimmable; this change qualifies no cap, eviction or trim eligibility. |
+| `claim_signature_counts`, `claim_signature_writer_counts` | Incremental inspection projections | Candidate and carrying-writer counts maintained by admission/deletion triggers. The attributable inspection threshold reports a fault without deleting candidates. |
+| `claim_signature_judging` | Local incremental work | Durable candidate cursor, best candidate and dependency availability for bounded writer loans. Relevant changes invalidate its accumulator; partial candidate state cannot authorize a dependent claim. |
+| `claim_signature_migration` | Local bootstrap progress | Durable inventory cursor, reconciliation targets, serving model and explicit fault. Complete isolated legacy semantics serve until atomic candidate activation; reaching an envelope does not authorize its claims under candidate semantics, since later envelopes can carry more candidates. The legacy P0 remains visible during bootstrap. |
+| `claim_signature_nonce_uses` | Shared incremental projection | Cryptographically matching key/nonce use per live claim, including non-winning candidates. Invalid signature bytes cannot reserve another key's nonce; deletion invalidates affected dependencies before removing use. |
+| `claim_signatures` | Shared projection | Best candidate under current authority: Verified before Held before Invalid, then normalized signature bytes. Every candidate contributes authority dependencies and matching nonce use, including non-winners. Readers pin one complete legacy or candidate model. |
+| `claim_verdict_fresh`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdicts` | Local cache of shared outcomes | Current-authority candidate fold and dependency work, outside replication digests and rebuilt by `recheck_claim_verdicts`. Links accumulate conservatively per page until claim removal or explicit recheck; completing a judgment does not rewrite its whole dependency set. Property tests compare inventory, selection, verdicts and recomputation across shuffled, split and duplicate delivery. |
+| `claims` | Shared storage, with stated local fields | Shared immutable logical claim bytes/id/subject/kind/actor/predecessors/time. store_index alone is local; system-local/legacy migrated claims must be excluded from logical replicated-source digests. |
+| `coordination_sends` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
+| `custom_dependencies` | Shared projection | Reducer dependency relationships derived from registered custom subjects. |
+| `custom_registrations` | Shared projection | Canonical custom-subject registrations. |
+| `custom_sources` | Shared projection | Canonical source claims for custom-subject reducers. |
+| `desired` | Shared projection | Shared selected declaration, ancestry/conflicts, ownership and full canonical body; existing ancestry/revision/id selection is deterministic and must be preserved. |
+| `documents` | Shared projection | Shared immutable name/hash binding, binding_claim_id and materialized canonical binding_key. created_index is a local arrival cursor; latest selection and history order use the indexed binding_key. |
+| `event_positions` | Local | Payload-free admitted event positions and subject routing; replay/admission history can differ. |
+| `events` | Local view | Canonical claim payloads joined to local admitted membership by arrival index. |
+| `expected_claim_signatures` | Local | A device's signature for the claim this node is about to write, moved into `claim_signatures` by the write's own transaction and gone once it returns. |
+| `fleet_generation` | Local | Membership-fold invalidation counter. |
+| `fleet_invite_tokens` | Local | Local invite secret/redemption attempt/authorization bookkeeping; fleet.invite-* lifecycle claims are shared. |
+| `glass_heads` | Shared projection | Canonical glass declaration heads derived from admitted claims. |
+| `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
+| `held_keys` | Local | Which principal each key this node holds belongs to, and its delegation chain; the private keys are files in `STATE/keys`. |
+| `idempotency` | Local | Hashed caller keys and derived responses. New receipts expire after seven days in bounded rowid order; active work extends retention. Rows at or below meta.idempotency_legacy_rowid have no recorded expiry and remain. |
+| `identity_dirty` | Local cache | Transaction-local naming-fold invalidation marker; excluded from replicated digests and cleared during projection replay. |
+| `identity_heads` | Shared projection | Immutable storage identity, canonical public ID, naming revision and lifecycle availability derived from declaration and naming facts. All columns participate in projection digests and shuffle/restart/checkpoint coverage. |
+| `identity_names` | Shared projection | Reserved historical names and their immutable identity and naming claim. All columns participate in projection digests; replay reconstructs reservations from durable facts. |
+| `local_agent_message_pending` | Local cache | Rebuildable eligible-message timestamps and daily recipient counts, plus a deduplicated queue of changed messages, over this node's retained send claims. They accelerate the daily usage estimate, are not replicated, and do not add shared identities to projection digests. |
+| `local_blob_uploads` | Local | Who uploaded an attachment file, for the per-actor quota and for who may read it before a message names it. Never replicated; the bytes are files under `<state_dir>/blobs`, see [Attachments](attachments.md). |
+| `local_blobs` | Local | Staged upload bytes awaiting a durable claim reference. Promotion into `blobs` commits with the referencing claim. |
+| `local_client_message_cut_epoch` | Local | Single-row counter that invalidates issued message page cursors after deletions, repairs or a selector rebuild. Never replicated. |
+| `local_client_message_fold_batches` | Local cache | Temporary batch-prefix counters for resumable selector folds. They compute legacy canonical wire positions through bounded indexed claim scans, contain no message bodies, and are cleared in bounded chunks after each subject. Never replicated or included in projection digests. |
+| `local_client_message_publications` | Local cache | Body-free publication-cut timestamps used to retain retired headers for the full cursor lifetime after their replacement becomes published. Unreferenced cohorts are pruned in bounded chunks while the latest is retained. Never replicated or included in projection digests. |
+| `local_client_message_selectors_v1` | Local cache | Rebuildable body-free message page selectors: canonical order key, parties and eligibility with local cut intervals, plus a pending queue of changed subjects. Backfilled from claims and projections in bounded resumable chunks, never replicated, and excluded from projection digests. See [schema](schema.md#local-message-selectors). |
+| `local_coordination_backfill` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
+| `local_custom_dirty` | Local | Custom projection subjects requiring maintenance in the current transaction. |
+| `local_directive_note_dirty` | Local | Person directive-note subjects whose published read needs refresh. |
+| `local_directive_note_pending` | Local | Person directive-note projection work queue. |
+| `local_event_payloads` | Temporary local | Present only while duplicate local event payloads drain in bounded migration transactions. |
+| `local_git_change_latest` | Local | Current workspace Git observations on this node. |
+| `local_git_change_records` | Local | Local Git change observation records and cursors. |
+| `local_glass_head_dirty` | Local | Glass heads whose published read needs refresh. |
+| `local_glass_head_pending` | Local | Glass-head projection work queue. |
+| `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
+| `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
+| `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
+| `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
+| `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |
+| `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |
+| `local_mailbox_owners` | Local | This daemon's native socket subscription owner, live runtime incarnation and replacement epoch. Survives daemon restart; excluded from replicated projection digests. |
+| `local_observations` | Local | Local-retention observations and their local frontier/id; never replicated. |
+| `client_diagnostic_receipts` | Local operational fact | Paired-device diagnostic retry receipts and admission accounting; retained for 30 days independently of local observations, never replicated or included in projection digests. |
+| `local_publication_claims`, `local_publication_starts`, `local_publication_pending`, `local_publication_batches`, `local_publication_bootstrap`, `local_publication_launch_epoch` | Local derived state | Rebuildable retained runtime and incarnation launch evidence, canonical keys, exact delta and coalesced batch queues, cache generation, and durable bootstrap cursor. Outside replicated digests; missing or incomplete evidence is Unknown. |
 | `local_resource_projection_pending` | Local projection work queue | Resource subjects whose admitted observations changed in the current transaction; flushed before commit |
-| `mission_revisions` | Projection | `mission.published` claims |
-| `mission_definitions` | Projection | Selected `mission.published` heads |
-| `mission_runs` | Projection | `mission-run.*` claims |
-| `run_generations` | Projection | `run-generation.*` claims |
-| `step_runs` | Projection | `step-run.*` and `work.*` claims |
-| `local_work_lease_renewals` | Local operational fact | Recent quiet lease renewals; replayed over replicated claim projections and bounded by periodic `work.renewed` anchors |
-| `local_observations` | Local observation log | Observations of `local` and `latest` retention made on this node; never replicated, trimmed after `[observations] retention` |
-| `local_latest_slots` | Local observation log | For each `latest` slot this node writes: its last replicated observation and time, and the newest local observation no claim carries yet |
-| `local_usage_seen` | Local deduplication index | Stable provider response IDs from local timeline observations; never replicated |
-| `local_usage_totals` | Local cumulative observation projection | Token buckets from accepted local response observations; never replicated and retained across log trimming |
 | `local_seat_accounts` | Local operational fact | The account chosen for each pooled seat on this node; retained across restarts, never replicated |
-| `revision_proposals` | Projection | `revision-proposal.*` claims |
-| `planning_sessions` | Projection | `planning-session.*` claims |
-| `planning_candidates` | Projection | `planning-session.candidate-submitted` claims |
-| `planning_previews` | Projection | `planning-session.previewed` claims |
-| `idempotency` | Opaque response cache | Hashed caller keys and derived responses |
-| `mission_run_requests` | Opaque validation cache | Hashed caller keys and request digests |
-| `capabilities` | Local short-lived authority | Dedicated API issuance; capabilities do not replicate |
-| `replica_envelopes` | Replicated authority | Authenticated outer envelopes and their exact payloads |
-| `replica_records` | Admission state | Envelope records, validation results, and repair references |
-| `projection_health` | Local diagnostic projection | Projection attempts against admitted authority |
-| `projection_digest_repaired_claims` | Local repair exclusion cache | Known original claim identities from replicated repairs; survives receipt cleanup so retained invalid originals cannot rejoin shared source or operation projections |
-| `replica_envelope_signatures` | Replicated authority | Writers' member-key signatures over envelopes, verified at receipt |
-| `replica_envelope_holds` | Admission state | Envelopes held as `unsigned` or `fenced` by fleet membership; retried on each wake |
-| `replication_peers` | Local transport state | Last signed exchange or transport failure for each configured peer |
-| `peer_cursors` | Legacy test state | The removed cursor protocol; production does not use this table |
-| `peer_replica_cursors` | Legacy test state | The removed cursor protocol; production does not use this table |
+| `local_subscription_mission_deferrals` | Local | Local reconciler capacity backoff/retry scheduling. |
+| `local_stop_deferral_backfill` | Local cache | Trigger-maintained claim ids, subjects and recovered-failure references of retained-stop diagnostics, faults and recoveries, plus the ceiling and completion of the one-time copy of older claims. Rebuildable from claims; never replicated; excluded from shared projection digests. |
+| `local_usage_provenance` | Local | Pricing contributions for the local spend slots. |
+| `local_usage_responses` | Local | Counted provider response IDs and times; deduplicates replay across harness incarnations. |
+| `local_usage_spend` | Local | Cumulative token and cost buckets; retained across observation-log trimming. |
+| `local_work_lease_renewals` | Local | Local lease extensions, re-applied after canonical replay. Durable replicated lease anchors remain shared. |
+| `message_index` | Shared projection | Shared message membership/closed fact. created_index is a local cache cursor. Subject order/onset/lifecycle must come from canonical message claims, never this cursor. |
+| `meta` | Local | Local schema/version/writer/cache/frontier bookkeeping; individual fleet-binding metadata copies do not turn the table into a shared projection. |
+| `mission_definitions` | Shared projection | Shared selected mission revision/state/claim. |
+| `mission_revisions` | Shared projection | Shared full immutable mission revision/state/body and binding claim. created_index is a local historical cursor; repeated identical revision bindings need a deterministic representative claim. |
+| `mission_run_after` | Shared projection | Shared predecessor run dependency. |
+| `mission_run_deadlines` | Shared projection | Shared durable run timeout/deadline derived from run creation; evaluate expiration with an explicit as_of. |
+| `mission_run_requests` | Local | Local original request-hash cache paired with idempotency; run identities in the request API are origin-scoped. |
+| `mission_runs` | Shared projection | Shared run creation inputs, hierarchy, ownership, workspace, requester, mode, status/phase and durable timestamps. Digest full logical row, not just status columns. |
+| `operations` | Shared projection | Shared operation identity, canonical claim, request digest and conflict state, derived from live claims plus tombstones. After trim, operations with no live claim are served by tombstones. |
+| `peer_cursors` | Local | Local per-peer legacy transport progress. |
+| `peer_replica_cursors` | Local | Local per-peer/per-writer transport progress. |
+| `person_directive_notes` | Shared projection | Current person-authored directive notes derived from claims. |
+| `planning_candidates` | Shared projection | Shared immutable variant/revision/document references, mission revision and submission timestamp. |
+| `planning_previews` | Shared projection | Serialized preview claim fields and candidate fence. Embedded store_index is claim payload, not this replica’s arrival cursor. |
+| `planning_sessions` | Shared projection | Shared launch/planner/request/config, status, selected revision, ownership and durable timestamps. |
+| `projection_digest_generation` | Local | Projection-digest cache invalidation generation. |
+| `projection_digest_operation_rows` | Local | Maintained operation-row digest contributions. |
+| `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source, operation or actual-state projections. Actual values, provenance, runtime origin and runtime-epoch reads use this durable repaired-ID membership even after local receipt cleanup. |
+| `projection_digest_state` | Local | Maintained shared projection digest state; the logical digest is shared, these rows are local maintenance. |
+| `projection_health` | Local | Local admission/projection/quarantine status, frontier, errors and observation timestamps. Deterministic shared degraded-state summaries must be separate from receipt health. |
+| `replica_envelope_holds` | Local | Local validation/fencing hold state and observation time. |
+| `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |
+| `replica_envelopes` | Shared storage, with stated local fields | Shared authenticated writer/sequence/hash/payload identity; relay, receipt_state/errors and received_at are local. Inventory hashes immutable envelope identity, not physical rows. |
+| `replica_records` | Shared storage, with stated local fields | Shared raw record/position/claim identity and replicated repair meaning; admission status/errors/updated_at are local. Normalize from retained records plus tombstones; never compare physical receipt rows. |
+| `claim_positions` | Shared storage | Each claim's canonical batch position: stored at admission, lowered only by a later record of the same claim, frozen before a claim or record deletion could renumber it, and never deleted. An input of canonical order, not a projection; it is not compared or exchanged. |
+| `repaired_claim_replacements` | Local storage | Each repaired original claim's current replacement and record reference, copied by trigger from repaired records and kept after a checkpoint deletes the record; never deleted. The original's exclusion stays in `projection_digest_repaired_claims`; the authenticated meaning stays in `record.repaired` claims. |
+| `retired_claim_ids`, `retired_envelopes` | Shared storage | Exact identity sets of every claim ID and envelope identity a checkpoint table has held; they only grow. A SHA-256 hex identity is stored as its 32 bytes, any other value as its TEXT. Not yet read by admission or evidence; never compared or exchanged. |
+| `claim_range_digests` | Local storage | Count and order-independent digest of the retained claim IDs in each of 4,096 leaf and 64 top ranges, folded from `claim_range_pending`. A transport summary for claims sync, not authentication; not yet read or exchanged. |
+| `claim_range_pending`, `claim_range_import` | Local storage | Claim inserts and deletes queued by trigger until the background fold, and the cursor of the one-time fold of claims that predate the triggers. |
+| `retired_claim_withdrawals`, `retired_envelope_withdrawals` | Local storage | Retired identities a checkpoint table stopped holding (adoption keeping only a manifest), with the recording checkpoint, so a later conversion can judge them under the old recorded-state rules. |
+| `retired_operation_receipts`, `retired_claim_ancestry` | Shared storage | Operation receipts and ancestry (subject, kind, predecessors) of every claim a checkpoint table has held; they only grow. Not yet read; retries, ancestry walks and seat history still read `checkpoint_claims`. |
+| `writer_heads` | Local storage | Each writer's highest (sequence, hash), raised on batch insert and stored before batch delete, never lowered or deleted. Local sequence allocation and the chain's previous hash read it with `batches`, so a trimmed head is never reused. |
+| `replication_peers` | Local | Local connectivity, peer digest observations, receive timings and errors. |
+| `replication_refusals` | Local | Outbound Fabric grant refusals and observation timestamps; route policy state outside shared projections. |
+| `resource_observations` | Shared projection | Latest canonical `resource.observed` claim per resource subject; indexed by resource kind and opener |
+| `revision_proposals` | Shared projection | Shared candidate/source generation, reviewers/approvals, cutover/compatibility, status/preview/successor and durable timestamps. |
+| `run_generations` | Shared projection | Shared generation identity, revision, predecessor, actor/reason, status and durable timestamps. |
+| `step_runs` | Shared projection | Step definition, attempts, results, durable claimant/incarnation and readiness. Local lease_expires_at_unix_ms and updated_at_unix_ms overlays are excluded from projection digests. |
+| `stop_deferral_claims` | Local cache | Trigger-maintained claim ids, subjects and recovered-failure references of retained-stop diagnostics, faults and recoveries, plus the ceiling and completion of the one-time copy of older claims. Rebuildable from claims; never replicated; excluded from shared projection digests. |
+| `unread_mail` | Local cache | Rebuildable unread-message timestamp and prefix-count indexes, plus a deduplicated queue of changed messages, over this node's retained sent/read/closed claims. They accelerate current age counts, are not replicated, and do not add shared identities to projection digests. |
+| `unread_mail_pending` | Local cache | Rebuildable unread-message timestamp and prefix-count indexes, plus a deduplicated queue of changed messages, over this node's retained sent/read/closed claims. They accelerate current age counts, are not replicated, and do not add shared identities to projection digests. |
+| `unread_mail_prefixes` | Local cache | Rebuildable unread-message timestamp and prefix-count indexes, plus a deduplicated queue of changed messages, over this node's retained sent/read/closed claims. They accelerate current age counts, are not replicated, and do not add shared identities to projection digests. |
+
+Temporary clock simulation and checkpoint proof/adoption scratch state is local.
+SQLite `sqlite_sequence` is a local allocation counter. Rust read caches and exported
+mailbox files are disposable local caches; their shared source selections still
+follow the canonical rules above.
 
 The store rebuilds operation and planning projections when it opens.
 The resource observation projection is backfilled once on the first open with its projection

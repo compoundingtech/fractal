@@ -126,7 +126,7 @@ impl Runtime for FaultRuntime {
             ));
         }
         tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES ('busy-test-effect',?1)",
+            /* sqlite-large-value: allow-for-now lv-h63db5880c91c owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES ('busy-test-effect',?1)",
             [through.to_string()],
         )
         .map_err(internal)?;
@@ -139,7 +139,7 @@ impl Runtime for FaultRuntime {
     }
     fn after_projection(&self, tx: &Transaction<'_>) -> Result<(), Error> {
         tx.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES ('busy-test-after','written')",
+            /* sqlite-large-value: allow-for-now lv-hd154f27b9b98 owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES ('busy-test-after','written')",
             [],
         )
         .map_err(internal)?;
@@ -278,8 +278,8 @@ fn a_projection_chunk_owns_the_write_lock_before_observing_its_frontier() {
     assert!(store.project_replication_backlog_with_progress("test", |progress| {
         if progress.phase == "project-incremental" {
             reached = true;
-            let result = competitor.execute_batch("BEGIN IMMEDIATE");
-            if result.is_ok() { competitor.execute_batch("ROLLBACK").unwrap(); }
+            let result = competitor.execute_batch(/* sqlite-large-value: allow-for-now lv-h9096d721fa4e owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE");
+            if result.is_ok() { competitor.execute_batch(/* sqlite-large-value: allow-for-now lv-h514749f7f47a owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap(); }
             let error = result.expect_err("the chunk must already exclude the other SQLite writer");
             assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DatabaseBusy));
         }
@@ -301,7 +301,7 @@ fn a_busy_begin_preserves_health_and_deferred_work_then_recovers() {
         .busy_timeout(std::time::Duration::ZERO)
         .unwrap();
     let other = Connection::open(&path).unwrap();
-    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-h3ee3c0d890d3 owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
     let mut lines = Vec::new();
     let error = store
         .project_replication_backlog_with_log("test", |line| lines.push(line.to_owned()))
@@ -315,7 +315,7 @@ fn a_busy_begin_preserves_health_and_deferred_work_then_recovers() {
     );
     assert_eq!(health(&store), before);
     assert!(store.replication_projection_deferred());
-    other.execute_batch("ROLLBACK").unwrap();
+    other.execute_batch(/* sqlite-large-value: allow-for-now lv-he5b857500820 owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     assert!(store.project_replication_backlog().unwrap());
     assert_eq!(health(&store).1, store.index().unwrap());
     assert!(!store.replication_projection_deferred());
@@ -355,13 +355,13 @@ fn serialized_checkpoint_defers_for_a_reader_and_recycles_after_release() {
     pending_claim(&store);
     let reader = Connection::open(&path).unwrap();
     reader
-        .execute_batch("BEGIN; SELECT COUNT(*) FROM claims;")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h8cab6b9b348f owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "BEGIN; SELECT COUNT(*) FROM claims;")
         .unwrap();
     let checkpoint = Connection::open(&path).unwrap();
     assert!(!store.checkpoint_idle_wal(&checkpoint).unwrap());
     // The failed recycle does not retain the queue loan or discard a normal write.
     pending_claim(&store);
-    reader.execute_batch("ROLLBACK").unwrap();
+    reader.execute_batch(/* sqlite-large-value: allow-for-now lv-h5f2f28e45551 owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     assert!(store.checkpoint_idle_wal(&checkpoint).unwrap());
     assert_eq!(
         std::fs::metadata(path.with_extension("sqlite3-wal"))
@@ -407,7 +407,7 @@ fn truncate_requests_the_fifo_writer_before_changing_the_wal() {
     let job = requests
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("TRUNCATE must ask the FIFO writer");
-    let crate::sqlite::WriterJob::Lend { lent, returned } = job else {
+    let crate::sqlite::WriterJob::Lend { lent, returned, .. } = job else {
         panic!("expected a writer loan");
     };
     assert!(
@@ -493,19 +493,56 @@ fn empty_wal_checkpoint_needs_no_writer_loan() {
 }
 
 #[test]
+fn healthy_empty_source_skips_runtime_writes_but_not_ahead_frontiers_or_verdicts() {
+    let store = Store::open_memory("node", Arc::new(FaultRuntime::new())).unwrap();
+    assert!(store.project_replication_backlog().unwrap());
+    let writes = store.connection.write().total_changes();
+    let mut phases = Vec::new();
+    assert!(store.project_replication_backlog_with_progress("test", |progress| {
+        phases.push(progress.phase);
+    }).unwrap());
+    assert_eq!(store.connection.write().total_changes(), writes,
+        "a healthy empty source must not execute runtime writes, even rolled-back ones");
+    assert!(phases.contains(&"projection-current"));
+    assert!(!phases.contains(&"projection-committed"));
+
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hbefa73f065eb owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=999999 WHERE aggregate='graph'", [],
+    ).unwrap();
+    phases.clear();
+    assert!(store.project_replication_backlog_with_progress("test", |progress| {
+        phases.push(progress.phase);
+    }).unwrap());
+    assert!(phases.contains(&"projection-committed"),
+        "an ahead frontier must reach the runtime's projection guard");
+
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h87a5ba694468 owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET last_good_store_index=0 WHERE aggregate='graph'", [],
+    ).unwrap();
+    store.verdicts_due.store(true, Ordering::Release);
+    phases.clear();
+    assert!(store.project_replication_backlog_with_progress("test", |progress| {
+        phases.push(progress.phase);
+    }).unwrap());
+    assert!(phases.contains(&"projection-committed"),
+        "pending verdicts must retain the projection commit boundary");
+    assert!(!store.verdicts_due.load(Ordering::Acquire));
+}
+
+#[test]
 fn tail_verdict_busy_remains_typed_and_pending_after_projection_commit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claims.sqlite3");
     let store = Store::open(&path, "node", Arc::new(FaultRuntime::new())).unwrap();
     store.project_replication_backlog().unwrap();
-    store.connection.write().execute("DELETE FROM meta WHERE key='claim_verdict_roots'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h17bffd2554d4 owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='claim_verdict_roots'", []).unwrap();
     store.connection.write().busy_timeout(std::time::Duration::ZERO).unwrap();
     store.verdicts_due.store(true, Ordering::Release);
     let holder = Connection::open(&path).unwrap();
     let mut held = false;
     let error = store.project_replication_backlog_with_progress("test", |progress| {
         if progress.phase == "projection-committed" && !held {
-            holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+            holder.execute_batch(/* sqlite-large-value: allow-for-now lv-ha09adbfb1aac owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE").unwrap();
             held = true;
         }
     }).unwrap_err();
@@ -514,7 +551,7 @@ fn tail_verdict_busy_remains_typed_and_pending_after_projection_commit() {
     assert!(store.verdicts_due.load(Ordering::Acquire));
     assert!(store.replication_projection_deferred());
     assert_eq!(health(&store).0, "healthy");
-    holder.execute_batch("ROLLBACK").unwrap();
+    holder.execute_batch(/* sqlite-large-value: allow-for-now lv-h00ac58224c7e owner=smallclaims::store::projection_busy_tests TODO=trace-statement-and-value-representation */ "ROLLBACK").unwrap();
     assert!(store.project_replication_backlog().unwrap());
     assert!(!store.verdicts_due.load(Ordering::Acquire));
     assert!(!store.replication_projection_deferred());
@@ -540,4 +577,33 @@ fn a_live_snapshot_and_a_lent_read_are_listed_with_their_call_sites_until_they_e
     assert!(oldest.live >= 1);
     drop(guard);
     assert!(!crate::sqlite::live_read_locations().contains(&(here(guard_line), false)));
+}
+
+#[test]
+fn the_trust_roots_fold_runs_again_only_when_the_fleet_generation_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let store = Store::open(&path, "node", Arc::new(FaultRuntime::new())).unwrap();
+    let folds = || super::principals::MEMBER_ROOT_FOLDS.with(|folds| folds.get());
+    // Each call is the first thing a write transaction does, as the judge's chunks are.
+    let roots = |store: &Store| {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        let roots = store.trust_roots(&transaction, "node").unwrap();
+        transaction.commit().unwrap();
+        roots
+    };
+    let before = folds();
+    let first = roots(&store);
+    assert_eq!(folds(), before + 1, "the first call folds membership");
+    assert_eq!(roots(&store), first);
+    assert_eq!(roots(&store), first);
+    assert_eq!(folds(), before + 1, "the same generation reuses the fold");
+    store
+        .connection
+        .write()
+        .execute(/* sqlite-large-value: allow-for-now lv-hefad97e271db owner=smallclaims::store::projection_busy_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_generation SET value=value+1 WHERE id=1", [])
+        .unwrap();
+    assert_eq!(roots(&store), first);
+    assert_eq!(folds(), before + 2, "a moved generation folds again");
 }

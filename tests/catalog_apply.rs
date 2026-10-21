@@ -14,13 +14,12 @@ use sha2::{Digest as _, Sha256};
 use support::{CommandOwnedChildGroupExt as _, OwnedChildGroup};
 
 fn st2() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
 }
 
-const DEMO_WASM_SRC: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/crates/agent-spec/tests/fixtures/demo_resolver.wasm"
-);
+fn demo_wasm_src() -> &'static str {
+    test_env!("CARGO_MANIFEST_DIR", "/crates/agent-spec/tests/fixtures/demo_resolver.wasm")
+}
 
 fn agent(identity: &str, retired: bool) -> String {
     format!("agent \"{identity}\" {{\n  host \"host\"\n  retired #{retired}\n  argv \"true\"\n}}\n")
@@ -115,7 +114,7 @@ fn raw_snapshot(catalog: &Path, output: &Path) -> Output {
 }
 
 fn prepared_root_sha256(catalog: &Path, prepared: &Path) -> String {
-    st2::catalog_transaction::digest_prepared(catalog, prepared)
+    fractal_legacy_runner::catalog_transaction::digest_prepared(catalog, prepared)
         .map(|digest| digest.root_sha256)
         // Negative apply fixtures deliberately cannot be digested. A well-formed mismatch lets
         // the apply command itself reach and report the more specific structural rejection.
@@ -384,6 +383,7 @@ fn catalog_digest_is_a_typed_read_only_projection_receipt() {
     assert_eq!(control_after, control_before);
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn apply_input_fence_survives_source_free_crash_resume() {
     let temp = tempfile::tempdir().unwrap();
@@ -653,6 +653,7 @@ fn concurrent_bootstrap_has_one_publication_and_one_exact_replay() {
     }));
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn bootstrap_crash_boundaries_replay_from_absent_or_complete_only() {
     let temp = tempfile::tempdir().unwrap();
@@ -727,6 +728,7 @@ fn bootstrap_crash_boundaries_replay_from_absent_or_complete_only() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn bootstrap_publishes_its_lock_before_readers_can_enter() {
     let temp = tempfile::tempdir().unwrap();
@@ -784,6 +786,7 @@ fn bootstrap_publishes_its_lock_before_readers_can_enter() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn bootstrap_capture_is_not_redirected_by_a_source_swap() {
     let temp = tempfile::tempdir().unwrap();
@@ -907,6 +910,7 @@ fn bootstrap_composes_with_the_next_root_cas_apply_generation() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn bootstrap_target_capability_cannot_be_redirected_by_symlink_swaps() {
     let temp = tempfile::tempdir().unwrap();
@@ -953,6 +957,7 @@ fn bootstrap_target_capability_cannot_be_redirected_by_symlink_swaps() {
     assert!(external.read_dir().unwrap().next().is_none());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn bootstrap_replay_validates_the_same_catalog_capability_it_locked() {
     let temp = tempfile::tempdir().unwrap();
@@ -973,7 +978,7 @@ fn bootstrap_replay_validates_the_same_catalog_capability_it_locked() {
         .success()
     );
 
-    let incumbent_lock = st2::CatalogLock::exclusive(&target).unwrap();
+    let incumbent_lock = fractal_legacy_runner::CatalogLock::exclusive(&target).unwrap();
     let attempt = temp.path().join("replay-lock-attempt");
     let mut child = st2();
     child
@@ -1175,6 +1180,7 @@ fn paused_bootstrap(
     command.spawn_owned().unwrap()
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn paused_catalog_child_is_reaped_when_test_unwinds() {
     let temp = tempfile::tempdir().unwrap();
@@ -1208,10 +1214,10 @@ fn paused_catalog_child_is_reaped_when_test_unwinds() {
 
     let child_pid = child_pid.get();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while st2::host_lock::process_alive(child_pid) && Instant::now() < deadline {
+    while fractal_legacy_runner::host_lock::process_alive(child_pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(2));
     }
-    let survived = st2::host_lock::process_alive(child_pid);
+    let survived = fractal_legacy_runner::host_lock::process_alive(child_pid);
     if survived {
         unsafe {
             libc::kill(child_pid, libc::SIGKILL);
@@ -1453,7 +1459,7 @@ fn relative_profile_modules_reject_unsafe_missing_and_unprojected_inputs() {
     )
     .unwrap();
     assert!(
-        st2::validate::validate(&missing)
+        fractal_legacy_runner::validate::validate(&missing)
             .issues
             .iter()
             .any(|issue| issue.code == "profile-module")
@@ -1529,7 +1535,7 @@ fn raw_preimage_repairs_catalogs_with_unadmitted_profile_modules() {
         let desired = temp.path().join(format!("raw-module-desired-{case}"));
         write_agent(&desired, "worker", false);
         fs::create_dir(desired.join("resolvers")).unwrap();
-        fs::copy(DEMO_WASM_SRC, desired.join("resolvers/repaired.wasm")).unwrap();
+        fs::copy(demo_wasm_src(), desired.join("resolvers/repaired.wasm")).unwrap();
         fs::write(
             desired.join("catalog.kdl"),
             profile_catalog_config(&[("dev.example.goal", "resolvers/repaired.wasm")]),
@@ -1642,7 +1648,7 @@ fn prepared_profile_bundle_applies_and_loads_from_live_catalog() {
     let source = temp.path().join("source");
     write_agent(&source, "worker", false);
     fs::create_dir(source.join("resolvers")).unwrap();
-    fs::copy(DEMO_WASM_SRC, source.join("resolvers/goal.wasm")).unwrap();
+    fs::copy(demo_wasm_src(), source.join("resolvers/goal.wasm")).unwrap();
     fs::write(
         source.join("catalog.kdl"),
         profile_catalog_config(&[("dev.example.goal", "resolvers/goal.wasm")]),
@@ -1659,14 +1665,15 @@ fn prepared_profile_bundle_applies_and_loads_from_live_catalog() {
     );
     assert_eq!(
         fs::read(catalog.join("resolvers/goal.wasm")).unwrap(),
-        fs::read(DEMO_WASM_SRC).unwrap()
+        fs::read(demo_wasm_src()).unwrap()
     );
-    let registry = st2::catalog::declared_profiles(&catalog).unwrap();
+    let registry = fractal_legacy_runner::catalog::declared_profiles(&catalog).unwrap();
     assert_eq!(
         registry.get("dev.example.goal").unwrap().module(),
         Some(catalog.join("resolvers/goal.wasm").as_path())
     );
 }
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn profile_module_publication_is_superset_biased_around_catalog_kdl() {
     let temp = tempfile::tempdir().unwrap();
@@ -1728,6 +1735,7 @@ fn profile_module_publication_is_superset_biased_around_catalog_kdl() {
     assert!(catalog.join("resolvers/new.wasm").is_file());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn profile_module_recovery_admits_only_recorded_projected_module_paths() {
     let temp = tempfile::tempdir().unwrap();
@@ -2044,7 +2052,7 @@ profile "dev.example.observe" {{
 "#
     );
     fs::write(catalog.join("catalog.kdl"), &legacy_config).unwrap();
-    let legacy_error = st2::catalog::load(&catalog).unwrap_err();
+    let legacy_error = fractal_legacy_runner::catalog::load(&catalog).unwrap_err();
     assert!(
         legacy_error
             .to_string()
@@ -2089,9 +2097,9 @@ profile "dev.example.observe" {{
     write_agent(&desired, "worker", false);
     fs::create_dir_all(desired.join("resolvers")).unwrap();
     fs::create_dir_all(desired.join("providers")).unwrap();
-    fs::copy(DEMO_WASM_SRC, desired.join("resolvers/observe.wasm")).unwrap();
+    fs::copy(demo_wasm_src(), desired.join("resolvers/observe.wasm")).unwrap();
     fs::copy(
-        DEMO_WASM_SRC,
+        demo_wasm_src(),
         desired.join("providers/observe.component.wasm"),
     )
     .unwrap();
@@ -2132,7 +2140,7 @@ profile "dev.example.observe" {{
         fs::read_to_string(agent.join(".workspace/session.txt")).unwrap(),
         "preserve live workspace"
     );
-    let applied = st2::catalog::load(&catalog).unwrap();
+    let applied = fractal_legacy_runner::catalog::load(&catalog).unwrap();
     assert_eq!(applied.pty_root.as_deref(), Some(pty_root));
     assert_eq!(
         applied.profiles[0]
@@ -2148,7 +2156,7 @@ profile "dev.example.observe" {{
     );
     assert_eq!(
         fs::read(catalog.join("providers/observe.component.wasm")).unwrap(),
-        fs::read(DEMO_WASM_SRC).unwrap()
+        fs::read(demo_wasm_src()).unwrap()
     );
 }
 
@@ -2165,7 +2173,7 @@ fn raw_preimage_accepts_valid_bytes_and_wrong_cas_preserves_declarations() {
     let workspace = agent_dir(&valid, "worker").join(".workspace");
     fs::create_dir(&workspace).unwrap();
     fs::create_dir_all(valid.join("resolvers")).unwrap();
-    fs::copy(DEMO_WASM_SRC, valid.join("resolvers/observe.wasm")).unwrap();
+    fs::copy(demo_wasm_src(), valid.join("resolvers/observe.wasm")).unwrap();
     fs::write(
         valid.join("catalog.kdl"),
         profile_catalog_config(&[("dev.example.observe", "resolvers/observe.wasm")]),
@@ -2215,7 +2223,7 @@ fn raw_preimage_accepts_valid_bytes_and_wrong_cas_preserves_declarations() {
     assert_eq!(stale_module_apply["status"], "applied");
     assert_eq!(
         fs::read(valid.join("resolvers/observe.wasm")).unwrap(),
-        fs::read(DEMO_WASM_SRC).unwrap()
+        fs::read(demo_wasm_src()).unwrap()
     );
     assert!(workspace.is_dir());
 
@@ -2238,7 +2246,7 @@ fn raw_preimage_accepts_valid_bytes_and_wrong_cas_preserves_declarations() {
     fs::write(&module_alias, b"mutated alias").unwrap();
     assert_eq!(
         fs::read(&live_module).unwrap(),
-        fs::read(DEMO_WASM_SRC).unwrap()
+        fs::read(demo_wasm_src()).unwrap()
     );
 
     let invalid = temp.path().join("invalid");
@@ -2337,6 +2345,7 @@ fn raw_preimage_treats_the_live_envelope_and_pty_root_as_bytes() {
     assert!(!catalog.join(".st2/catalog-apply-incomplete").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn raw_preimage_resume_uses_the_durable_validated_stage() {
     let temp = tempfile::tempdir().unwrap();
@@ -2978,6 +2987,7 @@ fn retained_capture_refuses_a_destination_inside_its_source_before_traversal() {
     assert!(!catalog.join(".st2/catalog-apply-incomplete").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn concurrent_control_creation_fsyncs_both_the_creator_and_racing_observer_paths() {
     let temp = tempfile::tempdir().unwrap();
@@ -3082,6 +3092,7 @@ fn concurrent_control_creation_fsyncs_both_the_creator_and_racing_observer_paths
     assert_eq!(fs::read_to_string(creator_branch).unwrap(), "created");
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn crashes_recover_from_the_durable_stage_without_rechecking_partial_live_state() {
     for point in [
@@ -3167,6 +3178,7 @@ fn crashes_recover_from_the_durable_stage_without_rechecking_partial_live_state(
     }
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn a_crash_before_new_identity_publication_resumes_from_control_plane_staging() {
     let temp = tempfile::tempdir().unwrap();
@@ -3208,6 +3220,7 @@ fn a_crash_before_new_identity_publication_resumes_from_control_plane_staging() 
     assert_no_writer_temporaries(&catalog);
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn apply_post_commit_generation_failure_is_fenced_and_recovered() {
     let temp = tempfile::tempdir().unwrap();
@@ -3266,6 +3279,7 @@ fn apply_post_commit_generation_failure_is_fenced_and_recovered() {
     assert!(!catalog.join(".st2/catalog-apply-incomplete").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn control_directory_swap_cannot_redirect_apply_leaf_or_identity_staging() {
     let temp = tempfile::tempdir().unwrap();
@@ -3325,6 +3339,7 @@ fn control_directory_swap_cannot_redirect_apply_leaf_or_identity_staging() {
     assert!(!retained.join("catalog-apply-incomplete").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn cross_device_leaf_publication_fails_closed_and_remains_source_free_resumable() {
     let temp = tempfile::tempdir().unwrap();
@@ -3378,6 +3393,7 @@ fn cross_device_leaf_publication_fails_closed_and_remains_source_free_resumable(
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn cross_device_identity_publication_fails_closed_and_remains_source_free_resumable() {
     let temp = tempfile::tempdir().unwrap();
@@ -3417,6 +3433,7 @@ fn cross_device_identity_publication_fails_closed_and_remains_source_free_resuma
     assert!(agent_dir(&catalog, "new").join("agent.kdl").is_file());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn recovery_does_not_need_a_partially_broken_old_render_graph() {
     let temp = tempfile::tempdir().unwrap();
@@ -3485,6 +3502,7 @@ fn recovery_does_not_need_a_partially_broken_old_render_graph() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn mismatched_recovery_and_malformed_markers_remain_fenced_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
@@ -3573,6 +3591,7 @@ fn mismatched_recovery_and_malformed_markers_remain_fenced_without_mutation() {
     assert_eq!(fs::read_to_string(&marker).unwrap(), "{broken");
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn marker_time_state_routes_existing_orphans_but_never_flat_falls_back_for_new_agents() {
     let temp = tempfile::tempdir().unwrap();
@@ -3782,6 +3801,7 @@ fn marker_time_state_routes_existing_orphans_but_never_flat_falls_back_for_new_a
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn state_remains_addressable_after_its_spec_is_deleted_mid_apply() {
     let temp = tempfile::tempdir().unwrap();
@@ -3851,6 +3871,7 @@ fn state_remains_addressable_after_its_spec_is_deleted_mid_apply() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn marker_time_message_write_remains_bound_to_its_retained_agent_capability() {
     let temp = tempfile::tempdir().unwrap();
@@ -3939,6 +3960,7 @@ fn marker_time_message_write_remains_bound_to_its_retained_agent_capability() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn marker_time_status_write_remains_bound_to_its_retained_agent_capability() {
     let temp = tempfile::tempdir().unwrap();
@@ -4010,6 +4032,7 @@ fn marker_time_status_write_remains_bound_to_its_retained_agent_capability() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn marker_time_state_plane_writes_reject_a_swapped_state_ancestor() {
     let temp = tempfile::tempdir().unwrap();
@@ -4114,6 +4137,7 @@ fn marker_time_state_plane_writes_reject_a_swapped_state_ancestor() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn completed_apply_between_address_fence_reads_cannot_accept_a_stale_recipient() {
     let temp = tempfile::tempdir().unwrap();
@@ -4166,6 +4190,7 @@ fn completed_apply_between_address_fence_reads_cannot_accept_a_stale_recipient()
     assert!(!catalog.join("host.old").exists());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn task_inventory_fails_closed_without_observing_runtime_during_a_partial_apply() {
     let temp = tempfile::tempdir().unwrap();
@@ -4245,6 +4270,7 @@ fn task_inventory_fails_closed_without_observing_runtime_during_a_partial_apply(
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn agent_publish_serializes_behind_apply_and_rechecks_its_leaf_cas() {
     let temp = tempfile::tempdir().unwrap();

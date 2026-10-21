@@ -269,3 +269,8 @@ into `Environment=` lines alongside the existing `PATH`/`PTY_ROOT` serialization
    subscriber; correlated diagnostics migrated; otelite assertions extended to logs.
 
 Each PR lands CI-green independently; PR2/PR3 depend on PR1's plumbing only.
+
+## st observability
+
+The current daemon, CLI, replication worker and hook-exporter reference is
+[st observability](../../st3/observability.md).

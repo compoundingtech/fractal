@@ -50,9 +50,9 @@ export default githubRepoSettings({
           // The repository merges with merge commits today (the st train did).
           merge_method: 'MERGE',
           grouping_strategy: 'ALLGREEN',
-          // Namespace's measured Linux limit is 320 vCPU / 640 GiB. Each full Workspace CI group
-          // initially requests 40 vCPU / 80 GiB, so five groups fit; PR and main jobs share capacity.
-          max_entries_to_build: 5,
+          // Start three groups with Namespace overflow; retain shared capacity for PRs.
+          // Live tuning changes only this field, preserving the live grouping strategy.
+          max_entries_to_build: 3,
           max_entries_to_merge: 5,
           min_entries_to_merge: 1,
           min_entries_to_merge_wait_minutes: 5,
@@ -62,5 +62,16 @@ export default githubRepoSettings({
         },
       },
     ],
+  }), githubRuleset({
+    // Evidence records are tags (docs/st3/gate-evidence.md, "Records as tags"): once written, a record is never deleted or moved,
+    // so a newer failing record cannot be removed to let an older pass decide again. Creation stays open: producers create tags.
+    // No bypass actor: scripts/evidence-gc turns this ruleset's enforcement off only around its own tag deletions (--lock-config,
+    // logged, relocked in a finally and checked), and the protection that does not depend on GitHub is the signed evidence log.
+    name: 'evidence-tags',
+    target: 'tag',
+    enforcement: 'active',
+    bypass_actors: [],
+    conditions: { ref_name: { include: ['refs/tags/evidence/**'], exclude: [] } },
+    rules: [{ type: 'deletion' }, { type: 'update' }, { type: 'non_fast_forward' }],
   })],
 })

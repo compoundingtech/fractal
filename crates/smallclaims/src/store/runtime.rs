@@ -2,14 +2,18 @@
 //!
 //! The graph knows claims, envelopes, batches, documents and blobs, but not what any claim kind
 //! means. A runtime knows its kinds: their schemas, the tables it projects them into, and which of
-//! them a checkpoint may drop. The store calls it at each of these seams, inside the store's own
-//! transactions, and never the other way around: the runtime may call the graph freely.
+//! them a checkpoint may drop. Projection mutations run inside the store's transactions;
+//! bounded startup work may commit its own chunks before readers are exposed.
+//! The runtime may call the graph freely.
+
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use rusqlite::{Connection, Transaction};
 use serde_json::{Value, json};
 
 use super::checkpoint::{DropPlan, SealedSet};
+use super::checkpoint_staging::{CheckpointClaimFacts, StagedPlanner};
 use super::{ReplicatedClaimAdmission, Store, append_claim_record_tx};
 use crate::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
 use crate::error::Error;
@@ -45,6 +49,20 @@ pub struct ReplayProgress {
 
 /// A runtime's claim kinds and projections.
 pub trait Runtime: Send + Sync {
+    /// Optional process-local invalidation at the single writer's resolution boundary.
+    fn writer_observer(&self) -> Option<std::sync::Arc<dyn crate::sqlite::WriterObserver>> {
+        None
+    }
+    /// A completed local response still names live work. Cleanup extends its retry window;
+    /// the runtime checks only the bounded candidate, never its complete history.
+    fn idempotency_response_in_use(
+        &self,
+        _connection: &Connection,
+        _response: &str,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Migrate an older store's tables before any table is created. The graph has checked that
     /// the schema version is one it supports.
     fn migrate_schema(&self, connection: &Connection) -> Result<()>;
@@ -52,13 +70,38 @@ pub trait Runtime: Send + Sync {
     /// Create the runtime's tables and its indexes on the claim log, once the graph's exist.
     fn create_schema(&self, connection: &Connection) -> Result<()>;
 
+    /// Install a runtime for a store that had no user objects when opening began.
+    /// Runtimes may batch fresh DDL here; existing and incomplete stores use create_schema.
+    fn create_schema_for_fresh_store(&self, connection: &Connection) -> Result<()> {
+        self.create_schema(connection)
+    }
+
     /// Bring the runtime's projections up to date as the store opens: a store in shared memory
     /// is new, and a store on disk may need a replay after an upgrade.
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()>;
 
+    /// Persist bounded initialization metadata after `open_projections` commits.
+    /// Called before readers are exposed; full projection builds belong to
+    /// post-serving maintenance, not this first-serving critical path.
+    fn finish_open_projections(&self, _connection: &mut Connection) -> Result<()> {
+        Ok(())
+    }
+
     /// The digest of the claim kinds and fields this build knows. Peers whose digests differ may
     /// project the same claims differently, so they compare their logs instead of their graphs.
     fn schema_digest(&self) -> String;
+
+    /// Claim vocabulary and shared layout before per-table definition versions. An older
+    /// peer advertises this identity as schema_digest. No admission depends on this value.
+    fn projection_registry_digest(&self) -> String {
+        self.schema_digest()
+    }
+
+    /// Definition versions different from the implicit legacy version 1. All table digests
+    /// stay advertised; a comparison skips only tables with different definition versions.
+    fn projection_versions(&self) -> BTreeMap<String, u64> {
+        BTreeMap::new()
+    }
 
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
     fn classify_replicated_claim(
@@ -67,6 +110,18 @@ pub trait Runtime: Send + Sync {
         batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, Error>;
+
+    /// `classify_replicated_claim` for a runtime whose answer depends only on the claim and this
+    /// build, never on the store: admission then classifies before it takes the writer. `None`,
+    /// the default, means the runtime reads the store, and the claim is classified under the
+    /// writer as before.
+    fn classify_replicated_claim_unbound(
+        &self,
+        _batch: &ReplicaBatch,
+        _claim: &ClaimRecord,
+    ) -> Option<Result<ReplicatedClaimAdmission, Error>> {
+        None
+    }
 
     /// Append a claim this node writes, from a client's input. The runtime decides how the claim
     /// is kept (some kinds stay local observations), validates it, appends it through the graph
@@ -128,6 +183,14 @@ pub trait Runtime: Send + Sync {
     /// Reapply this node's local state that a projection replaced, once a projection ends.
     fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), Error>;
 
+    /// Once per managed outer transaction, after all batched jobs or lent helpers
+    /// and before source-adapter finalization and COMMIT. Bound maintenance for the
+    /// entire transaction here, not in append/projection helpers that may repeat.
+    /// Startup and checkpoint-copy raw transactions do not use this boundary.
+    fn before_commit(&self, _transaction: &Transaction<'_>) -> Result<()> {
+        Ok(())
+    }
+
     /// Projections changed beneath whatever the runtime keeps in memory about them.
     fn forget_views(&self);
 
@@ -141,8 +204,26 @@ pub trait Runtime: Send + Sync {
     /// only when their rules digests match.
     fn checkpoint_rules_digest(&self) -> String;
 
+    /// Fail before sealing history or copying a store when a runtime has no checkpoint contract.
+    fn checkpoint_preflight(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Decide what a checkpoint drops from `sealed`: a pure function of the sealed claims.
     fn plan_checkpoint_drops(&self, sealed: &SealedSet) -> DropPlan;
+
+    /// What the staged planner reads of one sealed claim's body, computed while the capture
+    /// holds the body. A runtime with no checkpoint rules reads nothing.
+    fn checkpoint_claim_facts(&self, _claim: &ClaimRecord) -> CheckpointClaimFacts {
+        CheckpointClaimFacts::default()
+    }
+
+    /// Decide what a checkpoint drops from a staged set, by marking its staged claims: the same
+    /// decision `plan_checkpoint_drops` makes from the set in memory. Marking nothing drops
+    /// nothing.
+    fn plan_staged_checkpoint_drops(&self, _planner: &StagedPlanner<'_>) -> Result<()> {
+        Ok(())
+    }
 
     /// Empty every projection, and every local table that refers to claims, on a copy of the
     /// store that a checkpoint proof is about to cut down to its sealed set.
@@ -158,6 +239,27 @@ pub trait Runtime: Send + Sync {
         subject: &str,
         cut: u128,
     ) -> Result<Value>;
+
+    /// Answers that belong to no one subject, such as a fold across every seat, that a checkpoint
+    /// must leave unchanged. The proof computes them on its copy, which they may write to, before
+    /// and after the drop, and compares them with the subjects' answers.
+    fn checkpoint_global_answers(&self, _transaction: &Transaction<'_>) -> Result<Option<Value>> {
+        Ok(None)
+    }
+
+    /// Return the same proof answers, with optional bounded per-item source identities captured
+    /// during that read. Sources are diagnostic only and never enter the proof/digest contract.
+    fn checkpoint_subject_answers_with_sources(
+        &self,
+        connection: &Connection,
+        subject: &str,
+        cut: u128,
+    ) -> Result<(Value, super::checkpoint::CheckpointAnswerSources)> {
+        Ok((
+            self.checkpoint_subject_answers(connection, subject, cut)?,
+            Default::default(),
+        ))
+    }
 }
 
 /// The runtime of a program that only keeps and syncs claims: it accepts every claim as it is,

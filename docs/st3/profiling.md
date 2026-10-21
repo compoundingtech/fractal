@@ -4,6 +4,327 @@ A daemon that answers slowly is usually waiting, not computing: for the store's 
 one of its read connections, or for SQLite. The daemon can account for its own time so that a slow
 request names what it waited for and who held it.
 
+`GET /v1/client/request-latency` reports completed response-envelope timings without enabling
+profiling. Its `routes` array retains mixed route totals (`scope: "route"`) and adds independent
+`scope: "work-action"` rows for POST claim, renew, progress, complete, fail, release and extend.
+An action row has a static route such as `/v1/work/renew/{*subject}`, `method: "POST"` and
+`action: "renew"`; it retains no subject, body or token. Action samples are subsets of the mixed
+route totals, so do not add counts across scopes. The seven action buckets are independent of the
+256 general-route limit.
+
+`GET /v1/client/agents` also gets `scope: "agents-read"` rows, `method: "GET"`, with `read` set to
+`first-page`, `fresh` or `continuation` (any page with a `cursor`). A `fresh=true` first page waits
+up to two seconds for a refresh to publish at or after the read's own cut, including when the
+refresher is idle. Only a failed latest attempt with no newer attempt in flight returns the
+newest publication at once. Its original snapshot cut and publication time show its age.
+The other two answer at once from a published roster. Count the fresh row against its own
+target: the route total includes it.
+
+A first page with `min_cut=N` instead waits for that fixed host-local acceptance index,
+not the changing request head. It uses the same `fresh` request-latency classification and
+`fresh-wait`/`fresh-page` stages. If both `fresh=true` and `min_cut` are supplied, only the
+named barrier runs. Plain CLI listings send neither and remain `first-page` reads.
+
+`scope: "agents-roster"` rows (also under route `/v1/client/agents`) time where that wait goes,
+each in its own last-512 sample, `duration_scope: "roster-stage"`. Stage `refresh` is one refresher
+fold from the previous publication, `refresh-cold` one with no publication to start from, which
+refolds every card from the log (the daemon's first complete roster, or after a chunked
+replication projection, a trim or a repair forgot every kept reduction), and `refresh-admission`
+its wait for roster admission (`population: "refresher-folds"`).
+Stage `fresh-wait` is a fresh read's wait for a publication at its cut (2 s at most), and
+`fresh-page` the page it then builds (`population: "fresh-reads"`). Stages are not requests: they
+add no route or path rows.
+
+`scope: "work-list"` rows (under route `/v1/client/work`) time a current-work read served from
+the published work list, `duration_scope: "work-stage"`. Stage `fresh-wait` is a fresh read's wait
+for a publication at its cut (2 s at most, `population: "fresh-reads"`); `page` a first page served
+from a publication, and `actor-build` one whose read built its actor's order in that publication
+(`population: "first-pages"`). They add no route or path rows. A fresh work read, which `st work ls`
+sends, still counts in full, wait included, under the `GET /v1/client/work` route and its
+`person-read` target: it has no `(fresh)` path or target of its own.
+
+Each row's `count` is its completed-response count since this process started, including error
+responses. Percentiles use its last at most 512 completions (`recent_count`), in whole milliseconds.
+Renew and claim have separate counts and percentile samples. `duration_scope: "response-envelope"`
+includes handler queueing, request work, durable admission and envelope serialization; it does not
+subtract writer wait or report only a hierarchy component. This is server completion time, not
+network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
+route durations include deliberate waiting.
+
+## Background task CPU
+
+The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
+`st.task.polls`, a counter of future polls and blocking invocations, through its
+existing OTel meter provider. Both carry the bounded static attribute `st.task`.
+Two thread-CPU clock reads bracket each future poll, on the thread executing
+that poll; time asleep, queued, or waiting between polls is not CPU. Blocking
+callbacks are measured on their executing thread, not the awaiting Tokio worker.
+These counters do not require file profiling. An unavailable thread CPU clock
+omits that CPU sample rather than recording wall time; polls still count.
+Task metric recording is enabled only after the OTel metrics provider is installed.
+With metrics disabled, each async wrapper checks that switch once and awaits its
+future directly; each blocking scope checks it once before constructing instruments,
+reading clocks or entering the task-metric recorder. New callback and writer batch
+lexical scopes also skip performance/profile/origin entry entirely when disabled.
+Callbacks that already had synchronous attribution use explicit profile-preserving
+or performance-only adapters; their existing shared performance-meter lock and
+attribution remain independent of metrics export and are not claimed to be zero-cost.
+The reconcile cost-counter metric covers classified background passes only:
+completed startup, notification, deadline and changed-repeat trigger spans, with
+only SQL recorded inside those same spans. It reads both operation buckets:
+`reconcile` owns a pass with task metrics on; `task reconcile-pass` owns it with
+file profiling on and task metrics off. The inner task never starts a second
+operation while the outer one is current, so each pass contributes only once.
+Direct and unclassified passes, next-deadline callbacks and async polls are excluded.
+The direct/unclassified remainder is not measured and is not exported as zero.
+Process CPU remains a whole-process measurement, not classified-pass CPU.
+Each future keeps CPU and poll totals locally, flushing to OTel at most once a
+second while polling and once when it completes or is dropped. A parked task's
+remaining sample is flushed when it next polls or is dropped; there is no timer
+task per wrapper. Nested wrappers on the same thread count their polls but leave
+CPU to the outermost wrapper, so adding their rates does not count that CPU twice.
+Blocking invocations flush on return (or unwind), not once per second. An
+outermost invocation reads the thread CPU clock twice; each invocation adds its
+poll count and nonzero CPU to OTel and records a performance task (including the
+shared meter lock).
+The CPU counter measures the wrapped work, not the full cost of publishing its
+own sample; process CPU is needed to measure instrumentation overhead.
+
+For a Prometheus translation that replaces dots with underscores and appends the
+counter suffix, CPU usage in cores is:
+
+```promql
+sum by (st_task) (rate(st_task_cpu_time_total[5m]))
+```
+
+Collectors that add unit suffixes may expose this as
+`st_task_cpu_time_seconds_total`; use the collector's translated name. In Grafana
+dashboards use `$__rate_interval` instead of a fixed range.
+
+Names distinguish `reconcile` and its timers, `published_list.agents`,
+`published_list.missions`, `published_list.work`, replication transport and
+export/receive work, startup warmup, checkpoints/WAL, retention and other
+maintenance. They contain no seat IDs, peer names, collection values from
+requests, or request paths. HTTP handlers and serving tasks remain under their
+existing HTTP instrumentation, not these background-task wrappers. Work done by
+child processes is not included in the parent's thread CPU.
+
+The same static task scopes label background writer submissions when file
+profiling is enabled. Each batched savepoint runs under its own submitter's
+profile operation. `writer.batch.job` includes SAVEPOINT, the callback and
+RELEASE or ROLLBACK TO/RELEASE, including unsuccessful callbacks. Its `st.task`
+CPU is an aggregate across writer jobs, not attribution to an individual request
+or original background task. Nested wrappers count invocations but leave CPU to
+this outer job scope. Shared setup uses `writer.batch.setup`; finalizers, COMMIT
+(or failed-batch resolution) and postcommit observers use one nonoverlapping
+`writer.batch.commit` invocation. Thus a batch with N executed jobs has N job
+invocations and one setup and one commit invocation; nested callbacks can add
+their own poll counts, but not duplicate CPU. A job skipped after batch failure
+has no executed-job sample. Individual submitters retain their profile CPU,
+I/O and SQL attribution. All accounting scopes finish before acknowledgements,
+so callers cannot snapshot their completed operations before samples arrive.
+
+The batch `WriterHold` and telemetry `Holding` guard also drop before the first
+ACK is sent, after postcommit callbacks and sample publication. Previously they
+dropped when the batch function returned, after sending every ACK. The holds
+window now removes the in-progress batch and records its held duration before
+ACK delivery; holder totals/maxima, long-hold durations and over-target counts
+exclude ACK-channel blocking/delivery time. The OTel writer holder is cleared
+before ACKs, so a waiter during ACK delivery no longer sees the preceding job as
+the holder. This does not mean the writer has started its next batch: ACK
+backpressure can still delay that. It does not change COMMIT durability or
+move observers after acknowledgements.
+
+
+## Targets and live windows
+
+[`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
+writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
+the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
+A target describes what we aim for and gates nothing by itself.
+
+The request-latency read adds `targets` and `paths` to `routes`. Each target and each path keeps
+rolling 1-minute, 5-minute and 1-hour windows with `count`, `p50_ms`, `p99_ms`, `max_ms`,
+`over_target` and `over_target_share`. A path is `METHOD /route`, or `stream COLLECTION` for the
+time from a subscription on the client collections socket to its first snapshot, conversation
+page or terminal screen. A read the daemon relayed from another machine's owner counts toward
+the target's `remote_windows` and its remote target. A request that asks to wait (`wait_ms` above
+zero, or `wait=true`) is a long poll: it is kept under `METHOD /route (long poll)` and counts
+toward no target. An agents list with legacy `fresh=true` or an explicit `min_cut` asks to wait for a
+publication. Ordinary `st agents ls` and `st agents tree` send neither. The explicit wait is
+still a wait a person sits through, so it is the path `GET /v1/client/agents (fresh)` with its own `person-read-fresh`
+target and counts toward no other: a first page is held to the 100 ms of `person-read`, a fresh
+list to 300 ms. The `sql-statement`, `transaction` (`read`, `write`, `writer_hold`) and `cpu`
+rows cover the store's statements, its read and write transactions, each hold of its single
+writer, and the process's CPU in cores.
+
+The `writer-hold` row names who held the writer, against the transaction target (`max_ms`).
+It is always on, without `ST3_PROFILE_DIR`. A holder is the request route or background task
+the asking thread worked for, with the request's client when known, or `(thread NAME)`; each
+row also gives `at`, the code location that asked. A batch is charged to the write in it that
+ran longest; a lent writer to its borrower. `in_progress` lists each writer's current hold,
+oldest first, with its holder, start (`started_unix_ms`) and `held_ms`, so a stuck hold shows
+before it ends. `holders` ranks up to 16 holders by writer time over the last hour (count, over
+target, total and max). `long_holds` and `long_reads` keep the last 64 writer holds and read
+transactions over the target in that hour, newest first; a long hold also gives its `kind`
+(`batch` or `lend`), `writes` and `longest_write_ms`. The replication projection chunk's loan
+also says where its hold went: `stages` gives the time in each of `begin` (BEGIN IMMEDIATE),
+`chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
+`health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
+and log sinks, which run under the writer) and `release` (giving the connection back, with the
+commit observers it runs). `unattributed_ms` is the rest: the handoff between the writer thread
+and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
+`begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
+not by itself show that their marks are placed right. `open_reads` lists up to eight read
+snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
+waiting for admission, and `threads` counts this process's threads, in all and by name. `st
+doctor` prints it as `slo/writer-hold`.
+
+Three more fields show what keeps the WAL from recycling:
+- `read_loans` lists every read loan now, grouped by the route label of the read budget it works
+  under (`(no budget)` for background work). Each route gives `checkouts`,
+  `snapshot_checkouts`, `expired` (loans whose budget has run out), `oldest_checkout_age_ms` and
+  `oldest_snapshot_confirmed_age_ms`. The eight routes with the oldest checkouts come first, and
+  the rest are summed as `(other)`. A checked-out loan need not hold a read transaction; a
+  confirmed snapshot has completed its first read and does.
+- `wal` is the newest attempt by the WAL checkpoint worker, which tries every five seconds:
+  `checkpoint` (`outcome` empty, recycled, deferred or error, with `frames`, `backfilled`,
+  `not_backfilled` and its phase times), `wal_bytes` (the WAL file's size), `age_ms`, and
+  `deferred_ms`, how long checkpoints have been deferred or failing since one last settled.
+- `snapshot_build` gives windows for the three phases of building a replication snapshot:
+  `wait` for the build lock, which one build holds at a time; `inventory` for reading the
+  envelope inventory; and `digest` for hashing its digests. A build that fails partway still
+  records the phases it reached, so these are not only successful builds.
+
+Waiting for a reader, the writer's queue, commits and checkpoints are measured as OpenTelemetry
+histograms when export is on: `db.client.connection.wait_time` (read admission),
+`st.db.writer.queue.duration` (writer admission), `st.db.writer.commit.duration` and
+`st.db.wal.checkpoint.duration`.
+
+The `database` row is this member's store: `max_live_gb` for the pages in use (the file less its
+free pages, which SQLite reuses before the file grows) and `max_growth_mb_per_day` for their net
+daily growth, what is written less what checkpoints and retention free. The daemon samples the
+store hourly, after its local trims, by reading three pragmas, and keeps two days of samples in
+`meta` (`database_size_samples`), so a restart does not lose the growth. Growth is measured from
+the newest sample at least a day old, or extrapolated from the oldest once there is an hour of
+samples; `size` says over what span. Each sample also records the lengths of the main file and its WAL:
+`physical_bytes` is their sum, what the store takes on disk (page counts include pages committed
+to the WAL but not yet copied into the main file, so they are never added to the WAL), and
+`physical_growth_bytes_per_day` compares it with the sample nearest exactly a day ago, within half
+an hour of it, scaled to a day. It is never extrapolated. A sample dated in the future, after the
+clock went back, is dropped. The newest sample is the one every reader uses
+(`fractal_daemon::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
+within it.
+
+The windows live in memory. Each is a ring of slots (12 of 5 seconds, 10 of 30 seconds, 12 of 5
+minutes). Each slot is a sparse histogram with 16 buckets per doubling, so a percentile is
+within a sixteenth of its sample and never above the window's exact maximum. The share over target
+is counted exactly as each sample finishes. Nothing samples on a thread of its own. A window ages
+out when it is next written or read, and a restart empties it.
+
+With `[observations.otlp]` set, the daemon also sends the windows to the collector once a minute
+as gauges, from a timer task that reads the same report as the request-latency read and does no
+work on a request path. A minute the collector refuses is dropped, not replayed; the collector
+holds the history. Each point carries `target`, `series` (`owner` or `remote` for a read target;
+`reported` for a latency paired phones reported; `statement`, `read`, `write` or `writer_hold` for
+the store), `window` (`1m`, `5m`, `1h`) and, on
+latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
+`st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
+figure from `slo/targets.toml`, so one query sets a host's number against its target),
+`st_slo_cpu_cores` and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
+phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
+`st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
+the targets, not every path's snapshot.
+
+`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
+beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
+that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
+target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
+spent; a max target has no allowance, so it is whole or empty; CPU and the database's size read
+against their own ceilings; a phone's live share against the disconnected time its minimum
+allows. A budget is an allowance that resets: each account's weekly and 5-hour limit, with `LEFT`
+the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
+may be the start of an id. The list is computed on each read from the live windows and the limit
+readings, and writes nothing.
+
+The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
+percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
+`NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
+over; a name may declare several percentiles. A `[[count]]` is at most `max_per_hour` events an
+hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci/NAME`, and one
+series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
+time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
+workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
+nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
+not in the request-latency read, its gauges or `st doctor`.
+
+Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
+`main_performance_failures` also reads, with the same token, conditional cache and five-minute
+cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
+completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
+the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
+the member that runs that observer has them; every other member, and that one until its first
+read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
+fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
+first observer that read them; another repository's observer does not read them and logs a warning.
+If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
+workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
+reading as an idle day. Only run-level timestamps and, for `flakes`, artifact names are read, no
+jobs and no logs:
+
+- `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
+  `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
+  a rerun restarts `run_started_at` and reruns only some jobs. A run whose jobs were all skipped, such as a draft's, counts as a fast sample.
+- `merge-latency/p50` and `/p95`: each successful merge group run (head branch
+  `gh-readonly-queue/...`), from its `created_at`, when the group entered the queue, to its
+  `updated_at`, when it went green. This is a proxy for entering the queue until merging: the wait
+  before GitHub creates the group's run and the merge after it are not counted, and a pull request
+  whose group is rebuilt after an ejection counts once per green group, not from its first entry.
+- `flakes`: merge group runs that concluded `failure`, an ejected group, plus the tests nextest
+  passed only on a retry, in the runs that finished in the last hour. Workspace CI's four test lanes
+  name their count in an artifact, `nextest-flaky-<lane>-<N>` (none for 0, see `docs/ci.md`). Each
+  run that finished in the last hour, pull request or merge group, has its artifacts listed once
+  (`GET .../actions/runs/ID/artifacts?per_page=100`, the same token and actions read), at most 20
+  runs a poll, newest first, so a restart cannot burst; the rest are listed on the next polls. The
+  counts stay in the daemon's memory with the runs, kept only while a run is in the hour; a failed
+  listing is tried again on a later poll. Pull request runs are listed only when they succeeded, so
+  a failed pull request run's flaky tests are not counted. A run not listed yet adds no flaky test.
+  About one listing per Workspace CI run, a few hundred a day.
+
+A duration's samples are the runs that finished in the last day; its value is the nearest-rank
+percentile, and `LEFT` is how much of the `100 - percentile` share allowed over its target the
+day has not spent. The count is over the last hour, and with `max_per_hour = 0` one ejected group
+or one flaky test spends it all. A window without a sample, or without a finished pull request or
+merge group run for the count, is `no-data`.
+
+A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
+objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
+`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
+subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
+agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
+fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
+that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
+before the observer has read any runs, neither opens nor ends one. The other objectives open no
+fault.
+
+`st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
+`7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
+remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
+day after seven. A chart column is the lowest reading in its slice of the period, so a brief spend
+shows; a column with no reading is a dot, which means the daemon was down or nothing was
+measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
+serves the same columns. A node with a collector keeps the longer history there.
+
+`st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
+over their target in the last five minutes. A p99 target is missed in a window when more than 1%
+of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
+not `warn`, so `st doctor --strict` does not fail on a target.
+
+For a deployed latency receipt, retain the process/source identity and before/after count delta.
+A low-volume tail can include requests from before the measurement window, and a restart resets
+these in-memory counters. The endpoint alone supplies no queue-versus-work breakdown; the phase
+profiling below supplies that context separately.
+
 Person-ask reconciliation checks for retained `work.person-asked` claims on a read connection
 after importing legacy asks. When there are none, it skips the writer queue so an empty stage
 does not delay the rest of the reconcile pass behind unrelated writes. When asks exist, their
@@ -19,8 +340,8 @@ load.
 | `ST3_PROFILE_SLOW_MS` | Writes a line for each operation slower than this. The default is 250. |
 | `ST3_PROFILE_PTRACER` | Linux only. Lets any process of the same user trace the daemon, so a stack sampler such as `eu-stack` can attach on hosts that allow tracing only a process's own children. |
 
-The daemon records each request route (`GET /v1/messages/page`) and each background pass (`task
-reconcile-pass`, `startup open-store`) as one operation. For each operation it records:
+The daemon records each request route (`GET /v1/messages/page`) and each background pass
+(`reconcile`, `startup.open_store`) as one operation. For each operation it records:
 
 - Its wall time and how long it queued before a thread began it.
 - How long it waited for the store's writer, how long it held the writer, and which operation held
@@ -32,15 +353,107 @@ reconcile-pass`, `startup open-store`) as one operation. For each operation it r
 - Named spans, such as each reconcile stage, and counted notes, such as why a replicated
   projection replayed the graph from nothing.
 
-It writes three files:
+It writes four files:
 
 - `minutes.jsonl` gets one line a minute. The line holds process CPU and I/O, how late the async
   runtime woke a 100 ms timer, each operation of that minute ranked by cost with percentiles, and
   a table of callers by route.
 - `slow.jsonl` gets one line for each slow operation, with the same detail.
 - `totals.json` holds the totals since the daemon started.
+- `in-flight.jsonl` samples unfinished work every ten seconds when at least one tracked
+  operation is a second old. It keeps the oldest 32 labels/callers and ages, including
+  queue wait; at most 4,096 weak registrations are retained. The current file and its
+  single rotated predecessor are capped at 8 MiB each. Labels and callers are capped
+  at 256 UTF-8 bytes with visible truncation flags.
 
 Work on a thread that runs no named operation appears as `(unlabeled THREAD)`.
+
+Collection socket reads name their work `stream collection/missions`,
+`stream collection/attention`, `stream collection/agents`, `stream collection/work`,
+`stream collection/glasses` and `stream collection/arrangements`. Their shared bounded
+claim-kind check is `stream collection/invalidation`. These labels include cache lookup and
+live agent overlays as well as rebuilds; a label's operation count is not a rebuild count.
+The socket remains responsible for its own snapshot and change delivery. Equivalent session
+authority and query windows share computation through a disposable per-Store cache, while each
+read rechecks paired authority and receives its own SQLite snapshot fence. Admission for an
+equivalent cached window waits asynchronously before starting its blocking snapshot reader;
+the physical worker retains admission through cancellation. Cache locks only select or publish
+immutable results. Each Store retains at most 64 windows, with 16 per session; query churn past
+that session quota evicts only that session's inactive windows. Separate local-commit epochs
+survive later ignored claims. Missions share a bounded 200-card fleet projection independent
+of subscriber grants and limits; attention shares by effective person visibility and custom-form
+compatibility. Authorization is checked before reuse, including grant expiry and scope loss.
+Their cached projections record the captured clock and the earliest exact output transition,
+including effective mission-preview leases, recently-ended mission membership and attention
+admission times; a backward clock or reaching a transition rebuilds. Failed/cancelled missions
+remain current through the inclusive 24-hour cutoff and leave one millisecond later. The
+membership fence includes the page's lookahead so `has_more` is refreshed as well as cards.
+Selection, mission `must_act` and previews share the captured read clock. Attention rows do not
+age out: observer grace, final-step fault
+aging and checkpoint waits already belong to the separate fault projection, not this collection.
+Wake times and execution deadlines affect stored states through graph writes, not these cards'
+read clock.
+The socket's existing 30-second timer remains the delivery cadence for clock-only changes.
+This cache covers the six collections named above.
+
+A disposable local single-client cold-read comparison is available with:
+`cargo test -p fractal-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
+It compares uncached, cold cached and warm reads for 100 glass rows under Unix and paired
+sessions, alternating case order and reporting aggregate wall/process CPU. Debug-profile
+fixture results do not measure deployed paired-client CPU or production tail latency.
+
+`cargo test -p fractal-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
+compares 22 uncached projections with shared cold and 22 warm reads over 70 generated missions
+and person steps, asserting projection parity. Its stage profile separates mission attention-run
+selection, definition reads, run overviews, step previews and attention snapshot work. The
+`perf_load` workload includes `collection missions` and `collection attention`: synthetic bursts
+of 20 concurrent WebSocket subscribers alongside the existing busy request mix. These are
+synthetic fixture measurements, not measurements of a deployed daemon or transport latency.
+
+Conversation collection followers (`follow_conversation`) and standalone conversation sockets
+(`conversation_stream_socket`) use the existing conversation page/change reader. Mailbox reads
+already name `task mailbox-snapshot` and `task mailbox-update`. Attention's collection clock
+handles grace and expiry without a claim; HTTP Home/now reads retain their route labels.
+Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen source and periodically
+recheck their live fence; the existing fence span is `terminal/live-fence`. These are source
+locations for investigating ongoing work, not an attribution of process CPU. Long-poll waits and
+socket lifetime must be distinguished from the cost of a completed read.
+
+On `/v1/client/collections/stream` (`st3.client.collections.v0`), a conversation
+subscription additionally owns `stream conversation/first-frame` from accepted receipt
+through its first successful data-frame send. Its `conversation/first-frame-total`
+includes admission/scheduler delay, owner resolution, initial retries, page work and
+outbox/send delay. `completion: finished` means the socket send succeeded, not that
+the client rendered it; cancellation or replacement records `dropped`, not success.
+The follower releases first-frame ownership before its intentional change long poll.
+Async admission, owner resolution/relay, first-page and send spans record wall time
+only. CPU and SQL are charged only during a future's poll or its physical blocking
+worker, never across an async suspension. Native preparation/fold, bounded header,
+stored-message overlay, page/frame preparation and serialization use thread-local
+CPU/SQL spans. These overlapping spans are not additive. Labels are static and carry
+no transcript, audio, text, session identifier or credential attributes. No public
+request-latency rows or diagnostic fields are added.
+
+Local opening captures the first page and replay boundary together, using the native
+keyset fold and reusing its bounded head for the header. Remote opening retains the
+two established owner reads (changes with no cursor and zero wait, then timeline);
+profile those reads separately before attributing repeated fold work to local opening.
+The opening admission pins one graph frontier for routing and managed session identity.
+An `agent/` target reads that subject directly, rather than constructing the fleet owner map.
+The local first page carries that owner and its incarnation through transcript selection,
+the follower mark, native ordering and stored-message overlay; those stages do not resolve
+the owner again. Transcript selection is shared with the mark rather than repeated for it.
+Identity fields and runtime-source selection use newest-first indexed seeks; only genuine
+rival runtime origins require the causal conflict proof. The daemon-cost owner regressions
+compare short and long mixed-origin histories without increasing a growth allowance.
+
+For representative receipts, pin the daemon build and capture five successful initial,
+tab-switch and reconnect frames on the used collections route, with client receipt/render
+time beside the internal profile. Record local versus relayed ownership and cold versus
+warm source state; exclude intentional reconnect-offline time from server-work comparisons.
+The isolated `conversation_first_frame_profile_lifecycle` test runs with
+`ST3_PROFILE_DIR` and `ST3_PROFILE_SLOW_MS=0`; it proves successful completion and
+wall-only async attribution before long-poll idle, not production performance.
 
 A slow record's `completion` is `finished` when the request or task explicitly finished its
 profile. If its owner exits without finishing, including a canceled HTTP request, the last
@@ -51,6 +464,152 @@ response reached the caller. Work still running when the daemon stops has no com
 SQLite reports a statement's time from its first step to its reset, at millisecond resolution. A
 query whose rows the caller processes one at a time includes that processing, so the outer query
 of a nested loop looks slow. Statement times from concurrent operations overlap.
+
+With OpenTelemetry export enabled, `st.reconcile_pass` and `st.reconcile_deadline` are
+independent roots, even when called inside a request or an attached OpenTelemetry context.
+A pass that continues after an isolated member failure or an unavailable PTY snapshot still
+exports ERROR status. `st.fifo.depth` and `st.fifo.oldest_age` describe pending work only:
+writer jobs leave the backlog before waiting to begin their transaction, and closing a writer,
+conversation, or terminal-emulation receiver discards its pending observations.
+Writer observations include foreground jobs, background loans and configuration fences, but not
+internal background-ready notifications. Dispatch removes the selected job's timestamp, so a
+foreground job overtaking a background loan does not erase the older loan's waiting time.
+
+## Writer batching and accounting
+
+The store has one writer connection. Foreground jobs are FIFO. Opt-in background
+loans use a separate queue; a pending background loan can be overtaken by at most
+eight foreground loan or group-commit turns. This bounds dispatch turns, not elapsed
+time or SQL work inside a holder. Configuration fences retain their ordering.
+
+Batched jobs run in one `BEGIN IMMEDIATE` transaction, each in its own savepoint.
+The writer stops taking more jobs after 256 jobs, 50 ms, or a lent write, commits
+once, then answers callers. A failed or panicking job rolls back only its savepoint;
+a failed transaction begin or commit fails the batch. A caller hears success after
+commit. A lent write manages its own transactions and returns the connection when
+it finishes. With `synchronous = FULL`, batching shares one disk flush across the
+jobs in that commit.
+
+Under `ST3_PROFILE_DIR`, an operation counts the time before its writer job starts
+as writer wait, and the job itself as writer hold. The batch `COMMIT` appears under
+`(unlabeled st3-writer)`, whose statement count is the number of batches. Phase times
+and the enclosing operation can overlap; they must not be added as independent
+request durations.
+
+### Isolated native message-selector cost receipts
+
+The ignored native controls in `crates/fractal-api-core/src/api/client_messages_selector_tests.rs`
+use fresh temporary stores, not daemon databases. Run them in the admitted native
+proof lane with the same optimized build, filesystem and durability settings for
+both designs; retain the exact source/build identity, command, machine/filesystem,
+complete stderr JSON and exit status. Focused Cargo filters (with
+`cargo test --release -p fractal-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
+
+- `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
+  each with 32 metadata claims, explicit native rebuild and first/next pages.
+- `benchmark_client_messages_selector_closed_heavy`: 12,800 real messages,
+  12,672 closed, explicit native rebuild and open first/next pages.
+- `benchmark_client_messages_selector_write_bursts`: identical 128 sends,
+  256 delivered/read setup commits and 128 closes per design. Fresh source-only
+  and selector-enabled stores run in reversed order across two rounds; full
+  authoritative message views must agree.
+- `benchmark_client_messages_selector_deferred_maintenance`: a real 128-message,
+  32-metadata-claims-per-message fixture followed by one native delivered-claim
+  batch that must leave pending work. It drains independent production maintenance
+  calls, retains each loan's interval and maximum, gates every call at 100 ms,
+  and checks fully drained headers, canonical body status and complete page/oracle
+  equality. The source batch's COMMIT and maintenance checkpoint are separate.
+- `benchmark_client_messages_selector_migration_copy`: requires
+  `ST3_CLIENT_MESSAGES_SELECTOR_MIGRATION_COPY` naming an explicitly supplied,
+  checkpointed **offline copy** with 118,000–118,999 claims. Only a further fresh
+  temporary copy is mutated. It reports total Store open, native startup backfill,
+  explicit rebuild, outside-transaction checkpoint and populated reopen separately.
+  A copy with completed selectors is rejected as migration evidence.
+
+The scaling and closed-heavy controls now gate the **maximum** of every real
+rebuild chunk against the existing 100 ms transaction target, independently of
+page p95. The offline control does the same for startup and explicit rebuild.
+`selector_backfill_transactions` reports BEGIN-through-durable-COMMIT maximum,
+the phase and work/COMMIT times for that transaction, plus the independently
+longest COMMIT's phase, work, Unix-microsecond interval and WAL file length.
+Work includes BEGIN and progress/fold bookkeeping, not just one selector SQL
+step. `checkpoint_outside_transactions_ms` is the driver's PASSIVE checkpoint;
+it is not deducted from transaction time or from total Store open. These are
+observed cohort maxima, **not** a universal scheduler/fsync tail guarantee.
+
+The write control retains FULL (`synchronous=2`) and verifies automatic
+checkpointing is disabled. Its `commit_inclusive` distribution includes max and
+the count at or over 100 ms; every append call must be below 100 ms. This is an
+outer call scope, including writer admission, native append/projection, selector
+finalization and COMMIT, **not** an isolated SQL transaction measurement.
+Per-commit indexed wall times and Unix-microsecond intervals allow correlation
+with a contemporaneous native profile or OS trace. They do not by themselves
+attribute a slow call to selector work or fsync. Profiling's batch COMMIT label
+above and the backfill phase counters must not be conflated.
+
+The deferred-maintenance control reports a conservative transaction envelope:
+preflight reads, writer admission, BEGIN, the production finalizer, durable COMMIT
+and remaining-work checks. Unlike the startup/rebuild counters, this public
+maintenance call does not expose separate selector-work/COMMIT timings. A slow
+loan requires native profiling/OS tracing or a contract-preserving test-only phase
+hook at that production boundary; its outer wall time must not be labeled isolated
+SQL work. A finite fixture and passing observed maxima do not establish a universal
+bound for all future workloads.
+
+`client_messages_selector_checkpoint` records TRUNCATE admission/checkpoint
+wall time, SQLite busy/frame results and before/after physical storage; each
+send/close segment must start with a verified zero-length WAL. Send and close
+records include the pre-checkpoint WAL bytes, bytes per commit, post-checkpoint
+storage, and separate checkpoint timing. Delivered/read setup is real work but
+excluded from send/close latency distributions; its WAL is visible in the next
+segment-start checkpoint record. Delta records report absolute extra WAL bytes,
+percentage over the source-only baseline and p95/max/call-sum wall differences
+for the same round and lifecycle workload. These file lengths include the WAL
+header; they are neither daily database growth nor cumulative write I/O.
+Startup/rebuild's PASSIVE checkpoint can leave a reusable WAL file, so their
+post-return file lengths cannot be presented as bytes written by that operation.
+
+A passing new cohort cannot explain or erase an earlier over-target COMMIT.
+For an unexplained tail, preserve the adverse receipt and collect a contemporaneous
+SQLite/OS scheduling and sync trace over its recorded interval before assigning
+a cause; disabling automatic checkpointing does not remove FULL sync or scheduler
+tails. Do not weaken durability, raise 100 ms, or substitute page p95 for transaction
+max. No benchmark result is implied by these commands or instrumentation.
+The repository's database-size/daily-growth targets do not allocate an acceptable
+selector-versus-baseline WAL amplification percentage. That limit and disposition
+of adverse write/WAL receipts require the public contract owner's explicit decision;
+these controls deliberately do not invent a WAL ceiling or a waiver.
+
+#### Production-size offline-copy receipt
+
+`api::client_messages_selector_tests::production_copy::benchmark_client_messages_selector_production_copy`
+is a separate ignored control; the older 118k-claim migration-copy control is unchanged.
+Set `ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY` to an explicitly supplied,
+checkpointed offline database and `TMPDIR` to a scratch filesystem with room for
+two fresh database copies, derived indexes and WAL. The input is opened read-only;
+neither copy is a daemon store. A completed selector projection is rejected as
+initial online-build evidence rather than silently rebuilt.
+
+The receipt records source counts/bytes and Git HEAD, every observed online
+backfill transaction's BEGIN-through-COMMIT duration and work/COMMIT split,
+distribution/max and 100 ms counts, and physical WAL start/peak/growth relative
+to the original database bytes against the 20% bar. Real foreground
+send/delivered/read/close lifecycles compete with the independent background
+writer loans. One lifecycle is offered per loan through a capacity-one channel
+(coalescing offers while busy); intervals and actual transaction overlaps are
+reported, not assumed. WAL samples include those competing writes.
+
+After the build, isolated send/close segments report individual physical WAL
+deltas and latency, and compare against a second source-only copy with the same
+foreground workload replayed before measurement. FULL durability is retained;
+automatic build checkpoints are disabled by the production backfill guard.
+One JSON receipt is emitted, including adverse bars and operational errors;
+inspect top-level and nested `error` fields, `errors`, overlap counts and bar
+results even when the test exits successfully. This control deliberately does
+not assert the performance bars before printing the receipt.
+The separate ignored `benchmark_client_messages_selector_production_copy_smoke`
+uses only its own small fresh offline store and asserts receipt completeness.
+
 
 ## Raw terminal cold opens
 
@@ -74,18 +633,124 @@ Capability admission seeks the attachment's indexed hash and its subject-head fe
 SQLite snapshot instead of decoding a bounded page of the whole fleet graph. Single-use CAS,
 session, person, and mode binding, expiry, and owner/incarnation checks remain unchanged.
 
+## Checkpoint scratch memory
+
+Checkpoint capture filters envelope cuts in SQLite and sorts only claim identities and canonical
+keys, then decodes retained bodies in bounded pages. Each metadata, body, protection and tombstone
+page has its own read snapshot and checks the persistent capture invalidation epoch. Mutations
+that affect the registered below-cut envelope prefix, canonical ordering, its protection references
+or below-cut tombstones restart capture; three invalidated attempts fail closed with a clear error.
+The seal rowid is fixed once per capture. A short atomic writer statement advances the monotonic
+frontier and accepted-time cut only when their persisted bounds need to grow; retries and repeated
+captures within covered bounds do not rewrite them. Admission of newer above-cut envelopes,
+identical duplicate re-offers and projection writes referring only to newer history do not
+invalidate capture. Delayed admission into the captured prefix and repairs that protect captured
+claims still invalidate it. The WAL is released between pages rather than pinned across sorting
+and the full body pass. The default and maximum capture page sizes are 64 envelopes/records.
+The compact metadata pass strictly decodes claim acceptance timestamps before envelope exclusion;
+malformed, negative or overflowing values return an error rather than silently counting as early.
+Capture mutation guards seek batch and record membership through their existing indexes, then
+look up the exact envelope identity. They do not scan the retained envelope frontier for each
+deleted claim during trim. The capture mutation guards preserve the cut/frontier and invalidation rules.
+Mission-run and planning replay retain the canonical list of IDs and load one claim body at a
+time. Base replay uses a temporary ID order and bounded body pages. Both close their ordering
+or body statements before projection savepoints.
+
+Proof copies use a disk rollback journal and temporary storage, with a fixed 2 MiB SQLite cache
+target. The scratch directory needs space for the database copy and its rollback journal.
+This does not change the sealed set, canonical ordering, proof digests, or reader-equivalence
+checks. Large retained sealed sets still consume memory; reader page-cache settings do not
+bound decoded claim bodies or allocator retention. Compare live allocations and SQLite's
+allocator counters with RSS before attributing an RSS plateau to retained read connections.
+
+## Writer worker admission
+
+Writer-bound API handlers, replication receive, mailbox control and daemon maintenance
+wait asynchronously before entering Tokio's blocking pool. Each writer admits at most 32
+top-level synchronous writer-bound callbacks by default. Mutation handlers run as admitted
+future polls: when a body, service, mutex or receipt wait returns pending, its blocking worker and
+writer permit return before the future waits asynchronously for its next wake. Set
+`SMALLCLAIMS_MAX_WRITE_WORKERS` in the **daemon's** environment to a positive integer to
+override this count; zero, invalid, or values beyond Tokio's semaphore capacity use 32. The value is read once per process.
+
+Admission holds no SQLite connection or store lock. Dependent nested callbacks share their
+parent's capacity, including when a current-thread runtime needs a separate blocking child.
+Started callbacks retain capacity through completion or panic even if their awaiting task
+is dropped. API mutations keep their existing completion and acknowledgement behavior.
+Non-writing publication/git preflight, gate startup, attestation and terminal control effects
+run independently of writer admission; their mutation continuation admits again before
+polling store work. The request and result receipts still surround each terminal effect.
+Read workers and health checks have independent capacity. The existing writer queue still
+orders foreground jobs, drains fences and schedules background loans; admission does not
+change a callback's loan class. Synchronous/raw writer access remains available and does not
+become a process-wide thread bound.
+
+This bounds the thread multiplier while a writer is held; it does not shorten that hold
+(#2185) or budget retained reader caches (#1381/#1936). Tokio's global blocking limit stays
+unchanged: native provider sessions occupy blocking threads for their lifetime and may wait
+on daemon control, and current-thread nested callbacks require another blocking slot.
+A global cap needs a separate dependency-safe design.
+
+The isolated Linux `smallclaims` example from issue #2636 preserves a raw control path:
+
+```sh
+cargo run -p smallclaims --example blocking_pool -- 128 --writer-only
+cargo run -p smallclaims --example blocking_pool -- 128 --writer-only --admitted
+```
+
+Omit `--writer-only` to run the original raw-reader cache phase too. That phase deliberately
+bypasses admission so reader retention can be compared independently.
+
 ## Read connections and SQLite allocation
 
-Reads take an idle connection or open another when all retained connections are busy. The
-pool retains up to 128 idle connections by default; `SMALLCLAIMS_MAX_IDLE_READ_CONNECTIONS`
-overrides that retention ceiling. It does not cap concurrent connections or make reads wait
-for an available slot. Nested reads and pinned snapshots keep their existing behavior.
-Each reader requests a fixed 2 MiB page-cache target by default. Set
+Top-level API read queries admit before opening a connection or pinning a snapshot.
+Waiting for reader capacity holds no cache, roster, or socket gate; waiting for those gates
+holds no reader capacity. Each pool admits at most 32 top-level workers by default. Set
+`SMALLCLAIMS_MAX_READ_WORKERS` in the **daemon's** environment to a positive integer to
+override this count; zero, invalid, or values beyond Tokio's semaphore capacity use 32.
+The value is read once per process. Queued reads observe their existing cancellation and
+deadline budgets without opening a reader. An upgraded stream's query is admitted without
+adding a deadline policy; waiting for events or socket/window admission holds no reader.
+Collections retain their FIFO reader grant into the physical query instead of discarding
+it and racing a new try-acquire. Other gates are tried without waiting; contention releases
+capacity and unrelated gates before waiting for the contended gate.
+Same-pool nested reads reuse their loan, including pinned snapshots. Cross-pool nested
+reads never wait for the inner pool's capacity while holding an outer loan or snapshot:
+they try spare capacity, otherwise use an unadmitted nested loan. Status fanout tries
+extra capacity without waiting, then reduces inline on the parent's reader if none is free.
+
+After admission, reads take an idle connection or open another when all retained connections
+are busy. The pool still retains up to 128 idle connections by default;
+`SMALLCLAIMS_MAX_IDLE_READ_CONNECTIONS` overrides only that retention ceiling. Admission
+does not change page-cache targets, statement caching, or the allocator. Legacy raw pool
+checkout, non-API background reads, and the cross-pool nested fallback remain ungated:
+32 is a top-level worker-admission bound, not a global physical connection count or a
+process memory limit.
+
+Each reader requests a fixed 8 MiB page-cache target by default. Set
 `SMALLCLAIMS_READ_CACHE_KIB` in the **daemon's** environment to override it in KiB; positive
 integers through 2,147,483,647 are accepted, and invalid or zero values use the default.
-The value is read once per process. Retention still defaults to 128, preserving schema and
-prepared-statement reuse from #1234. Profiling counts fresh connections as
+The value is read once per process. Retention defaults to 128, preserving schema and prepared-statement reuse.
+Profiling counts fresh connections as
 `read connection opened`.
+
+Each reader also maps the store file (`PRAGMA mmap_size`, 1 TiB by default, so the whole store).
+In WAL mode SQLite empties a reader's page cache whenever its next transaction sees any commit,
+and on a busy store nearly every request starts after one. Without the mapping that request
+fetched every page it touched again with one `read()` call each, from the kernel's file cache
+into the connection's private cache: on dev3, 87,500 calls a second across 73 readers, with 79%
+of the daemon's CPU in the kernel (#3343). A mapped page needs no call and no copy, and all
+readers share the kernel's one copy of it. WAL frames are still read with `read()`. Mapped
+pages the daemon has touched count in its RSS as file-backed memory (`RssFile`), so VmRSS,
+VmHWM and the `st.process.memory.rss` gauge read higher, by up to the hot part of the store:
+1.8 GB after a 30-second replay on a 29 GB store copy, while `RssAnon` fell by about 400 MB.
+They are the same page-cache pages `read()` filled, which the service cgroup's `memory.max`
+(`MemoryMax`, `MemoryHigh`) already counted, and the kernel reclaims them under pressure.
+Compare `RssAnon` for the daemon's own memory. Set
+`SMALLCLAIMS_READ_MMAP_MIB` in the **daemon's** environment to map at most that many MiB,
+or `0` to turn mapping off; values above 1,048,576 or invalid values use the default. The
+bundled SQLite is built with `SQLITE_MAX_MMAP_SIZE` raised to 1 TiB to allow it, since its
+default ceiling is 2 GiB.
 
 Each reader keeps up to 128 prepared statements. Mailbox changed-since, owner/binding,
 local watermark, and snapshot fence checks reuse those statements; caching removes repeated
@@ -99,10 +764,10 @@ checks. A full safety read every thirty seconds with a randomized per-binding ph
 dependencies, missed notifications and ownership changes. Initial dispatcher-cursor failures never replay from zero: they retry at
 the current head and resync subscribers once. Batch failures retain their cursor and retry every
 five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expose failures since
-startup and whether routing is currently degraded. There is no debounce. `task mailbox-wake-dispatch`,
+startup and whether routing is currently degraded. There is no debounce. `mailbox.wake_dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
-`cargo test --release -p st3 --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
+`cargo test --release -p fractal-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
 `ST_MAILBOX_PROFILE_DIR` retains its generated store, latency/CPU results, doctor counters and
 profile. Its load client and daemon run in separate processes.
 
@@ -112,8 +777,138 @@ every subject's status read into a scan of its historical JSON bodies. The opera
 TEXT affinity is removed in that join so SQLite can seek the JSON-expression index.
 
 The agent-card cache holds its mutex only while selecting or publishing immutable cached
-rows, not while building cards. A request's SQLite snapshot therefore does not wait at that
-mutex behind another request's disk reads.
+rows, not while building cards. HTTP agent pages and WS roster windows first probe read-only
+caches inside a fresh, authorized SQLite snapshot. An exact, lease-valid warm hit bypasses the
+store-wide roster admission even while an unrelated cold reader holds it. A miss releases its
+snapshot before awaiting admission, then opens a new snapshot and rechecks authority and caches.
+Cold HTTP first pages build shallow refs and selected cards under one admission and one snapshot;
+warm first pages need neither admission nor a second snapshot. The existing same-key WS window
+admission remains in place for authority fencing. The cold worker retains store admission through
+completion even if its caller disconnects, so waiting followers pin no old WAL read mark.
+
+Eight immutable graph-index/local-frontier/history cuts are retained. HTTP pages lazily fill missing subjects into
+the same projection used by the complete WS roster, without reducing unrelated cards. Local
+agent observations and registered agent claims update only their subject's card. Run and generation
+changes refresh owned cards and diff roster membership; step/work changes map owners, assignees,
+claimants and activity actors. Queue-affecting claims refresh fleet queue selection and selected
+labels once, then compare all queue fields per card before refolding. Message sends refresh their
+agent endpoints because they contribute to activity timestamps. All message lifecycle receipts
+also refresh projected agent parties: draining rollout blockers read the message's delivery state,
+including ancestors of eligible replies. Receipt claims need not contain endpoint fields.
+Daemon diagnostics, glasses, arrangements and fleet-only claims reuse the cards. Unknown kinds and
+unclassified structural changes conservatively cold-build. Authorization is checked before reuse,
+and local delivery presence stays a per-read overlay rather than graph-cached authority.
+
+The reuse allowlist includes transitive rollout, suspension, fault and placement dependencies:
+
+| Claims | Card read | Delta mapping |
+| --- | --- | --- |
+| `message.sent` | activity and rollout delivery blockers | projected agent sender/recipient |
+| `message.staged`, `message.delivered`, `message.read`, `message.closed` | rollout delivery blockers and eligible reply ancestry | projected agent sender/recipient; cold if no message projection exists |
+| `daemon.diagnostic`, `daemon.started` | none; diagnostic reports are separate from agent reconcile faults | empty, guarded to daemon subjects |
+| `glass.upserted`, `glass.deleted` | none; glass projection is not a card or blocker input | empty, guarded to glass subjects |
+| `arrangement.edited` | none; arrangement projection is not a card or blocker input | empty, guarded to arrangement subjects |
+| `fleet.invite-created`, `fleet.invite-redeemed`, `fleet.invite-revoked` | none | empty, guarded to invitation subjects |
+| `fleet.member-admitted`, `fleet.member-endpoints`, `fleet.member-left`, `fleet.member-removed` | none; host metadata is declaration-derived and placement fences do not read peer liveness | empty, guarded to host subjects |
+
+Shared cards are built only from current, independently time-fenced queue metadata. A
+pagination continuation applies its frozen ordering/host/queue refs to the response clone
+after reading the shared cards; frozen pagination cuts must never seed the shared projection.
+The shallow HTTP membership/order/queue refs have the same bounded graph-cut retention.
+Warm pages reuse those refs rather than scanning all fleet work. An explicit allow-list of
+existing-agent harness observations and daemon diagnostics leaves them valid; every other
+claim rebuilds them. Runtime status can move an undeclared or stopped agent into history,
+so even an existing agent's `runtime.observed` rebuilds shallow refs.
+Both shallow refs and the full-card projection expire at the earliest current-generation
+work-lease deadline. Expired work becomes ready (or disappears from a revision-draining queue)
+without a new claim. Full-card refreshes retain expired rows only as diff sources, never as warm
+hits: `roster/queue-diff` scans queue selection and labels once and refolds only cards whose queue
+fields changed. It also refreshes the next deadline. Shallow refs still rebuild after expiry.
+Safe card-local advances carry the prior deadline forward. Shallow-ref warm hits add no SQL;
+full-card probes
+read the relevant local frontier before selecting cached rows. The outer shared agents
+WS window inherits the same fence, so it cannot hide an expired full-card projection.
+HTTP reads see expiry immediately; live WS subscribers see the transition on the next
+existing 30-second authority/freshness tick. That existing live-stream bound is unchanged.
+
+Historical status cuts read queue and declaration presentation from the caller's current SQLite
+projection, just as cold cards do. When the requested graph index precedes that physical
+projection's frontier, full-card reads bypass shared cached rows and cold-build selected coverage;
+they do not borrow stale queue fields from an earlier physical snapshot.
+
+The isolated 60-agent, six-mission, 60-step fixture counts canonical claim kinds and local samples:
+`cargo test -p fractal-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
+Its frozen pre-incremental classification distinguishes the old cold fallback from the current
+selected-card build count. Full JSON parity, including queues, todos and usage, is checked by
+`agent_roster_seeded_claim_sequences_match_cold_json` with reproducible proptest sequences,
+both history modes, selected coverage, historical cuts and injected-clock lease expiry.
+The ignored `agent_roster_one_step_claim_fixture_timing` reports cold/incremental wall times and
+the number of refolded cards after one work claim; run it explicitly with `--ignored --nocapture`.
+These debug-profile fixtures are not deployed latency or loaded-host benchmarks.
+
+The relevant local-observation frontier is the largest agent `harness.timeline` row ID visible
+inside the same SQLite snapshot with `after_store_index` at or before the requested graph cut,
+or zero when none exists. A partial covering index, `local_observations_roster_frontier_index`,
+contains only those rows. The reverse lookup skips newer heartbeat rows entirely, without
+assuming row IDs and graph indices are monotonic; an old cut still steps over newer agent
+timeline rows in the index. Existing stores create the index automatically on their next open,
+without a schema-version bump or replay migration. Initial creation took 0.171 seconds on
+an offline 1.78 GB store copy with 161,048 local observations (118,115 indexed agent timeline
+rows), using SQLite 3.53.3. The 8,701-row synthetic fixture took 0.516 ms; these isolated
+index-creation timings do not measure end-to-end startup or predict other stores.
+Heartbeat-only `harness.observed`, local telemetry and non-agent timeline appends leave cached
+cards reusable. Every agent timeline entry type advances the frontier, including usage entries,
+because managed-session recency reads the latest timeline row even when last activity does not.
+Replicated status and usage changes retain their graph-index invalidation. A same-index local
+content transcript append misses the read-only getter
+and updates the affected card's `last_activity_at` when rebuilt for both HTTP and WS; ignoring
+timeline rows here would make a shared warm roster instant but stale. Read-only getters never
+build, require selected-subject coverage, and pin immutable rows without filtering or cloning them.
+
+Cache relevance does not filter the existing `changed()` notification signal. Local
+heartbeat and timeline publications still wake every existing event subscriber; a heartbeat
+can then reuse the roster rows, while timeline activity misses and refreshes them. The normal
+`agent_roster_cache_reuse_preserves_changed_for_existing_subscribers` regression checks both
+publications with two subscribers.
+
+The performance report exposes each roster stage under bounded task labels:
+`roster/admission-wait` (waiting for the shared admission or an in-flight build),
+`roster/frontier-read`, `roster/cache-hit`, `roster/build` (incremental advance or cold build),
+`roster/card-projection` (refolding changed cards) and `agent_work_queues`.
+With trace export enabled, HTTP reads of a published complete roster or startup head report
+`st.roster.mode=hit` and the served publication's card count on their request span. Rebuilds
+remain independent roots of the background refresher, not children of the reading request.
+
+Fresh published first pages also add attributes to that existing request span:
+`st.roster.fresh_wait` is `published`, `unchanged`, `refresh_failed`, `disconnected`,
+`timeout` or `read_failed`. `st.roster.fresh_wait_cut` is the actual wait target,
+which can follow `st.roster.requested_cut`; neither is the served
+`st.roster.publication_cut`. The wait cut is absent if its initial index read failed.
+`st.roster.fresh_proof` is `not_checked`, `verified`, `refused` or `read_failed`,
+and `st.roster.fresh_unchanged_verified` is true exactly for `verified`.
+Only an `unchanged` exit attempts verification, against the exact complete cards,
+cut and publication timestamp served, using the existing fault, expiry, local-frontier
+and claim-delta guards. Eviction between selection and proof honestly refuses verification;
+a head or not-ready response cannot verify a complete publication. Failure, disconnection
+and timeout never imply unchanged cards. These attributes change no response fields or wait
+policy. Only recording traced requests perform the additional read-only snapshot/range proof;
+its cost under claim churn remains unmeasured until the focused native receipt is available.
+
+The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
+incremental-update costs with `cargo test -p fractal-daemon --lib agent_roster_snapshot_fixture_timing --
+--ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
+`perf-load` workload holds concurrent agents WS subscribers and measures first-snapshot
+latency against the roster's 300 ms budget.
+
+Normal tests include a small cached-versus-uncached roster comparison before and after local
+timeline activity, in both history modes. Run the heartbeat-only fixture with
+`cargo test -p fractal-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
+it prints append/probe/hit counts, hit rate and elapsed time, requires every heartbeat probe to
+reuse the same immutable rows, and requires a subsequent timeline append to miss before rebuild.
+The normal warm HTTP fixture
+`warm_agent_http_page_bypasses_unrelated_cold_roster_admission` holds store admission while reading
+a cached first page and prints its elapsed time. These are deterministic cache/admission
+regressions with diagnostic timings, not production latency guarantees.
 
 Every five seconds a dedicated native thread attempts a passive WAL checkpoint outside the
 writer queue. Once every frame is backfilled, it attempts `TRUNCATE` with zero busy timeout.
@@ -127,20 +922,34 @@ shutdown does not wait for a long backfill.
 `st doctor` reports open, idle and active reader counts, peak open readers, total connections
 opened since startup, the configured cache target, and summed current reader targets without
 requiring SQLite MEMSTATUS. These are targets, not measured allocations: SQLite schema,
-prepared statements, query results and allocator overhead are additional. Reader checkout
-remains non-waiting; **burst concurrency is unbounded**. Bounded admission must first resolve
-cross-thread pinned snapshot dependencies (#1381).
+prepared statements, query results and allocator overhead are additional. The report names
+the configured API read-worker admission bound. Raw reader checkout remains non-waiting;
+background reads and retained idle connections can exceed the admitted-worker count.
 
 The doctor planning envelope uses the larger of current open readers and idle retention,
 multiplied by the per-reader target, plus the writer's 32 MiB target and a 512 MiB reserve for
-schema/statements, projections, tasks and allocator overhead. At defaults this is 800 MiB,
-leaving 224 MiB beyond that reserve under a 1 GiB service cap. The reserve is a planning
-allowance, not an enforced limit or a guarantee for every graph or workload. On Linux, doctor
+schema/statements, projections, tasks and allocator overhead. At defaults this is 1,568 MiB:
+1 GiB for 128 retained reader caches, 32 MiB for the writer and the 512 MiB reserve.
+The 1 GiB cap used in diagnostic examples is illustrative, not the service default:
+the Home Manager module defaults `memoryMax` to `"8G"` and installations can override it.
+For an installation limited to 1 GiB, set `SMALLCLAIMS_READ_CACHE_KIB=2048` to restore
+the 800 MiB planning envelope, or adjust its service limit.
+The reserve is a planning allowance, not an enforced limit or a guarantee for every graph
+or workload. On Linux, doctor
 locates the daemon's own cgroup v2 mount and checks `memory.max` and `memory.events` in that
 cgroup and its visible ancestors. It warns when the tightest limit is below the planning
 envelope, any `max` counter records pressure, or the files cannot be inspected. Ancestor
 counters include other descendants; historical hits do not prove a current OOM. On other
 platforms it reports that cgroup diagnostics are Linux-only.
+
+Checkpoint application and proof completion make one best-effort allocator-reclamation
+attempt on Linux with glibc (`malloc_trim(0)`). Nested entrypoints defer that one call until
+the outer operation has dropped its temporary inputs and SQLite guards. Successful,
+reader-mismatch, and error completions share the cleanup; skipped agreement/proof work
+does not trigger it. There is no periodic trim, idle-WAL hook, or ordinary API-read hook.
+Other targets use a no-op. This releases only unused glibc pages, not live SQLite caches
+or retained application data, and is not a process-memory cap. The call may contend with
+concurrent allocator activity; compare its duration as well as post-operation RSS.
 
 Reproduce reader-cache multiplication with invented data and the bundled SQLite artifact:
 
@@ -153,7 +962,7 @@ Compare mailbox, work, interactive mission and replication API reads in fresh is
 processes using the existing generated benchmark store (scale 0.1):
 
 ```sh
-cargo build -p st3 --features test-support --example reader_cache
+cargo build -p fractal --features test-support --example reader_cache
 target/debug/examples/reader_cache /tmp/reader-cache-fixture --generate-only
 SMALLCLAIMS_READ_CACHE_KIB=8192 target/debug/examples/reader_cache /tmp/reader-cache-fixture
 SMALLCLAIMS_READ_CACHE_KIB=2048 target/debug/examples/reader_cache /tmp/reader-cache-fixture
@@ -164,8 +973,8 @@ process. Compare identical builds and workloads; debug-build latency is not a pr
 latency promise. It prints per-wave CPU, latency, RSS and reader counts. Only generated
 invented data and private sockets are used.
 
-The bundled SQLite build uses `SQLITE_DEFAULT_MEMSTATUS=0` through the workspace Cargo
-configuration, including Cargo-based Nix builds. SQLite's process-wide allocation statistics
+The bundled SQLite build uses `SQLITE_DEFAULT_MEMSTATUS=0` and `SQLITE_MAX_MMAP_SIZE=1 TiB`
+through the workspace Cargo configuration, including Cargo-based Nix builds. SQLite's process-wide allocation statistics
 are disabled by default, removing their shared allocator mutex; statement, process CPU and
 I/O accounting remain available.
 
@@ -178,54 +987,42 @@ malformed operation metadata, an operation conflict, and `incremental-error:CODE
 incremental chunks produce no fallback log. The target is the admitted index observed at entry;
 a full replay can also include claims admitted since that observation.
 
-## Initial targeted mailbox wake comparison (2026-10-05)
+The daemon reserves both Unix socket addresses right after acquiring its startup lock, before
+opening SQLite, but does not listen on them. A socket that is bound and not listening makes the
+kernel refuse every connection at once, so clients and `st doctor` keep seeing "daemon starting"
+with the current phase, and nothing queues behind an uninitialized router. The daemon starts
+listening only when migrations, admission, canonical projection catch-up and application
+initialization have finished. A per-address advisory lock (`<socket>.reservation.lock`) is held
+from reservation through serving, so a second daemon neither unlinks a reserved address nor a
+live listener; the lock is released when the process exits.
 
-This comparison measured the initial implementation at `d9bcabb9b619895a73809038f2e429d599a580cd`
-with its original three-second timer; the later five- and thirty-second timers are measured separately below.
-The isolated fixture used 128 invented seats, 256 Unix mailbox streams, a fresh WAL store,
-3,000 writes (100 targeted messages), and 32 owner replacements. Both builds used Nix Rust
-1.97.0 / LLVM 21.1.8, release settings and profiling. The baseline commit
-`0295286eb051650674b769e5c023aa8acb80d990` includes prepared-statement caching (#1492).
-The daemon and load client were separate processes; providers and the reconciler were absent.
+Reserving early moves the path preparation (live-listener probe, stale-file removal, bind,
+permissions and discovery link) off the ready-to-listen interval. It does not preserve an exited
+process's established streams or remove the stop-to-bind refusal window. Zero-refusal restarts
+require a service-manager-owned socket that survives the writer handoff, with the replacement
+accepting only after SQLite is ready.
 
-| Measurement | Baseline | Targeted wakes |
-| --- | ---: | ---: |
-| Write phase elapsed | 343.25 s | 30.31 s |
-| Actual writes/s (requested 100) | 8.74 | 98.97 |
-| Daemon CPU for all 3,000 writes | 3,344.17 s | 5.58 s |
-| Average daemon CPU cores | 9.74 | 0.184 |
-| Mailbox delivery p50 / p95 / max | 552.68 / 719.22 / 1,156.00 ms | 2.14 / 2.81 / 9.48 ms |
-| Ownership fencing p50 / p95 / max | 212.80 / 702.60 / 945.69 ms | 0.73 / 0.88 / 2.17 ms |
-| Write API p95 | 207.76 ms | 1.80 ms |
+### Startup phase durations
 
-Latency runs from API request start to the recipient mailbox frame or old-owner fenced frame,
-including the write. CPU covers the entire write phase plus a 300 ms settle, excluding setup,
-doctor and owner replacements. The baseline saturated below requested pacing, so these are
-identical completed workloads rather than equal write-rate or equal-duration windows.
+Every successful daemon start emits one structured stderr line when both listeners are ready:
+`st3: startup phases {"configuration_ms":...,"install_hooks_ms":...,"open_store_ms":...,...,"total_ms":...}`.
+The service journal captures this line without enabling profiling. Durations use a monotonic
+clock and milliseconds; `total_ms` starts at entry to daemon initialization, not process execution.
+Failed starts that never reach listener readiness do not emit this summary.
 
-The actual doctor samples are rolling five-minute counters: the baseline's final sample covers
-292 sampled seconds, and the targeted sample covers 33. They are not full-run deltas.
+The phase keys partition that interval: `configuration_ms`, `install_hooks_ms`,
+`open_store_ms`, `judge_claims_ms`, `validate_replication_backlog_ms`,
+`apply_replication_repairs_ms`, `settlement_projection_ms`, `runtime_prelude_ms`,
+`login_environment_ms`, `isolation_pty_ms`, `recorder_ms`, `app_state_ms`,
+`reconciler_ms`, `background_tasks_ms`, and `bind_ms`. Configuration includes identity and
+instance-lock setup; hooks include profiler initialization and the file-descriptor limit.
+Opening the store includes signing-key setup. Settlement and projection share one interval;
+the runtime prelude includes the startup claim, notification state, and PTY directory.
+`bind_ms` adds the early socket reservation to the interval that ends at the second listener's
+readiness callback. The summary adds no per-request
+instrumentation and is not repeated for projection chunks or readiness progress updates.
 
-| Doctor counter | Baseline | Targeted wakes |
-| --- | ---: | ---: |
-| `task mailbox-change-check` count | 420,776 | 200 |
-| Change-check summed wall / CPU | 47,357,010 / 2,684,611 ms | 19.88 / 18.23 ms |
-| `task mailbox-snapshot` count | 1,235 | 3,016 |
-| Snapshot summed wall / CPU | 449,550 / 37,791 ms | 1,247.78 / 1,147.92 ms |
-| `task mailbox-wake-dispatch` count | absent | 3,252 |
-| Dispatcher summed wall / CPU | absent | 336.69 / 313.10 ms |
-
-The targeted run performed two changed-since checks per targeted message (delivery and title)
-and none for the 2,900 unrelated writes. More snapshots are intentional: every stream performs
-its three-second safety read. Task wall times overlap and must not be added as process elapsed
-time. Synthetic latency and CPU values describe this fixture, rather than a production guarantee.
-
-Raw measurements, before/after performance snapshots, doctor task counters and build/fixture
-metadata: [baseline](profiles/targeted-mailbox-wakes-2026-10-05/baseline.json) and
-[targeted wakes](profiles/targeted-mailbox-wakes-2026-10-05/targeted-wakes.json).
-Reproduce with the ignored test above using `--release` on each version and the same fixture.
-
-## Reproduce a baseline without modifying main
+## Reproduce a mailbox-wake comparison
 
 `scripts/profile-mailbox-wakes` copies the current test-only fixture into a disposable checkout
 of the requested ref. Production code comes from that ref; the added module is `cfg(test)` only.
@@ -233,7 +1030,6 @@ The script removes the checkout after the run and retains build identity, logs, 
 CPU/latency evidence. Run it inside the pinned development shell with a new output directory:
 
 ```sh
-nix develop --command scripts/profile-mailbox-wakes 0295286eb /tmp/mailbox-baseline
 nix develop --command scripts/profile-mailbox-wakes HEAD /tmp/mailbox-targeted
 nix develop --command scripts/profile-mailbox-wakes HEAD /tmp/mailbox-idle-100 --idle 100
 nix develop --command scripts/profile-mailbox-wakes HEAD /tmp/mailbox-idle-250 --idle 250
@@ -245,112 +1041,90 @@ writes. CPU covers the daemon process, including safety reads and heartbeats; se
 are excluded. The payload is 352 bytes per message. Providers and the reconciler are absent.
 This is an explicit synthetic sizing probe, not an observed production unread distribution.
 
-## Five-second timer measurements, superseded by the thirty-second backstop (2026-10-06)
+## Browser perceived-UX traces
 
-The earlier revision used a five-second period and randomized per-binding phase in
-`[0,5)` seconds. The following probes used production sources at
-`019e34d4e742b37526cdfb00a433ea3bff93cf3b`, rebased onto
-`8b020f0aa94cd276bae57ae771e48605132b723c`. The earlier table is preserved as the
-matched before/after comparison of the original three-second implementation.
+The browser exports `service.name=fractal-web` to the explicitly configured
+`VITE_OTLP_TRACES_URL` endpoint. Dogfood pages record **100%** of budget roots and SDK detail.
+No local storage, transcript content, resource identifiers, credentials, or free-form error
+details enter production spans. The existing 200-span `SpanRing` is the dependency-free local
+assertion surface; adding the separate otelite package is unnecessary for these lifecycle tests.
 
-Idle sizing used 128 invented seats, 256 Unix mailbox streams, 352-byte message bodies, a
-fresh WAL store and separate daemon/load processes. The release build used Nix Rust 1.97.0 /
-LLVM 21.1.8 with profiling enabled; providers and the reconciler were absent.
-CPU includes safety reads, heartbeats and profiling, after setup and before doctor.
-No observed production unread distribution was available; these are explicit synthetic shapes.
+| Span | `span.label` | Attributes and measured boundary |
+| --- | --- | --- |
+| `wf.ux.reload` | `roster` | Navigation start → committed shell paint → committed roster paint. `wf.ux.shell_ms`, `wf.ux.roster_after_shell_ms`; q96 `wf.ux.budget_ms=100`, `wf.ux.budget_phase=roster-after-shell`, strict `<100ms` `wf.ux.budget_met`. |
+| `wf.ux.switch` | `warm` or `cold` | Selection → transcript DOM commit followed by paint. `wf.ux.cache`, `wf.ux.slot_count`, `wf.ux.data_ready_ms`, `wf.ux.painted`; `wf.ux.budget_ms=100`, `wf.ux.budget_phase=selection-to-paint`, `wf.ux.budget_met`. |
+| `wf.ux.switch.data_ready` | `first page` | Child of switch: selection → first decoded page, separately from painted completion. |
+| `wf.ux.first_frame` | Collection name, `conversation`, or `terminal` | One bounded root per subscribe attempt: actual subscribe send → first verified frame, not paint. `wf.subscription.kind`, `wf.ux.early`, `wf.ux.outcome`; `wf.ux.budget_ms=30000`, `wf.ux.budget_phase=subscribe-to-first-frame`, `wf.ux.budget_met` express the bounded first-frame lifecycle. |
+| `wf.sync.transition` | `window`, `conversation`, `terminal`, `gateway` | SyncStatus v2 tag/stage/reason transitions; `wf.subscription.kind`, `wf.sync.from`, `wf.sync.to`, `wf.sync.stage`, `wf.sync.previous_ms`, `wf.sync.reconnect_ms`. Span duration is capped at 30 seconds; full dwell and reconnect durations remain numeric attributes. `wf.ux.budget_ms=30000`, `wf.ux.budget_phase=transition-bound` describes this lifecycle bound, not a product reconnect SLO. |
+| `wf.ux.send_echo` | `echo` | Feature-owned hook: send → verified echo DOM commit followed by paint; `wf.ux.painted`, `wf.ux.budget_ms=100`, `wf.ux.budget_phase=send-to-echo-paint`, `wf.ux.budget_met`. |
+| `st3.capabilities`, `st3.snapshot`, `st3.messageSend`, `st3.follow.subscribe` | Fixed operation name in production | SDK children inherit the active UX context and propagate their own child traceparent; identifiers and failure details are stripped. |
+| `st3.socket.probe`, `st3.socket.create` | `probe`, `socket` | Per-attempt capability probe and credential/socket issuance. These are children of an active UX operation, or independent roots on reconnect; creation is not a long-lived socket span or a handshake timing claim. |
 
-| Pending per seat / total | Idle wall / daemon CPU | Average CPU cores | Snapshot count / summed CPU |
-| --- | ---: | ---: | ---: |
-| 100 / 12,800 | 60.00 s / 18.56 s | 0.309 | 3,072 / 17.60 s |
-| 250 / 32,000 | 60.00 s / 45.23 s | 0.754 | 3,072 / 43.78 s |
+UX operations have a 30-second deadline and `wf.ux.outcome` distinguishes `painted`, `observed`,
+`timeout`, `superseded`, and `disposed`. Repeated progress ticks do not create new transition
+spans. The 100ms switch/echo comparison is a telemetry budget, not evidence that those feature
+surfaces meet it.
 
-Both idle windows had zero dispatcher batches and zero changed-since checks. Each had 3,072
-full snapshots: 256 streams at five-second intervals over 60 seconds. Task CPU is summed
-attributed CPU; process CPU includes work outside these tasks. Before/after counter deltas
-are valid here because both samples remain within the same rolling five-minute window.
-Doctor reported zero dispatcher failures and healthy routing in both runs.
+### Feature paint and echo hooks
 
-The revised timer also completed the same 3,000-write workload: all 100 targeted messages
-arrived and all 32 old owners were fenced. Latencies include the write; CPU excludes setup,
-doctor and owner replacements, as in the initial comparison.
+The live `ConversationPane` owns the transcript and composer. Selection starts a
+conversation follow and emits `wf.ux.switch.data_ready`; data publication alone is
+not paint. The visible pane observes its committed transcript content and calls
+`telemetry.ux.transcriptCommitted(ref)`, canceling that observation during effect
+cleanup. Only that boundary finishes the switch root with `wf.ux.painted=true`.
+Absent a committed boundary, the root ends as timeout/superseded/disposed.
 
-| Measurement | Revised five-second timer |
-| --- | ---: |
-| 3,000-write elapsed / actual writes/s | 30.29 s / 99.03 |
-| Full-write-phase daemon CPU / average cores | 4.98 s / 0.165 |
-| Delivery p50 / p95 / max | 2.02 / 2.56 / 3.44 ms |
-| Owner fencing p50 / p95 / max | 0.67 / 0.91 / 1.71 ms |
-| Write API p95 | 1.52 ms |
+For a composer, call `telemetry.ux.beginSendEcho()` at send. Its `committed()` callback belongs
+on the verified matching echo DOM commit, never on the HTTP acknowledgement; call `cancel()`
+when the operation is abandoned. No echo span is fabricated by the data layer.
 
-The revised workload's final doctor sample covers 33 sampled seconds of its rolling five-minute
-window, including setup; these are not write-phase deltas.
+### Propagation and early roster connection
 
-| Doctor task | Count | Summed wall / CPU |
-| --- | ---: | ---: |
-| `task mailbox-snapshot` | 2,131 | 947.22 / 925.26 ms |
-| `task mailbox-wake-dispatch` | 3,250 | 347.44 / 309.97 ms |
-| `task mailbox-change-check` | 200 | 17.72 / 16.50 ms |
+SDK HTTP requests use the generated-client-compatible `traceContext` callback. Browser
+WebSocket upgrades carry validated W3C context in trace-only URL parameters (browser WebSocket
+APIs cannot set request headers); the gateway strips those parameters before forwarding,
+parents its request span to the browser context, and forwards its child context upstream.
+Subscribe frames carry optional `trace: { traceparent, tracestate? }`; older daemons ignore
+unknown frame fields. Frame-level daemon parenting requires the corresponding daemon protocol
+support; upgrade-level and HTTP parenting do not.
 
-Raw evidence: [idle, 100 pending](profiles/targeted-mailbox-wakes-2026-10-06/idle-100.json),
-[idle, 250 pending](profiles/targeted-mailbox-wakes-2026-10-06/idle-250.json), and
-[revised write workload](profiles/targeted-mailbox-wakes-2026-10-06/targeted-wakes.json).
-The fixture saves idle results before doctor and gives only that request a 120-second budget
-because sealing a generated 32,000-message store exceeded the normal 15-second CLI deadline.
-Doctor runs outside the measured CPU phase; production request deadlines are unchanged.
+The roster bootstrap runs before the main module and sends its first subscribe without waiting
+for the bundle. The SDK adopts the page-owned socket and buffered frames, without persistence,
+duplicate roster subscribe, or a second initial socket. Its first-frame observation is an
+independent root linked to the bootstrap trace, rather than adopting an unrelated active UX parent.
+Browser fixtures exercise early-send ordering and committed-paint completion; SDK/server tests
+assert trace-ID continuity.
 
-## Thirty-second backstop measurements (2026-10-06)
+On `pagehide`, the source synchronously closes its collection socket before starting asynchronous
+disposal. Custom SDK sockets receive code 1001; native browser APIs prohibit that reserved code,
+so their adapters use no-argument close (an empty close frame, reported as 1005 by a server).
+A persisted (back/forward-cache) page retains its scope; persisted `pageshow` reconnects and
+resubscribes its existing interests. These lifecycle handlers add no timers. The early unclaimed
+socket also closes synchronously on pagehide.
+The document entry owns a single lifecycle handler: close the socket, synchronously unmount
+React registry consumers, then dispose the source. This explicit ordering does not rely on
+capture/bubble ordering between separately registered window listeners.
 
-Nathan chose a thirty-second per-stream safety interval for the initial rollout, retaining
-random per-binding phase in `[0,30)` seconds: "we like 30s better than 5s for a start".
-Only the interval, its diagnostic/documentation references and test timing margins changed
-from `30f73b727ae7a433fcb23467a5e99fe91af54c82`; dispatcher failure retry stays five seconds.
-These measurements use production sources at `5ba65431d949febfe56a5842c6dd4daef83f0021` on the same
-`8b020f0aa94cd276bae57ae771e48605132b723c` base. The reviewed design was subsequently
-integrated onto `e40e0b60b9f0a42ea8d81d5f8457ff9a833144d9` with documentation-only conflict
-resolutions. These measurements retain their earlier source and base identities.
+The browser proof commands require `playwright-cli` on `PATH` and the locked workspace
+dependencies installed:
 
-The same synthetic fixture uses 128 invented seats, 256 Unix mailbox streams, 352-byte
-messages, a fresh WAL store and separate daemon/load processes. Release Nix Rust 1.97.0 /
-LLVM 21.1.8, profiling enabled; providers and the reconciler absent. Idle CPU covers
-60 seconds without graph writes after every delivery stream has the complete mailbox,
-including safety reads and heartbeats, excluding setup and doctor. No observed production
-unread distribution was available.
+```sh
+node apps/fractal-web/scripts/early-connect-proof.mjs
+node apps/fractal-web/scripts/ux-paint-proof.mjs
+```
 
-| Pending per seat / total | Idle wall / daemon CPU | Average CPU cores | Snapshot count / summed CPU | CPU vs five-second probe |
-| --- | ---: | ---: | ---: | ---: |
-| 100 / 12,800 | 60.00 s / 3.72 s | 0.062 | 512 / 3.21 s | 20.1% |
-| 250 / 32,000 | 60.00 s / 10.00 s | 0.167 | 512 / 9.24 s | 22.1% |
+The early-connect proof controls module delivery, then imports the actual main entry,
+renders the real shell, and checks that the SDK took the one initial socket without sending
+a second roster subscribe. It then dispatches persisted page-transition events to exercise
+retained-scope reconnect, and performs a real browser reload. The test server requires each
+close frame before the next roster subscribe. It expects an empty native close frame on simulated
+pagehide; real navigation may additionally use the browser's own 1001 close. The persisted events
+test the handlers,
+not browser-specific back/forward-cache eligibility. This proves the early path while a bundle
+is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
+bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-Both idle runs made 512 full snapshots: two per stream over 60 seconds, exactly one sixth
-of the five-second timer's 3,072 snapshots. Both had zero dispatcher batches and changed-since
-checks, zero dispatcher failures and healthy routing. Counter deltas stay within the same
-rolling five-minute window. The CPU ratios compare independent synthetic runs on a shared
-host; shared host conditions affect scaling. Raw evidence retains each source identity.
+The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/api/client_v0.rs)
+derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
+is accepted and ignored by older servers.
 
-The 3,000-write workload delivered all 100 targeted messages amid 2,900 unrelated writes
-and fenced all 32 replaced owners. Latency includes each API write; write-phase CPU includes
-300 ms settle and excludes setup, doctor and owner replacements. Successful delivery and
-fencing still use targeted wakes. A deliberately missed dependency is recovered by the
-unconditional safety read within the longer 30-second backstop.
-
-| Measurement | Thirty-second timer |
-| --- | ---: |
-| 3,000-write elapsed / actual writes/s | 30.30 s / 99.02 |
-| Full-write-phase daemon CPU / average cores | 6.22 s / 0.205 |
-| Delivery p50 / p95 / max | 2.87 / 4.89 / 9.20 ms |
-| Owner fencing p50 / p95 / max | 0.99 / 1.13 / 1.49 ms |
-| Write API p95 | 2.45 ms |
-
-The final workload doctor sample covers 33 sampled seconds, including setup;
-these are rolling-window totals, not write-phase deltas.
-
-| Doctor task | Count | Summed wall / CPU |
-| --- | ---: | ---: |
-| `task mailbox-snapshot` | 739 | 414.59 / 392.83 ms |
-| `task mailbox-wake-dispatch` | 3,252 | 432.67 / 391.05 ms |
-| `task mailbox-change-check` | 200 | 34.43 / 30.22 ms |
-
-Raw evidence: [idle, 100 pending](profiles/targeted-mailbox-wakes-2026-10-06-30s/idle-100.json),
-[idle, 250 pending](profiles/targeted-mailbox-wakes-2026-10-06-30s/idle-250.json), and
-[thirty-second write workload](profiles/targeted-mailbox-wakes-2026-10-06-30s/targeted-wakes.json).
-The earlier three- and five-second measurements remain above for comparison.

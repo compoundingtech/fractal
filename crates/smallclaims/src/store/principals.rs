@@ -7,8 +7,9 @@
 //!
 //! - `claim_verdicts`: one row per signed claim, keyed by the claim ID (a content hash), so a
 //!   different claim never reuses a verdict.
-//! - `claim_verdict_links`: what each verdict relied on (delegations, keys, its nonce, the trust
-//!   roots). A claim that changes one of those queues every verdict linked to it.
+//! - `claim_verdict_links`: a conservative dependency superset for retained candidates
+//!   (delegations, keys, nonces and roots), maintained by each judgment page. Relevant changes
+//!   queue linked verdicts; claim removal or explicit recheck owns dependency cleanup.
 //! - `claim_verdict_queue`: claims to judge again.
 //! - `claim_verdict_fresh`: claims whose signature was just stored, at sealing or admission; a
 //!   pass judges them and queues whatever they change. Nothing scans the claims.
@@ -29,7 +30,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h56821e2a865f owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -37,7 +38,84 @@ CREATE TABLE IF NOT EXISTS claim_signatures (
     nonce TEXT NOT NULL,
     signature TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS claim_signatures_nonce_index ON claim_signatures(key, nonce);
+-- The legacy nonce index remains with the renamed legacy table during online bootstrap.
+CREATE TABLE IF NOT EXISTS claim_signature_candidates (
+    claim_id TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    key TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    PRIMARY KEY(claim_id, signature)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS claim_signature_sources (
+    claim_id TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    PRIMARY KEY(claim_id, signature, writer)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS claim_signature_counts (
+    claim_id TEXT PRIMARY KEY,
+    candidates INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_signature_counts_alert_index ON claim_signature_counts(candidates,claim_id) WHERE candidates>=64;
+CREATE TABLE IF NOT EXISTS claim_signature_writer_counts (
+    writer TEXT PRIMARY KEY,
+    candidates INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS claim_signature_candidate_added AFTER INSERT ON claim_signature_candidates BEGIN
+    INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (NEW.claim_id,1)
+    ON CONFLICT(claim_id) DO UPDATE SET candidates=candidates+1;
+END;
+CREATE TRIGGER IF NOT EXISTS claim_signature_candidate_removed AFTER DELETE ON claim_signature_candidates BEGIN
+    DELETE FROM claim_signature_sources WHERE claim_id=OLD.claim_id AND signature=OLD.signature;
+    UPDATE claim_signature_counts SET candidates=candidates-1 WHERE claim_id=OLD.claim_id;
+    DELETE FROM claim_signature_counts WHERE claim_id=OLD.claim_id AND candidates=0;
+END;
+CREATE TRIGGER IF NOT EXISTS claim_signature_source_added AFTER INSERT ON claim_signature_sources BEGIN
+    INSERT INTO claim_signature_writer_counts(writer,candidates) VALUES (NEW.writer,1)
+    ON CONFLICT(writer) DO UPDATE SET candidates=candidates+1;
+END;
+CREATE TRIGGER IF NOT EXISTS claim_signature_source_removed AFTER DELETE ON claim_signature_sources BEGIN
+    UPDATE claim_signature_writer_counts SET candidates=candidates-1 WHERE writer=OLD.writer;
+    DELETE FROM claim_signature_writer_counts WHERE writer=OLD.writer AND candidates=0;
+END;
+CREATE TABLE IF NOT EXISTS claim_signature_migration (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    phase TEXT NOT NULL,
+    cursor INTEGER NOT NULL,
+    legacy_through INTEGER NOT NULL,
+    envelopes_through INTEGER NOT NULL,
+    fault TEXT,
+    legacy_fault TEXT,
+    envelope_row INTEGER NOT NULL DEFAULT 0,
+    claim_offset INTEGER NOT NULL DEFAULT 0,
+    serving_legacy INTEGER NOT NULL DEFAULT 0 CHECK(serving_legacy IN (0,1)),
+    legacy_present INTEGER NOT NULL DEFAULT 0 CHECK(legacy_present IN (0,1)),
+    started_at_unix_ms INTEGER NOT NULL DEFAULT 0,
+    advanced_at_unix_ms INTEGER NOT NULL DEFAULT 0,
+    completed_work INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS claim_signature_nonce_uses (
+    claim_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    PRIMARY KEY(claim_id,key,nonce)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_signature_nonce_uses_key ON claim_signature_nonce_uses(key,nonce,claim_id);
+CREATE TABLE IF NOT EXISTS claim_signature_judging (
+    claim_id TEXT PRIMARY KEY,
+    candidate_count INTEGER NOT NULL,
+    roots_digest TEXT NOT NULL,
+    content_digest TEXT NOT NULL,
+    last_signature TEXT NOT NULL,
+    best_signature TEXT,
+    best_verdict TEXT,
+    best_reason TEXT,
+    complete INTEGER NOT NULL,
+    dirty INTEGER NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0,
+    blocked INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS claim_signature_judging_pending ON claim_signature_judging(claim_id) WHERE complete=0 OR dirty=1 OR blocked=1;
 CREATE TABLE IF NOT EXISTS claim_verdicts (
     claim_id TEXT PRIMARY KEY,
     verdict TEXT NOT NULL,
@@ -45,13 +123,13 @@ CREATE TABLE IF NOT EXISTS claim_verdicts (
     signer TEXT NOT NULL,
     on_behalf TEXT
 );
-CREATE INDEX IF NOT EXISTS claim_verdicts_verdict_index ON claim_verdicts(verdict);
+CREATE INDEX IF NOT EXISTS claim_candidate_verdicts_verdict_index ON claim_verdicts(verdict);
 CREATE TABLE IF NOT EXISTS claim_verdict_links (
     link TEXT NOT NULL,
     claim_id TEXT NOT NULL,
     PRIMARY KEY(link, claim_id)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS claim_verdict_links_claim_index ON claim_verdict_links(claim_id);
+CREATE INDEX IF NOT EXISTS claim_candidate_verdict_links_claim_index ON claim_verdict_links(claim_id);
 CREATE TABLE IF NOT EXISTS claim_verdict_queue (
     claim_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
@@ -74,10 +152,11 @@ CREATE TABLE IF NOT EXISTS held_keys (
 "#;
 
 /// Queued claims judged per writer loan, so queued writes run between chunks.
-const JUDGE_CHUNK: usize = 256;
+const JUDGE_CHUNK: usize = 32;
+const CANDIDATE_PAGE: usize = 32;
 /// The longest chain admission follows: a device, its person's root, and the node that vouched.
 const MAX_CHAIN_DEPTH: usize = 8;
-const VERDICT_ROOTS: &str = "claim_verdict_roots";
+const VERDICT_ROOTS: &str = "claim_candidate_verdict_roots";
 const OWN_NODE_KEY: &str = "principal_node_key";
 
 /// A claim's position in the canonical order, as comparable values.
@@ -110,8 +189,8 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
     let count = components.len();
     let sql = format!("SELECT {} FROM claims WHERE id=?1", components.join(", "));
     Ok(connection
-        .prepare_cached(&sql)?
-        .query_row([claim_id], |row| {
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9aea6e0e7e48 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ &sql)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hd6bc18dda34a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             (0..count)
                 .map(|index| row.get::<_, SqlValue>(index))
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -123,37 +202,174 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
 fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
     let text = connection
         .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-        .query_row([claim_id], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hccb25d68371e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
         .optional()?;
-    Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
+    text.map(|text| Ok(serde_json::from_str(&text)?))
+        .transpose()
 }
 
-/// Keep `signature` for `claim_id`, and mark the claim for the next verdict pass. A signature is
-/// never replaced: the first one stored is the one the claim's envelope carried.
+/// Keep each distinct carried signature as current state: authority facts arriving later
+/// can make any candidate relevant. Exact duplicates neither add state nor queue judging.
 pub fn store_claim_signature_tx(
     connection: &Connection,
     claim_id: &str,
     signature: &ClaimSignature,
 ) -> Result<()> {
-    let stored = connection
+    let writer: Option<String> = connection.prepare_cached(
+        "SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1"
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-ha3c5feea65a0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0)).optional()?;
+    store_carried_signature_tx(
+        connection,
+        claim_id,
+        signature,
+        writer.as_deref().unwrap_or("unknown-legacy"),
+    )
+}
+
+pub(crate) fn store_carried_signature_tx(
+    connection: &Connection,
+    claim_id: &str,
+    signature: &ClaimSignature,
+    writer: &str,
+) -> Result<()> {
+    store_candidate_tx(
+        connection,
+        claim_id,
+        signature,
+        writer,
+        legacy::active(connection)?,
+    )
+}
+
+pub(super) fn store_inventory_signature_tx(
+    connection: &Connection,
+    claim_id: &str,
+    signature: &ClaimSignature,
+    writer: Option<&str>,
+) -> Result<()> {
+    let origin = if writer.is_none() {
+        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h134e5aef5050 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0)).optional()?
+    } else {
+        None
+    };
+    store_candidate_tx(
+        connection,
+        claim_id,
+        signature,
+        writer.or(origin.as_deref()).unwrap_or("unknown-legacy"),
+        false,
+    )
+}
+
+fn store_candidate_tx(
+    connection: &Connection,
+    claim_id: &str,
+    signature: &ClaimSignature,
+    writer: &str,
+    update_legacy: bool,
+) -> Result<()> {
+    // Historical inventory feeds only the shadow projection. New live inputs maintain
+    // both projections until activation; duplicate candidates still reach the legacy path.
+    if update_legacy {
+        legacy::store_claim_signature_tx(connection, claim_id, signature)?;
+    }
+    let text = serde_json::to_string(signature)?;
+    let added = connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO claim_signatures(claim_id, signer, key, nonce, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            /* sqlite-large-value: allow-for-now lv-h16586c1e56da owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_candidates(claim_id,signature,key,nonce)
+         VALUES (?1,?2,?3,?4)",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h7609ad2c9eca owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, signature.key, signature.nonce])?;
+    connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-h8b1d8ca0d39f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES (?1,?2,?3)"
+    )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,text,writer])?;
+    if added == 0 {
+        return Ok(());
+    }
+    connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7650541fb6ca owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id=?1")?
+        .execute(/* sqlite-large-value: allow-for-now lv-ha2e9111d7319 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    let row = claim_row(connection, claim_id)?;
+    if let Some(row) = row.as_ref()
+        && signature_matches(row, signature)
+    {
+        let used=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfd04ef25b0f3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_nonce_uses(claim_id,key,nonce) VALUES (?1,?2,?3)")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h23f9772ef4a9 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,signature.key,signature.nonce])?;
+        if used != 0 {
+            queue_linked_tx(
+                connection,
+                &format!("nonce:{}|{}", signature.key, signature.nonce),
+            )?;
+        }
+    }
+    if let Some(row) = row.as_ref() {
+        queue_affected_by_row_tx(connection, row)?;
+    }
+    // A newly sealed local claim needs its signature before its first verdict pass.
+    // Thereafter this facade is updated only by the current-authority candidate fold.
+    connection
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h3ef3e2963c54 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signatures(claim_id,signer,key,nonce,signature)
+         VALUES (?1,?2,?3,?4,?5)",
+        )?
+        .execute(/* sqlite-large-value: allow-for-now lv-h3d338a6f6764 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             claim_id,
             signature.signer,
             signature.key,
             signature.nonce,
-            serde_json::to_string(signature)?
+            text
         ])?;
-    if stored != 0 {
-        connection
-            .prepare_cached("INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)")?
-            .execute([claim_id])?;
-    }
+    connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h974754085cbf owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)")?
+        .execute(/* sqlite-large-value: allow-for-now lv-h314ea5b7655f owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     Ok(())
 }
+
+fn signature_candidates(connection: &Connection, claim_id: &str) -> Result<Vec<ClaimSignature>> {
+    connection
+        .prepare_cached(
+            "SELECT signature FROM claim_signature_candidates WHERE claim_id=?1 ORDER BY signature",
+        )?
+        .query_map([claim_id], |row| row.get::<_, String>(0))?
+        .map(|text| Ok(serde_json::from_str(&text?)?))
+        .collect()
+}
+
+fn signature_fields(row: &ClaimRow) -> Value {
+    let mut fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
+    // A long message's claim holds a preview, and names its whole text in an `attachments` entry
+    // of type text/plain. A device that signs such a message names `body_sha256` and `body_bytes`
+    // among its signed fields; they are those entry's hash and size, not stored fields.
+    if row.kind == "message.sent"
+        && let Some(body) = fields
+            .get("attachments")
+            .and_then(crate::principal::message_body_entry)
+            .cloned()
+    {
+        fields["body_sha256"] = body.get("sha256").cloned().unwrap_or(Value::Null);
+        fields["body_bytes"] = body.get("size").cloned().unwrap_or(Value::Null);
+    }
+    fields
+}
+
+fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
+    let fields = signature_fields(row);
+    signature.verifies(&crate::principal::Judged {
+        id: &row.id,
+        subject: &row.subject,
+        kind: &row.kind,
+        actor: row.actor.as_deref(),
+        content: content_digest(&row.subject, &row.kind, row.actor.as_deref(), &row.body),
+        fields: &fields,
+    })
+}
+
+mod judging;
+mod legacy;
+mod migration;
+pub(crate) use migration::SignatureEnvelopeWork;
+pub use migration::SignatureMigration;
+pub(crate) use migration::initialize_schema;
 
 /// Keep a signature a device made for the claim this node is about to write on `subject`, so the
 /// write stores it in its own transaction.
@@ -164,6 +380,28 @@ pub fn attach_expected_signature_tx(
     kind: &str,
     actor: Option<&str>,
 ) -> Result<()> {
+    attach_expected_signature_inner_tx(transaction, claim_id, subject, kind, actor, None)
+}
+
+pub(crate) fn attach_expected_signature_from_writer_tx(
+    transaction: &Transaction<'_>,
+    claim_id: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    writer: &str,
+) -> Result<()> {
+    attach_expected_signature_inner_tx(transaction, claim_id, subject, kind, actor, Some(writer))
+}
+
+fn attach_expected_signature_inner_tx(
+    transaction: &Transaction<'_>,
+    claim_id: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    writer: Option<&str>,
+) -> Result<()> {
     let Some(actor) = actor else {
         return Ok(());
     };
@@ -172,16 +410,36 @@ pub fn attach_expected_signature_tx(
             "SELECT signature FROM expected_claim_signatures
              WHERE subject=?1 AND kind=?2 AND actor=?3",
         )?
-        .query_row(params![subject, kind, actor], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hd18f6fae02cc owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![subject, kind, actor], |row| row.get::<_, String>(0))
         .optional()?;
     if let Some(text) = expected {
         transaction
             .prepare_cached(
-                "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
+                /* sqlite-large-value: allow-for-now lv-h72e4ba49a7d3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
             )?
-            .execute(params![subject, kind, actor])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-h213133341fb4 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![subject, kind, actor])?;
         if let Ok(signature) = serde_json::from_str::<ClaimSignature>(&text) {
-            store_claim_signature_tx(transaction, claim_id, &signature)?;
+            // API validation precedes this writer loan. Recheck nonce use against the
+            // serving model in the claim transaction, including an intervening cutover.
+            let serving_legacy = legacy::active(transaction)?;
+            if nonce_used_in_model(
+                transaction,
+                &signature.key,
+                &signature.nonce,
+                serving_legacy,
+            )? {
+                return Err(St3Error::new(
+                    "device-signature-replayed",
+                    "another live claim already carries this signature's nonce",
+                )
+                .into());
+            }
+            if let Some(writer) = writer {
+                // This model choice remains valid inside this same writer transaction.
+                store_candidate_tx(transaction, claim_id, &signature, writer, serving_legacy)?;
+            } else {
+                store_claim_signature_tx(transaction, claim_id, &signature)?;
+            }
         }
     }
     Ok(())
@@ -198,22 +456,31 @@ struct ClaimRow {
 fn claim_row(connection: &Connection, claim_id: &str) -> Result<Option<ClaimRow>> {
     Ok(connection
         .prepare_cached("SELECT id, subject, kind, actor, body FROM claims WHERE id=?1")?
-        .query_row([claim_id], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h683d859bacef owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             Ok(ClaimRow {
                 id: row.get(0)?,
                 subject: row.get(1)?,
                 kind: row.get(2)?,
                 actor: row.get(3)?,
-                body: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or(Value::Null),
+                body: serde_json::from_str(&row.get::<_, String>(4)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
             })
         })
         .optional()?)
 }
 
-/// The trust roots: `(host/NAME, key)` for every member incarnation fleet membership admits, and
-/// this node's own key.
-fn roots(connection: &Connection, origin: &str) -> Result<BTreeSet<(String, String)>> {
-    let mut roots = fleet_membership_tx(connection)?
+/// The member incarnations fleet membership admits, as `(host/NAME, key)`. A fold of every fleet
+/// claim: hundreds of statements, and on a large store tens of milliseconds to seconds of the
+/// writer each time.
+fn member_roots(connection: &Connection) -> Result<BTreeSet<(String, String)>> {
+    #[cfg(test)]
+    MEMBER_ROOT_FOLDS.with(|folds| folds.set(folds.get() + 1));
+    Ok(fleet_membership_tx(connection)?
         .incarnations()
         .map(|incarnation| {
             (
@@ -221,11 +488,130 @@ fn roots(connection: &Connection, origin: &str) -> Result<BTreeSet<(String, Stri
                 incarnation.member_key.clone(),
             )
         })
-        .collect::<BTreeSet<_>>();
-    if let Some(own) = fleet_meta(connection, OWN_NODE_KEY)? {
-        roots.insert((format!("host/{origin}"), own));
+        .collect::<BTreeSet<_>>())
+}
+
+// Per thread, so tests running side by side cannot count each other's folds.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MEMBER_ROOT_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Local inspection of retained candidate state. A threshold is an alert, never an eviction.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SignatureStateFault {
+    pub code: String,
+    pub subject: String,
+    pub detail: String,
+}
+
+// The primary-key order otherwise lets SQLite choose a scan of every ordinary claim.
+// Sort the sparse alert set after reading the existing threshold index instead.
+fn signature_alerts_query(connection: &Connection) -> rusqlite::Result<rusqlite::CachedStatement<'_>> {
+    connection.prepare_cached("SELECT claim_id,candidates FROM claim_signature_counts INDEXED BY claim_signature_counts_alert_index WHERE candidates>=64 ORDER BY claim_id")
+}
+
+impl Store {
+    pub fn signature_candidate_count(&self, claim_id: &str) -> Result<u64> {
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT candidates FROM claim_signature_counts WHERE claim_id=?1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hab4cfb09b8f9 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
+            .optional()?
+            .unwrap_or(0))
     }
-    Ok(roots)
+    pub fn signature_writer_candidate_count(&self, writer: &str) -> Result<u64> {
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT candidates FROM claim_signature_writer_counts WHERE writer=?1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h5fbe338e2956 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [writer], |row| row.get(0))
+            .optional()?
+            .unwrap_or(0))
+    }
+    pub fn signature_state_faults(&self) -> Result<Vec<SignatureStateFault>> {
+        let mut faults = Vec::new();
+        let migration = self.signature_migration()?;
+        if migration.serving_legacy && migration.legacy_fault.is_none() {
+            faults.push(SignatureStateFault { code:"signature-legacy-p0-exposed".into(), subject:format!("host/{}",self.origin), detail:format!("legacy first-carried authorization is active; candidate projection is {} at cursor {}, legacy through {}, envelopes through {}, envelope {} claim offset {}; corrected authority activates only after complete inventory and reconciliation",migration.phase,migration.cursor,migration.legacy_through,migration.envelopes_through,migration.envelope_row,migration.claim_offset) + "; " + &migration.progress_description() });
+        }
+        if migration.serving_legacy
+            && migration.legacy_fault.is_none()
+            && migration.fault.is_none()
+            && now_ms().saturating_sub(migration.advanced_at_unix_ms) > 300_000
+        {
+            faults.push(SignatureStateFault { code:"signature-bootstrap-stalled".into(),subject:format!("host/{}",self.origin),detail:format!("no committed candidate bootstrap progress for at least 300s; inspect the writer queue and stopped-job logs; {}",migration.progress_description()) });
+        }
+        if let Some(fault) = &migration.legacy_fault {
+            faults.push(SignatureStateFault {code:"signature-state-corrupt".into(),subject:format!("host/{}",self.origin),detail:format!("legacy authorization is unavailable: {fault}; repair the named local defect before explicit resume")});
+        }
+        if let Some(reason) = migration.unavailable_reason() {
+            let (code, detail) = reason.split_once(": ").unwrap_or((&reason, ""));
+            faults.push(SignatureStateFault {
+                code: code.into(),
+                subject: format!("host/{}", self.origin),
+                detail: detail.into(),
+            });
+        }
+        let connection = self.readers.get();
+        let pending:u64=connection.prepare_cached("SELECT COUNT(*) FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1")?.query_row(/* sqlite-large-value: allow-for-now lv-ha7a25e3cb8cb owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [],|row|row.get(0))?;
+        if pending != 0 {
+            let sample=connection.prepare_cached("SELECT claim_id FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1 ORDER BY claim_id LIMIT 20")?.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            faults.push(SignatureStateFault {code:"signature-judgment-incomplete".into(),subject:format!("host/{}",self.origin),detail:format!("{pending} claims have pending bounded candidate judgment; first {} claim ids: {sample:?}; serving model is {}; candidate authority remains Held until affected pages reconcile",sample.len(),if migration.serving_legacy { "legacy (P0 exposed)" } else { "candidate" })});
+        }
+        let alerts=signature_alerts_query(&connection)?
+            .query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (claim_id, count) in alerts {
+            let writers=connection.prepare_cached("SELECT writer,COUNT(*) FROM claim_signature_sources WHERE claim_id=?1 GROUP BY writer ORDER BY writer")?
+                .query_map([&claim_id],|row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            faults.push(SignatureStateFault { code:"signature-candidate-count".into(), subject:format!("claim/{claim_id}"), detail:format!("{count} distinct candidates retained; carrying writers: {writers:?}; threshold 64 is inspection only") });
+        }
+        Ok(faults)
+    }
+}
+
+impl Store {
+    /// The trust roots: `(host/NAME, key)` for every member incarnation fleet membership admits,
+    /// and this node's own key. The membership part is folded again only when `fleet_generation`
+    /// moved: it is a function of the fleet claims, their envelopes' signatures and the anchor,
+    /// and triggers advance the generation whenever any of them changes.
+    ///
+    /// Call it before the transaction writes anything: the generation and the fold are then read
+    /// from the same committed snapshot, so a cached pair is always consistent. A transaction that
+    /// had already changed fleet claims could cache a membership its rollback would undo.
+    pub(crate) fn trust_roots(
+        &self,
+        connection: &Connection,
+        origin: &str,
+    ) -> Result<BTreeSet<(String, String)>> {
+        let generation: i64 =
+            connection.query_row("SELECT value FROM fleet_generation WHERE id=1", [], |row| {
+                row.get(0)
+            })?;
+        let cached = self
+            .roots_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(folded_at, _)| *folded_at == generation)
+            .map(|(_, roots)| roots.clone());
+        let mut roots = match cached {
+            Some(roots) => roots,
+            None => {
+                let roots = member_roots(connection)?;
+                *self
+                    .roots_cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some((generation, roots.clone()));
+                roots
+            }
+        };
+        if let Some(own) = fleet_meta(connection, OWN_NODE_KEY)? {
+            roots.insert((format!("host/{origin}"), own));
+        }
+        Ok(roots)
+    }
 }
 
 /// Answers for one claim being judged: every question about order is about claims before it.
@@ -239,22 +625,30 @@ struct StoreFacts<'a> {
     memo: &'a RefCell<BTreeMap<String, Verdict>>,
     /// What the verdict relied on.
     links: RefCell<BTreeSet<String>>,
+    fault: RefCell<Option<String>>,
+    incomplete: RefCell<bool>,
 }
 
 impl StoreFacts<'_> {
+    fn read<T>(&self, result: Result<T>, neutral: T) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.fault
+                    .borrow_mut()
+                    .get_or_insert_with(|| format!("{error:#}"));
+                neutral
+            }
+        }
+    }
     fn before(&self, other: &str) -> bool {
-        position(self.connection, other)
-            .ok()
-            .flatten()
+        self.read(position(self.connection, other), None)
             .is_some_and(|other| other.compare(&self.position) == CmpOrdering::Less)
     }
 
     fn verdict_of(&self, claim_id: &str) -> Verdict {
         if let Some(verdict) = self.memo.borrow().get(claim_id) {
             return verdict.clone();
-        }
-        if let Ok(Some(verdict)) = cached_verdict(self.connection, claim_id) {
-            return verdict;
         }
         if self.depth >= MAX_CHAIN_DEPTH {
             return Verdict::Invalid("the chain is too deep or loops".into());
@@ -266,8 +660,13 @@ impl StoreFacts<'_> {
             self.depth + 1,
             self.memo,
         )
-        .map(|(verdict, _)| verdict)
-        .unwrap_or_else(|error| Verdict::Invalid(format!("could not judge: {error:#}")));
+        .map(|(verdict, _, _)| verdict)
+        .unwrap_or_else(|error| {
+            self.fault
+                .borrow_mut()
+                .get_or_insert_with(|| format!("{error:#}"));
+            Verdict::Held(format!("signature-state-corrupt: {error:#}"))
+        });
         self.memo
             .borrow_mut()
             .insert(claim_id.to_owned(), verdict.clone());
@@ -280,7 +679,7 @@ impl Facts for StoreFacts<'_> {
         self.links
             .borrow_mut()
             .insert(format!("delegation:{claim_id}"));
-        let row = claim_row(self.connection, claim_id).ok().flatten()?;
+        let row = self.read(claim_row(self.connection, claim_id), None)?;
         if row.kind != KEY_GRANTED {
             return None;
         }
@@ -307,9 +706,9 @@ impl Facts for StoreFacts<'_> {
         let revocations = self
             .connection
             .prepare_cached(
-                "SELECT claims.id FROM claims JOIN claim_signatures ON claim_signatures.claim_id=claims.id
-                 WHERE claims.subject=?1 AND claims.kind=?2
-                   AND json_extract(claims.body, '$.fields.key')=?3",
+                "SELECT claims.id FROM claims WHERE claims.subject=?1 AND claims.kind=?2
+                   AND json_extract(claims.body, '$.fields.key')=?3
+                   AND EXISTS(SELECT 1 FROM claim_signature_candidates WHERE claim_id=claims.id)",
             )
             .and_then(|mut statement| {
                 statement
@@ -318,18 +717,35 @@ impl Facts for StoreFacts<'_> {
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
-            .unwrap_or_default();
+            .map_err(Into::into);
+        let revocations = self.read(revocations, Vec::new());
         revocations.into_iter().any(|revocation| {
-            revocation != self.claim_id
-                && self.before(&revocation)
-                && self.verdict_of(&revocation) == Verdict::Verified
-                && stored_signature(self.connection, &revocation)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|signature| {
-                        signature.signer == principal
-                            || Family::of(&signature.signer) == Some(Family::Node)
-                    })
+            if revocation == self.claim_id
+                || !self.before(&revocation)
+                || self.depth >= MAX_CHAIN_DEPTH
+            {
+                return false;
+            }
+            let (verdict, _, signature) = self.read(
+                judge_claim(
+                    self.connection,
+                    self.roots,
+                    &revocation,
+                    self.depth + 1,
+                    self.memo,
+                ),
+                (
+                    Verdict::Held("signature-state-corrupt".into()),
+                    BTreeSet::new(),
+                    None,
+                ),
+            );
+            if matches!(&verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:")) { *self.incomplete.borrow_mut()=true; }
+            verdict == Verdict::Verified
+                && signature.is_some_and(|signature| {
+                    signature.signer == principal
+                        || Family::of(&signature.signer) == Some(Family::Node)
+                })
         })
     }
 
@@ -340,7 +756,7 @@ impl Facts for StoreFacts<'_> {
         let others = self
             .connection
             .prepare_cached(
-                "SELECT claim_id FROM claim_signatures WHERE key=?1 AND nonce=?2 AND claim_id<>?3",
+                "SELECT claim_id FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2 AND claim_id<>?3",
             )
             .and_then(|mut statement| {
                 statement
@@ -349,7 +765,8 @@ impl Facts for StoreFacts<'_> {
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
-            .unwrap_or_default();
+            .map_err(Into::into);
+        let others = self.read(others, Vec::new());
         others.iter().any(|other| self.before(other))
     }
 }
@@ -357,7 +774,7 @@ impl Facts for StoreFacts<'_> {
 fn cached_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {
     Ok(connection
         .prepare_cached("SELECT verdict, reason FROM claim_verdicts WHERE claim_id=?1")?
-        .query_row([claim_id], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-hf0974ef66e69 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             Ok(verdict_from(&row.get::<_, String>(0)?, row.get(1)?))
         })
         .optional()?)
@@ -380,18 +797,57 @@ fn judge_claim(
     claim_id: &str,
     depth: usize,
     memo: &RefCell<BTreeMap<String, Verdict>>,
-) -> Result<(Verdict, BTreeSet<String>)> {
+) -> Result<(Verdict, BTreeSet<String>, Option<ClaimSignature>)> {
+    if !migration::judging_available(connection)? {
+        let reason = migration::unavailable(connection)?
+            .unwrap_or_else(|| "signature-state-corrupt: missing inventory state".into());
+        return Ok((Verdict::Held(reason), BTreeSet::new(), None));
+    }
     let Some(row) = claim_row(connection, claim_id)? else {
         return Ok((
             Verdict::Held(format!("claim {claim_id} is not here")),
             BTreeSet::new(),
+            None,
         ));
     };
-    let signature = stored_signature(connection, claim_id)?;
+    let count = judging::candidate_count(connection, claim_id)?;
+    if count > CANDIDATE_PAGE as u64 {
+        if judging::complete(connection, claim_id)? {
+            judging::validate_cached(connection, &row)?;
+            let verdict=cached_verdict(connection,claim_id)?.ok_or_else(|| anyhow::anyhow!("signature-state-corrupt: completed candidate judgment has no verdict for {claim_id}"))?;
+            let signature=stored_signature(connection,claim_id)?.ok_or_else(|| anyhow::anyhow!("signature-state-corrupt: completed candidate judgment has no signature for {claim_id}"))?;
+            return Ok((verdict, BTreeSet::new(), Some(signature)));
+        }
+        return Ok((
+            Verdict::Held(format!("signature-judgment-incomplete: {claim_id}")),
+            BTreeSet::new(),
+            None,
+        ));
+    }
+    judge_candidates(
+        connection,
+        roots,
+        &row,
+        signature_candidates(connection, claim_id)?,
+        depth,
+        memo,
+    )
+}
+
+fn judge_candidates(
+    connection: &Connection,
+    roots: &BTreeSet<(String, String)>,
+    row: &ClaimRow,
+    signatures: Vec<ClaimSignature>,
+    depth: usize,
+    memo: &RefCell<BTreeMap<String, Verdict>>,
+) -> Result<(Verdict, BTreeSet<String>, Option<ClaimSignature>)> {
+    let claim_id = &row.id;
     let Some(position) = position(connection, claim_id)? else {
         return Ok((
             Verdict::Held(format!("claim {claim_id} is not here")),
             BTreeSet::new(),
+            None,
         ));
     };
     let facts = StoreFacts {
@@ -402,8 +858,10 @@ fn judge_claim(
         depth,
         memo,
         links: RefCell::default(),
+        fault: RefCell::default(),
+        incomplete: RefCell::default(),
     };
-    let fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
+    let fields = signature_fields(row);
     let judged = crate::principal::Judged {
         id: &row.id,
         subject: &row.subject,
@@ -412,8 +870,34 @@ fn judge_claim(
         content: content_digest(&row.subject, &row.kind, row.actor.as_deref(), &row.body),
         fields: &fields,
     };
-    let verdict = judge(&judged, signature.as_ref(), &facts);
-    Ok((verdict, facts.links.into_inner()))
+    let mut best: Option<(Verdict, ClaimSignature)> = None;
+    // Candidates already have normalized byte order. Equal verdict ranks keep the first.
+    // Judge every candidate to preserve losing candidates' authority dependencies too.
+    for signature in signatures {
+        let verdict = judge(&judged, Some(&signature), &facts);
+        if best
+            .as_ref()
+            .is_none_or(|(previous, _)| judging::rank(&verdict) < judging::rank(previous))
+        {
+            best = Some((verdict, signature));
+        }
+    }
+    if let Some(error) = facts.fault.into_inner() {
+        anyhow::bail!("signature-state-corrupt: {error}");
+    }
+    if facts.incomplete.into_inner() {
+        return Ok((
+            Verdict::Held(
+                "signature-judgment-incomplete: an authority dependency is pending".into(),
+            ),
+            facts.links.into_inner(),
+            best.map(|(_, signature)| signature),
+        ));
+    }
+    let (verdict, signature) = best.map_or((Verdict::Unsigned, None), |(verdict, signature)| {
+        (verdict, Some(signature))
+    });
+    Ok((verdict, facts.links.into_inner(), signature))
 }
 
 fn write_verdict_tx(
@@ -421,42 +905,98 @@ fn write_verdict_tx(
     claim_id: &str,
     signature: &ClaimSignature,
     verdict: &Verdict,
-    links: &BTreeSet<String>,
 ) -> Result<bool> {
     let previous = cached_verdict(connection, claim_id)?;
-    connection
-        .prepare_cached("DELETE FROM claim_verdict_links WHERE claim_id=?1")?
-        .execute([claim_id])?;
-    for link in links {
-        connection
-            .prepare_cached(
-                "INSERT OR IGNORE INTO claim_verdict_links(link, claim_id) VALUES (?1, ?2)",
-            )?
-            .execute(params![link, claim_id])?;
-    }
+    let previous_signature = stored_signature(connection, claim_id)?;
     connection
         .prepare_cached(
-            "INSERT OR REPLACE INTO claim_verdicts(claim_id, verdict, reason, signer, on_behalf)
+            /* sqlite-large-value: allow-for-now lv-h5f8142f84899 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signatures SET signer=?1,key=?2,nonce=?3,signature=?4 WHERE claim_id=?5",
+        )?
+        .execute(/* sqlite-large-value: allow-for-now lv-h63d55e8c184c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
+            signature.signer,
+            signature.key,
+            signature.nonce,
+            serde_json::to_string(signature)?,
+            claim_id
+        ])?;
+    // Candidate pages have already committed their dependency links. Publishing the
+    // verdict never reads, deletes or rewrites the full link set.
+    connection
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h3af9bdc217e6 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO claim_verdicts(claim_id, verdict, reason, signer, on_behalf)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-he60e299d0182 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             claim_id,
             verdict.name(),
             verdict.reason(),
             signature.signer,
             signature.on_behalf
         ])?;
-    Ok(previous.as_ref() != Some(verdict))
+    let notify: bool = connection
+        .prepare_cached("SELECT notified=0 FROM claim_signature_judging WHERE claim_id=?1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h7f915a30389b owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
+        .optional()?
+        .unwrap_or(false);
+    let ready = !matches!(verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:"));
+    if ready {
+        connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbe00773d6819 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET notified=1 WHERE claim_id=?1")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h4f2bc9087eab owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    }
+    Ok(previous.as_ref() != Some(verdict)
+        || previous_signature.as_ref() != Some(signature)
+        || (notify && ready))
+}
+
+/// Forget a claim's signature and every cached verdict row of it, when a checkpoint drops the
+/// claim. None of these rows is synced or in a digest, and nothing reads them for a claim that is
+/// gone: a nonce counts as used before only by a claim the store still holds, and a dropped claim
+/// is never a delegation another verdict relies on (those kinds are never dropped).
+pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result<usize> {
+    // Absence of a formerly live nonce use can make a retained candidate valid again.
+    // Queue its dependents before deleting the relation, in the deletion transaction.
+    // The indexed join includes non-winning cryptographic uses, not just the facade.
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd26d59e3827d owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h4207bd94c16e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4ff355fec1f2 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h871e734931b2 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    queue_affected_by_tx(connection, claim_id)?;
+    if legacy::active(connection)? {
+        legacy::queue_affected_by_tx(connection, claim_id)?;
+    }
+    let mut rows = 0;
+    if legacy::present(connection)? {
+        for table in legacy::TABLES {
+            rows += connection
+                .prepare_cached(&format!(/* sqlite-large-value: allow-for-now lv-h682b64691597 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id=?1"))?
+                .execute(/* sqlite-large-value: allow-for-now lv-h1a31bc53b2c8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+        }
+    }
+    for table in [
+        "claim_signatures",
+        "claim_signature_candidates",
+        "claim_signature_nonce_uses",
+        "claim_signature_judging",
+        "claim_verdicts",
+        "claim_verdict_links",
+        "claim_verdict_queue",
+        "claim_verdict_fresh",
+    ] {
+        rows += connection
+            .prepare_cached(&format!(/* sqlite-large-value: allow-for-now lv-hf6676f3ba393 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id=?1"))?
+            .execute(/* sqlite-large-value: allow-for-now lv-h8f30a91548fa owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    }
+    Ok(rows)
 }
 
 /// Queue every verdict linked to `link`.
 fn queue_linked_tx(connection: &Connection, link: &str) -> Result<()> {
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h49b3f0ec0be5 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id IN (SELECT claim_id FROM claim_verdict_links WHERE link=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h70b485176b21 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [link])?;
     connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
+            /* sqlite-large-value: allow-for-now lv-h223cb02a73f3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
              SELECT claim_id FROM claim_verdict_links WHERE link=?1",
         )?
-        .execute([link])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h166860a6fb5a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [link])?;
     Ok(())
 }
 
@@ -466,20 +1006,16 @@ fn queue_affected_by_tx(connection: &Connection, claim_id: &str) -> Result<()> {
     let Some(row) = claim_row(connection, claim_id)? else {
         return Ok(());
     };
-    let Some(signature) = stored_signature(connection, claim_id)? else {
-        return Ok(());
-    };
-    queue_linked_tx(
-        connection,
-        &format!("nonce:{}|{}", signature.key, signature.nonce),
-    )?;
+    queue_affected_by_row_tx(connection, &row)
+}
+fn queue_affected_by_row_tx(connection: &Connection, row: &ClaimRow) -> Result<()> {
     let field_key = row
         .body
         .pointer("/fields/key")
         .and_then(Value::as_str)
         .map(str::to_owned);
     match (row.kind.as_str(), field_key) {
-        (KEY_GRANTED, _) => queue_linked_tx(connection, &format!("delegation:{claim_id}"))?,
+        (KEY_GRANTED, _) => queue_linked_tx(connection, &format!("delegation:{}", row.id))?,
         (KEY_REVOKED, Some(key)) => {
             queue_linked_tx(connection, &format!("key:{}|{key}", row.subject))?
         }
@@ -495,6 +1031,69 @@ pub struct Unsealed<'a> {
     pub actor: Option<&'a str>,
     pub body: &'a Value,
     pub accepted_at_unix_ms: u128,
+}
+
+/// Which complete authorization model supplies a local judgment. A legacy-serving member
+/// is not qualified to supply candidate-model authority to another member or feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignatureModel {
+    Legacy,
+    Candidate,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ClaimAuthorization {
+    pub model: SignatureModel,
+    pub verdict: Verdict,
+    pub signature: Option<ClaimSignature>,
+}
+
+/// All `claim_signer` reads of a claim besides the keyring: the issuer and issuer key of the
+/// grant it makes, when it is a key grant, and its actor. Claims with equal inputs are signed by
+/// the same signer.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SignerInput {
+    grant: Option<(String, String)>,
+    actor: Option<String>,
+}
+
+impl SignerInput {
+    pub(crate) fn of(claim: &Unsealed<'_>) -> Self {
+        let grant = if claim.kind == KEY_GRANTED {
+            claim
+                .body
+                .get("fields")
+                .and_then(KeyGrant::from_fields)
+                .map(|grant| (grant.issuer, grant.issuer_key))
+        } else {
+            None
+        };
+        Self {
+            grant,
+            actor: claim.actor.map(str::to_owned),
+        }
+    }
+}
+
+/// The key a claim is signed with, the principal it signs as, the principal it acts for and the
+/// delegation chain from its key: what a claim signature records about its signer.
+pub(crate) struct ClaimSigner {
+    pub(crate) key: Arc<crate::fleet::MemberKey>,
+    pub(crate) signer: String,
+    pub(crate) on_behalf: Option<String>,
+    pub(crate) chain: Vec<String>,
+}
+
+impl ClaimSigner {
+    /// Whether `signature` names this signer: the same key, principal, principal acted for and
+    /// chain. Two signatures by the same signer differ only in nonce, and so in signature bytes.
+    pub(crate) fn signed(&self, signature: &ClaimSignature) -> bool {
+        signature.key == self.key.public()
+            && signature.signer == self.signer
+            && signature.on_behalf == self.on_behalf
+            && signature.chain == self.chain
+    }
 }
 
 /// What a verdict recheck found.
@@ -524,7 +1123,7 @@ impl Store {
             let connection = self.connection.write();
             connection
                 .execute(
-                    "INSERT OR REPLACE INTO expected_claim_signatures(subject, kind, actor, signature)
+                    /* sqlite-large-value: allow-for-now lv-h29f3aefa1eb9 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO expected_claim_signatures(subject, kind, actor, signature)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![key.0, key.1, key.2, text],
                 )
@@ -535,21 +1134,17 @@ impl Store {
         let connection = self.connection.write();
         connection
             .execute(
-                "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
+                /* sqlite-large-value: allow-for-now lv-h57caa6e1f61e owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
                 params![key.0, key.1, key.2],
             )
             .map_err(internal)?;
         appended
     }
 
-    /// Whether another claim already carries this key and nonce.
+    /// Whether a live claim already carries cryptographic signing use of this key/nonce.
+    /// A partial legacy inventory cannot answer absence safely and refuses authorization.
     pub fn signature_nonce_used(&self, key: &str, nonce: &str) -> Result<bool> {
-        let connection = self.readers.get();
-        Ok(connection
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM claim_signatures WHERE key=?1 AND nonce=?2)",
-            )?
-            .query_row(params![key, nonce], |row| row.get(0))?)
+        self.read_snapshot(|_| nonce_used(&self.readers.get(), key, nonce))
     }
 
     /// Enrol a device of `person`: the person's root key, which this node holds, grants `key` as
@@ -674,7 +1269,7 @@ impl Store {
         self.keyring.set_node(Some(key));
         let connection = self.connection.write();
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+            /* sqlite-large-value: allow-for-now lv-h66ada43b6645 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![OWN_NODE_KEY, public],
         )?;
@@ -806,7 +1401,7 @@ impl Store {
         self.connection
             .write()
             .execute(
-                "INSERT OR REPLACE INTO held_keys(public_key, principal, role, chain)
+                /* sqlite-large-value: allow-for-now lv-hc16319dc28f4 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO held_keys(public_key, principal, role, chain)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
                     key.public(),
@@ -830,52 +1425,70 @@ impl Store {
     /// principal this node holds a key for with that key, anything else by the node on the
     /// writer's behalf. `None` without a node key.
     pub(crate) fn sign_unsealed(&self, claim: &Unsealed<'_>) -> Option<ClaimSignature> {
-        let node = self.keyring.node()?;
+        let chosen = self.claim_signer(claim)?;
         let content = content_digest(claim.subject, claim.kind, claim.actor, claim.body);
         let signed_at = u64::try_from(claim.accepted_at_unix_ms).unwrap_or(u64::MAX);
-        let node_subject = self.node_subject();
-        if claim.kind == KEY_GRANTED
-            && let Some(grant) = claim.body.get("fields").and_then(KeyGrant::from_fields)
-        {
-            if grant.issuer == node_subject && grant.issuer_key == node.public() {
-                return Some(ClaimSignature::sign(
-                    &node,
-                    &content,
-                    &node_subject,
-                    None,
-                    Vec::new(),
-                    signed_at,
-                ));
-            }
-            if let Some(issuer) = self.keyring.by_public(&grant.issuer_key)
-                && issuer.principal == grant.issuer
-            {
-                return Some(ClaimSignature::sign(
-                    &issuer.key,
-                    &content,
-                    &issuer.principal,
-                    None,
-                    issuer.chain,
-                    signed_at,
-                ));
-            }
-        }
-        if let Some(actor) = claim.actor
-            && let Some(held) = self.keyring.signing(actor)
-        {
-            return Some(ClaimSignature::sign(
-                &held.key, &content, actor, None, held.chain, signed_at,
-            ));
-        }
-        let on_behalf = claim.actor.filter(|actor| *actor != node_subject);
         Some(ClaimSignature::sign(
-            &node,
+            &chosen.key,
             &content,
-            &node_subject,
-            on_behalf,
-            Vec::new(),
+            &chosen.signer,
+            chosen.on_behalf.as_deref(),
+            chosen.chain,
             signed_at,
         ))
+    }
+
+    /// Who `sign_unsealed` signs `claim` as, read from the keyring without signing. `None`
+    /// without a node key.
+    pub(crate) fn claim_signer(&self, claim: &Unsealed<'_>) -> Option<ClaimSigner> {
+        self.claim_signer_for(&SignerInput::of(claim))
+    }
+
+    /// Who `sign_unsealed` signs a claim with these inputs as. `None` without a node key.
+    pub(crate) fn claim_signer_for(&self, input: &SignerInput) -> Option<ClaimSigner> {
+        let node = self.keyring.node()?;
+        let node_subject = self.node_subject();
+        if let Some((issuer, issuer_key)) = &input.grant {
+            if *issuer == node_subject && issuer_key == node.public() {
+                return Some(ClaimSigner {
+                    key: node,
+                    signer: node_subject,
+                    on_behalf: None,
+                    chain: Vec::new(),
+                });
+            }
+            if let Some(held) = self.keyring.by_public(issuer_key)
+                && held.principal == *issuer
+            {
+                return Some(ClaimSigner {
+                    key: held.key,
+                    signer: held.principal,
+                    on_behalf: None,
+                    chain: held.chain,
+                });
+            }
+        }
+        if let Some(actor) = input.actor.as_deref()
+            && let Some(held) = self.keyring.signing(actor)
+        {
+            return Some(ClaimSigner {
+                key: held.key,
+                signer: actor.to_owned(),
+                on_behalf: None,
+                chain: held.chain,
+            });
+        }
+        let on_behalf = input
+            .actor
+            .as_deref()
+            .filter(|actor| *actor != node_subject)
+            .map(str::to_owned);
+        Some(ClaimSigner {
+            key: node,
+            signer: node_subject,
+            on_behalf,
+            chain: Vec::new(),
+        })
     }
 
     /// Whether a pass has anything to judge: a newly signed claim, or a queued one. Two probes
@@ -887,7 +1500,7 @@ impl Store {
                 "SELECT EXISTS(SELECT 1 FROM claim_verdict_fresh)
                      OR EXISTS(SELECT 1 FROM claim_verdict_queue)",
             )?
-            .query_row([], |row| row.get(0))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-ha76b0c3b2d8f owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
     }
 
     /// Judge every signed claim admitted since the last pass and every queued one. With
@@ -895,10 +1508,38 @@ impl Store {
     /// membership changed them. Each chunk takes the writer once; queued writes run between
     /// chunks. A pass with nothing to do reads one row.
     pub fn judge_claims(&self, check_roots: bool) -> Result<usize> {
+        if legacy::active(&self.readers.get())? {
+            // Ordinary API work maintains the serving model. The finite background job
+            // alone owns the historical shadow queue until activation.
+            return legacy::judge_claims(self, check_roots);
+        }
+        self.record_judgment_failure(self.judge_claims_inner(check_roots, false))
+    }
+
+    /// One resumable shadow judgment loan for the paced bootstrap worker.
+    pub fn advance_signature_judgment(&self) -> Result<usize> {
+        self.record_judgment_failure(self.judge_claims_inner(true, true))
+    }
+
+    fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
+        if let Err(error) = &result {
+            migration::record_fault(
+                &self.connection.write(),
+                &format!("verdict reconciliation: {error:#}"),
+            )?;
+        }
+        result
+    }
+    fn judge_claims_inner(&self, check_roots: bool, one_loan: bool) -> Result<usize> {
+        let migration = self.signature_migration()?;
+        if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
+            return Ok(0);
+        }
+        let track_bootstrap = !migration.done();
         if check_roots {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
-            let roots = roots(&transaction, &self.origin)?;
+            let roots = self.trust_roots(&transaction, &self.origin)?;
             let roots_digest = crate::hash::canonical_hash(&roots)?;
             if fleet_meta(&transaction, VERDICT_ROOTS)?.as_deref() != Some(roots_digest.as_str()) {
                 queue_linked_tx(&transaction, "root")?;
@@ -906,89 +1547,186 @@ impl Store {
             }
             transaction.commit()?;
         }
-        if !self.verdicts_pending()? {
+        if !track_bootstrap && !self.verdicts_pending()? {
             return Ok(0);
         }
         let mut judged = 0;
         loop {
             let mut connection = self.connection.write();
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let roots = roots(&transaction, &self.origin)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let roots = self.trust_roots(&transaction, &self.origin)?;
+            // A root can change between bounded loans. The final activation transaction
+            // must reconcile that input too, rather than certify earlier cached roots.
+            if check_roots || track_bootstrap {
+                let roots_digest = crate::hash::canonical_hash(&roots)?;
+                if fleet_meta(&transaction, VERDICT_ROOTS)?.as_deref()
+                    != Some(roots_digest.as_str())
+                {
+                    queue_linked_tx(&transaction, "root")?;
+                    set_meta_tx(&transaction, VERDICT_ROOTS, &roots_digest)?;
+                }
+            }
             let fresh = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_fresh LIMIT ?1")?
                 .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for claim_id in &fresh {
                 transaction
-                    .prepare_cached("DELETE FROM claim_verdict_fresh WHERE claim_id=?1")?
-                    .execute([claim_id])?;
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfa4112c13a2b owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_verdict_fresh WHERE claim_id=?1")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h28d625e3f51a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
                 // A new delegation, revocation or reused nonce changes what relied on it.
                 queue_affected_by_tx(&transaction, claim_id)?;
                 transaction
                     .prepare_cached(
-                        "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
+                        /* sqlite-large-value: allow-for-now lv-hdb329af360b2 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
                     )?
-                    .execute([claim_id])?;
+                    .execute(/* sqlite-large-value: allow-for-now lv-h9c7ea890a098 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
             }
             let queued = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
                 .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let memo = RefCell::new(BTreeMap::new());
+            let mut candidates_judged = 0;
             for claim_id in &queued {
+                if candidates_judged >= CANDIDATE_PAGE {
+                    break;
+                }
                 transaction
-                    .prepare_cached("DELETE FROM claim_verdict_queue WHERE claim_id=?1")?
-                    .execute([claim_id])?;
-                let Some(signature) = stored_signature(&transaction, claim_id)? else {
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9b345496e02d owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_verdict_queue WHERE claim_id=?1")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h29105e98503c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+                // A signature can arrive for a claim a checkpoint has since dropped.
+                let Some(row) = claim_row(&transaction, claim_id)? else {
                     continue;
                 };
-                // A signature can arrive for a claim a checkpoint has since dropped.
-                if claim_row(&transaction, claim_id)?.is_none() {
+                let (result, used) = judging::advance(
+                    &transaction,
+                    &roots,
+                    &row,
+                    &memo,
+                    CANDIDATE_PAGE - candidates_judged,
+                )?;
+                candidates_judged += used.max(1);
+                let Some((verdict, signature)) = result else {
                     continue;
-                }
-                let (verdict, links) = judge_claim(&transaction, &roots, claim_id, 0, &memo)?;
-                if write_verdict_tx(&transaction, claim_id, &signature, &verdict, &links)? {
+                };
+                let Some(signature) = signature else {
+                    continue;
+                };
+                if write_verdict_tx(&transaction, claim_id, &signature, &verdict)? {
                     // A changed delegation or revocation changes what relied on it.
-                    queue_affected_by_tx(&transaction, claim_id)?;
+                    queue_affected_by_row_tx(&transaction, &row)?;
                 }
                 judged += 1;
             }
-            transaction.commit()?;
+            if track_bootstrap && candidates_judged != 0 {
+                migration::note_work(&transaction, candidates_judged)?;
+            }
             if fresh.is_empty() && queued.is_empty() {
+                migration::finish_judging(&transaction)?;
+            }
+            transaction.commit()?;
+            if one_loan || (fresh.is_empty() && queued.is_empty()) {
                 return Ok(judged);
             }
         }
     }
 
-    /// A claim's verdict as the cache holds it. A claim with no signature is `unsigned`.
-    pub fn claim_verdict(&self, claim_id: &str) -> Result<Verdict> {
-        let connection = self.readers.get();
-        Ok(cached_verdict(&connection, claim_id)?.unwrap_or(Verdict::Unsigned))
+    /// Exercise a real bounded loan, then allow another real writer to change inputs.
+    #[cfg(feature = "test-support")]
+    pub fn judge_claim_page_for_test(&self, check_roots: bool) -> Result<usize> {
+        self.judge_claims_inner(check_roots, true)
     }
 
-    /// A claim's signature, when it has one.
+    pub fn signature_model(&self) -> Result<SignatureModel> {
+        self.read_snapshot(|_| {
+            Ok(if legacy::active(&self.readers.get())? {
+                SignatureModel::Legacy
+            } else {
+                SignatureModel::Candidate
+            })
+        })
+    }
+
+    /// Pin the model, verdict and selected signature together for a relying reader.
+    /// An incomplete candidate model gives a typed Held verdict without proof bytes.
+    pub fn claim_authorization(&self, claim_id: &str) -> Result<ClaimAuthorization> {
+        self.read_snapshot(|_| {
+            let model=self.signature_model()?;
+            let verdict=self.claim_verdict(claim_id)?;
+            let signature=if matches!(&verdict,Verdict::Held(reason) if reason.starts_with("signature-migration-incomplete:") || reason.starts_with("signature-judgment-incomplete:") || reason.starts_with("signature-state-corrupt:")) { None } else { self.claim_signature(claim_id)? };
+            Ok(ClaimAuthorization { model, verdict, signature })
+        })
+    }
+
+    /// A claim's verdict as the cache holds it. A claim with no signature is `unsigned`.
+    pub fn claim_verdict(&self, claim_id: &str) -> Result<Verdict> {
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            if legacy::active(&connection)? {
+                return Ok(
+                    legacy::cached_verdict(&connection, claim_id)?.unwrap_or(Verdict::Unsigned)
+                );
+            }
+            if let Some(reason) = migration::unavailable(&connection)? {
+                return Ok(Verdict::Held(reason));
+            }
+            if let Some(reason) = judging::unavailable(&connection, claim_id)? {
+                return Ok(Verdict::Held(reason));
+            }
+            Ok(cached_verdict(&connection, claim_id)?.unwrap_or(Verdict::Unsigned))
+        })
+    }
+
+    /// A signature from the same serving model as its verdict.
     pub fn claim_signature(&self, claim_id: &str) -> Result<Option<ClaimSignature>> {
-        stored_signature(&self.readers.get(), claim_id)
+        self.read_snapshot(|_| serving_signature(&self.readers.get(), claim_id))
     }
 
     /// How many claims have each verdict, read only. This node's own claims are signed as their
     /// batches are sealed: claims in batches not sealed yet count as `unsealed`, and every other
     /// claim without a cached verdict is `unsigned`.
     pub fn claim_verdict_counts(&self) -> Result<BTreeMap<String, u64>> {
+        self.read_snapshot(|_| self.claim_verdict_counts_snapshot())
+    }
+    fn claim_verdict_counts_snapshot(&self) -> Result<BTreeMap<String, u64>> {
         let connection = self.readers.get();
+        let serving_legacy = legacy::active(&connection)?;
+        if !serving_legacy && migration::unavailable(&connection)?.is_some() {
+            let total: u64 =
+                connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))?;
+            return Ok(BTreeMap::from([("held".into(), total)]));
+        }
         let unsealed: u64 = connection.query_row(
             "SELECT COUNT(*) FROM batches JOIN claims ON claims.batch_id=batches.id
              WHERE batches.rowid>?1",
             [self.seeded_batch_rowid.load(Ordering::Acquire)],
             |row| row.get(0),
         )?;
-        let mut counts = connection
-            .prepare("SELECT verdict, COUNT(*) FROM claim_verdicts GROUP BY verdict")?
+        let mut counts = if serving_legacy {
+            connection
+                .prepare("SELECT verdict, COUNT(*) FROM legacy_claim_verdicts GROUP BY verdict")?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                })?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
+        } else {
+            connection
+            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
+        };
+        let pending_uncached: u64 = if serving_legacy {
+            0
+        } else {
+            connection.query_row("SELECT COUNT(*) FROM claim_signature_counts c JOIN claims ON claims.id=c.claim_id LEFT JOIN claim_verdicts v USING(claim_id) WHERE v.claim_id IS NULL AND c.candidates>32",[],|row|row.get(0))?
+        };
+        if pending_uncached != 0 {
+            *counts.entry("held".into()).or_default() += pending_uncached;
+        }
         let total: u64 =
             connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))?;
         let judged = counts.values().sum::<u64>();
@@ -1004,6 +1742,9 @@ impl Store {
     /// reporting each claim whose cached verdict differed. A cache row edited, deleted or added
     /// by hand shows here and never survives.
     pub fn recheck_claim_verdicts(&self) -> Result<Vec<VerdictMismatch>> {
+        if let Some(reason) = self.signature_migration()?.unavailable_reason() {
+            anyhow::bail!("{reason}");
+        }
         let cached = {
             let connection = self.readers.get();
             connection
@@ -1017,11 +1758,11 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute_batch(
-                "DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
+                /* sqlite-large-value: allow-for-now lv-h617a09575246 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
                  DELETE FROM claim_verdict_queue;
-                 INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT claim_id FROM claim_signatures;",
+                 INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;",
             )?;
-            transaction.execute("DELETE FROM meta WHERE key=?1", params![VERDICT_ROOTS])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-ha0cfaa1ec5cc owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", params![VERDICT_ROOTS])?;
             transaction.commit()?;
         }
         self.judge_claims(true)?;
@@ -1058,17 +1799,17 @@ impl Store {
 fn set_meta_tx(connection: &Connection, key: &str, value: &str) -> Result<()> {
     connection
         .prepare_cached(
-            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+            /* sqlite-large-value: allow-for-now lv-hfd8ac25bca92 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         )?
-        .execute(params![key, value])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h02841b9e96c0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![key, value])?;
     Ok(())
 }
 
 /// The rules as the graph holds them: for each `rule/NAME`, its latest [`crate::rules::RULE_SET`]
 /// claim in canonical order.
 pub fn current_rules_tx(connection: &Connection) -> Result<Vec<crate::rules::NamedRule>> {
-    let mut statement = connection.prepare_cached(&format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c81103a624c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.subject, claims.id, claims.body FROM claims
          WHERE claims.kind=?1 ORDER BY {CANONICAL_ORDER}"
     ))?;
@@ -1122,7 +1863,7 @@ pub fn rules_gate_tx(
     }
     let any: bool = transaction
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE kind=?1)")?
-        .query_row([crate::rules::RULE_SET], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0b18afb3307a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [crate::rules::RULE_SET], |row| row.get(0))?;
     if !any {
         return Ok(());
     }
@@ -1193,7 +1934,7 @@ impl Store {
     /// The newest audit records, of one rule or of all, newest first.
     pub fn rule_audits(&self, rule: Option<&str>, limit: usize) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h483f134075db owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
              ORDER BY claims.store_index DESC LIMIT ?3"
@@ -1222,5 +1963,94 @@ impl Store {
         let rules = Arc::new(current_rules_tx(&self.readers.get())?);
         *self.rules.write().unwrap_or_else(PoisonError::into_inner) = Some(rules.clone());
         Ok(rules)
+    }
+}
+
+fn nonce_used(connection: &Connection, key: &str, nonce: &str) -> Result<bool> {
+    nonce_used_in_model(connection, key, nonce, legacy::active(connection)?)
+}
+fn nonce_used_in_model(
+    connection: &Connection,
+    key: &str,
+    nonce: &str,
+    serving_legacy: bool,
+) -> Result<bool> {
+    let sql = if serving_legacy {
+        "SELECT EXISTS(SELECT 1 FROM legacy_claim_signatures WHERE key=?1 AND nonce=?2)"
+    } else {
+        if let Some(reason) = migration::unavailable(connection)? {
+            anyhow::bail!("{reason}");
+        }
+        "SELECT EXISTS(SELECT 1 FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2)"
+    };
+    Ok(connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf9d562de9ebc owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ sql)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hc3493cbfe828 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![key, nonce], |row| row.get(0))?)
+}
+
+pub(crate) fn serving_signature(
+    connection: &Connection,
+    claim_id: &str,
+) -> Result<Option<ClaimSignature>> {
+    if legacy::active(connection)? {
+        return legacy::stored_signature(connection, claim_id);
+    }
+    if let Some(reason) = migration::unavailable(connection)? {
+        anyhow::bail!("{reason}");
+    }
+    if let Some(reason) = judging::unavailable(connection, claim_id)? {
+        anyhow::bail!("{reason}");
+    }
+    stored_signature(connection, claim_id)
+}
+
+pub(crate) fn envelope_signature(
+    connection: &Connection,
+    claim_id: &str,
+) -> Result<Option<ClaimSignature>> {
+    if legacy::active(connection)? {
+        legacy::stored_signature(connection, claim_id)
+    } else {
+        stored_signature(connection, claim_id)
+    }
+}
+
+#[cfg(test)]
+mod signature_alert_tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    #[test]
+    fn signature_alerts_read_only_the_threshold_index_and_keep_claim_order() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            // The common population must not be visited when finding two exceptional claims.
+            for i in 0..10_000 {
+                tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,63)",
+                    [format!("ordinary/{i:05}")]).unwrap();
+            }
+            tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES ('a-alert',65),('z-alert',64)", []).unwrap();
+            tx.commit().unwrap();
+        }
+        {
+            let connection = store.readers.get();
+            let mut statement = signature_alerts_query(&connection).unwrap();
+            let alerts = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(alerts, vec![("a-alert".into(),65),("z-alert".into(),64)]);
+            assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+            assert!(statement.get_status(StatementStatus::VmStep) < 100,
+                "ordinary below-threshold rows must not contribute query work");
+        }
+        let faults = store.signature_state_faults().unwrap().into_iter()
+            .filter(|fault| fault.code == "signature-candidate-count")
+            .map(|fault| (fault.subject, fault.detail)).collect::<Vec<_>>();
+        assert_eq!(faults.len(), 2);
+        assert_eq!(faults[0].0, "claim/a-alert");
+        assert!(faults[0].1.starts_with("65 distinct candidates retained;"));
+        assert_eq!(faults[1].0, "claim/z-alert");
+        assert!(faults[1].1.starts_with("64 distinct candidates retained;"));
     }
 }

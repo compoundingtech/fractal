@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
+from script_process import signal_private
 
 
 def canary_module():
@@ -146,9 +147,10 @@ if __name__ == '__main__':
                         self.assertTrue(Path(f"/proc/{rows['daemon']}").exists())
                         self.assertTrue(Path(f"/proc/{rows['escaped']}").exists())
                     if signal_to_test:
-                        os.kill(runner.pid, signal_to_test)
+                        runner.send_signal(signal_to_test)
                     if signal_to_fixture:
-                        os.kill(rows["fixture"], signal_to_fixture)
+                        signal_private(rows["fixture"], signal_to_fixture,
+                                       environment={"ST3_CLEANUP_FIXTURE": directory})
                     runner.wait(timeout=10)
                     if mode == "exit":
                         self.assertEqual(runner.returncode, 0, (evidence / "rust.log").read_text())
@@ -200,7 +202,8 @@ if __name__ == '__main__':
         node.start = lambda: canary.fail("injected startup failure")
         node.pty = lambda *args: (_ for _ in ()).throw(OSError("injected evidence failure"))
         args = SimpleNamespace(binary=Path(BINARY), harness="claude", scenario="fresh", bound=180)
-        with patch.object(canary, "Node", return_value=node), patch.object(node, "stop", create=True) as stop:
+        with patch.object(canary, "register"), patch.object(canary, "capture", return_value=[]), \
+             patch.object(canary, "Node", return_value=node), patch.object(node, "stop", create=True) as stop:
             with self.assertRaisesRegex(OSError, "evidence failure"):
                 canary.run(args, node.root, Path("/unused-evidence"))
             stop.assert_called_once()

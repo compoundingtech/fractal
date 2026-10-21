@@ -54,7 +54,7 @@ fn write_executable(path: &Path, body: &str) {
 }
 
 fn tasks(catalog: &Path, bin: &Path, state: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["tasks", "--host", "h", "--json", "--catalog"])
         .arg(catalog)
         .env("PATH", bin)
@@ -67,7 +67,7 @@ fn tasks(catalog: &Path, bin: &Path, state: &Path) -> Output {
 }
 
 fn real_tasks(catalog: &Path, state: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["tasks", "--host", "h", "--json", "--catalog"])
         .arg(catalog)
         .env("XDG_STATE_HOME", state)
@@ -79,7 +79,7 @@ fn real_tasks(catalog: &Path, state: &Path) -> Output {
 }
 
 fn seeded_supervisor_scope(catalog: &Path, host: Option<&str>, state: &Path) -> PathBuf {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_st2"));
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st2"));
     command
         .args(["unpark", "h.worker", "--catalog"])
         .arg(catalog);
@@ -117,7 +117,7 @@ fn execute_recovery(action: &serde_json::Value, bin: &Path, ambient_catalog: &Pa
         let argv = action["argv"]
             .as_array()
             .expect("recovery action carries argv");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_st2"));
+        let mut command = Command::new(test_env!("CARGO_BIN_EXE_st2"));
         command.args(argv.iter().skip(1).map(|arg| arg.as_str().unwrap()));
         command
     };
@@ -137,7 +137,7 @@ fn execute_recovery(action: &serde_json::Value, bin: &Path, ambient_catalog: &Pa
 #[test]
 fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_defaults() {
     let (tmp, selected_catalog, bin) = fixture("[]");
-    symlink(env!("CARGO_BIN_EXE_st2"), bin.join("st2")).unwrap();
+    symlink(test_env!("CARGO_BIN_EXE_st2"), bin.join("st2")).unwrap();
     let ambient_catalog = tmp.path().join("ambient-catalog");
     fs::create_dir(&ambient_catalog).unwrap();
     let state = tmp.path().join("state");
@@ -146,7 +146,7 @@ fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_default
     let ambient_scope = seeded_supervisor_scope(&ambient_catalog, None, &state);
     assert_ne!(selected_scope, ambient_scope);
     for scope in [&selected_scope, &ambient_scope] {
-        let projection = st2::park::ParkProjection::current(scope.join("parked")).unwrap();
+        let projection = fractal_legacy_runner::park::ParkProjection::current(scope.join("parked")).unwrap();
         assert!(
             projection
                 .publish(
@@ -168,8 +168,8 @@ fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_default
     execute_recovery(recovery, &bin, &ambient_catalog, &state);
 
     let (selected, selected_errors) =
-        st2::park::take_unpark_requests(&selected_scope.join("unpark"));
-    let (ambient, ambient_errors) = st2::park::take_unpark_requests(&ambient_scope.join("unpark"));
+        fractal_legacy_runner::park::take_unpark_requests(&selected_scope.join("unpark"));
+    let (ambient, ambient_errors) = fractal_legacy_runner::park::take_unpark_requests(&ambient_scope.join("unpark"));
     assert!(selected_errors.is_empty() && ambient_errors.is_empty());
     assert_eq!(selected, ["h.worker"]);
     assert!(
@@ -308,7 +308,7 @@ fn completed_catalog_aba_during_runtime_observation_is_incomplete() {
     let prepared_a = tmp.path().join("prepared-a");
     let prepared_b = tmp.path().join("prepared-b");
     let snapshot = |output: &Path| {
-        let result = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let result = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args([
                 "catalog",
                 "snapshot",
@@ -348,7 +348,7 @@ fn completed_catalog_aba_during_runtime_observation_is_incomplete() {
             observer_ready, observer_release
         ),
     );
-    let inventory = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let inventory = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["tasks", "--host", "h", "--json", "--catalog"])
         .arg(&catalog)
         .env("PATH", &bin)
@@ -367,10 +367,10 @@ fn completed_catalog_aba_during_runtime_observation_is_incomplete() {
     }
 
     let apply = |prepared: &Path, expected: &str| {
-        let input_sha256 = st2::catalog_transaction::digest_prepared(&catalog, prepared)
+        let input_sha256 = fractal_legacy_runner::catalog_transaction::digest_prepared(&catalog, prepared)
             .unwrap()
             .root_sha256;
-        Command::new(env!("CARGO_BIN_EXE_st2"))
+        Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args([
                 "catalog",
                 "apply",
@@ -434,7 +434,7 @@ fn completed_single_agent_writer_abas_during_runtime_observation_are_incomplete(
                 observer_ready, observer_release
             ),
         );
-        let inventory = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let inventory = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args(["tasks", "--host", "h", "--json", "--catalog"])
             .arg(&catalog)
             .env("PATH", &bin)
@@ -465,7 +465,7 @@ fn completed_single_agent_writer_abas_during_runtime_observation_are_incomplete(
             )
             .unwrap();
             let digest = |source: &Path| {
-                let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+                let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
                     .args(["agent", "digest", "--spec"])
                     .arg(source)
                     .arg("--json")
@@ -483,7 +483,7 @@ fn completed_single_agent_writer_abas_during_runtime_observation_are_incomplete(
                 (&source_b, digest_b.as_str(), digest_a.as_str()),
                 (&source_a, digest_a.as_str(), digest_b.as_str()),
             ] {
-                let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+                let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
                     .args([
                         "agent",
                         "publish",
@@ -509,7 +509,7 @@ fn completed_single_agent_writer_abas_during_runtime_observation_are_incomplete(
                 vec!["rename", "h.worker", "temporary", "--host", "h"],
                 vec!["rename", "h.worker", "--clear", "--host", "h"],
             ] {
-                let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+                let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
                     .arg("--catalog")
                     .arg(&catalog)
                     .args(args)
@@ -575,12 +575,11 @@ fn failed_and_timed_out_pty_commands_are_typed_incomplete() {
     assert!(!failed.status.success());
     let failed_json: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
     assert_eq!(failed_json["complete"], false);
-    assert!(
-        failed_json["errors"][0]
-            .as_str()
-            .unwrap()
-            .contains("fixture failure")
-    );
+    // A failed launcher is reported by its exit status alone: launcher output may carry
+    // environment values, so it never reaches the inventory.
+    let failed_error = failed_json["errors"][0].as_str().unwrap();
+    assert!(failed_error.contains("exit status: 7"), "{failed_error}");
+    assert!(!failed_error.contains("fixture failure"), "{failed_error}");
 
     let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join("sleep"))
@@ -742,7 +741,7 @@ fn catalog_semantic_drift_during_observation_fails_closed() {
 fn missing_catalog_and_missing_json_flag_fail_explicitly() {
     let tmp = tempfile::tempdir().unwrap();
     let missing = tmp.path().join("missing-catalog");
-    let missing_output = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let missing_output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["tasks", "--host", "h", "--json", "--catalog"])
         .arg(&missing)
         .env("XDG_STATE_HOME", tmp.path().join("state"))
@@ -758,7 +757,7 @@ fn missing_catalog_and_missing_json_flag_fail_explicitly() {
     assert!(value["tasks"].as_array().unwrap().is_empty());
 
     let (fixture_tmp, catalog, bin) = fixture("[]");
-    let no_json = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let no_json = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["tasks", "--host", "h", "--catalog"])
         .arg(&catalog)
         .env("PATH", bin)

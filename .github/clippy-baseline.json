@@ -5,58 +5,77 @@
       "clippy::filter_next": 1,
       "clippy::needless_range_loop": 1
     },
-    "st-drivers": {
+    "fractal-drivers": {
       "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 7,
+      "clippy::collapsible_if": 5,
       "clippy::items_after_test_module": 2,
       "clippy::needless_borrow": 2,
       "clippy::too_many_arguments": 12,
       "clippy::useless_format": 1,
       "clippy::while_let_loop": 1
     },
-    "st2": {
+    "fractal-legacy-runner": {
       "clippy::obfuscated_if_else": 1,
       "clippy::too_many_arguments": 2
     },
-    "st3": {
-      "clippy::cloned_ref_to_slice_refs": 5,
-      "clippy::collapsible_if": 27,
+    "fractal": {
+      "clippy::collapsible_if": 4,
       "clippy::collapsible_match": 1,
       "clippy::derivable_impls": 1,
-      "clippy::double_ended_iterator_last": 1,
-      "clippy::empty_line_after_doc_comments": 2,
       "clippy::manual_is_multiple_of": 3,
-      "clippy::manual_next_back": 1,
-      "clippy::needless_borrow": 3,
+      "clippy::needless_borrow": 2,
       "clippy::needless_borrows_for_generic_args": 1,
-      "clippy::needless_question_mark": 1,
-      "clippy::needless_return": 2,
-      "clippy::redundant_closure": 1,
-      "clippy::too_many_arguments": 3,
-      "clippy::type_complexity": 10,
+      "clippy::needless_return": 1,
+      "clippy::too_many_arguments": 2,
       "clippy::unnecessary_get_then_check": 1,
-      "clippy::unnecessary_lazy_evaluations": 1,
-      "clippy::useless_format": 1,
-      "clippy::while_let_loop": 1
+      "clippy::unnecessary_lazy_evaluations": 1
     },
-    "st3-client": {
+    "fractal-api-core": {
+      "clippy::collapsible_if": 2,
+      "clippy::manual_next_back": 1
+    },
+    "fractal-client": {
       "clippy::large_enum_variant": 1,
-      "clippy::manual_is_multiple_of": 1,
-      "unused_imports": 3
+      "clippy::manual_is_multiple_of": 1
     },
-    "st3-client-codegen": {
-      "clippy::useless_format": 2,
-      "unused_variables": 1
+    "fractal-client-codegen": {
+      "clippy::useless_format": 2
     },
-    "st3-feed": {
+    "fractal-feed": {
       "clippy::filter_map_bool_then": 1,
       "clippy::if_same_then_else": 1,
       "clippy::too_many_arguments": 1
     },
-    "st3-ui-model": {
+    "fractal-github-base": {
+      "clippy::type_complexity": 3
+    },
+    "fractal-missions": {
+      "clippy::cloned_ref_to_slice_refs": 1,
+      "clippy::collapsible_if": 3,
+      "clippy::needless_borrow": 1
+    },
+    "fractal-reconcile": {
+      "clippy::collapsible_if": 3,
+      "clippy::empty_line_after_doc_comments": 2,
+      "clippy::needless_return": 1,
+      "clippy::type_complexity": 3,
+      "clippy::useless_format": 1
+    },
+    "fractal-seats": {
+      "clippy::cloned_ref_to_slice_refs": 4,
+      "clippy::needless_question_mark": 1,
+      "clippy::type_complexity": 2
+    },
+    "fractal-store": {
+      "clippy::collapsible_if": 10,
+      "clippy::double_ended_iterator_last": 1,
+      "clippy::redundant_closure": 1,
+      "clippy::too_many_arguments": 1
+    },
+    "fractal-ui-model": {
       "clippy::field_reassign_with_default": 4
     },
-    "stui": {
+    "fractal-tui": {
       "clippy::cloned_ref_to_slice_refs": 2,
       "clippy::collapsible_if": 1,
       "clippy::double_ended_iterator_last": 1,

@@ -19,6 +19,11 @@ once admission, projection and digest checks pass. It refuses a destination with
 Without `--database`, restore selects the configured state's `claims.sqlite3`. Stop the node before
 restoring there. Neither command installs services or starts a daemon.
 
+A backup of a member also holds the whole text of the [long messages](long-messages.md) that
+member owns, which are files outside the database; restore checks each against its hash and its
+claim and returns them beside the restored database. The restore report says how many it returned
+and how many long messages the claims name in all, since another member owns the rest.
+
 For rehearsals, make a consistent SQLite copy first, then export that copy:
 
 ```sh
@@ -115,4 +120,4 @@ configuration, or other local caches. Protect the file like the original graph: 
 bytes can contain private information. A restored standalone graph can be inspected immediately;
 running seats and fleet transport require fresh local setup.
 
-The format deliberately uses sync records. A receive-only continuous backup peer is future work.
+The format uses sync records.

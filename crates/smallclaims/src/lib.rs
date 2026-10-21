@@ -13,16 +13,24 @@ pub mod claim;
 pub mod error;
 pub mod fleet;
 pub mod hash;
+pub mod ivm;
 pub mod performance;
+pub mod prepared_cut;
+pub mod fifo;
 pub mod principal;
 /// Opt-in accounting of where the daemon's time goes, turned on by `ST3_PROFILE_DIR`.
 pub mod profile;
+pub mod task_cpu;
+pub mod read_budget;
 pub mod replication;
 pub mod rules;
+pub mod shards;
 pub mod sqlite;
 pub mod store;
 pub mod sync;
 pub mod touched;
+/// Rolling latency windows for the daemon's targets: routes, statements, transactions, holds.
+pub mod windows;
 
 pub use claim::{
     ClaimInput, ClaimRecord, ReplicaBatch, ReplicaEnvelope, ReplicaEnvelopeId,

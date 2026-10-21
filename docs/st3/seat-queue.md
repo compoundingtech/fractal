@@ -1,15 +1,11 @@
 # Agent seat queues
 
-This document explains the seat queue for reviewers: the model, the commands, how the order is
-stored and replicated, how it is tested, and what is left out or uncertain.
+This document explains the seat queue model, commands, storage, replication, and limits.
 
 ## Model
 
 An agent seat holds at most one claim at a time. A claimed, working, or verifying step occupies
-it. Before this change, a free seat was woken for the oldest ready step across all runs, ordered
-by step creation time and subject.
-
-Now each seat has one ordered queue of mission runs:
+it. Each seat has one ordered queue of mission runs:
 
 - A run joins the end of the seat's queue when it first has a step assigned to that seat.
 - A run stays queued while its current generation has a step for the seat. A revision keeps the
@@ -37,9 +33,7 @@ normally serves one run, so its queue has one entry.
 
 ## One selector
 
-`crates/st3/src/seat_queue.rs` holds the only next-work selector, `seat_queue::select`. It replaces
-the two oldest-first orderings that existed before, one in `Store::agent_work_queues` and one in
-the reconciler's `next_work_wake_for_agent`. It is now used by:
+`crates/fractal-kernel/src/seat_queue.rs` holds the only next-work selector, `seat_queue::select`. It is used by:
 
 - `Store::agent_work_queues`, which feeds `NEXT WORK`, `QUEUED WORK`, and `UPCOMING` in
   `st agents show` and the `agents` client resource;
@@ -136,14 +130,17 @@ is ignored.
 A revision that drops a seat's claim records the seat as `claimant` on the new step's
 `step-run.carried` claim. A ready step is first for that seat while no `work.claimed` claim on the
 step follows the carried claim. Each work read looks this up once for its ready steps, starting
-from those steps, so the cost follows current work rather than every carried step in history. On
-the performance fixture, all current work reads in 1.28 ms against 1.22 ms without the lookup,
-and one seat's work in 0.30 ms against 0.29 ms.
+from those steps, so the cost follows current work rather than every carried step in history.
 
 The claims replicate like other agent claims, and the join times come from replicated run
 claims, so every replica computes the same order. Terminal runs are read only when a move names
 them. A run that never receives or anchors a move cannot change the relative order of the
 others.
+
+The per-agent HTTP queue read checks existence with the indexed newest-claim ID lookup. It
+does not deserialize a full claim or sort the agent's observation history merely to decide
+whether to return a queue or `404`. Queue joins, current work and canonical move replay are
+still read from the current store; no queue cache is introduced.
 
 ## Tests
 
@@ -170,6 +167,12 @@ others.
   - moves must name queued runs and valid anchors.
 - `client_v0_contract::agent_queue_read_and_person_move_share_one_seat_order`: the read, the
   person action, the agent-filtered work list order, validation errors, and an unknown agent.
+- `api::client_v0::tests::agent_queue_history_preserves_output_and_missing_agent` and
+  `agent_queue_nonempty_matches_previous_handler`: full JSON parity with the previous handler,
+  short/full IDs, missing agents, ready/waiting runs and move history.
+- `api::client_v0::tests::agent_queue_history_cost` (ignored): isolated fixture comparison with
+  4,096, 32,768 and 262,144 observations, exact existence-query plans and VM steps, and ten alternating
+  before/after handler samples. This measures local fixture reads, not production HTTP tails.
 - `mission::tests::queue_authority_still_parses_and_rejects_invalid_rules`: a `queue-authority`
   block still parses, and empty, prefixed, wildcard, duplicate, and unknown rules are refused.
 - `client_v0_cli::agents_queue_cli_shows_seat_order_and_records_person_and_agent_moves`: human
@@ -178,34 +181,26 @@ others.
 - `tests::agent_queue_view_lists_the_claim_then_runs_in_order_and_moves`: the exact human view.
 - `evals/st3/seat-queue`: a paid eval with one durable seat and three runs. The seat is Claude
   `claude-sonnet-5` by default; the runner can put Codex `gpt-6-luna` or omp
-  `openai-codex/gpt-5.6-luna` in it instead. A model-free chief agent makes the move. Reports from
-  before free mode also record the seat's own move being refused. Held-out judges replay graph history
+  `openai-codex/gpt-5.6-luna` in it instead. A model-free chief agent makes the move. Held-out judges replay graph history
   at every claim. They require that a live agent took the first ready step in queue order each
   time, followed the chief's move, passed over a head run waiting on a gate and returned to it
   once ready, kept each held claim, and got no terminal input. Run reports are in
-  `evals/st3/seat-queue/reports/`. Reports before the chief was added used a person's move.
-  Of the eleven person-move runs, ten passed on Claude, Codex, and omp seats. In the other, a
-  Claude seat never reached idle before any work existed.
-  With the chief's move, both Claude runs and both Codex runs passed. One omp run passed; the
-  other was void after its seat re-declared itself, described below, and its replacement passed.
+  `evals/st3/seat-queue/reports/`.
   `scripts/st3-seat-queue-eval/report` drafts a run's report from the evidence the runner keeps.
 
-## Left out or uncertain
+## Limits
 
-- **Claims are refused out of run order, not out of step order.** The first live eval showed that
-  the wake and the agent's work list are not enough. A Claude seat that finished one step checked
-  its list, then claimed a later run's step before the wake for the head run arrived. `work claim`
-  now refuses that. Inside one run, the mission's dependencies still decide. `available-to` work
-  is not queued, so it is not refused. An agent that wants another run first moves it.
+- **Claims are refused out of run order, not out of step order.** `work claim` refuses a step
+  from a later run while an earlier run has ready work for the seat, because a seat can read
+  its work list before the wake for the head run arrives. Inside one run, the mission's
+  dependencies decide readiness. `available-to` work is not queued, so it is not refused.
+  An agent that wants another run first moves it.
 - **`st work ls` without `--as` lists fleet work.** That list is in creation order, not seat
   order, and it includes steps the agent cannot claim. The claim check makes the seat order hold
   anyway, and the seat's next step also arrives as a message that names it.
-- **An agent once re-declared its own seat.** In one live eval run an omp seat ran
-  `st agents start` for its own identity, as itself. The daemon accepted the declaration, which
-  replaced the eval's: it dropped the model and the audit environment and set `restart always`.
-  Eval cleanup then no longer owned the seat and could not remove its terminal, so the run was
-  void although every judge passed. In free mode an agent may still do this; the declaration
-  records the agent as its writer.
+- **An agent can re-declare its own seat.** In free mode an agent may use `st agents start`
+  for its own identity. The declaration records the agent as its writer and replaces the
+  previous declaration.
 - **A reorder does not withdraw a wake that was already sent.** If the old head was woken and not
   yet claimed, the seat also receives a wake for the new head. Withdrawing the old wake would count
   as a closed attempt and could exhaust wakes when moves go back and forth.
@@ -220,9 +215,4 @@ others.
 - **No projection table.** Reads replay moves on each call. That is cheap while moves are human
   actions. A seat with thousands of moves would need a cached projection. The reconciler reads a
   seat's order only when the seat holds nothing, has ready work in more than one run, and can be
-  woken. [Seat queue performance](seat-queue-performance.md) measures the idle cost against the
-  base commit.
-- **The Swift client was not compiled.** The codegen checks that every Swift model field exists.
-  The TypeScript client type-checks and its contract test passes.
-- **Generated client drift was fixed.** `messages_list_for_peer` had been added only to the
-  generated Rust client. The template now carries it, so regeneration keeps it.
+  woken.
