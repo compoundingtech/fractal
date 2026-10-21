@@ -225,7 +225,7 @@ describe('native Details mounted hook with real getter adapters', () => {
     } }
     const count = (path: string) => reads.filter(read => read === path).length
     const client = new FractalClient(options)
-    const other = { ...nativeRow('first'), id: Native.decodeUnknownSync(Native.Id)('agent/example-other'), current_session_id: Option.none() }
+    const other = { ...nativeRow('first'), id: Native.decodeUnknownSync(Native.AgentId)('agent/example-other'), current_session_id: Option.none() }
     const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [nativeRow('first'), other] }))
     const source: DataSource = { ...emptySource(), mode: 'live', agents,
       subjectReads: gatewaySubjectReads({ options, registry, discovery: client }),

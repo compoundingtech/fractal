@@ -197,7 +197,7 @@ describe('fixture-free native Details projection', () => {
     healthy.spendRead?.onRefresh()
     expect(calls).toEqual(['usage'])
     // In flight: the previous figures stay, marked as refreshing.
-    expect(view({ selectedPeriod: { ...observed({ value: period }), freshness: 'stale' } }).spendRead).toMatchObject({ updatedAt: 5000, refreshing: true })
+    expect(view({ selectedPeriod: observed({ value: period, freshness: 'stale' }) }).spendRead).toMatchObject({ updatedAt: 5000, refreshing: true })
     expect(view({ selectedPeriod: { _tag: 'Waiting' } }).spendRead).toMatchObject({ refreshing: true })
     // Each failure names itself and retries only its own getter; healthy sections keep their content.
     const failed = unavailable({ reason: 'failed', detail: 'Lost' })
@@ -215,7 +215,7 @@ describe('fixture-free native Details projection', () => {
     expect(broken.overview.title).toBe(row.name)
     expect(broken.sections.find(section => section.title === 'Terminals')?.items._tag).toBe('Known')
     // A failed refresh keeps the last figures, still dated, beside its Try again.
-    const retained = view({ selectedPeriod: { ...observed({ value: period }), freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } })
+    const retained = view({ selectedPeriod: { _tag: 'Observed', value: period, freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } })
     expect(retained.spendRead).toMatchObject({ updatedAt: 5000, failure: { message: "Couldn't load spend." } })
     expect(retained.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
     // Forbidden and non-retryable reads offer neither Try again nor Refresh.
