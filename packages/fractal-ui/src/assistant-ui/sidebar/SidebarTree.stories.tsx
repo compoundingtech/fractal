@@ -278,6 +278,7 @@ function ResizeRevealExample() {
 }
 export const RevealAfterWidthChange: Story = {
   tags: ['critical'],
+  parameters: { scenario: { _tag: 'primitive', reason: 'Exercises sidebar tree reveal after a container width change with a synthetic row list and no scenario data.' } },
   render: () => <ResizeRevealExample />,
   play: async ({ canvasElement }) => {
     const root = within(canvasElement).getByTestId('resize-reveal')
