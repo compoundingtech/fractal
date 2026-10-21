@@ -11,7 +11,7 @@ import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal, usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
@@ -215,6 +215,7 @@ const initialAgentFromUrl = () => {
 export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
+  usePortalContainerRegistration(getContainer)
   return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
 }
 
@@ -553,7 +554,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
   </NarrowLayoutContext.Provider>)
 }
