@@ -14,6 +14,15 @@ export type SidebarMissionStep = { readonly _tag: 'Step'; readonly name: string 
 export type SidebarMissionContext =
   | { readonly _tag: 'Mission'; readonly id: string; readonly slug: string; readonly progress: SidebarMissionProgress; readonly step: SidebarMissionStep; readonly queued: readonly { readonly id: string; readonly slug: string }[] }
   | { readonly _tag: 'None' }
+/**
+ * Freshness of `missionContext`. Live: the current observation. Stale: the last observation, retained while the source
+ * catches up. Failed: the last refresh failed and the retained value is shown. `updatedAt` is the real time of the retained
+ * observation when the source reports one, never an invented time. Absent means Live.
+ */
+export type SidebarMissionInfo =
+  | { readonly _tag: 'Live' }
+  | { readonly _tag: 'Stale'; readonly updatedAt?: number }
+  | { readonly _tag: 'Failed'; readonly updatedAt?: number }
 export interface SidebarReported {
   readonly model?: string
   /** Producers may provide both scoped observations; the row prefers an explicit lifetime fact. */
@@ -39,6 +48,8 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly mission?: string
   /** Absent or None: line 2 reads `status · host`. */
   readonly missionContext?: SidebarMissionContext
+  /** Absent: Live. Stale or Failed mutes the retained mission and keeps its popover reachable to say why. */
+  readonly missionInfo?: SidebarMissionInfo
   readonly status: AgentStatus
   readonly statusLabel: string
   readonly host: string

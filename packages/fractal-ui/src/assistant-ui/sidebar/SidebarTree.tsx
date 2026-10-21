@@ -5,7 +5,7 @@ import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collectio
 import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
 import { Icon } from '../composition/Icons'
-import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { useTouchLayout } from './useTouchLayout'
 
 export interface SidebarTreeItem<T> {
   readonly id: Key
@@ -141,20 +141,6 @@ const copyCheckboxFieldSlots: React.ContextType<typeof CheckboxFieldContext> = {
  * Touch layouts keep this gutter and these edges; only the hit area changes (see `disclosurePlacement`).
  */
 const depthIndent = (depth: number) => `calc(${s.lg} * ${depth})`
-/** A coarse primary pointer with no fine one: the composer's touch query. */
-const touchPointerQuery = '(pointer: coarse) and (not (any-pointer: fine))'
-const subscribeTouchPointer = (onChange: () => void) => {
-  const media = window.matchMedia(touchPointerQuery)
-  media.addEventListener('change', onChange)
-  return () => media.removeEventListener('change', onChange)
-}
-const touchPointer = () => window.matchMedia(touchPointerQuery).matches
-/** Touch layout: a narrow host or a coarse primary pointer. */
-function useTouchLayout() {
-  const narrow = React.useContext(NarrowLayoutContext)
-  const coarse = React.useSyncExternalStore(subscribeTouchPointer, touchPointer, () => false)
-  return narrow || coarse
-}
 
 /**
  * The touch disclosure for a `trailing` parent, rendered by the host in its own trailing column when `renderRow` gets

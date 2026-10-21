@@ -6,10 +6,11 @@ import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
 import { AgentHoverCard, AgentRowActions, Highlight } from './SidebarAgentRow'
-import { SidebarMissionLine } from './SidebarMissionLine'
+import { SidebarMissionLine, missionLineHasTrigger } from './SidebarMissionLine'
 import { SidebarStatus } from './SidebarStatus'
 import { SidebarTime } from './SidebarTime'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
+import { useTouchLayout } from './useTouchLayout'
 
 export interface MilestoneAgentRowProps {
   readonly row: Row
@@ -53,6 +54,8 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * RM1 SR-2 two-line row, 48px. Line 1: status glyph · title · last turn · attention · (chevron), each trailing column a
  * fixed width so every time ends on one edge. Line 2: `[mission pill] · step` while the agent works on a mission (see
  * `SidebarMissionLine`), otherwise `status · host`; spend and duration live in the hover card and reported details.
+ * On touch layouts (narrow host or coarse pointer) a row whose mission line holds a button (a queue, or Stale/Failed
+ * mission info) grows line 2 to a 44px track, 68px in all, so that button's own box is the 44 × 44 hit area.
  * A row whose mission question waits on you drops the "!": its decision handle and status glyph carry the attention.
  * Activation belongs to the hosting tree item, so the row is never a button. Desktop pointer hover shows the kit hover
  * card with no timers: the CSS entrance delay supplies hover intent. The shared action trigger overlays line 2 on
@@ -61,17 +64,19 @@ export const openAgentRowMenu = (element: Element): boolean => {
 export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
+  const touch = useTouchLayout()
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
+  const touchMission = mission !== undefined && touch && missionLineHasTrigger(mission, row.missionInfo, touch)
   const signal = row.needsMe
     ? mission?.step._tag === 'Waiting' ? null : <span data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenInk)}>!</span>
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, frozen && styles.frozenInk)}>{row.unread}</span> : null
-  return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
+  return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={displayOnly ? undefined : () => setHovered(true)} onMouseLeave={displayOnly ? undefined : () => setHovered(false)}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
-    {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, narrow && !displayOnly && styles.narrowRow, narrow && !displayOnly && chevron !== undefined && styles.narrowWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
+    {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, narrow && !displayOnly && styles.narrowRow, narrow && !displayOnly && chevron !== undefined && styles.narrowWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, touchMission && styles.touchMissionRow, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
@@ -79,9 +84,9 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="signal" {...stylex.props(styles.signal)}>{signal}</span>
     {!displayOnly && chevron !== undefined && <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>}
     {!displayOnly && touchDisclosure !== undefined && <span data-row-column="touch-disclosure" {...stylex.props(styles.touchDisclosureSlot)}>{touchDisclosure}</span>}
-    <span data-row-column="line2" {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, !displayOnly && (narrow || (mission?.queued.length ?? 0) > 0) && styles.line2BeforeMenu, !displayOnly && touchDisclosure !== undefined && styles.touchDisclosureLine2)}>
+    <span data-row-column="line2" data-mission-info={mission === undefined ? undefined : (row.missionInfo?._tag ?? 'Live').toLowerCase()} {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, !displayOnly && (narrow || touchMission || (mission?.queued.length ?? 0) > 0) && styles.line2BeforeMenu, !displayOnly && touchDisclosure !== undefined && styles.touchDisclosureLine2)}>
       {mission !== undefined
-        ? <SidebarMissionLine mission={mission} frozen={frozen} />
+        ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} />
         : <><span data-row-field="status-label">{row.statusLabel}</span><span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
     {!displayOnly && <AgentRowActions row={row} now={now} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
@@ -104,6 +109,8 @@ const styles = stylex.create({
   narrowWithChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.icon} ${g.touchTarget}` },
   touchWithDisclosure: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.sidebarMetric} ${g.status} ${g.touchTarget} ${g.touchTarget}` },
   touchDisclosureSlot: { gridColumn: '5', gridRow: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.touchTarget },
+  // Touch row with a mission button: line 2 becomes the button's 44px track; desktop rows stay 48px.
+  touchMissionRow: { gridTemplateRows: `${g.controlSm} ${g.touchTarget}`, height: `calc(${g.controlSm} + ${g.touchTarget})` },
   touchDisclosureLine2: { gridColumn: '2 / -3' },
   touchMenuButton: { gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
   active: { backgroundColor: surface.rowActive },
@@ -119,9 +126,9 @@ const styles = stylex.create({
   frozenInk: { color: ink.fgSoft },
   chevronSlot: { gridColumn: '5', gridRow: '1', display: 'flex', justifyContent: 'center' },
   line2: { gridColumn: '2 / -1', gridRow: '2', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
-  // The pill sits at line 2's first pixel; its slots truncate, so the line itself does not clip the "+N" touch target.
+  // The pill sits at line 2's first pixel; its slots truncate, so the line itself does not clip the mission buttons' focus rings.
   line2Mission: { display: 'flex', alignItems: 'center', overflow: 'visible' },
-  // Phone rows give the action trigger its own column; a "+N" row also stops short of the desktop trigger's overlay.
+  // Phone rows give the action trigger its own column; a "+N" or touch mission-button row also stops short of the desktop trigger's overlay.
   line2BeforeMenu: { gridColumn: '2 / -2' },
   sep: { paddingInline: s.xs, color: ink.fgMuted },
   // The card mounts on pointer enter; the delayed entrance is the 150ms hover intent, so a pass across rows never flashes cards.

@@ -1,8 +1,9 @@
 /**
  * RM1 agent rows with mission context on line 2: `[mission pill] · step`. Designed cases cover all five mission hues, a
  * mission shared across project folders, a long slug, a question waiting on you with and without a decision handle,
- * unknown progress, an unknown step, rows without a mission and missions queued behind the current one. A separate
- * scenario story projects the catalog roster without introducing any of these fixed contract cases.
+ * unknown progress, an unknown step, rows without a mission, missions queued behind the current one and retained Stale
+ * (with and without a reported update time) and Failed mission info. The phone frame proves the merged 44px mission
+ * target on a touch layout. A separate scenario story projects the catalog roster without these fixed contract cases.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -13,10 +14,12 @@ import { SidebarTree, SidebarTreeDisclosure, type SidebarTreeItem } from './Side
 import type { Key } from 'react-aria-components'
 import { missionHues } from './SidebarMissionLine'
 import { statuses, type SidebarAgentRow as Row, type SidebarMissionContext } from './model'
+import { sidebarRowAccessibleName } from './SidebarAgentRow'
 import { geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { touchPointerQuery } from './useTouchLayout'
 
 const storyNow = Date.UTC(2026, 9, 21, 9, 30, 0)
 const base: Row = {
@@ -27,6 +30,7 @@ const mission = (id: string, slug: string, rest: Omit<Extract<SidebarMissionCont
 const row = (key: string, title: string, rest: Partial<Row>): Row => ({ ...base, ref: `agent/example-${key}`, id: key, title, ...rest })
 const waiting = { status: 'waiting', statusLabel: statuses.waiting.label, needsMe: true } as const satisfies Partial<Row>
 const longSlug = 'review-hover-scopes-and-every-long-mission-name'
+const staleAt = storyNow - 600_000
 
 /** Two project folders; `fractal-web-upstream` runs in both, so its rows must share one hue and one glyph. */
 const folders: readonly { readonly label: string; readonly rows: readonly Row[] }[] = [
@@ -45,14 +49,22 @@ const folders: readonly { readonly label: string; readonly rows: readonly Row[] 
     row('long', 'Review every long scope', { host: 'build-2', missionContext: mission('long', longSlug, { progress: { _tag: 'Known', done: 0, total: 3 }, step: { _tag: 'Step', name: 'Collect the hover scope notes for review' }, queued: [] }) }),
     row('sync', 'Sync upstream notes', { host: 'build-2', missionContext: mission('fractal-web-upstream', 'fractal-web-upstream', { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Write the port notes' }, queued: [] }) }),
     row('release', 'Release checklist', { status: 'ended', statusLabel: statuses.ended.label, host: 'build-2' }),
+    // Retained mission info: Stale with a reported update time, Stale without one, and Failed (no time) with a queue.
+    row('uploads', 'Watch the upload retries', { missionInfo: { _tag: 'Stale', updatedAt: staleAt }, missionContext: mission('upload-retries', 'upload-retries', { progress: { _tag: 'Known', done: 1, total: 3 }, step: { _tag: 'Step', name: 'Watch the next upload' }, queued: [] }) }),
+    row('search', 'Index the search logs', { host: 'build-2', missionInfo: { _tag: 'Stale' }, missionContext: mission('search-index', 'search-index', { progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: 'Rebuild the log index' }, queued: [] }) }),
+    row('billing', 'Map the billing events', { ...waiting, host: 'build-2', missionInfo: { _tag: 'Failed' }, missionContext: mission('billing-events', 'billing-events', {
+      progress: { _tag: 'Known', done: 2, total: 4 }, step: { _tag: 'Waiting', question: 'Keep the legacy event names?', handle: 'q207' }, queued: [{ id: 'mission/example/docs-refresh', slug: 'docs-refresh' }],
+    }) }),
   ] },
 ]
 
 interface MissionTreeItem extends SidebarTreeItem<MissionTreeItem> { readonly row: Row }
 const missionChild: Row = { ...folders[0]!.rows[1]!, ref: 'agent/example-mission-helper', parentRef: 'agent/example-mission-parent', title: 'Observed mission helper', children: [] }
-const missionParent: Row = { ...folders[1]!.rows[3]!, ref: 'agent/example-mission-parent', title: 'Mission parent with subagents', children: [missionChild] }
+const missionParent: Row = { ...folders[1]!.rows[3]!, ref: 'agent/example-mission-parent', title: 'Mission parent with subagents', children: [missionChild],
+  missionContext: mission('fractal-web-upstream', 'fractal-web-upstream', { progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Write the port notes' }, queued: [{ id: 'mission/example/sidebar-polish', slug: 'sidebar-polish' }] }),
+}
 const missionTree: readonly MissionTreeItem[] = [{
-  id: missionParent.ref, depth: 0, textValue: missionParent.title, row: missionParent, disclosurePlacement: 'trailing',
+  id: missionParent.ref, depth: 0, textValue: missionParent.title, accessibleName: sidebarRowAccessibleName(missionParent), row: missionParent, disclosurePlacement: 'trailing',
   children: [{ id: missionChild.ref, depth: 1, textValue: missionChild.title, row: missionChild, children: [], isDisabled: true }],
 }]
 
@@ -90,9 +102,9 @@ const meta = {
   title: 'Fractal UI/Sidebar/Mission row',
   component: MissionRowsStory,
   parameters: {
-    layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Fixed mission rows verify all five hues, exact pill geometry, truncation, optional progress and question-handle states unavailable together in a catalog roster.' },
+    layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Fixed mission rows verify all five hues, exact pill geometry, truncation, optional progress, question-handle states and retained Stale/Failed mission info unavailable together in a catalog roster.' },
     a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } },
-    docs: { description: { component: 'Line 2 of the RM1 row with mission context: `[mission pill] · step`. The pill is the row’s only box (16px, fully rounded, at most 56% of line 2); five stable mission hues reach only the glyph and a 14% wash. A waiting question shows its decision handle as amber text; rows without a mission read `status · host`; queued missions open from "+N" in a popover.' } },
+    docs: { description: { component: 'Line 2 of the RM1 row with mission context: `[mission pill] · step`. The pill is the row’s only box (16px, fully rounded, at most 56% of line 2); five stable mission hues reach only the glyph and a 14% wash. A waiting question shows its decision handle as amber text; rows without a mission read `status · host`; queued missions open from "+N" in a popover. Stale or Failed mission info mutes the mission and opens a "Mission info" popover from the pill. On touch layouts the pill and "+N" are one button filling a 44px line-2 track.' } },
   },
   args: { scheme: 'dark' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phone: { control: 'boolean' } },
@@ -107,6 +119,19 @@ const designedRow = (canvasElement: HTMLElement, title: string) => {
 }
 const line2 = (element: Element) => element.querySelector<HTMLElement>('[data-row-column="line2"]')!
 const probe = (canvasElement: HTMLElement) => getComputedStyle(canvasElement.querySelector('[data-tone-probe]')!)
+const rect = (element: Element) => element.getBoundingClientRect()
+const intersects = (a: DOMRect, b: DOMRect) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5
+const infoDialog = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Mission info"]')
+/** The mission button's content-derived name, comma-joined parts; tolerant only of the whitespace name computation adds around inline-flex boxes. */
+const missionName = (...parts: readonly string[]) => {
+  const escaped = parts.map(part => part.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&').replace(/ /g, '\\s+'))
+  return new RegExp('^' + escaped.join('\\s*,\\s*') + '$')
+}
+const retainedCases = [
+  { title: 'Watch the upload retries', info: 'stale', updatedAt: staleAt, note: 'Mission info may be out of date. Updated 10m ago.', name: ['Mission upload-retries', '1 of 3 steps'], touchQueue: [], reason: 'mission info may be out of date' },
+  { title: 'Index the search logs', info: 'stale', updatedAt: undefined, note: 'Mission info may be out of date.', name: ['Mission search-index'], touchQueue: [], reason: 'mission info may be out of date' },
+  { title: 'Map the billing events', info: 'failed', updatedAt: undefined, note: 'Couldn’t refresh mission info.', name: ['Mission billing-events', '2 of 4 steps'], touchQueue: ['+1 more mission queued'], reason: 'couldn’t refresh mission info' },
+] as const
 
 /** Geometry and content shared by the desktop and phone stories. */
 const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
@@ -129,7 +154,7 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
   const designed = [...canvasElement.querySelectorAll<HTMLElement>('[data-host="designed"] [data-box="pill"]')]
   await expect(new Set(designed.map(pill => pill.dataset.missionHue))).toEqual(new Set(missionHues))
   const ink = probe(canvasElement).backgroundColor
-  for (const pill of designed) {
+  for (const pill of designed.filter(item => item.dataset.missionInfo === 'live')) {
     const glyph = pill.querySelector<SVGElement>('[data-mission-mark]')!
     await expect(getComputedStyle(pill.querySelector('[data-row-field="mission"]')!).color).toBe(ink)
     await expect(getComputedStyle(glyph).color).not.toBe(ink)
@@ -188,7 +213,39 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
   // Folders stay project folders: no mission grouping and no "No mission" section.
   await expect([...canvasElement.querySelectorAll('[data-host="designed"] [data-folder]')].map(folder => folder.getAttribute('data-folder'))).toEqual(['fractal-web', 'smalltalk'])
   await expect(canvasElement).not.toHaveTextContent(/no mission/i)
-  for (const element of canvasElement.querySelectorAll<HTMLElement>('[data-milestone-row]')) await expect(Math.abs(element.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
+  // Desktop rows stay 48px; only a touch row whose mission line holds a button grows its line 2 to the 44px track.
+  const touch = canvasElement.querySelector('[data-narrow]') !== null || window.matchMedia(touchPointerQuery).matches
+  if (!touch) await expect(canvasElement.querySelector('[data-touch-mission]')).toBeNull()
+  for (const element of canvasElement.querySelectorAll<HTMLElement>('[data-milestone-row]')) await expect(Math.abs(rect(element).height - (element.hasAttribute('data-touch-mission') ? 68 : 48))).toBeLessThanOrEqual(1)
+
+  // Retained mission info: muted glyph, wash and text (no hue), its real update time only when reported, and a
+  // "Mission info" popover from the pill even with nothing queued. No retry: the host offers none.
+  for (const retained of retainedCases) {
+    const element = designedRow(canvasElement, retained.title)
+    const pill = element.querySelector<HTMLElement>('[data-box="pill"]')!
+    await expect(line2(element)).toHaveAttribute('data-mission-info', retained.info)
+    await expect(pill).toHaveAttribute('data-mission-info', retained.info)
+    await expect(pill.getAttribute('data-mission-updated-at')).toBe(retained.updatedAt === undefined ? null : String(retained.updatedAt))
+    const slugColor = getComputedStyle(pill.querySelector('[data-row-field="mission"]')!).color
+    await expect(slugColor).not.toBe(ink)
+    await expect(getComputedStyle(pill.querySelector('[data-mission-mark]')!).color).toBe(slugColor)
+    await expect(getComputedStyle(element.querySelector('[data-line2-slot="step"]')!).color).toBe(slugColor)
+    const handle = element.querySelector<HTMLElement>('[data-q-handle]')
+    if (handle !== null) await expect(getComputedStyle(handle).color).not.toBe(probe(canvasElement).color)
+    const trigger = element.querySelector<HTMLElement>('button[data-mission-trigger="info"]')!
+    await expect(trigger).toContainElement(pill)
+    // Named from its content; on touch layouts the queue's "+N" sits inside the same button.
+    await expect(trigger).toHaveAccessibleName(missionName(...retained.name, ...(touch ? retained.touchQueue : []), retained.reason))
+    await userEvent.click(trigger)
+    const dialog = await waitFor(() => { const found = infoDialog(); expect(found).not.toBeNull(); expect(found).toBeVisible(); return found! })
+    await expect(dialog.querySelector('[data-mission-info-note]')!.textContent).toBe(retained.note)
+    await expect(dialog.querySelectorAll('time')).toHaveLength(retained.updatedAt === undefined ? 0 : 1)
+    await expect(dialog.querySelector('button')).toBeNull()
+    await waitFor(() => expect(dialog).toHaveFocus())
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(infoDialog()).toBeNull())
+    await waitFor(() => expect(trigger).toHaveFocus())
+  }
 
   // The scheme reaches the surface: light renders on a light canvas, dark on a dark one.
   const surfaceRoot = within(canvasElement).getByTestId('mission-rows')
@@ -234,6 +291,7 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
     expect(box.right).toBeLessThanOrEqual(window.innerWidth)
     expect(box.bottom).toBeLessThanOrEqual(window.innerHeight)
   })
+  await waitFor(() => expect(dialog).toHaveFocus())
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(queuedDialog()).toBeNull())
   await waitFor(() => expect(trigger).toHaveFocus())
@@ -245,23 +303,79 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
 export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed +1 and +2 mission queues prove popover geometry, keyboard focus, Escape and hover-free disclosure; catalog queues vary with work.' } }, play: queuedPlay }
 export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued missions · "+N" popover · light', args: { scheme: 'light' } }
 
-/** 390px phone: the same pill geometry; "+N" keeps a 44 × 44 hit area and opens from a touch press. */
+/**
+ * Touch-layout mission targets in `scope`: each is one button at least 44 × 44, its own box (no pseudo-element), inside
+ * its own row, ending before every trailing control (disclosure, actions, any Open action) and clear of the next row.
+ * The visible pill inside stays 16px, centred, within the mission side's 56%.
+ */
+const assertTouchTargets = async (scope: HTMLElement) => {
+  const rows = [...scope.querySelectorAll<HTMLElement>('[data-milestone-row]')].filter(element => element.closest('[inert]') === null)
+  for (const [index, element] of rows.entries()) {
+    const trigger = element.querySelector<HTMLElement>('button[data-mission-trigger]')
+    await expect(element.hasAttribute('data-touch-mission')).toBe(trigger !== null)
+    if (trigger === null) continue
+    const box = rect(trigger)
+    const own = rect(element)
+    await expect(box.width).toBeGreaterThanOrEqual(44)
+    await expect(box.height).toBeGreaterThanOrEqual(44)
+    await expect(box.left).toBeGreaterThanOrEqual(own.left - 0.5)
+    await expect(box.right).toBeLessThanOrEqual(own.right + 0.5)
+    await expect(box.top).toBeGreaterThanOrEqual(own.top - 0.5)
+    await expect(box.bottom).toBeLessThanOrEqual(own.bottom + 0.5)
+    await expect(getComputedStyle(trigger, '::before').content).toMatch(/^(none|normal)$/)
+    const pill = rect(trigger.querySelector('[data-box="pill"]')!)
+    await expect(Math.abs(pill.height - 16)).toBeLessThanOrEqual(0.5)
+    await expect(Math.abs((pill.top + pill.bottom) / 2 - (box.top + box.bottom) / 2)).toBeLessThanOrEqual(1)
+    await expect(rect(trigger.closest('[data-line2-slot="mission"]')!).width).toBeLessThanOrEqual(rect(line2(element)).width * 0.56 + 0.5)
+    for (const other of element.querySelectorAll<HTMLElement>('button, [data-row-action], [data-agent-menu], [data-sidebar-disclosure]')) {
+      const otherBox = rect(other)
+      // The visually hidden details trigger is a 1px clip, not a target.
+      if (other === trigger || trigger.contains(other) || otherBox.width <= 1 || otherBox.height <= 1) continue
+      await expect(intersects(box, otherBox)).toBe(false)
+      if (otherBox.left >= box.left) await expect(box.right).toBeLessThanOrEqual(otherBox.left + 0.5)
+    }
+    const next = rows[index + 1]
+    if (next !== undefined) await expect(intersects(box, rect(next))).toBe(false)
+  }
+}
+
+/** Touch layout at the viewport's width (up to 440px): pill and "+N" merge into one 44px target that opens from a touch press. */
 const phonePlay: NonNullable<Story['play']> = async context => {
+  const frame = within(context.canvasElement).getByTestId('mission-rows')
+  await expect(Math.abs(rect(frame).width - Math.min(document.documentElement.clientWidth, 440))).toBeLessThanOrEqual(1)
   await missionRowsPlay(context)
+  const designedHost = context.canvasElement.querySelector<HTMLElement>('[data-host="designed"]')!
+  // Exactly the queued and retained rows carry a merged target; plain live rows keep the bare 48px pill row.
+  await expect([...designedHost.querySelectorAll('[data-touch-mission] [data-row-column="title"]')].map(title => title.textContent))
+    .toEqual(['Port the upstream sidebar', 'Rename the users API', 'Watch the upload retries', 'Index the search logs', 'Map the billing events'])
+  await expect(designedHost.querySelector('[data-queued-missions]:not([data-mission-trigger])')).toBeNull()
+  await assertTouchTargets(designedHost)
+
   const parentSection = context.canvasElement.querySelector<HTMLElement>('[data-host="mission-parent"]')!
   const parent = parentSection.querySelector<HTMLElement>('[data-milestone-row]')!
   const disclosure = within(parent).getByRole('button', { name: 'Hide subagents' })
   const actions = within(parent).getByRole('button', { name: `Actions for ${missionParent.title}` })
   for (const control of [disclosure, actions]) {
-    const box = control.getBoundingClientRect()
+    const box = rect(control)
     await expect(box.width).toBeGreaterThanOrEqual(44)
     await expect(box.height).toBeGreaterThanOrEqual(44)
-    await expect(line2(parent).getBoundingClientRect().right).toBeLessThanOrEqual(box.left + 0.5)
+    await expect(rect(line2(parent)).right).toBeLessThanOrEqual(box.left + 0.5)
   }
-  const parentPill = parent.querySelector<HTMLElement>('[data-box="pill"]')!
-  await expect(parentPill.getBoundingClientRect().height).toBe(16)
-  await expect(parentPill.getBoundingClientRect().width).toBeLessThanOrEqual(line2(parent).getBoundingClientRect().width * 0.56 + 0.5)
-  await expect(parent.querySelector('[data-line2-slot="step"]')!.getBoundingClientRect().width).toBeGreaterThan(0)
+  // The parent carries a mission and a queue, so its merged target sits beside both trailing 44px tracks.
+  await assertTouchTargets(parentSection)
+  const parentTrigger = within(parent).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+1 more mission queued') })
+  await expect(parentTrigger).toHaveAttribute('data-mission-trigger', 'queued')
+  await expect(parent.querySelector('[data-line2-slot="step"]')).toHaveTextContent('Write the port notes')
+  await expect(rect(parent.querySelector('[data-line2-slot="step"]')!).width).toBeGreaterThan(0)
+  // Tapping it opens only the popover: the tree row's action never fires.
+  await userEvent.pointer([{ keys: '[TouchA>]', target: parentTrigger }, { keys: '[/TouchA]', target: parentTrigger }])
+  const parentDialog = await waitFor(() => { const element = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Queued mission"]'); expect(element).not.toBeNull(); expect(element).toBeVisible(); return element! })
+  await expect([...parentDialog.querySelectorAll('[data-queued-mission]')].map(item => item.getAttribute('data-queued-mission'))).toEqual(['sidebar-polish'])
+  await expect(parentSection).not.toHaveAttribute('data-opened')
+  await waitFor(() => expect(parentDialog).toHaveFocus())
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Queued mission"]')).toBeNull())
+
   const child = parentSection.querySelectorAll<HTMLElement>('[data-milestone-row]')[1]!
   await expect(line2(child).textContent).toBe('Needs you·build-1')
   await expect(child.querySelector('[data-agent-menu], [data-row-action], [data-mission-pill], [data-queued-mission], button')).toBeNull()
@@ -271,22 +385,31 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   await expect(within(parent).getByRole('button', { name: 'Show subagents' })).toBeVisible()
   await userEvent.click(within(parent).getByRole('button', { name: 'Show subagents' }))
   await expect(within(parentSection).getByText(missionChild.title)).toBeVisible()
-  const trigger = queuedTrigger(context.canvasElement)
-  await expect(Math.abs(within(context.canvasElement).getByTestId('mission-rows').getBoundingClientRect().width - 390)).toBeLessThanOrEqual(1)
-  const hit = getComputedStyle(trigger, '::before')
-  await expect(Number.parseFloat(hit.width)).toBeGreaterThanOrEqual(44)
-  await expect(Number.parseFloat(hit.height)).toBeGreaterThanOrEqual(44)
+
+  // A touch press on a Failed row's merged target opens "Mission info" with the warning and its queue in one popover.
+  const failed = designedRow(context.canvasElement, 'Map the billing events').querySelector<HTMLElement>('button[data-mission-trigger="info"]')!
+  await userEvent.pointer([{ keys: '[TouchA>]', target: failed }, { keys: '[/TouchA]', target: failed }])
+  const failedDialog = await waitFor(() => { const found = infoDialog(); expect(found).not.toBeNull(); expect(found).toBeVisible(); return found! })
+  await expect([...failedDialog.querySelectorAll('[data-queued-mission]')].map(item => item.getAttribute('data-queued-mission'))).toEqual(['docs-refresh'])
+  await waitFor(() => expect(failedDialog).toHaveFocus())
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(infoDialog()).toBeNull())
+
+  // The queued row: one target for pill and "+2"; a touch press opens the queue inside the frame. Ends open for the a11y check.
+  const trigger = within(designedRow(context.canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+2 more missions queued') })
+  await expect(trigger.querySelector('[data-queued-count]')).toHaveTextContent('+2')
   await userEvent.pointer([{ keys: '[TouchA>]', target: trigger }, { keys: '[/TouchA]', target: trigger }])
   const dialog = await waitFor(() => { const element = queuedDialog(); expect(element).not.toBeNull(); expect(element).toBeVisible(); return element! })
+  await expect([...dialog.querySelectorAll('[data-queued-mission]')].map(item => item.getAttribute('data-queued-mission'))).toEqual(['docs-refresh', 'rename-users-api'])
   await waitFor(() => {
-    const box = dialog.getBoundingClientRect()
+    const box = rect(dialog)
     expect(box.left).toBeGreaterThanOrEqual(0)
-    expect(box.right).toBeLessThanOrEqual(Math.min(window.innerWidth, 390))
+    expect(box.right).toBeLessThanOrEqual(Math.min(window.innerWidth, rect(frame).right))
   })
 }
 
-export const Phone: Story = { tags: ['critical'], name: 'Phone · mission pill and "+N" touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed 390px row matrix proves pill alignment, truncation, 44px queued-mission targets and two trailing parent controls; a child carrying mission data proves display-only rows omit mission controls.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
-export const PhoneLight: Story = { ...Phone, name: 'Phone · mission pill and "+N" touch target · light', args: { scheme: 'light', phone: true } }
+export const Phone: Story = { tags: ['critical'], name: 'Phone · merged mission touch target', parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed row matrix in a touch-layout frame at the viewport width (390 or 440px) proves pill alignment and truncation, one 44px pill-and-"+N" target per queued or retained-info row kept inside its row and clear of the parent’s disclosure and actions tracks and the next row, Stale/Failed mission info, and display-only rows without mission controls.' } }, args: { scheme: 'dark', phone: true }, play: phonePlay }
+export const PhoneLight: Story = { ...Phone, name: 'Phone · merged mission touch target · light', args: { scheme: 'light', phone: true } }
 
 
 const styles = stylex.create({
@@ -294,7 +417,8 @@ const styles = stylex.create({
   // The live default sidebar: `sidebarDefault` wide, rows inset by `s.md` with 2px gaps.
   column: { display: 'flex', flexDirection: 'column', gap: s.xs2, width: g.sidebarDefault, boxSizing: 'border-box', padding: s.md, backgroundColor: surface.sidebar },
   folder: { display: 'flex', flexDirection: 'column', gap: s.xs2 },
-  phoneFrame: { flexDirection: 'column', width: '390px', maxWidth: '100%', padding: 0, gap: 0 },
+  // The real viewport width up to a large phone: 390px on a 390px viewport, 440px on 440px and wider.
+  phoneFrame: { flexDirection: 'column', width: '100%', maxWidth: '440px', padding: 0, gap: 0 },
   phoneColumn: { width: '100%' },
   parentViewport: { height: '144px', minHeight: 0 },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
