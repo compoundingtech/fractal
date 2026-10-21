@@ -39,16 +39,16 @@ MANIFEST_JOIN = re.compile(r'CARGO_MANIFEST_DIR"\s*\)\s*\)?\s*\.join\(\s*"([^"]+
 # relative to that root; those literals whose first component is a tracked top-level entry are checked as repo paths.
 # Reviewed hits of the root pass that are not repository-root reads, with the reason.
 ROOT_LITERAL_REVIEWED = {
-    ('crates/st3/tests/examples.rs', 'AGENTS.md'): 'joined onto eval seat workspaces under evals/st3 (examples.rs:980-990)',
-    ('crates/st3/tests/examples.rs', 'CLAUDE.md'): 'joined onto eval seat workspaces under evals/st3 (examples.rs:980-990)',
+    ('crates/fractal/tests/examples.rs', 'AGENTS.md'): 'joined onto eval seat workspaces under evals/st3 (examples.rs:980-990)',
+    ('crates/fractal/tests/examples.rs', 'CLAUDE.md'): 'joined onto eval seat workspaces under evals/st3 (examples.rs:980-990)',
 }
 ANY_JOIN = re.compile(r'\.join\(\s*"([^"{}]+)"\s*\)')
 STAMP_READERS = re.compile(r'ST_BUILD_STAMP_LOCAL|AGENT_SPEC_REVISION|LOCAL_STAMP|machine_version\(')
 # Every reader of the git-derived build stamp, reviewed: they read its SHAPE (a full sha, or a dirty/unknown marker), so
 # any clean commit with the same inputs gives the same result. A new reader must be reviewed and added here.
 STAMP_ALLOWED = {
-    'crates/st-drivers/src/version.rs', 'crates/agent-spec/src/lib.rs', 'src/catalog_graph.rs', 'src/agent_publish.rs',
-    'src/main.rs', 'crates/st3/tests/version.rs', 'crates/st3/tests/client_v0_contract.rs',
+    'crates/fractal-drivers/src/version.rs', 'crates/agent-spec/src/lib.rs', 'src/catalog_graph.rs', 'src/agent_publish.rs',
+    'src/main.rs', 'crates/fractal/tests/version.rs', 'crates/fractal/tests/client_v0_contract.rs',
 }
 
 
@@ -192,7 +192,7 @@ class Classification(unittest.TestCase):
         return directory
 
     def test_under_is_path_component_exact(self):
-        self.assertTrue(select.under('crates/st3/src/lib.rs', ('crates',)))
+        self.assertTrue(select.under('crates/fractal/src/lib.rs', ('crates',)))
         self.assertTrue(select.under('Cargo.toml', ('Cargo.toml',)))
         self.assertFalse(select.under('crates-extra/x', ('crates',)))
         self.assertFalse(select.under('Cargo.toml.bak', ('Cargo.toml',)))

@@ -4,10 +4,6 @@
 name: Performance
 
 on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: 23 2 * * *
   workflow_dispatch: {}
 
 permissions:
@@ -16,8 +12,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: "perf-${{ (github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf') && github.run_id || github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
-  cancel-in-progress: ${{ (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
+  group: "perf-${{ (github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf') && github.run_id || github.event.pull_request.number || github.run_id }}"
+  cancel-in-progress: ${{ (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && github.event_name == 'pull_request' }}
 
 jobs:
   scope:
@@ -50,7 +46,7 @@ jobs:
               'crates/**', 'vendor/**', 'nix/**', 'scripts/ci-test-paths.rs',
               'Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'flake.nix', 'flake.lock',
               'docs/st3/schema.md', 'scripts/ci-perf*', 'scripts/ci-nix-cache',
-              '.github/workflows/perf.yml*',
+              '.github/workflows/perf.yml*', '.github/workflows/perf-load.ts',
           )
 
 
@@ -124,7 +120,7 @@ jobs:
         nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -136,14 +132,34 @@ jobs:
       PERF_PR_NUMBER: ${{ github.event.pull_request.number }}
       PERF_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Name compatible snapshot recipes
         env:
-          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/st3/Cargo.toml', '.cargo/config.toml') }}"
-          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/fractal/Cargo.toml', 'crates/fractal-daemon/Cargo.toml', '.cargo/config.toml') }}"
+          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
         run: printf "PERF_BUILD_SNAPSHOT=%s\nPERF_STORES_SNAPSHOT=%s\n" "$PERF_BUILD_SNAPSHOT" "$PERF_STORES_SNAPSHOT" >> "$GITHUB_ENV"
       - name: Restore compatible build, Nix, stores and main baseline snapshots
         env:
@@ -216,14 +232,14 @@ jobs:
   perf-load-hog:
     name: perf-load-hog
     needs: [scope]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'workflow_dispatch' && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
+    continue-on-error: true
     runs-on:
       [
         nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 45
-    continue-on-error: true
     defaults:
       run:
         shell: bash
@@ -235,14 +251,34 @@ jobs:
       PERF_PR_NUMBER: ${{ github.event.pull_request.number }}
       PERF_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
     steps:
+      - name: Identify runner hardware
+        shell: bash
+        env:
+          CI_RUNNER_NAME: ${{ runner.name }}
+        run: |
+          cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+          printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Name compatible snapshot recipes
         env:
-          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/st3/Cargo.toml', '.cargo/config.toml') }}"
-          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
+          PERF_BUILD_SNAPSHOT: "perf-load-build-v1-${{ hashFiles('Cargo.lock', 'flake.lock', 'flake.nix', 'Cargo.toml', 'crates/fractal/Cargo.toml', 'crates/fractal-daemon/Cargo.toml', '.cargo/config.toml') }}"
+          PERF_STORES_SNAPSHOT: "perf-load-stores-v1-${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}"
         run: printf "PERF_BUILD_SNAPSHOT=%s\nPERF_STORES_SNAPSHOT=%s\n" "$PERF_BUILD_SNAPSHOT" "$PERF_STORES_SNAPSHOT" >> "$GITHUB_ENV"
       - name: Restore compatible build, Nix, stores and main baseline snapshots
         env:
@@ -286,9 +322,9 @@ jobs:
   perf-load-hog-macos:
     name: perf-load-hog-macos
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'workflow_dispatch') }}
+    continue-on-error: true
     runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]
     timeout-minutes: 60
-    continue-on-error: true
     defaults:
       run:
         shell: bash
@@ -300,8 +336,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
       - name: Install Nix
         uses: DeterminateSystems/determinate-nix-action@v3
         env:

@@ -51,6 +51,11 @@ OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 SHA256 = re.compile(r'^[0-9a-f]{64}$')
 CHECK = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
 REQUEST_KEYS = {'commit', 'check', 'command', 'exit_code', 'output_sha256', 'change_id', 'inputs'}
+# `runner` is optional: `wrapper` (the default) is a command run once and signed; `nix` is a check derivation built by
+# `nix build`, whose record names the output path and carries the Nix signatures on it (see check_nix).
+RUNNERS = ('wrapper', 'nix')
+STORE_PATH = re.compile(r'^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$')
+NIX_SIGNATURE = re.compile(r'^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$')
 INPUT_KEYS = {'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt'}
 # The record's inputs grow over time (the repository policy names the ones a check must carry).
 EXTRA_INPUT = re.compile(r'^[a-z][a-z0-9_]{0,39}$')
@@ -210,9 +215,51 @@ def git(repo, *args, stdin=None, env=None):
     return done.stdout
 
 
+def check_nix(request):
+    """A `nix` request is `nix build .#checks.<system>.<check>` and says what that build produced. The signer
+    cannot run Nix or see the store, so it holds the claim to its shape: store paths, a NAR hash, the signatures
+    as the daemon printed them, and a derivation that matches the output name. The verifier checks the Nix
+    signature itself against keys it reads from the accepted base; nothing here is trusted for that."""
+    check, command, inputs = request['check'], request['command'], request['inputs']
+    if not (len(command) == 3 and command[:2] == ['nix', 'build']
+            and re.fullmatch(r'\.#checks\.[a-z0-9_]+-[a-z]+\.' + re.escape(check), command[2])):
+        raise Refused('a nix record must be: nix build .#checks.<system>.<check>')
+    drv = inputs.get('drv_path', '')
+    if not (STORE_PATH.match(drv) and drv.endswith('.drv')):
+        raise Refused('a nix record needs drv_path, a store path ending in .drv')
+    if request['exit_code'] != 0:
+        # A failed build has no output: it is recorded, never satisfies, and names no path.
+        if set(inputs) & {'out_path', 'nar_hash', 'nar_size', 'references', 'nix_signatures'}:
+            raise Refused('a failed nix build records no output path')
+        return
+    out = inputs.get('out_path', '')
+    if not STORE_PATH.match(out) or out.rsplit('/', 1)[1].split('-', 1)[1] + '.drv' != drv.rsplit('/', 1)[1].split('-', 1)[1]:
+        raise Refused('out_path must be a store path named like drv_path without .drv')
+    if not re.fullmatch(r'sha256-[A-Za-z0-9+/]{43}=', inputs.get('nar_hash', '')):
+        raise Refused('nar_hash must be sha256-<base64>')
+    if not re.fullmatch(r'[0-9]{1,15}', inputs.get('nar_size', '')):
+        raise Refused('nar_size must be a decimal number')
+    references = inputs.get('references', '')
+    listed = [] if references == '-' else references.split(',')
+    if not references or not all(STORE_PATH.match(r) for r in listed) or listed != sorted(set(listed)):
+        raise Refused('references must be sorted, distinct store paths joined by commas, or - for none')
+    if inputs.get('cache_hit') not in ('true', 'false'):
+        raise Refused('cache_hit must be true or false')
+    signatures = inputs.get('nix_signatures', '')
+    pieces = [] if signatures == 'none' else signatures.split(',')
+    if not signatures or not all(NIX_SIGNATURE.match(piece) for piece in pieces):
+        raise Refused('nix_signatures must be name:base64 signatures joined by commas, or none')
+    if inputs.get('nix_unsigned') != ('false' if pieces else 'true'):
+        raise Refused('nix_unsigned must say whether nix_signatures is none')
+    if inputs.get('nix_key_id') != (pieces[0].split(':', 1)[0] if pieces else 'none'):
+        raise Refused('nix_key_id must name the first signature\'s key, or none')
+
+
 def validate(request):
-    if not isinstance(request, dict) or set(request) != REQUEST_KEYS:
-        raise Refused('request must have exactly: ' + ', '.join(sorted(REQUEST_KEYS)))
+    if not isinstance(request, dict) or not (REQUEST_KEYS <= set(request) <= REQUEST_KEYS | {'runner'}):
+        raise Refused('request must have exactly: ' + ', '.join(sorted(REQUEST_KEYS)) + ' (and optionally runner)')
+    if request.get('runner', 'wrapper') not in RUNNERS:
+        raise Refused('runner must be one of: ' + ', '.join(RUNNERS))
     if not OID.match(str(request['commit'])):
         raise Refused('commit must be a full object id')
     if not CHECK.match(str(request['check'])):
@@ -238,6 +285,8 @@ def validate(request):
             raise Refused(f'{key} must be 64 lowercase hex digits')
     if not re.fullmatch(r'[1-9][0-9]{0,3}', inputs['attempt']):
         raise Refused('attempt must be a small positive integer')
+    if request.get('runner') == 'nix':
+        check_nix(request)
 
 
 def main():
@@ -268,7 +317,10 @@ def main():
     body = {
         '_type': 'https://in-toto.io/Statement/v1',
         'subject': [{'name': commit, 'digest': {'gitTree': tree}}],
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-evidence-predicate-uri — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        # Keep writing the old URI until the accepting verifier release is on main.
         'predicateType': 'https://smalltalk.dev/evidence/gate/v1',
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-evidence-predicate-uri
         'predicate': {
             'schema_version': 1, 'change_id': request['change_id'], 'signer': signer, 'tier': 'full',
             're_attests': None,
@@ -277,7 +329,7 @@ def main():
             'observed_at': (os.environ.get('EVIDENCE_SIGN_NOW') if config.get('test_clock') is True else None)
                            or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'observed': {
-                'kind': 'tests', 'runner': 'wrapper',
+                'kind': 'tests', 'runner': request.get('runner', 'wrapper'),
                 'checks': {request['check']: {'command': request['command'], 'exit_code': request['exit_code'],
                                               'output_sha256': request['output_sha256']}},
                 'inputs': dict(sorted(request['inputs'].items())),

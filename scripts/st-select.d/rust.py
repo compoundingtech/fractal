@@ -15,7 +15,7 @@ INPUTS = (
     '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components',
     'crates', 'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix',
     'plugins', 'scripts', 'slo', 'src', 'templates', 'tests', 'vendor', 'wit',
-    # crates/st3/src/attach_image.rs:422 reads it at run time.
+    # crates/fractal-daemon/src/attach_image.rs:422 reads it at run time.
     'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',
 )
 
@@ -23,6 +23,7 @@ NOT_MINE = (
     'release-notes', 'apps', 'packages', 'buck2', 'docs', 'AGENTS.md', 'CLAUDE.md', 'README.md', 'README.st2.md',
     'BUCK', 'BUCK.genie.ts', '.buckconfig', '.buckconfig.genie.ts', '.buckroot', 'package.json', 'package.json.genie.ts',
     'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'install.sh', '.st',
+    'megarepo.kdl', 'megarepo.lock', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
 )
 
 # tests/integration.rs mounts these three; each reads the whole tree (tests/public_repo.rs, tests/native_only.rs:395,
@@ -33,7 +34,7 @@ ALWAYS = {
 }
 
 # Crates whose dev-dependency cycles make them one test component (cargo metadata, 2026-10-16).
-CYCLE = {'st3', 'st3-client', 'stui', 'st3-feed', 'st3-conversation-ui', 'st3-ui-model', 'st3-client-tui', 'st3-migrate'}
+CYCLE = {'fractal', 'fractal-client', 'fractal-tui', 'fractal-feed', 'fractal-conversation-ui', 'fractal-ui-model', 'fractal-client-tui', 'fractal-migrate'}
 
 
 def report(metadata, changed):
