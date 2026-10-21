@@ -3,12 +3,13 @@ import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline
 
 const now = Date.parse('2026-09-25T08:25:00Z');
 
-// (1) An unreadable attention projection must never read as an empty inbox.
-assert.deepEqual(attentionHeadline({ count: 0, loaded: true }), { text: 'Nothing needs your attention.', warning: false });
-assert.deepEqual(attentionHeadline({ count: 7, loaded: true }), { text: '7 actionable items', warning: false });
-assert.deepEqual(attentionHeadline({ count: 0, loaded: true, error: 'forbidden: device inventory requires an explicitly authenticated person' }), { text: 'Attention could not be loaded: forbidden: device inventory requires an explicitly authenticated person', warning: true });
-assert.deepEqual(attentionHeadline({ count: 0, loaded: false }), { text: 'Attention has not loaded yet.', warning: true });
-assert.deepEqual(attentionHeadline({ count: 3, loaded: true, error: 'offline' }), { text: '3 actionable items from the last load · refresh failed: offline', warning: true });
+// (1) An unreadable alerts projection must never read as no alerts; no alerts prints nothing.
+assert.deepEqual(attentionHeadline({ count: 0, loaded: true }), { text: '', warning: false });
+assert.deepEqual(attentionHeadline({ count: 7, loaded: true }), { text: '7 alerts', warning: false });
+assert.deepEqual(attentionHeadline({ count: 1, loaded: true }), { text: '1 alert', warning: false });
+assert.deepEqual(attentionHeadline({ count: 0, loaded: true, error: 'forbidden: device inventory requires an explicitly authenticated person' }), { text: 'Alerts could not be loaded: forbidden: device inventory requires an explicitly authenticated person', warning: true });
+assert.deepEqual(attentionHeadline({ count: 0, loaded: false }), { text: 'Alerts have not loaded yet.', warning: true });
+assert.deepEqual(attentionHeadline({ count: 3, loaded: true, error: 'offline' }), { text: '3 alerts from the last load · refresh failed: offline', warning: true });
 
 
 // (2) Queued work shows how long the next step has been waiting, from the queue st joined into the
@@ -24,7 +25,7 @@ assert.equal(currentWorkSummary({ current_work: [{ ...route, path: 'review/diff'
 assert.equal(currentWorkSummary({ current_work: [{ ...route, title: 'Route output', state: 'claimed' }] }), 'Current: Route output (claimed)');
 assert.equal(currentWorkSummary({}), null);
 
-// Control groups and describes missions from the steps st joined into each run: no work list.
+// The mission list groups and describes missions from the steps st joined into each run: no work list.
 const step = (path, state) => ({ id: `step-run/9f/${path}`, path, state, attempt: 1, since: '2026-09-25T08:00:00Z' });
 const release = { id: 'mission/fleet/app/release', title: 'fleet/app/release', state: 'running', runs: ['mission-run/9f'], visualization: { nodes: [{ kind: 'step' }, { kind: 'step' }, { kind: 'group' }], groups: [] }, run_details: [{ id: 'mission-run/9f', steps: [step('build', 'completed'), step('review', 'claimed')] }] };
 assert.deepEqual(missionSteps(release).map(s => s.path), ['build', 'review']);
@@ -56,7 +57,7 @@ assert.equal(missionGroup({ ...stuck, state: 'completed' }), 'Archive');
 
 // Small Talk st joined into a conversation shows who wrote to whom and its title.
 assert.deepEqual(smallTalkPresentation({ message_id: 'message/1', from: 'agent/example/cos/standing/cos', to: 'person/alex', title: 'Release is ready' }), { from: 'COS → alex', text: 'Release is ready' });
-assert.deepEqual(smallTalkPresentation({ message_id: 'message/2', from: 'agent/example/app' }), { from: 'App → someone', text: 'Small Talk' });
+assert.deepEqual(smallTalkPresentation({ message_id: 'message/2', from: 'agent/example/app' }), { from: 'App → someone', text: 'Fractal' });
 
 
 // (3) A crash-looping seat must stand out rather than read as a normal row.

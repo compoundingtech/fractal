@@ -6,6 +6,7 @@ description = "A replicated claims graph: the claim log, its canonical order and
 license = "MIT"
 
 [dependencies]
+fractal-storage-version = { path = "../fractal-storage-version" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
@@ -16,10 +17,14 @@ flate2 = "1"
 getrandom = { version = "0.3", features = ["std"] }
 hex = "0.4"
 hmac = "0.12"
+hyper = { version = "1", features = ["client", "http1"] }
 libc = "0.2"
+opentelemetry = { version = "0.30", default-features = false, features = ["metrics", "trace"] }
+parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions", "hooks"] }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 # Claim bodies keep the writer's field order when they decode, so a claim hashed in insertion
 # order by an old build still verifies (see `hash::claim_id_is_content_hash`). Inside smalltalk
@@ -34,10 +39,17 @@ uuid = { version = "1", features = ["v7"] }
 # Counters that tests of a runtime built on the graph read, such as the SQLite statements a
 # thread ran. Off in every non-test build.
 test-support = []
+# Opt-in standalone transport benchmark; absent from production builds.
+transport-bench = []
 
 [dev-dependencies]
 futures-util = "0.3"
+opentelemetry_sdk = { version = "0.30", features = ["testing"] }
 proptest = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
+
+[[example]]
+name = "transport_observation_bench"
+required-features = ["transport-bench"]

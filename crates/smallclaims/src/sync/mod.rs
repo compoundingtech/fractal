@@ -21,10 +21,32 @@ use sha2::{Digest as _, Sha256};
 use crate::fleet::{MemberKey, Sender, verify_signature};
 
 mod backend;
+pub mod telemetry;
 mod worker;
 
 pub use backend::{Backend, Local, redemption_answer};
 pub use worker::*;
+
+/// `ST3_WORKER_INTERVAL_MS`, read once: a cap on every worker timer, and on the store's
+/// catch-up and divergence intervals that follow them, so tests of several nodes on one machine
+/// need not wait out the 30- and 60-second defaults. Unset, nothing is capped.
+pub(crate) fn worker_timer_cap() -> Option<std::time::Duration> {
+    static CAP: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("ST3_WORKER_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+/// `default`, or `cap` when that is shorter.
+pub(crate) fn capped(
+    default: std::time::Duration,
+    cap: Option<std::time::Duration>,
+) -> std::time::Duration {
+    cap.map_or(default, |cap| cap.min(default))
+}
 
 const PROTOCOL: &str = "st3-replication-v1";
 pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
@@ -32,9 +54,11 @@ pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 /// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
 /// in. Older builds neither serve nor call it.
 pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
-pub const HEAL_PATH: &str = "/v1/peer/heal";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
 pub const MAX_JOIN_BYTES: usize = 4096;
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
+// Senders keep x-st3-* until every member accepts aliases; sunset 60 days after
+// the first shipping release. Signature domains and canonical bytes do not change.
 const HEADER_FLEET: &str = "x-st3-fleet";
 const HEADER_NODE: &str = "x-st3-node";
 const HEADER_BODY: &str = "x-st3-body-sha256";
@@ -42,6 +66,16 @@ const HEADER_SIGNATURE: &str = "x-st3-signature";
 const HEADER_REQUEST: &str = "x-st3-request-digest";
 const HEADER_MEMBER_KEY: &str = "x-st3-member-key";
 const HEADER_MEMBER_SIGNATURE: &str = "x-st3-member-signature";
+const HEADER_ALIASES: [(&str, &str); 7] = [
+    (HEADER_FLEET, "x-fractal-fleet"),
+    (HEADER_NODE, "x-fractal-node"),
+    (HEADER_BODY, "x-fractal-body-sha256"),
+    (HEADER_SIGNATURE, "x-fractal-signature"),
+    (HEADER_REQUEST, "x-fractal-request-digest"),
+    (HEADER_MEMBER_KEY, "x-fractal-member-key"),
+    (HEADER_MEMBER_SIGNATURE, "x-fractal-member-signature"),
+];
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 const MEMBER_SIGNATURE_DOMAIN: &str = "st3-member-v1";
 pub const MAX_EXCHANGE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -69,17 +103,21 @@ fn deflate(body: &[u8]) -> Result<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
-/// Inflate an exchange body, refusing one that would expand past `MAX_EXCHANGE_BYTES`.
-fn inflate(body: &[u8]) -> Result<Vec<u8>> {
+/// Inflate an exchange body, refusing one that would expand past `MAX_EXCHANGE_BYTES`. `what`
+/// names the body (which path, request or answer, and the peer when known) so a refusal says
+/// which part of an exchange grew past the limit; the message keeps its leading words, which
+/// error classification reads.
+fn inflate(body: &[u8], what: &str) -> Result<Vec<u8>> {
     use std::io::Read as _;
     let mut inflated = Vec::with_capacity(body.len() * 3);
     flate2::read::ZlibDecoder::new(body)
         .take(MAX_EXCHANGE_BYTES as u64 + 1)
         .read_to_end(&mut inflated)
-        .context("inflate the exchange body")?;
+        .with_context(|| format!("inflate the exchange body ({what})"))?;
     anyhow::ensure!(
         inflated.len() <= MAX_EXCHANGE_BYTES,
-        "the exchange body inflates past {MAX_EXCHANGE_BYTES} bytes"
+        "the exchange body inflates past {MAX_EXCHANGE_BYTES} bytes ({what}, {} compressed bytes)",
+        body.len()
     );
     Ok(inflated)
 }
@@ -105,6 +143,25 @@ fn accepts_deflate(headers: &HeaderMap) -> bool {
                 .is_some_and(|name| name.trim().eq_ignore_ascii_case(EXCHANGE_ENCODING))
         })
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
+// Accept both spellings until contraction, 60 days after the first shipping release;
+// switch senders only after every member accepts aliases.
+fn signed_fields(headers: &HeaderMap) -> Result<[Option<&str>; 7]> {
+    let mut fields = [None; 7];
+    for ((old, new), field) in HEADER_ALIASES.into_iter().zip(&mut fields) {
+        let mut values = headers.get_all(old).iter().chain(headers.get_all(new).iter());
+        if let Some(first) = values.next() {
+            anyhow::ensure!(
+                values.all(|value| value == first),
+                "the signed message has conflicting {old}/{new} headers"
+            );
+            *field = first.to_str().ok();
+        }
+    }
+    Ok(fields)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -187,6 +244,9 @@ impl FleetAuth {
         format!("{MEMBER_SIGNATURE_DOMAIN}\n{canonical}").into_bytes()
     }
 
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — sender hold.
+    // Keep old names until every member accepts aliases; sunset 60 days after first shipping release.
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
     fn add_member_signature(&self, headers: &mut HeaderMap, canonical: &str) -> Result<()> {
         if let Some(member) = &self.member {
             headers.insert(HEADER_MEMBER_KEY, HeaderValue::from_str(member.public())?);
@@ -293,17 +353,16 @@ impl FleetAuth {
         expected_node: Option<&str>,
         request_digest: Option<&str>,
     ) -> Result<Sender> {
-        let field = |name: &str| -> Result<&str> {
-            headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .with_context(|| format!("the signed message has no valid {name} header"))
-        };
+        fn field<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str> {
+            value.with_context(|| format!("the signed message has no valid {name} header"))
+        }
+        let [fleet, node, body_hash, signature, request, member_key, member_signature] =
+            signed_fields(headers)?;
         anyhow::ensure!(
-            field(HEADER_FLEET)? == self.fleet_id,
+            field(fleet, HEADER_FLEET)? == self.fleet_id,
             "the fleet ID does not match"
         );
-        let node = field(HEADER_NODE)?;
+        let node = field(node, HEADER_NODE)?;
         if let Some(expected) = expected_node {
             anyhow::ensure!(
                 node == expected,
@@ -312,16 +371,16 @@ impl FleetAuth {
         }
         let digest = Self::body_digest(body);
         anyhow::ensure!(
-            field(HEADER_BODY)? == digest,
+            field(body_hash, HEADER_BODY)? == digest,
             "the signed body digest does not match"
         );
         if let Some(expected) = request_digest {
             anyhow::ensure!(
-                field(HEADER_REQUEST)? == expected,
+                field(request, HEADER_REQUEST)? == expected,
                 "the response does not bind to this request"
             );
         }
-        let signature = hex::decode(field(HEADER_SIGNATURE)?)
+        let signature = hex::decode(field(signature, HEADER_SIGNATURE)?)
             .context("the replication signature is not hexadecimal")?;
         let canonical = self.canonical(method, path, node, &digest, request_digest);
         let mut mac =
@@ -329,16 +388,10 @@ impl FleetAuth {
         mac.update(canonical.as_bytes());
         mac.verify_slice(&signature)
             .context("the replication signature does not match")?;
-        let optional = |name: &str| {
-            headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-        };
-        let member_key = optional(HEADER_MEMBER_KEY);
-        let member_signature_valid = match (&member_key, optional(HEADER_MEMBER_SIGNATURE)) {
+        let member_key = member_key.map(str::to_owned);
+        let member_signature_valid = match (&member_key, member_signature) {
             (Some(key), Some(signature)) => {
-                verify_signature(key, &Self::member_message(&canonical), &signature)
+                verify_signature(key, &Self::member_message(&canonical), signature)
             }
             _ => false,
         };
@@ -350,6 +403,9 @@ impl FleetAuth {
     }
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — sender hold.
+// Keep old names until every member accepts aliases; sunset 60 days after first shipping release.
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 fn headers(
     fleet: &str,
     node: &str,
@@ -395,5 +451,91 @@ impl<T> PeerResponse<T> {
             store_index,
             value,
         }
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    fn signed_response() -> (FleetAuth, HeaderMap) {
+        let member = Arc::new(MemberKey::generate().unwrap().0);
+        let auth = FleetAuth::test("fleet", &[9; 32]).with_member_key(Some(member));
+        let headers = auth
+            .response_headers_for(EXCHANGE_PATH, "peer", b"body", "request")
+            .unwrap();
+        (auth, headers)
+    }
+
+    fn verify(auth: &FleetAuth, headers: &HeaderMap) -> Result<Sender> {
+        auth.verify_sender(
+            headers, "RESPONSE", EXCHANGE_PATH, b"body", Some("peer"), Some("request"),
+        )
+    }
+
+    #[test]
+    fn signed_headers_accept_old_new_mixed_and_equal_duplicates() {
+        let (auth, old) = signed_response();
+        assert_eq!(old.len(), HEADER_ALIASES.len());
+        for (name, alias) in HEADER_ALIASES {
+            assert!(old.contains_key(name), "sender must keep {name}");
+            assert!(!old.contains_key(alias), "sender must not emit {alias}");
+        }
+        let mut new = HeaderMap::new();
+        let mut mixed = HeaderMap::new();
+        let mut both = old.clone();
+        for (index, (name, alias)) in HEADER_ALIASES.into_iter().enumerate() {
+            let value = old.get(name).unwrap();
+            new.insert(alias, value.clone());
+            mixed.insert(if index % 2 == 0 { name } else { alias }, value.clone());
+            both.append(name, value.clone());
+            both.append(alias, value.clone());
+            both.append(alias, value.clone());
+        }
+        for headers in [&old, &new, &mixed, &both] {
+            let sender = verify(&auth, headers).unwrap();
+            assert_eq!(sender.name, "peer");
+            assert_eq!(sender.member_key.as_deref(), auth.member_key());
+            assert!(sender.member_signature_valid);
+            assert!(auth.verify_sender(
+                headers, "RESPONSE", EXCHANGE_PATH, b"tampered", Some("peer"), Some("request"),
+            ).is_err());
+            assert!(auth.verify_sender(
+                headers, "RESPONSE", EXCHANGE_PATH, b"body", Some("peer"), Some("other"),
+            ).is_err());
+        }
+    }
+
+    #[test]
+    fn signed_headers_reject_every_conflicting_alias_or_duplicate() {
+        let (auth, old) = signed_response();
+        for (name, alias) in HEADER_ALIASES {
+            for duplicate_name in [name, alias] {
+                let mut headers = old.clone();
+                if duplicate_name == alias {
+                    let value = headers.remove(name).unwrap();
+                    headers.insert(alias, value);
+                }
+                headers.append(duplicate_name, HeaderValue::from_static("conflict"));
+                let error = verify(&auth, &headers).unwrap_err().to_string();
+                assert!(error.contains("conflicting"), "{name}: {error}");
+            }
+            let mut headers = old.clone();
+            headers.insert(alias, HeaderValue::from_static("conflict"));
+            let error = verify(&auth, &headers).unwrap_err().to_string();
+            assert!(error.contains("conflicting"), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn requests_reject_conflicting_unused_request_digest() {
+        let (auth, _) = signed_response();
+        let mut headers = auth.request_headers("peer", b"body").unwrap();
+        headers.insert(HEADER_REQUEST, HeaderValue::from_static("one"));
+        headers.insert("x-fractal-request-digest", HeaderValue::from_static("two"));
+        let error = auth.verify(
+            &headers, "POST", EXCHANGE_PATH, b"body", Some("peer"), None,
+        ).unwrap_err().to_string();
+        assert!(error.contains("conflicting"), "{error}");
     }
 }

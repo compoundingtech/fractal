@@ -13,7 +13,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -142,6 +143,27 @@ pub struct ClaimSignature {
     /// The fields a [`FIELDS_FORMAT`] signature covers; the node may add others.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_fields: Vec<String>,
+}
+
+/// The `attachments` entry of a `message.sent` claim that is the message's long body: the first
+/// of type `text/plain` with a 64-hex hash, a `host/` origin and a size of 1 byte to 256 KiB.
+/// Readers and the judge both take it from here, so a claim cannot verify against one body and
+/// display another.
+pub fn message_body_entry(attachments: &Value) -> Option<&Value> {
+    attachments.as_array()?.iter().find(|entry| {
+        entry.get("media_type").and_then(Value::as_str) == Some("text/plain")
+            && entry.get("sha256").and_then(Value::as_str).is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+            && entry
+                .get("origin")
+                .and_then(Value::as_str)
+                .is_some_and(|origin| origin.starts_with("host/"))
+            && entry
+                .get("size")
+                .and_then(Value::as_u64)
+                .is_some_and(|size| (1..=256 * 1024).contains(&size))
+    })
 }
 
 /// A signature over named fields of a claim, laid out as text a device builds without CBOR:
@@ -514,6 +536,23 @@ pub struct Keyring {
     keys: RwLock<BTreeMap<String, HeldKey>>,
     /// The public key each principal signs claims with.
     signing: RwLock<BTreeMap<String, String>>,
+    /// Moves twice for each change to the node key or the held keys: odd while the change is
+    /// being made, even once it is complete. See [`Keyring::settled`].
+    generation: AtomicU64,
+    /// Serializes changes, so the generation is odd exactly while one is being made.
+    changing: Mutex<()>,
+}
+
+/// A change to a keyring in progress. Dropping it completes the change, even on a panic.
+struct Changing<'a> {
+    generation: &'a AtomicU64,
+    _serial: MutexGuard<'a, ()>,
+}
+
+impl Drop for Changing<'_> {
+    fn drop(&mut self) {
+        self.generation.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl Keyring {
@@ -531,7 +570,38 @@ impl Keyring {
             .clone()
     }
 
+    fn change(&self) -> Changing<'_> {
+        let serial = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        Changing {
+            generation: &self.generation,
+            _serial: serial,
+        }
+    }
+
+    /// Run `read` over the keys, and return its result only if no change to them began or was in
+    /// progress while it ran: then `read` saw the keys as they stood at one moment. `None` when a
+    /// change overlapped it.
+    pub fn settled<T>(&self, read: impl FnOnce() -> T) -> Option<T> {
+        let before = self.generation.load(Ordering::Acquire);
+        if !before.is_multiple_of(2) {
+            return None;
+        }
+        let value = read();
+        // A change moves the generation before it takes any map's lock, and `read` takes those
+        // locks, so a change `read` saw any part of has moved it by now.
+        (self.generation.load(Ordering::Acquire) == before).then_some(value)
+    }
+
+    /// Hold a change to the keys open while `during` runs, as a change being made does.
+    #[cfg(test)]
+    pub(crate) fn changing_while<T>(&self, during: impl FnOnce() -> T) -> T {
+        let _changing = self.change();
+        during()
+    }
+
     pub fn set_node(&self, key: Option<Arc<MemberKey>>) {
+        let _changing = self.change();
         *self.node.write().unwrap_or_else(PoisonError::into_inner) = key;
     }
 
@@ -563,6 +633,7 @@ impl Keyring {
 
     /// Hold `held`; a key in a signing role becomes its principal's signing key.
     pub fn insert(&self, held: HeldKey) {
+        let _changing = self.change();
         let public = held.key.public().to_owned();
         if !matches!(held.role, Role::Root) {
             self.signing
@@ -707,5 +778,42 @@ mod tests {
         assert_eq!(Family::of("person/ada"), Some(Family::Person));
         assert_eq!(Family::of("person/"), None);
         assert_eq!(Family::of("message/1"), None);
+    }
+
+    #[test]
+    fn a_settled_read_of_the_keyring_excludes_any_change_it_overlaps() {
+        let keyring = Keyring::default();
+        let key = || Arc::new(MemberKey::generate().unwrap().0);
+        let node = key();
+        keyring.set_node(Some(node.clone()));
+        let read = || keyring.node().map(|node| node.public().to_owned());
+        assert_eq!(keyring.settled(read), Some(Some(node.public().to_owned())));
+        // A change in progress, begun before the read or during it.
+        assert_eq!(keyring.changing_while(|| keyring.settled(read)), None);
+        let replacement = key();
+        assert_eq!(
+            keyring.settled(|| {
+                let seen = read();
+                keyring.set_node(Some(replacement.clone()));
+                seen
+            }),
+            None
+        );
+        // An insert is a change too, and the keyring settles once each change completes.
+        assert_eq!(
+            keyring.settled(|| {
+                keyring.insert(HeldKey {
+                    principal: "agent/scribe".into(),
+                    role: Role::Agent,
+                    key: key(),
+                    chain: Vec::new(),
+                })
+            }),
+            None
+        );
+        assert_eq!(
+            keyring.settled(read),
+            Some(Some(replacement.public().to_owned()))
+        );
     }
 }

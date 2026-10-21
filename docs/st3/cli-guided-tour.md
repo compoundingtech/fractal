@@ -38,6 +38,14 @@ discoverable rather than surprising.
 This pass answers three questions: what is happening, what needs Alex, and how does Alex launch
 new work?
 
+### Current person context: `note`
+
+Run `st note --help`, `st note`, and `st note --json` through the trusted local Unix socket. Check author, time, optional UTC expiry, revision and a clear empty state. A person's read returns their own current note; a harness defaults to its agent identity and reads only people it works for or who own it.
+
+Inspect `st note set --help` and `st note clear --help`; exercise these only against disposable state as the configured person. Set takes nonblank text bounded to 4096 UTF-8 bytes and optional `--expires-at RFC3339`; clear removes the current note. Neither command accepts another target person, and agents cannot write. Confirm expiry removes a note from reads.
+
+Notes inform, never assign work, approve gates, answer person asks or grant authority. Slice A provides explicit reads only, without launch delivery, notifications or UI. Publishing requires anchored membership and all active members advertising `features.person_directive_note=1`; fence legacy peers from replication before enabling notes, because advertisements do not prove complete legacy-peer discovery.
+
 ### 1. `now` — one bounded operational answer
 
 Why: this should be the first command a person runs, not a dashboard assembled from five other
@@ -49,7 +57,7 @@ st now --as person/alex
 st now --as person/alex --json
 ```
 
-The default lists human attention only. Mission work is in `work ls` and Control; an explicit
+The default lists alerts, then unread updates; with no alert it prints no alert line at all. Mission work is in `work ls` and Control; an explicit
 `--owner-run` opts it into this combined view. Fleet diagnostics are in `doctor` and Operations.
 Check whether the default is calm, current, and actionable. `--all`, `--owner-run`, `--cursor`, and
 `--limit` must make sense from help alone.
@@ -124,15 +132,16 @@ st work revision cancel --help
 Check that a person can understand ownership, readiness, blockers, lease/incarnation, elapsed time,
 goals, constraints, and usage without learning internal graph vocabulary.
 
-### 4. `attention` — Alex's explicit inbox
+### 4. `alerts` — what waits on Alex
 
-Why: decisions and faults needing a person belong in one low-noise, actor-specific inbox.
+Why: asks, gates and approvals waiting on a person belong in one low-noise, actor-specific list,
+each in the conversation of the agent behind it. `st attention` is the older name.
 
 ```sh
-st attention --help
-st attention ls --help
-st attention ls --as person/alex
-st attention show --help
+st alerts --help
+st alerts ls --help
+st alerts ls --as person/alex
+st alerts show --help
 ```
 
 If `ls` returns an item, copy its ID into `show`. Inspect the mutation help without changing live
@@ -141,14 +150,14 @@ state:
 ```sh
 st work ask --help
 st work done --help
-st attention approve --help
-st attention reject --help
+st alerts approve --help
+st alerts reject --help
 ```
 
 Every row should say why Alex is involved, what happens if he does nothing, whether it is stale,
 and the exact actions available now.
 
-A subscription that holds mission requests for a person raises one attention item. Inspect the
+A subscription that holds mission requests for a person raises one alert. Inspect the
 subscription request commands without changing live state:
 
 ```sh
@@ -201,6 +210,9 @@ surface.
 st conversations --help
 st conversations ls --help
 st conversations ls person/alex
+st conversations ls person/alex --from agent/worker
+st conversations ls person/alex --from agent/worker --subject "Review ready"
+st conversations ls person/alex --from agent/worker --subject-prefix "Review" --archive --count
 st conversations sessions --help
 st conversations sessions
 st conversations read --help
@@ -211,6 +223,16 @@ st conversations timeline --help
 `conversations ls --as MAILBOX` is the same as the positional mailbox, matching `read --as`. A
 harness process with `ST_AGENT` can read, archive, send, reply, claim, and act on work only as that
 agent; a different `agent/...` actor is refused.
+
+`ls --from ACTOR` filters by sender; combine it with either `--subject TEXT` for an exact
+message subject or `--subject-prefix TEXT` for a literal prefix within that sender's messages.
+Both subject filters require `--from`: subject-only listing is out of scope because it would
+need a title index to avoid reading the whole mailbox. Both are case-sensitive and match the
+human-readable subject (`title` in JSON), not the `message/...` resource ID. They are mutually
+exclusive; `%` and `_` have no wildcard meaning. The daemon
+applies these filters before paging, including for `--archive`, `--count`, and `--json`.
+With an older daemon that ignores these query fields, the CLI filters the returned pages
+locally for the same result.
 
 Use a returned message ID for `read`/`thread` and a returned session ID for `timeline`. Inspect the
 write paths:
@@ -249,6 +271,9 @@ st agents new --help
 st agents new example --host HOST --print-kdl
 st agents suspend --help
 st agents resume --help
+st agents acknowledge-seed --help
+st agents handoff --help
+st agents handoff show AGENT
 st machines --help
 st machines
 ```
@@ -274,9 +299,21 @@ or omp snapshot to another fleet host under the same seat identity. The target n
 absolute workspace path, unoccupied; non-Git workspaces refuse suspend. Follow `suspension.phase`
 and the typed refusal reason in `agents show`.
 
+`agents handoff show AGENT` prints the document a seat left for its next session (see
+[seat continuity](seat-continuity.md)); it errors with `has written no handoff` for a seat that wrote
+none. `agents handoff write` and `agents handoff ready` are the seat's own mutations: run them only as that seat.
+
 `agents new --print-kdl` shows the seat declaration without applying it. Check that its workspace is
 a new directory below that host's home and that the harness defaults match the fleet's existing
 seats. Run it without `--print-kdl` only for an agent we agreed to start.
+
+`agents acknowledge-seed AGENT --reason REASON` is a recorded recovery mutation for an interrupted
+OMP seed attempt. Review help here; use only disposable state for the mutation. Check that the
+claim cites the original receipt and records the actor and reason. With or without acknowledgement,
+the next launch is fresh without rearming seed, even if the declaration still carries it.
+An unacknowledged attempt prints and records a durable incomplete warning; acknowledgement
+suppresses later warnings, never gates launch. A plain fresh seat never needs this recovery,
+including a restart before its first message.
 
 ### 8. `terminals` — inspect and attach without shell nesting
 
@@ -361,11 +398,19 @@ converge known contradictions without rewriting history.
 st doctor --help
 st doctor
 st doctor --strict
+st doctor --developer
 st repair --help
 st repair dry-run --help
 st repair dry-run
 st repair apply --help
 ```
+
+Ordinary `st doctor` also reports the daemon's own `build-tools` check; a machine that only
+runs st can ignore its warning. `--developer` separately checks this account's login PATH for
+source-build tools, without contacting the daemon, compiling a crate, or looking up credentials.
+Use `--developer --strict` to fail when a source-build tool is absent. It cannot be combined
+with `--performance`. When the local daemon is down, a person at a terminal is told to run `st`
+or `st setup`; seats and native drivers keep their existing recovery text.
 
 Apply nothing unless the dry-run reports a real, understood plan. Check pass/warn/fail semantics,
 exit status, evidence, remediation, stable repair classes, approval token, and zero-change retry.
@@ -496,11 +541,13 @@ st blobs get --help
 st conversations send --help
 ```
 
-`put` keeps a PNG, JPEG, GIF or WebP image of at most 10 MiB on this member and prints
-`blob/<sha256>`. `conversations send --attach FILE` uploads and attaches in one step, and
+`put` keeps an image on this member and prints `blob/<sha256>`. Like `conversations send
+--attach FILE`, which uploads and attaches in one step, it renders an SVG to PNG, converts a BMP,
+and scales an image over 10 MiB down to fit; `--media-type` uploads the bytes exactly instead.
 `conversations read` lists each attachment with the `blobs get` command that reads it. Exercise
-`get` with the `--message` that carries the image. Check that an image over 10 MiB, a text file
-named `.png`, and a fifth attachment are refused in words.
+`get` with the `--message` that carries the image. Check that a large screenshot is scaled and
+says so, that an SVG marking up a screenshot beside it arrives as a PNG, and that a HEIC photo, a
+text file named `.png`, and a fifth attachment are refused in words.
 
 ### 18. `diagnostic` — an agent's authorized harness-failure path
 

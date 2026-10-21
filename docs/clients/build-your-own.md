@@ -1,12 +1,12 @@
-# Build your own Smalltalk client
+# Build your own Fractal client
 
 Start with the typed client for transport and actions, then reuse the conversation model and
 feed. Your application owns layout, input, credentials and device storage. It does not need to
-parse CLI output or copy stui or the phone's transcript parser.
+parse CLI output or copy the terminal UI or the phone's transcript parser.
 
 The working [example TUI](../../examples/client-tui/) lists agents, follows the selected agent's
 conversation and sends a message. It is a workspace member, built and tested by Linux/macOS
-workspace CI. Its application code is about 400 lines, with no dependency on stui or the daemon.
+workspace CI. Its application code is about 400 lines, with no dependency on the `stui` library or the daemon.
 
 ## Run the example first
 
@@ -15,9 +15,9 @@ Have st running locally with at least one agent; the [getting-started guide](../
 sets that up. Choose a person already in your fleet; `person/avery` below is an invented example.
 
 ```sh
-cargo run --locked -p st3-client-tui -- person/avery
+cargo run --locked -p fractal-client-tui -- person/avery
 # Or choose the local daemon socket explicitly:
-cargo run --locked -p st3-client-tui -- person/avery /tmp/example-st3.sock
+cargo run --locked -p fractal-client-tui -- person/avery /tmp/example-st3.sock
 ```
 
 Without an explicit socket, the example passes `ST3_ENDPOINT` to `discover_unix_endpoint`, then
@@ -44,36 +44,63 @@ Open [main.rs](../../examples/client-tui/src/main.rs) for startup/input and
 
 | Job | Rust | TypeScript |
 | --- | --- | --- |
-| Typed reads, action parameters/fences, errors and streams | [`st3-client`](../../crates/st3-client/README.md) | [`@smalltalk/st3-client`](../../clients/typescript/st3-client/README.md) |
-| Live joined windows, member rotation and reconnect/resubscribe | [`st3-feed`](../../crates/st3-feed/README.md): `run_members`, `Command`, `Update` | Generated client's `collectionStream` and `applyWindow`; the caller owns reconnect/member selection (there is no TS feed package) |
-| Timeline revisions, earlier pages, transcript cleaning and delivery joins | [`st3-conversation-ui`](../../crates/st3-conversation-ui/README.md): `Timeline`, `Frame`, `adapt::conversation` | [`@smalltalk/st3-views`](../../clients/typescript/st3-views/README.md): `applyConversation`, `applyOlderPage`, `readOlder`, `conversationEntries` |
-| Conversation drawing, folds, selection and pane interactions | Enable `st3-conversation-ui`'s `ratatui` feature for `Cache`/`Theme`; model-only `State` emits `PaneIntent`s | `st3-views` supplies folding, simplified tool rows and entry types; your renderer draws them |
-| Mission words, precedence, queue state and step identity | `st3-ui-model::missions::adapt`, borrowing typed projections and caller display policies | Phone-specific mission derivation remains in `apps/ios/missionsView.ts`; it is not part of `st3-views` |
+| Typed reads, action parameters/fences, errors and streams | [`fractal-client`](../../crates/fractal-client/README.md) | [`@fractal/client`](../../clients/typescript/fractal-client/README.md) |
+| Live joined windows, member rotation and reconnect/resubscribe | [`fractal-feed`](../../crates/fractal-feed/README.md): `run_members`, `Command`, `Update` | Generated client's `collectionStream` and `applyWindow`; the caller owns reconnect/member selection (there is no TS feed package) |
+| Timeline revisions, earlier pages, transcript cleaning and delivery joins | [`fractal-conversation-ui`](../../crates/fractal-conversation-ui/README.md): `Timeline`, `Frame`, `adapt::conversation` | [`@fractal/views`](../../clients/typescript/fractal-views/README.md): `applyConversation`, `applyOlderPage`, `readOlder`, `conversationEntries` |
+| Conversation drawing, folds, selection and pane interactions | Enable `fractal-conversation-ui`'s `ratatui` feature for `Cache`/`Theme`; model-only `State` emits `PaneIntent`s | `st3-views` supplies folding, simplified tool rows and entry types; your renderer draws them |
+| Mission words, precedence, queue state and step identity | `fractal-ui-model::missions::adapt`, borrowing typed projections and caller display policies | Phone-specific mission derivation remains in `apps/ios/missionsView.ts`; it is not part of `st3-views` |
 | Session discovery, Home rows, request/answer formatting | Typed client resources; no single Rust package for all these views | `st3-views`: `sessionView`, `homeView`, `requestView` |
-| Private read-only display cache | `st3-feed::cache` and `model::Model` | Phone's cache remains application code; it is not a shared TS cache API |
-| Device-signing data and reported client name | Typed signature parameters in `st3-client`; caller owns key/signing; `set_client_name` reports your app | `st3-views`'s `deviceSigning` builds canonical bytes/parameters, and `clientName` formats caller-supplied product/version/build |
+| Private read-only display cache | `fractal-feed::cache` and `model::Model` | Phone's cache remains application code; it is not a shared TS cache API |
+| Device-signing data and reported client name | Typed signature parameters in `fractal-client`; caller owns key/signing; `set_client_name` reports your app | `st3-views`'s `deviceSigning` builds canonical bytes/parameters, and `clientName` formats caller-supplied product/version/build |
 
 These are repository source packages, not crates published on crates.io or npm. In a Rust app
 inside this checkout, use path dependencies like the [example manifest](../../examples/client-tui/Cargo.toml).
-When using them in another repository, pin one Smalltalk revision and keep the sibling crates
+When using them in another repository, pin one Fractal revision and keep the sibling crates
 together; they use relative path dependencies. The model's default features have no ratatui
 dependency. Enable `features = ["ratatui"]` only when drawing with ratatui, whose version must
 match the workspace. The example uses ratatui 0.30 and crossterm 0.29.
 
-TypeScript packages export source. Install the linked views package's dependencies first, then
-your app's dependencies; npm does not install dependencies inside a linked file package:
+TypeScript packages export source and share the root pnpm workspace. With Node 24
+and Corepack (or `nix develop .#web`), install from the repository root:
 
 ```sh
-npm ci --prefix clients/typescript/st3-views --ignore-scripts --no-audit --no-fund
+corepack enable # Outside the Nix web shell
+pnpm install --frozen-lockfile
 ```
 
-Use `file:../../clients/typescript/st3-views` from an app two directories below the repository
-root, as the phone does. Keep the generated client alongside it. Use a TypeScript-aware bundler
-or Node 24's TypeScript loader. For no-emit checks of `.ts` imports, enable
-`allowImportingTsExtensions`; for JavaScript output use `rewriteRelativeImportExtensions`.
+Use `workspace:*` for `@fractal/views` in a workspace app, as the phone does.
+The views package also depends on the generated client through `workspace:*`.
+Use a TypeScript-aware bundler or Node 24's TypeScript loader. For no-emit checks of
+`.ts` imports, enable `allowImportingTsExtensions`; for JavaScript output use
+`rewriteRelativeImportExtensions`.
 The shared views have no React, React Native, Expo or native key-store dependency. Home rows
 return `person`/`green` color tokens; map them through your palette. Pass your product name,
 version and build to `clientName`, and a device label to `signatureRefusal` if desired.
+
+## Fractal web browser telemetry
+
+Browser trace export is opt-in. Set `VITE_OTLP_TRACES_URL` to the complete OTLP/HTTP
+traces endpoint when building the Fractal web app with Vite (or in its Vite `.env`
+file). For example, a deployment build can set
+`VITE_OTLP_TRACES_URL=https://collector.example.test/v1/traces`. Vite embeds this
+public URL in the browser bundle; changing it requires rebuilding the bundle.
+The collector must accept browser OTLP/JSON requests and allow the app origin
+through CORS. Do not put credentials in this public configuration.
+
+With the key unset or blank, the browser installs no exporter and sends no OTLP
+requests. In-process tracing remains available. Configured deployments retain
+100% dogfood sampling. The app server does not proxy OTLP requests.
+
+Tracing and the mandatory first-frame context are captured synchronously. When a collector
+is configured, exporter construction and its flush timer normally wait until the committed
+shell or observed roster has painted. A ten-second timeout, foreground visibility change,
+startup error or pagehide releases that gate if no paint arrives. Up to 256 completed startup
+spans are kept in memory and handed to the exporter with their original trace identities and
+timestamps; spans still open at that boundary are exported when they end. Early pagehide or
+shutdown initializes the same exporter once and drains the startup buffer instead of dropping
+it. Shutdown initialization, already-started pagehide transport and the native final flush
+share one absolute one-second deadline; the native flush receives only the time remaining
+after the manual transport drain. The independently demanded session-trace provider remains lazy.
 
 ## Connect, follow and send
 
@@ -87,7 +114,7 @@ Pass the feed a standard update sender and a Tokio command receiver. Drain updat
 UI loop. An agents `Window` replaces the ordered agent rows; keep selection by resource ID,
 not row index. `Connected` means the socket opened, not that rows loaded: wait for a live
 window before enabling actions. `Offline` preserves the last display while disabling sends.
-`Converse { targets: vec![agent_id] }` asks st to join that agent's transcript and Smalltalk.
+`Converse { targets: vec![agent_id] }` asks st to join that agent's transcript and Fractal.
 Apply conversation frames through `Timeline`, then feed `adapt::conversation` into `Cache`.
 Do not append frames blindly: entries can be revised, streams can replace their window, and
 an agent can restart into another session. The feed can follow at most three conversations.
@@ -95,10 +122,10 @@ an agent can restart into another session. The feed can follow at most three con
 A TypeScript app composes the corresponding public APIs directly:
 
 ```ts
-import { St3Client, applyWindow, type CollectionWindow, type TimelineEntry } from '@smalltalk/st3-client';
-import { applyConversation, conversationEntries, clientName, type Conversation } from '@smalltalk/st3-views';
+import { FractalClient, applyWindow, type CollectionWindow, type TimelineEntry } from '@fractal/client';
+import { applyConversation, conversationEntries, clientName, type Conversation } from '@fractal/views';
 
-const client = new St3Client({
+const client = new FractalClient({
   baseUrl: gatewayUrl, credential: () => pairingCredential,
   client: clientName('smalltalk-ide', version, build),
 });
@@ -112,7 +139,7 @@ const stream = await client.collectionStream({
     } else if (frame.kind === 'conversation' && frame.id === 'chosen') {
       conversation = applyConversation(conversation, {
         replace: frame.replace, items: frame.items,
-        hasMore: frame.has_more ?? false, sessionId: frame.session_id,
+        hasMore: frame.has_more ?? false, sessionId: frame.session_id, olderCursor: frame.older_cursor,
       });
       render(conversationEntries(conversation.entries, agentNames));
     }
@@ -133,7 +160,7 @@ invented query parameter. Call `discover()` and check capability versions/states
 optional controls. A missing or refused collection stays unavailable, not an empty successful list.
 
 To send, take a fresh snapshot from `capabilities`, build `MessageSendParameters`, and call
-`message_send` with a `Fence` and a fresh action/idempotency pair (`st3_feed::action_pair`).
+`message_send` with a `Fence` and a fresh action/idempotency pair (`fractal_feed::action_pair`).
 TypeScript's generated `messageSend` takes the equivalent typed action. Reuse the same action ID,
 idempotency key, recipient and body when retrying an uncertain result; never silently queue a
 new mutation on reconnect. The example retains that request, locks recipient/editing until
@@ -141,6 +168,18 @@ acknowledgement or explicit discard, and says **Accepted**, not delivered. For a
 continue asynchronously, follow the returned operation (`followOperation` in TypeScript;
 `operations_get` in Rust) and display its terminal result. The server enforces actor and fences;
 show stable refusals through the client's plain-error helpers instead of parsing CLI messages.
+
+fractal-web's `source.attachments.send` owns this fence: callers pass `Send` or `Resend`
+with message fields, never a snapshot or fence. It publishes a first send's optimistic
+`Pending` row before awaiting anything, then uses the newest gateway-store snapshot
+already held in the SDK's collection-window sync evidence (highest `store_index`).
+Conversation frames carry no snapshot, and opaque conversation cursors cannot be used
+as fences; remote terminal-owner snapshots are excluded. With no held window snapshot,
+the existing SDK `snapshot` read obtains a fresh capabilities envelope, not cached discovery.
+An unavailable snapshot or `stale-fence` refusal leaves the row `Failed` with a typed
+reason and human-readable detail. After refreshing the observed window, explicit `Resend`
+keeps the original action ID, body and idempotency key while acquiring the refreshed fence;
+it never retries automatically or drops the failed row.
 
 Remote device sends may require a device signature: pairing credentials authenticate the
 gateway connection, while the signature attributes the message to the device's person.
@@ -157,14 +196,17 @@ loading, empty, failed and stale visible states distinct. Clear derived conversa
 the selected target changes; only apply updates for the current target.
 
 For older history, read the resolved session's timeline through the typed client and use
-`Timeline::older_page` or TS `readOlder`/`applyOlderPage`. Expired cursors require a fresh read;
+`Timeline::older_page` or TS `readOlder`/`applyOlderPage`. In TS, capture
+`{ sessionId, historyVersion }` when a read starts and pass it to `olderLoading`,
+`applyOlderPage` and `olderFailed`: a replacement frame discards earlier pages and their
+cursors, so a response requested before it is dropped. Expired cursors require a fresh read;
 do not invent entries to cover gaps. The optional Rust snapshot/event model has a separate
 cursor-gap recovery path: `Model::sync` reports the gap, resets its bounded collections and
 requires the application to discard other derived state. This is not a reason to poll joined
 live windows. Cached snapshots are display data, never authority for an offline action.
 
 For terminal control, typed `terminal.attach` supplies a capability/incarnation; the feed can
-follow a projected screen, or `st3-client` exposes a raw PTY connector for `pty-terminal`.
+follow a projected screen, or `fractal-client` exposes a raw PTY connector for `pty-terminal`.
 Input needs the owner's fresh sequence/incarnation fences; use the feed's fence helpers.
 For richer interactions, use `PaneIntent` and execute its actions in your application. Drawing
 code and pane state do not gain authority to send just by receiving text.
@@ -177,11 +219,11 @@ vectors pin the bytes devices sign. Extend those fixtures when behavior changes 
 sides passing. Each rendered client still owns its layout, keyboard/touch behavior and palette.
 
 ```sh
-cargo test --locked -p st3-client-tui
-cargo test --locked -p st3-conversation-ui --no-default-features
-cargo test --locked -p st3-conversation-ui --features ratatui
-npm test --prefix clients/typescript/st3-views
-npm run typecheck --prefix clients/typescript/st3-views
+cargo test --locked -p fractal-client-tui
+cargo test --locked -p fractal-conversation-ui --no-default-features
+cargo test --locked -p fractal-conversation-ui --features ratatui
+pnpm --filter @fractal/views test
+pnpm --filter @fractal/views typecheck
 ```
 
 The example tests use a terminal test backend and a loopback test gateway with the real client

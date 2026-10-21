@@ -19,13 +19,27 @@ pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
     envelope_tombstoned,
 };
+pub use super::checkpoint_space::CheckpointProofBusy;
 
 pub const DAY_MS: u128 = 86_400_000;
 
 /// Envelopes and records a sealed-set read takes per page. Each page is a read of its own, so no
 /// read holds a snapshot, and with it the WAL, for the length of the whole set.
-pub(crate) const SEALED_ENVELOPE_PAGE: i64 = 5_000;
-pub(crate) const SEALED_RECORD_PAGE: i64 = 20_000;
+pub(crate) const SEALED_ENVELOPE_PAGE: i64 = 64;
+pub(crate) const SEALED_RECORD_PAGE: i64 = 64;
+
+pub(super) fn checkpoint_accepted_time(raw: &str, id: &str, column: usize) -> rusqlite::Result<u128> {
+    raw.parse::<u128>().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid accepted time for checkpoint claim {id}: {error}"),
+            )),
+        )
+    })
+}
 
 /// The name of the checkpoint whose cut is `cut_unix_ms`, for example `checkpoint/2026-09-27`.
 pub fn checkpoint_name(cut_unix_ms: u128) -> String {
@@ -302,33 +316,39 @@ pub struct CheckpointProof {
 
 /// Source identity for an array item, used only for bounded scratch-proof failure diagnostics.
 /// It is excluded from reader answers, their digests and checkpoint certificates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointItemSource {
     pub claim: String,
     pub order: super::canonical::ClaimKey,
 }
 
 pub type CheckpointAnswerSources = BTreeMap<String, Vec<CheckpointItemSource>>;
-type ProofSources = BTreeMap<(String, String), Vec<CheckpointItemSource>>;
 
 // Reuse the existing bounded 60-second diagnostic limiter with one fixed stage/code bucket.
 // No source/subject IDs are keys, and suppressed failures have no flush, queue or retry.
 static CHECKPOINT_DIAGNOSTICS: std::sync::OnceLock<std::sync::Mutex<super::ProjectionDiagnosticState>> = std::sync::OnceLock::new();
 
+/// The tombstones a sealed set reads: those before the cut, but none of a checkpoint whose trim
+/// is still recording them. A trim records tombstones in chunks, so after a crash part way
+/// through, the plan made again reads only what earlier checkpoints dropped, as it did the first
+/// time, and records the rest.
+pub(super) const RECORDED_TOMBSTONE_FILTER: &str = "accepted_at_unix_ms < ?3
+    AND checkpoint NOT IN (SELECT id FROM checkpoints WHERE state='recording')";
+
 /// Record the tombstones of a checkpoint's drop. Recording them again changes nothing.
-pub fn record_checkpoint_tombstones_tx(
+pub /* sqlite-large-value-flow: allow-for-now flow-h98693fb60771 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn record_checkpoint_tombstones_tx(
     transaction: &Transaction<'_>,
     checkpoint: &str,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
 ) -> Result<()> {
     let mut insert_envelope = transaction.prepare_cached(
-        "INSERT OR IGNORE INTO checkpoint_envelopes(
+        /* sqlite-large-value: allow-for-now lv-hf8edc71dff36 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO checkpoint_envelopes(
              writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for envelope in envelopes {
-        insert_envelope.execute(params![
+        insert_envelope.execute(/* sqlite-large-value: allow-for-now lv-h4db2288f7bae owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![
             envelope.writer,
             envelope.sequence,
             envelope.envelope_hash,
@@ -337,13 +357,13 @@ pub fn record_checkpoint_tombstones_tx(
         ])?;
     }
     let mut insert_claim = transaction.prepare_cached(
-        "INSERT OR IGNORE INTO checkpoint_claims(
+        /* sqlite-large-value: allow-for-now lv-h05d4503618a3 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO checkpoint_claims(
              id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
              operation_id, request_digest, accepted_at_unix_ms, checkpoint)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?;
     for claim in claims {
-        insert_claim.execute(params![
+        insert_claim.execute(/* sqlite-large-value: allow-for-now lv-h5a7af5d0161f owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![
             claim.id,
             claim.writer,
             claim.sequence,
@@ -362,27 +382,33 @@ pub fn record_checkpoint_tombstones_tx(
 }
 
 /// Delete dropped claims and their envelopes from a store. The trim uses the same code.
-pub fn delete_dropped_rows_tx(
+pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn delete_dropped_rows_tx(
     transaction: &Transaction<'_>,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
 ) -> Result<()> {
     for claim in claims {
         if let Some(operation) = &claim.operation_id {
-            transaction.execute(
-                "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2",
-                params![operation, claim.id],
-            )?;
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
-        transaction.execute("DELETE FROM claims WHERE id=?1", [&claim.id])?;
+        super::principals::forget_claim_tx(transaction, &claim.id)?;
+        // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
+        // compiles every trigger program again. Per row that cost several times the delete.
+        transaction
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
+            .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
     }
     for envelope in envelopes {
         let batch: Option<String> = transaction
-            .query_row(
+            .prepare_cached(
                 "SELECT batch_id FROM replica_envelopes
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
+            )?
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h5c9af66a6a3a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash],
                 |row| row.get(0),
             )
             .optional()?
@@ -393,20 +419,18 @@ pub fn delete_dropped_rows_tx(
             "replica_envelope_holds",
             "replica_envelopes",
         ] {
-            transaction.execute(
-                &format!(
-                    "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
-                ),
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
-            )?;
+            transaction
+                .prepare_cached(&format!(
+                    /* sqlite-large-value: allow-for-now lv-h5f5425870484 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+                ))?
+                .execute(/* sqlite-large-value: allow-for-now lv-h9bdfd18f2c1e owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash])?;
         }
         if let Some(batch) = batch {
-            transaction.execute(
-                "DELETE FROM batches WHERE id=?1
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
-                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)",
-                [&batch],
-            )?;
+                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
+                .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
         }
     }
     Ok(())
@@ -418,7 +442,7 @@ pub fn claims_of_kind_in_order(
     kind: &str,
 ) -> Result<Vec<ClaimRecord>> {
     connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he2550876b0cb owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind=?2 ORDER BY {CANONICAL_ORDER}"
         ))?
@@ -444,36 +468,30 @@ pub fn reader_answers(
         .collect()
 }
 
-fn reader_answers_with_sources(
-    runtime: &dyn Runtime,
-    connection: &Connection,
-    subjects: &BTreeSet<String>,
-    cut: u128,
-) -> Result<(BTreeMap<String, Value>, ProofSources)> {
-    let mut answers = BTreeMap::new();
-    let mut sources = BTreeMap::new();
-    for subject in subjects {
-        let (answer, item_sources) = runtime.checkpoint_subject_answers_with_sources(connection, subject, cut)?;
-        answers.insert(subject.clone(), answer);
-        for (reader, items) in item_sources {
-            sources.insert((subject.clone(), reader), items);
-        }
-    }
-    Ok((answers, sources))
+/// What a status-history mismatch diagnostic names of the checkpoint the proof is for.
+struct DiagnosticTerms<'a> {
+    cut_unix_ms: u128,
+    seal_rowid: i64,
+    sealed_digest: &'a str,
+    rules_digest: &'a str,
+    drop_digest: &'a str,
 }
 
-fn status_history_mismatch_diagnostics(
-    sealed: &SealedSet,
-    plan: &DropPlan,
-    before: &BTreeMap<String, Value>,
-    after: &BTreeMap<String, Value>,
-    before_sources: &ProofSources,
-    after_sources: &ProofSources,
-) -> Vec<Value> {
+/// A bounded diagnostic for one subject whose `status_history` answer changed: identities,
+/// lengths and at most three items on each side, never their content.
+fn status_history_mismatch_diagnostic(
+    terms: &DiagnosticTerms<'_>,
+    subject: &str,
+    old: &[Value],
+    new: &[Value],
+    before_sources: Option<&[CheckpointItemSource]>,
+    after_sources: Option<&[CheckpointItemSource]>,
+    dropped: &dyn Fn(&str) -> bool,
+) -> Option<Value> {
     fn text(value: Option<&Value>, limit: usize) -> Value {
         value.and_then(Value::as_str).map_or(Value::Null, |text| json!(text.chars().take(limit).collect::<String>()))
     }
-    fn preview(items: &[Value], sources: Option<&[CheckpointItemSource]>, start: usize, plan: &DropPlan) -> Vec<Value> {
+    let preview = |items: &[Value], sources: Option<&[CheckpointItemSource]>, start: usize| -> Vec<Value> {
         items.iter().enumerate().skip(start).take(3).map(|(index, item)| {
             let source = sources.and_then(|sources| sources.get(index));
             json!({
@@ -483,32 +501,24 @@ fn status_history_mismatch_diagnostics(
                     source.order.0, source.order.1.chars().take(256).collect::<String>(), source.order.2,
                     source.order.3.chars().take(256).collect::<String>(), source.order.4,
                     source.order.5.chars().take(128).collect::<String>())),
-                "dropped":source.map(|source| plan.claims.iter().any(|claim| claim.id == source.claim)),
+                "dropped":source.map(|source| dropped(&source.claim)),
                 "state":text(item.get("state"), 128),
                 "incarnation":text(item.get("runtime_incarnation"), 128),
                 "observed_at":text(item.get("observed_at"), 48), "reset":item.get("reset").and_then(Value::as_bool),
             })
         }).collect()
-    }
-    let mut diagnostics = Vec::new();
-    for (subject, answer) in before {
-        let Some(old) = answer.get("status_history").and_then(Value::as_array) else { continue; };
-        let Some(new) = after.get(subject).and_then(|answer| answer.get("status_history")).and_then(Value::as_array) else { continue; };
-        let Some(first) = (0..old.len().max(new.len())).find(|index| old.get(*index) != new.get(*index)) else { continue; };
-        let key = (subject.clone(), "status_history".to_owned());
-        diagnostics.push(json!({
-            "checkpoint":checkpoint_name(sealed.cut_unix_ms), "seal_rowid":sealed.seal_rowid,
-            "sealed_digest":plan.sealed_digest, "cut_unix_ms":sealed.cut_unix_ms,
-            "source_build":super::checkpoint_agreement::checkpoint_build().chars().take(256).collect::<String>(),
-            "rules_digest":plan.rules_digest, "drop_digest":plan.drop_digest,
-            "subject":subject.chars().take(256).collect::<String>(), "reader":"status_history",
-            "before_len":old.len(), "after_len":new.len(), "first_difference":first,
-            "before":preview(old, before_sources.get(&key).map(Vec::as_slice), first, plan),
-            "after":preview(new, after_sources.get(&key).map(Vec::as_slice), first, plan),
-        }));
-        if diagnostics.len() == 3 { break; }
-    }
-    diagnostics
+    };
+    let first = (0..old.len().max(new.len())).find(|index| old.get(*index) != new.get(*index))?;
+    Some(json!({
+        "checkpoint":checkpoint_name(terms.cut_unix_ms), "seal_rowid":terms.seal_rowid,
+        "sealed_digest":terms.sealed_digest, "cut_unix_ms":terms.cut_unix_ms,
+        "source_build":super::checkpoint_agreement::checkpoint_build().chars().take(256).collect::<String>(),
+        "rules_digest":terms.rules_digest, "drop_digest":terms.drop_digest,
+        "subject":subject.chars().take(256).collect::<String>(), "reader":"status_history",
+        "before_len":old.len(), "after_len":new.len(), "first_difference":first,
+        "before":preview(old, before_sources, first),
+        "after":preview(new, after_sources, first),
+    }))
 }
 
 #[test]
@@ -520,27 +530,17 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     })).collect::<Vec<_>>();
     let mut changed = items.clone();
     changed.remove(2);
-    let subject = "agent/cedar".to_owned();
-    let before = BTreeMap::from([(subject.clone(), json!({"status_history":items}))]);
-    let after = BTreeMap::from([(subject.clone(), json!({"status_history":changed}))]);
-    let sources = BTreeMap::from([((subject, "status_history".to_owned()),
-        (0..8).map(|index| CheckpointItemSource {
-            claim:format!("claim-{index}"), order:(index, "cedar".into(), index as u64, "batch".into(), 0, format!("claim-{index}")),
-        }).collect::<Vec<_>>())]);
-    let sealed = SealedSet {
-        cut_unix_ms:DAY_MS, envelopes:Vec::new(), claims:Vec::new(), seal_rowid:7,
-        envelope_tombstones:Vec::new(), claim_tombstones:Vec::new(),
-    };
-    let plan = DropPlan {
-        cut_unix_ms:DAY_MS, rules_digest:"rules".into(), sealed_envelopes:0, sealed_claims:0,
-        sealed_digest:"sealed".into(), drop_digest:"drop".into(), retained_digest:"retained".into(),
-        envelopes:Vec::new(), claims:Vec::new(), by_kind:BTreeMap::new(),
+    let sources = (0..8).map(|index| CheckpointItemSource {
+        claim:format!("claim-{index}"), order:(index, "cedar".into(), index as u64, "batch".into(), 0, format!("claim-{index}")),
+    }).collect::<Vec<_>>();
+    let terms = DiagnosticTerms {
+        cut_unix_ms:DAY_MS, seal_rowid:7, sealed_digest:"sealed", rules_digest:"rules", drop_digest:"drop",
     };
     let mut after_sources = sources.clone();
-    after_sources.values_mut().next().unwrap().remove(2);
-    let diagnostics = status_history_mismatch_diagnostics(&sealed, &plan, &before, &after, &sources, &after_sources);
-    assert_eq!(diagnostics.len(), 1);
-    let diagnostic = &diagnostics[0];
+    after_sources.remove(2);
+    let diagnostic = status_history_mismatch_diagnostic(
+        &terms, "agent/cedar", &items, &changed, Some(&sources), Some(&after_sources), &|_| false,
+    ).unwrap();
     assert_eq!(diagnostic["first_difference"], 2);
     assert_eq!(diagnostic["before_len"], 8);
     assert_eq!(diagnostic["after_len"], 7);
@@ -550,7 +550,9 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     assert_eq!(diagnostic["after"][0]["source"], "claim-3");
     assert_eq!(diagnostic["before"][0]["incarnation"].as_str().unwrap().len(), 128);
     assert!(!diagnostic.to_string().contains("private transcript"));
-    assert!(status_history_mismatch_diagnostics(&sealed, &plan, &before, &before, &sources, &sources).is_empty());
+    assert!(status_history_mismatch_diagnostic(
+        &terms, "agent/cedar", &items, &items, Some(&sources), Some(&sources), &|_| false,
+    ).is_none());
 }
 
 pub fn answers_digest(answers: &BTreeMap<String, Value>) -> Result<String> {
@@ -570,8 +572,9 @@ pub fn answer_mismatches(
 ) -> Vec<String> {
     let mut mismatches = Vec::new();
     for (subject, before) in before {
-        let after = after.get(subject).cloned().unwrap_or(Value::Null);
-        let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        let (Some(before), Some(after)) =
+            (before.as_object(), after.get(subject).and_then(Value::as_object))
+        else {
             mismatches.push(format!("{subject} all"));
             continue;
         };
@@ -590,53 +593,84 @@ pub fn answer_mismatches(
     mismatches
 }
 
-/// Project a copy of the sealed set with and without the drop, and compare the graph and every
-/// reader answer. `copy` is a store file holding at least the sealed set; it is changed.
-pub fn prove_on_copy(
-    runtime: &dyn Runtime,
-    copy: &Path,
-    sealed: &SealedSet,
-    plan: &DropPlan,
-) -> Result<CheckpointProof> {
-    runtime.checkpoint_preflight()?;
-    let mut connection = Connection::open(copy)?;
+/// How `copy_store_to` copied the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreCopy {
+    /// A copy-on-write clone: it costs only the pages the proof then rewrites.
+    Clone,
+    /// A full `VACUUM INTO` copy, where the filesystem cannot clone.
+    Full,
+}
+
+/// Clone `source` to a new file at `target`: APFS `clonefile`, or a reflink on Linux. An error
+/// where the filesystem cannot clone, as on ext4.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: both paths are NUL-terminated and outlive the call.
+    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let source_file = fs::File::open(source)?;
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(target)?;
+    // SAFETY: both descriptors are open for the length of the call.
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source_file.as_raw_fd()) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    drop(file);
+    if let Err(cleanup) = fs::remove_file(target) {
+        return Err(std::io::Error::new(
+            cleanup.kind(),
+            format!(
+                "clone {} failed: {error}; removing incomplete target {} failed: {cleanup}",
+                source.display(),
+                target.display(),
+            ),
+        ));
+    }
+    Err(error)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::ProofVfs>) -> Result<Connection> {
+    let connection = if let Some(vfs) = vfs {
+        Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE, vfs.name())?
+    } else {
+        Connection::open(copy)?
+    };
     projection_digest::register(&connection)?;
-    connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = MEMORY;")?;
-    let transaction = connection.transaction()?;
-    // Keep only the sealed set.
-    transaction.execute_batch(
-        "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
-         CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
-         CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
-             PRIMARY KEY(writer, sequence, envelope_hash));",
-    )?;
-    let mut blobs = BTreeSet::new();
-    for sealed_claim in &sealed.claims {
-        transaction.execute(
-            "INSERT OR IGNORE INTO temp.sealed_claims(id) VALUES (?1)",
-            [&sealed_claim.claim.id],
-        )?;
-        collect_hash_fields(&sealed_claim.claim.body, &mut blobs);
-    }
-    for hash in &blobs {
-        transaction.execute("INSERT INTO temp.sealed_blobs(hash) VALUES (?1)", [hash])?;
-    }
-    for envelope in &sealed.envelopes {
-        transaction.execute(
-            "INSERT OR IGNORE INTO temp.sealed_envelopes VALUES (?1, ?2, ?3)",
-            params![
-                envelope.key.writer,
-                envelope.key.sequence,
-                envelope.key.envelope_hash
-            ],
-        )?;
-    }
-    runtime.clear_checkpoint_projections(&transaction)?;
-    // Blobs go with the claims that reference them. Admission needs a claim's blobs, so every
-    // node that holds the sealed claims holds these, while the blobs of later claims depend on
-    // what has arrived since the cut. A trim deletes no blob.
-    transaction.execute_batch(
-        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
+    // This scratch transaction can rewrite most of the store twice. Its rollback journal
+    // belongs on disk, not in an allocation proportional to the database's size. The copy is
+    // discarded after the proof, so its commits need not wait for the disk.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd107c49c5ec5 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
+        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
+         PRAGMA cache_size = -{}; PRAGMA temp_store = FILE; PRAGMA mmap_size = 0;",
+        crate::sqlite::READ_CACHE_KIB,
+    ))?;
+    Ok(connection)
+}
+
+/// Keep only the sealed set on a proof copy. Blobs go with the claims that reference them.
+/// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
+/// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
+fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h346bd8caeba9 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ super::canonical::PROOF_COPY_LEGACY_POSITIONS)?;
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h67cd460ba33d owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
          DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
          DELETE FROM replica_records WHERE NOT EXISTS (
              SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
@@ -645,8 +679,8 @@ pub fn prove_on_copy(
     // Number the claims in canonical order. Every node that holds the sealed set then proves
     // on the same store, whatever order its claims arrived in, so readers that compare store
     // indexes answer alike and the digests can match across nodes.
-    transaction.execute_batch(&format!(
-        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
+    connection.execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-h315c8b6f5aa8 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
          INSERT INTO temp.canonical_index(old, new)
              SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
              FROM claims JOIN batches ON batches.id=claims.batch_id;
@@ -654,27 +688,360 @@ pub fn prove_on_copy(
                                          WHERE old=claims.store_index);
          UPDATE claims SET store_index=-store_index;"
     ))?;
-    let subjects = plan
-        .claims
-        .iter()
-        .map(|claim| claim.subject.clone())
-        .collect::<BTreeSet<_>>();
+    Ok(())
+}
+
+/// What a proof reads of the sealed set and the drop it proves: from memory, or a page at a time
+/// from a staging file.
+pub trait ProofInput {
+    fn cut_unix_ms(&self) -> u128;
+    fn seal_rowid(&self) -> i64;
+    fn sealed_digest(&self) -> &str;
+    fn rules_digest(&self) -> &str;
+    fn drop_digest(&self) -> &str;
+    /// Prepare `connection`, outside any transaction, for `fill_sealed`.
+    fn attach(&self, _connection: &Connection) -> Result<()> {
+        Ok(())
+    }
+    /// Fill `temp.sealed_claims`, `temp.sealed_blobs` and `temp.sealed_envelopes`.
+    fn fill_sealed(&self, transaction: &Transaction<'_>) -> Result<()>;
+    /// The subjects of the dropped claims, in order, after `after`, at most `limit`.
+    fn subjects(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>>;
+    /// The dropped envelopes, then the dropped claims, a page at a time.
+    fn envelope_pages(&self, visit: &mut dyn FnMut(&[EnvelopeTombstone]) -> Result<()>) -> Result<()>;
+    fn claim_pages(&self, visit: &mut dyn FnMut(&[ClaimTombstone]) -> Result<()>) -> Result<()>;
+    fn drops_claim(&self, id: &str) -> Result<bool>;
+}
+
+/// A sealed set and its plan in memory, as `plan_drops` makes them.
+pub struct InMemoryProof<'a> {
+    pub sealed: &'a SealedSet,
+    pub plan: &'a DropPlan,
+}
+
+impl ProofInput for InMemoryProof<'_> {
+    fn cut_unix_ms(&self) -> u128 {
+        self.sealed.cut_unix_ms
+    }
+
+    fn seal_rowid(&self) -> i64 {
+        self.sealed.seal_rowid
+    }
+
+    fn sealed_digest(&self) -> &str {
+        &self.plan.sealed_digest
+    }
+
+    fn rules_digest(&self) -> &str {
+        &self.plan.rules_digest
+    }
+
+    fn drop_digest(&self) -> &str {
+        &self.plan.drop_digest
+    }
+
+    fn fill_sealed(&self, transaction: &Transaction<'_>) -> Result<()> {
+        let mut blobs = BTreeSet::new();
+        for sealed_claim in &self.sealed.claims {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-ha3852b2f0b38 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO temp.sealed_claims(id) VALUES (?1)",
+                [&sealed_claim.claim.id],
+            )?;
+            collect_hash_fields(&sealed_claim.claim.body, &mut blobs);
+        }
+        for hash in &blobs {
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hdc42e78f66e6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.sealed_blobs(hash) VALUES (?1)", [hash])?;
+        }
+        for envelope in &self.sealed.envelopes {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h937bff82e5ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO temp.sealed_envelopes VALUES (?1, ?2, ?3)",
+                params![envelope.key.writer, envelope.key.sequence, envelope.key.envelope_hash],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn subjects(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        Ok(self
+            .plan
+            .claims
+            .iter()
+            .map(|claim| claim.subject.as_str())
+            .filter(|subject| after.is_none_or(|after| *subject > after))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(limit)
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn envelope_pages(&self, visit: &mut dyn FnMut(&[EnvelopeTombstone]) -> Result<()>) -> Result<()> {
+        visit(&self.plan.envelopes)
+    }
+
+    fn claim_pages(&self, visit: &mut dyn FnMut(&[ClaimTombstone]) -> Result<()>) -> Result<()> {
+        visit(&self.plan.claims)
+    }
+
+    fn drops_claim(&self, id: &str) -> Result<bool> {
+        Ok(self.plan.claims.iter().any(|claim| claim.id == id))
+    }
+}
+
+/// Project a copy of the sealed set with and without the drop, and compare the graph and every
+/// reader answer. `copy` is a store file holding at least the sealed set; it is changed.
+/// The key a proof compares the runtime's global answers under, beside the subjects' answers.
+pub const GLOBAL_ANSWERS: &str = "fleet";
+
+/// Subjects a proof reads answers for at a time.
+const PROOF_SUBJECT_PAGE: usize = 64;
+
+pub fn prove_on_copy(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, &InMemoryProof { sealed, plan }, false, None)
+}
+
+/// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
+/// it commit first, statement by statement, so their rollback journal never holds every claim
+/// page at once. Inside one transaction each renumbering pass also kept a statement journal: the
+/// original of every claim page it moved, spilled to a temporary file. Only the replays and the
+/// comparison share a transaction, as before.
+fn prove_on_scratch_copy(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    input: &dyn ProofInput,
+    vfs: Option<&super::checkpoint_space::ProofVfs>,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, input, true, vfs)
+}
+
+/// Read every dropped subject's answers on `transaction`, a page of subjects at a time, into
+/// `temp.proof_answers` and `temp.proof_readers` under `phase`. The answers live on the copy's
+/// temporary storage, not in memory. With `before`, a status history's item sources are kept
+/// for the diagnostics of a later mismatch; otherwise each changed status history yields one.
+#[allow(clippy::too_many_arguments)]
+fn record_answers(
+    runtime: &dyn Runtime,
+    transaction: &Transaction<'_>,
+    input: &dyn ProofInput,
+    phase: i64,
+    subjects: &mut usize,
+    diagnostics: &mut Vec<Value>,
+) -> Result<()> {
+    let terms = DiagnosticTerms {
+        cut_unix_ms: input.cut_unix_ms(),
+        seal_rowid: input.seal_rowid(),
+        sealed_digest: input.sealed_digest(),
+        rules_digest: input.rules_digest(),
+        drop_digest: input.drop_digest(),
+    };
+    let mut after: Option<String> = None;
+    loop {
+        let page = input.subjects(after.as_deref(), PROOF_SUBJECT_PAGE)?;
+        let Some(last) = page.last().cloned() else {
+            return Ok(());
+        };
+        for subject in &page {
+            let (answer, sources) =
+                runtime.checkpoint_subject_answers_with_sources(transaction, subject, input.cut_unix_ms())?;
+            store_answer(transaction, phase, subject, &answer)?;
+            let history = sources.get("status_history");
+            if phase == 0 {
+                *subjects += 1;
+                if let Some(history) = history {
+                    transaction.execute(
+                        /* sqlite-large-value: allow-for-now lv-h796994f6a5b3 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO temp.proof_sources(subject, sources) VALUES (?1, ?2)",
+                        params![subject, serde_json::to_string(history)?],
+                    )?;
+                }
+            } else if diagnostics.len() < 3 {
+                let old: Option<String> = transaction
+                    .query_row(
+                        "SELECT text FROM temp.proof_readers WHERE phase=0 AND subject=?1 AND reader='status_history'",
+                        [subject],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let (Some(old), Some(new)) = (old, answer.get("status_history").and_then(Value::as_array)) else {
+                    continue;
+                };
+                let old: Value = serde_json::from_str(&old)?;
+                let Some(old) = old.as_array() else { continue };
+                let before_sources: Option<Vec<CheckpointItemSource>> = transaction
+                    .query_row("SELECT sources FROM temp.proof_sources WHERE subject=?1", [subject], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .optional()?
+                    .map(|text| serde_json::from_str(&text))
+                    .transpose()?;
+                if let Some(diagnostic) = status_history_mismatch_diagnostic(
+                    &terms,
+                    subject,
+                    old,
+                    new,
+                    before_sources.as_deref(),
+                    history.map(Vec::as_slice),
+                    &|id| input.drops_claim(id).unwrap_or(false),
+                ) {
+                    diagnostics.push(diagnostic);
+                }
+            }
+        }
+        after = Some(last);
+    }
+}
+
+/// Keep one subject's answer as canonical text, whole for the digest and per reader for the
+/// comparison, in the answer's own reader order.
+fn store_answer(transaction: &Transaction<'_>, phase: i64, subject: &str, answer: &Value) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h1776f9a0fd34 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO temp.proof_answers(phase, subject, text, object) VALUES (?1, ?2, ?3, ?4)",
+        params![phase, subject, canonical_json_text(answer)?, answer.is_object()],
+    )?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hbfe0b2c8c68f owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.proof_readers WHERE phase=?1 AND subject=?2",
+        params![phase, subject],
+    )?;
+    if let Some(readers) = answer.as_object() {
+        let mut insert = transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h7febd7173f5a owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.proof_readers(phase, subject, ordinal, reader, text) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for (ordinal, (reader, value)) in readers.iter().enumerate() {
+            insert.execute(/* sqlite-large-value: allow-for-now lv-h4bdc5d594924 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![phase, subject, i64::try_from(ordinal)?, reader, canonical_json_text(value)?])?;
+        }
+    }
+    Ok(())
+}
+
+/// `answers_digest` of one phase's recorded answers, in subject order.
+fn recorded_answers_digest(transaction: &Transaction<'_>, phase: i64) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"st3-checkpoint-readers-v1\0");
+    let mut statement = transaction
+        .prepare("SELECT subject, text FROM temp.proof_answers WHERE phase=?1 ORDER BY subject")?;
+    let mut rows = statement.query([phase])?;
+    while let Some(row) = rows.next()? {
+        digest_field(&mut digest, Some(&row.get::<_, String>(0)?));
+        digest_field(&mut digest, Some(&row.get::<_, String>(1)?));
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// `answer_mismatches` of the two recorded phases, in subject order, at most 20.
+fn recorded_answer_mismatches(transaction: &Transaction<'_>) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let mut subjects = transaction.prepare(
+        "SELECT before.subject, before.object, after.object FROM temp.proof_answers before
+         LEFT JOIN temp.proof_answers after ON after.phase=1 AND after.subject=before.subject
+         WHERE before.phase=0 ORDER BY before.subject",
+    )?;
+    let mut readers = transaction.prepare(
+        "SELECT reader, text FROM temp.proof_readers WHERE phase=?1 AND subject=?2 ORDER BY ordinal",
+    )?;
+    let mut rows = subjects.query([])?;
+    while let Some(row) = rows.next()? {
+        if mismatches.len() >= 20 {
+            break;
+        }
+        let subject: String = row.get(0)?;
+        if !(row.get::<_, bool>(1)? && row.get::<_, Option<bool>>(2)? == Some(true)) {
+            mismatches.push(format!("{subject} all"));
+            continue;
+        }
+        let read = |readers: &mut rusqlite::Statement<'_>, phase: i64| -> Result<Vec<(String, String)>> {
+            Ok(readers
+                .query_map(params![phase, subject], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+        let before = read(&mut readers, 0)?;
+        let after = read(&mut readers, 1)?;
+        let after_map = after.iter().map(|(reader, text)| (reader.as_str(), text.as_str())).collect::<BTreeMap<_, _>>();
+        let before_map = before.iter().map(|(reader, text)| (reader.as_str(), text.as_str())).collect::<BTreeMap<_, _>>();
+        for (reader, text) in &before {
+            if after_map.get(reader.as_str()) != Some(&text.as_str()) {
+                mismatches.push(format!("{subject} {reader}"));
+            }
+        }
+        for (reader, _) in &after {
+            if !before_map.contains_key(reader.as_str()) {
+                mismatches.push(format!("{subject} {reader}"));
+            }
+        }
+    }
+    mismatches.truncate(20);
+    Ok(mismatches)
+}
+
+fn prove(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    input: &dyn ProofInput,
+    commit_preparation: bool,
+    vfs: Option<&super::checkpoint_space::ProofVfs>,
+) -> Result<CheckpointProof> {
+    let _completion = super::checkpoint_completion::Completion::work();
+    runtime.checkpoint_preflight()?;
+    let mut connection = open_checkpoint_copy(copy, vfs)?;
+    if let Some(vfs) = vfs { vfs.begin_proof(&connection)?; }
+    input.attach(&connection)?;
+    let mut transaction = connection.transaction()?;
+    // A VFS refusal latches SQLITE_FULL. The disposable copy is removed after this function
+    // returns, so do not issue a rollback SQL statement from Transaction::drop on an error.
+    if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
+    // Keep only the sealed set.
+    transaction.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h298c5b9a94f9 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
+         CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
+         CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+             PRIMARY KEY(writer, sequence, envelope_hash));
+         CREATE TEMP TABLE proof_answers(phase INTEGER, subject TEXT, text TEXT, object INTEGER,
+             PRIMARY KEY(phase, subject));
+         CREATE TEMP TABLE proof_readers(phase INTEGER, subject TEXT, ordinal INTEGER, reader TEXT,
+             text TEXT, PRIMARY KEY(phase, subject, ordinal));
+         CREATE TEMP TABLE proof_sources(subject TEXT PRIMARY KEY, sources TEXT);",
+    )?;
+    input.fill_sealed(&transaction)?;
+    runtime.clear_checkpoint_projections(&transaction)?;
+    let transaction = if commit_preparation {
+        transaction.commit()?;
+        if let Some(vfs) = vfs { vfs.refresh_journal_pages(&connection)?; }
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb13e43c5dd77 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE")?;
+        keep_sealed_claims_in_canonical_order(&connection)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h77d273449aaf owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        if let Some(vfs) = vfs { vfs.refresh_journal_pages(&connection)?; }
+        let mut transaction = connection.transaction()?;
+        if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
+        transaction
+    } else {
+        keep_sealed_claims_in_canonical_order(&transaction)?;
+        transaction
+    };
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_before = graph_digest(&transaction)?;
     let digests_before = projection_digest::tables(&transaction)?;
-    let (before, before_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    let mut subjects = 0;
+    let mut diagnostics = Vec::new();
+    record_answers(runtime, &transaction, input, 0, &mut subjects, &mut diagnostics)?;
+    if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
+        store_answer(&transaction, 0, GLOBAL_ANSWERS, &answers)?;
+    }
     // As a trim does: tombstones first, which readers that walk ancestry pass through.
-    record_checkpoint_tombstones_tx(
-        &transaction,
-        &checkpoint_name(sealed.cut_unix_ms),
-        &plan.envelopes,
-        &plan.claims,
-    )?;
-    delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims)?;
+    let checkpoint = checkpoint_name(input.cut_unix_ms());
+    input.envelope_pages(&mut |envelopes| record_checkpoint_tombstones_tx(&transaction, &checkpoint, envelopes, &[]))?;
+    input.claim_pages(&mut |claims| record_checkpoint_tombstones_tx(&transaction, &checkpoint, &[], claims))?;
+    input.claim_pages(&mut |claims| delete_dropped_rows_tx(&transaction, &[], claims))?;
+    input.envelope_pages(&mut |envelopes| delete_dropped_rows_tx(&transaction, envelopes, &[]))?;
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_after = graph_digest(&transaction)?;
-    let (after, after_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
-    let mut mismatches = answer_mismatches(&before, &after);
+    record_answers(runtime, &transaction, input, 1, &mut subjects, &mut diagnostics)?;
+    if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
+        store_answer(&transaction, 1, GLOBAL_ANSWERS, &answers)?;
+    }
+    let mut mismatches = recorded_answer_mismatches(&transaction)?;
     if graph_digest_before != graph_digest_after {
         mismatches.splice(
             0..0,
@@ -687,26 +1054,23 @@ pub fn prove_on_copy(
         );
     }
     let proof = CheckpointProof {
-        reader_digest_before: answers_digest(&before)?,
-        reader_digest: answers_digest(&after)?,
+        reader_digest_before: recorded_answers_digest(&transaction, 0)?,
+        reader_digest: recorded_answers_digest(&transaction, 1)?,
         graph_digest_before,
         graph_digest: graph_digest_after,
-        subjects: subjects.len(),
+        subjects,
         passed: mismatches.is_empty(),
         mismatches,
     };
-    if !proof.passed {
-        let diagnostics = status_history_mismatch_diagnostics(sealed, plan, &before, &after, &before_sources, &after_sources);
-        if !diagnostics.is_empty() {
-            let emission = CHECKPOINT_DIAGNOSTICS.get_or_init(Default::default).lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .observe("checkpoint", "status-history-mismatch", std::time::Instant::now());
-            if let Some(emission) = emission {
-                for mut diagnostic in diagnostics {
-                    diagnostic["suppressed_proof_logs"] = json!(emission.suppressed);
-                    diagnostic["rate_bucket_overflow"] = json!(emission.overflow);
-                    eprintln!("st3: checkpoint reader mismatch {diagnostic}");
-                }
+    if !proof.passed && !diagnostics.is_empty() {
+        let emission = CHECKPOINT_DIAGNOSTICS.get_or_init(Default::default).lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe("checkpoint", "status-history-mismatch", std::time::Instant::now());
+        if let Some(emission) = emission {
+            for mut diagnostic in diagnostics {
+                diagnostic["suppressed_proof_logs"] = json!(emission.suppressed);
+                diagnostic["rate_bucket_overflow"] = json!(emission.overflow);
+                eprintln!("st3: checkpoint reader mismatch {diagnostic}");
             }
         }
     }
@@ -714,20 +1078,70 @@ pub fn prove_on_copy(
     Ok(proof)
 }
 
-/// The query for one window of records in the sealed-set read: the claim columns, the record's
-/// identity and state, and the canonical order's components as columns 14 to 20 (so the pages
-/// can be sorted together in Rust as `ORDER BY canonical` sorted them), then the record's
-/// position as column 21. It must be driven from `replica_records` by its rowid range; a plan
-/// that drives from `claims` would read every claim for every window.
+/// Compact identities and canonical sort keys for one sealed-record window. Claim bodies are
+/// read only after the envelope cut and canonical ordering have been resolved. The query must
+/// be driven from `replica_records` by its rowid range; driving from `claims` would read every
+/// claim for every window.
 pub fn sealed_records_page_sql() -> String {
     let order = super::canonical::components("claims").join(", ");
     format!(
-        "SELECT {CLAIM_COLUMNS}, records.writer, records.sequence, records.envelope_hash,
-                records.state, {order}, records.position
-         FROM claims JOIN batches ON batches.id=claims.batch_id
-         JOIN replica_records records ON records.claim_id=claims.id
-         WHERE records.rowid > ?1 AND records.rowid <= ?2 AND records.state<>'repaired'"
+        "SELECT {order}, records.writer, records.sequence, records.envelope_hash,
+                records.state, records.position
+         FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+         JOIN batches ON batches.id=claims.batch_id
+         JOIN replica_envelopes envelopes
+           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+             AND envelopes.envelope_hash=records.envelope_hash
+         WHERE records.rowid > ?1 AND records.rowid <= ?2 AND records.state<>'repaired'
+           AND envelopes.rowid <= ?4
+           AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
     )
+}
+
+/// One page of `replica_envelopes` in identity order after the key (?2, ?3, ?4), for a seal.
+/// As in `checkpoint_sealed_set_through`: an envelope is before the cut ?1 when it and every
+/// claim admitted from it, less repaired originals, are dated before the cut, and it is at or
+/// below the seal row ?5. That is a column, not a condition, so a page reads ?6 rows however
+/// many fail it.
+pub const SEALED_IDENTITY_ENVELOPES_SQL: &str = "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+        envelopes.rowid <= ?5
+        AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?1
+        AND NOT EXISTS (
+            SELECT 1 FROM replica_records AS records
+            JOIN claims ON claims.id=records.claim_id
+            WHERE records.writer=envelopes.writer
+              AND records.sequence=envelopes.sequence
+              AND records.envelope_hash=envelopes.envelope_hash
+              AND records.state<>'repaired'
+              AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?1)
+     FROM replica_envelopes AS envelopes
+     WHERE (envelopes.writer, envelopes.sequence, envelopes.envelope_hash) > (?2, ?3, ?4)
+     ORDER BY envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+     LIMIT ?6";
+
+/// One page of `checkpoint_envelopes` in identity order after the key (?2, ?3, ?4), with whether
+/// each is dated before the cut ?1, at most ?5 rows.
+pub const SEALED_IDENTITY_TOMBSTONES_SQL: &str = "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms < ?1
+     FROM checkpoint_envelopes
+     WHERE (writer, sequence, envelope_hash) > (?2, ?3, ?4)
+     ORDER BY writer, sequence, envelope_hash
+     LIMIT ?5";
+
+#[derive(Debug)]
+pub(super) struct CheckpointCaptureChanged;
+
+impl std::fmt::Display for CheckpointCaptureChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("checkpoint capture invalidated by a concurrent store change")
+    }
+}
+
+impl std::error::Error for CheckpointCaptureChanged {}
+
+struct CheckpointCaptureQuery<'a> {
+    table: &'a str,
+    columns: &'a str,
+    filter: &'a str,
 }
 
 impl Store {
@@ -752,13 +1166,11 @@ impl Store {
         )
     }
 
-    /// `checkpoint_sealed_set_through`, reading `envelope_page` envelopes and `record_page`
-    /// records per read. Each page is a read of its own, so its snapshot ends with it and the WAL
-    /// can be checkpointed between pages; one transaction over the whole set pinned the WAL for
-    /// the 20 to 40 seconds a large store took. The set stays the same set: the envelopes are
-    /// those up to `seal_rowid`, and a claim is kept only if its envelope is among them, so what
-    /// arrives between pages is read and left out. Only a record changing state (a repair)
-    /// between two pages of one call could differ from a single snapshot.
+    /// Capture metadata and bodies in bounded page snapshots with an epoch guard. The seal
+    /// and cut are registered once, only advancing durable guard bounds when needed. Retries
+    /// keep that seal and reread the epoch: three conflicting captured-history changes fail
+    /// closed. New above-cut admission, identical re-offers and unrelated projection writes
+    /// do not invalidate the captured prefix.
     pub fn checkpoint_sealed_set_paged(
         &self,
         cut_unix_ms: u128,
@@ -767,22 +1179,73 @@ impl Store {
         record_page: i64,
     ) -> Result<SealedSet> {
         self.runtime.checkpoint_preflight()?;
+        anyhow::ensure!(envelope_page > 0 && record_page > 0, "checkpoint page sizes must be positive");
+        let envelope_page = envelope_page.min(SEALED_ENVELOPE_PAGE);
+        let record_page = record_page.min(SEALED_RECORD_PAGE);
+        let seal_rowid = self.register_checkpoint_capture(cut_unix_ms, through_rowid)?;
+        for _ in 0..3 {
+            let epoch: i64 = self.read_snapshot(|_| {
+                Ok(self.readers.get().query_row(
+                    "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
+                )?)
+            })?;
+            match self.checkpoint_sealed_set_attempt(
+                cut_unix_ms, seal_rowid, epoch, envelope_page, record_page,
+            ) {
+                Err(error) if error.downcast_ref::<CheckpointCaptureChanged>().is_some() => continue,
+                result => return result,
+            }
+        }
+        anyhow::bail!("checkpoint capture invalidated by concurrent store changes after 3 attempts")
+    }
+
+    /// Seal new local batches, then register the capture's seal row and cut with the capture
+    /// epoch's triggers, only advancing durable bounds when needed, and return the seal row.
+    pub(super) fn register_checkpoint_capture(
+        &self,
+        cut_unix_ms: u128,
+        through_rowid: Option<i64>,
+    ) -> Result<i64> {
         // Seal only new batches. A full history scan under the writer stalls live requests
         // every time a checkpoint is reconsidered, even when no new envelope is needed.
         self.seal_local_batches()?;
-        let seal_rowid: i64 = {
-            let connection = self.readers.get();
-            let high: i64 = connection.query_row(
-                "SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes",
-                [],
-                |row| row.get(0),
+        let cut = i64::try_from(cut_unix_ms)?;
+        let (high, frontier, registered_cut): (i64, i64, i64) = self.read_snapshot(|_| {
+            Ok(self.readers.get().query_row(
+                "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes),
+                        envelope_frontier, cut_unix_ms
+                 FROM checkpoint_capture_epoch WHERE id=1",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?)
+        })?;
+        let seal_rowid = through_rowid.map_or(high, |through| through.min(high));
+        if frontier < seal_rowid || registered_cut < cut {
+            // One atomic autocommit statement. Already covered bounds take no writer loan;
+            // another capture can cover them before this loan, in which case no row changes.
+            self.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h73fa7657f133 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch
+                 SET envelope_frontier=MAX(envelope_frontier, ?1),
+                     cut_unix_ms=MAX(cut_unix_ms, ?2)
+                 WHERE id=1 AND (envelope_frontier<?1 OR cut_unix_ms<?2)",
+                params![seal_rowid, cut],
             )?;
-            through_rowid.map_or(high, |through| through.min(high))
-        };
+        }
+        Ok(seal_rowid)
+    }
+
+    fn checkpoint_sealed_set_attempt(
+        &self,
+        cut_unix_ms: u128,
+        seal_rowid: i64,
+        epoch: i64,
+        envelope_page: i64,
+        record_page: i64,
+    ) -> Result<SealedSet> {
         let mut envelopes = Vec::new();
         let mut after = 0_i64;
         while after < seal_rowid {
             let upto = after.saturating_add(envelope_page).min(seal_rowid);
+            let page = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
             let page = connection
                 .prepare_cached(
@@ -804,11 +1267,15 @@ impl Store {
                         accepted_at_unix_ms: row
                             .get::<_, String>(3)?
                             .parse()
-                            .unwrap_or(u128::MAX),
+                            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+                                3, rusqlite::types::Type::Text, Box::new(error),
+                            ))?,
                         records: row.get(4)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(page)
+            })?;
             envelopes.extend(page);
             after = upto;
         }
@@ -821,79 +1288,61 @@ impl Store {
         // canonical order's components as columns so the pages sort together here exactly as
         // `ORDER BY canonical` sorted them in SQL (binary text, then integers, NULL first).
         let records_sql = sealed_records_page_sql();
-        let (first, last): (i64, i64) = {
+        let last: i64 = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
-            connection.query_row(
-                "SELECT COALESCE(MIN(rowid), 0), COALESCE(MAX(rowid), 0) FROM replica_records",
+            Ok(connection.query_row(
+                "SELECT COALESCE(MAX(rowid), 0) FROM replica_records",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?
-        };
+                |row| row.get(0),
+            )?)
+        })?;
         // The canonical order, then the record's own identity, so a claim held by two records
         // (the same claim admitted from two envelopes) orders the same way every time.
-        type OrderKey = (i64, String, Option<String>, Option<i64>, String, i64, String, String, i64, String, i64);
-        let mut keyed: Vec<(OrderKey, ClaimRecord, EnvelopeKey, bool)> = Vec::new();
-        let mut after = first.saturating_sub(1);
+        type OrderKey = (i64, String, Option<String>, Option<i64>, String, i64, String, String, u64, String, i64);
+        let cut = i64::try_from(cut_unix_ms)?;
+        let mut keyed: Vec<(OrderKey, bool)> = Vec::new();
+        let mut after = 0_i64;
         while after < last {
             let upto = after.saturating_add(record_page).min(last);
+            let page = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
             let page = connection
-                .prepare_cached(&records_sql)?
-                .query_map([after, upto], |row| {
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7ca6888d8de3 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &records_sql)?
+                .query_map(params![after, upto, cut, seal_rowid], |row| {
                     Ok((
                         (
-                            row.get(14)?,
-                            row.get(15)?,
-                            row.get(16)?,
-                            row.get(17)?,
-                            row.get(18)?,
-                            row.get(19)?,
-                            row.get(20)?,
-                            row.get(10)?,
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
                             row.get(11)?,
-                            row.get(12)?,
-                            row.get(21)?,
                         ),
-                        claim_from_row(row)?,
-                        EnvelopeKey {
-                            writer: row.get(10)?,
-                            sequence: row.get(11)?,
-                            envelope_hash: row.get(12)?,
-                        },
-                        row.get::<_, String>(13)? == "valid",
+                        row.get::<_, String>(10)? == "valid",
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(page)
+            })?;
             keyed.extend(page);
             after = upto;
         }
-        keyed.sort_by(|left, right| left.0.cmp(&right.0));
-        let claims: Vec<(ClaimRecord, EnvelopeKey, bool)> = keyed
-            .into_iter()
-            .map(|(_, claim, envelope, valid)| (claim, envelope, valid))
-            .collect();
-        // Read after the record pages, so it is at least as new as the claims: a claim that became
-        // protected while the pages were read is protected here, and the set errs toward keeping.
-        let connection = self.readers.get();
-        let protected = connection
-            .prepare(
-                "SELECT claim_id FROM desired WHERE claim_id IS NOT NULL
-                 UNION SELECT claim_id FROM mission_definitions
-                 UNION SELECT claim_id FROM mission_revisions
-                 UNION SELECT binding_claim_id FROM documents WHERE binding_claim_id IS NOT NULL
-                 UNION SELECT json_extract(body, '$.fields.replacement') FROM claims
-                     WHERE kind='record.repaired'
-                 UNION SELECT replacement_claim_id FROM replica_records
-                     WHERE replacement_claim_id IS NOT NULL",
-            )?
-            .query_map([], |row| row.get::<_, Option<String>>(0))?
-            .filter_map(|row| row.transpose())
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-        let connection = self.readers.get();
+        // Record identity completes the key, so equal keys are the same record. An unstable
+        // sort preserves the canonical order without a second array of sort scratch space.
+        keyed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut late = BTreeSet::new();
-        for (claim, envelope, _) in &claims {
-            if claim.accepted_at_unix_ms >= cut_unix_ms {
-                late.insert(envelope.clone());
+        for (key, _) in &keyed {
+            if checkpoint_accepted_time(&key.1, &key.6, 1)? >= cut_unix_ms {
+                late.insert(EnvelopeKey {
+                    writer: key.7.clone(),
+                    sequence: key.8,
+                    envelope_hash: key.9.clone(),
+                });
             }
         }
         envelopes.retain(|envelope| !late.contains(&envelope.key));
@@ -901,38 +1350,80 @@ impl Store {
             .iter()
             .map(|envelope| envelope.key.clone())
             .collect::<BTreeSet<_>>();
-        let claims = claims
-            .into_iter()
-            .filter(|(_, envelope, _)| before.contains(envelope))
-            .map(|(claim, envelope, valid)| SealedClaim {
-                protected: protected.contains(&claim.id),
-                claim,
-                envelope,
-                valid,
-            })
-            .collect();
+        let mut claims = Vec::new();
+        let mut records = keyed.into_iter().peekable();
+        let claim_sql = format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1");
+        while records.peek().is_some() {
+            let page = self.checkpoint_capture_page(epoch, || {
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6487fa5f41ea owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &claim_sql)?;
+            let mut page = Vec::new();
+            for _ in 0..record_page {
+                let Some((key, valid)) = records.next() else {
+                    break;
+                };
+                let envelope = EnvelopeKey {
+                    writer: key.7,
+                    sequence: key.8,
+                    envelope_hash: key.9,
+                };
+                if before.contains(&envelope) {
+                    page.push(SealedClaim {
+                        claim: statement.query_row(/* sqlite-large-value: allow-for-now lv-h66cc50f1bba7 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&key.6], claim_from_row)?,
+                        envelope,
+                        valid,
+                        protected: false,
+                    });
+                }
+            }
+            Ok(page)
+            })?;
+            claims.extend(page);
+        }
+        let mut protected = BTreeSet::new();
+        for (table, columns, filter) in [
+            ("desired", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("mission_definitions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("mission_revisions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("documents", "binding_claim_id", "binding_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("claims", "json_extract(body, '$.fields.replacement')", "kind='record.repaired' AND ?3 IS NOT NULL"),
+            ("replica_records", "replacement_claim_id", "replacement_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+        ] {
+            let page = self.checkpoint_capture_rows(
+                epoch, CheckpointCaptureQuery { table, columns, filter }, cut, record_page,
+                |row| row.get::<_, Option<String>>(0),
+            )?;
+            protected.extend(page.into_iter().flatten());
+        }
+        for claim in &mut claims {
+            claim.protected = protected.contains(&claim.claim.id);
+        }
         // Envelopes an earlier checkpoint dropped are still part of what this node seals.
-        let envelope_tombstones = connection
-            .prepare(
-                "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms
-                 FROM checkpoint_envelopes WHERE accepted_at_unix_ms < ?1",
-            )?
-            .query_map([i64::try_from(cut_unix_ms)?], |row| {
+        let envelope_tombstones = self.checkpoint_capture_rows(
+            epoch,
+            CheckpointCaptureQuery {
+                table: "checkpoint_envelopes",
+                columns: "writer, sequence, envelope_hash, accepted_at_unix_ms",
+                filter: RECORDED_TOMBSTONE_FILTER,
+            },
+            cut, record_page, |row| {
                 Ok(EnvelopeTombstone {
                     writer: row.get(0)?,
                     sequence: row.get(1)?,
                     envelope_hash: row.get(2)?,
                     accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let claim_tombstones = connection
-            .prepare(
-                "SELECT id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
-                        operation_id, request_digest, accepted_at_unix_ms
-                 FROM checkpoint_claims WHERE accepted_at_unix_ms < ?1",
-            )?
-            .query_map([i64::try_from(cut_unix_ms)?], |row| {
+            },
+        )?;
+        let claim_tombstones = self.checkpoint_capture_rows(
+            epoch,
+            CheckpointCaptureQuery {
+                table: "checkpoint_claims",
+                columns: "id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
+                          operation_id, request_digest, accepted_at_unix_ms",
+                filter: RECORDED_TOMBSTONE_FILTER,
+            },
+            cut, record_page, |row| {
                 Ok(ClaimTombstone {
                     id: row.get(0)?,
                     writer: row.get(1)?,
@@ -947,8 +1438,8 @@ impl Store {
                     request_digest: row.get(9)?,
                     accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            },
+        )?;
         for tombstone in &envelope_tombstones {
             let key = EnvelopeKey {
                 writer: tombstone.writer.clone(),
@@ -964,6 +1455,7 @@ impl Store {
             }
         }
         envelopes.sort_by(|left, right| left.key.cmp(&right.key));
+        self.checkpoint_capture_page(epoch, || Ok(()))?;
         Ok(SealedSet {
             cut_unix_ms,
             envelopes,
@@ -972,6 +1464,51 @@ impl Store {
             envelope_tombstones,
             claim_tombstones,
         })
+    }
+
+    pub(super) fn checkpoint_capture_page<T>(&self, epoch: i64, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.read_snapshot(|_| {
+            let current: i64 = self.readers.get().query_row(
+                "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
+            )?;
+            if current != epoch {
+                return Err(CheckpointCaptureChanged.into());
+            }
+            read()
+        })
+    }
+
+    fn checkpoint_capture_rows<T>(
+        &self,
+        epoch: i64,
+        query: CheckpointCaptureQuery<'_>,
+        cut: i64,
+        page_size: i64,
+        mut decode: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>> {
+        let CheckpointCaptureQuery { table, columns, filter } = query;
+        let high: i64 = self.checkpoint_capture_page(epoch, || {
+            Ok(self.readers.get().query_row(
+                /* sqlite-large-value: allow-for-now lv-ha4da89b94dcd owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"), [], |row| row.get(0),
+            )?)
+        })?;
+        let sql = format!(
+            "SELECT {columns} FROM {table} WHERE rowid>?1 AND rowid<=?2 AND ({filter})"
+        );
+        let mut rows = Vec::new();
+        let mut after = 0_i64;
+        while after < high {
+            let upto = after.saturating_add(page_size).min(high);
+            let page = self.checkpoint_capture_page(epoch, || {
+                let connection = self.readers.get();
+                Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h44a31e8d721f owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &sql)?
+                    .query_map(params![after, upto, cut], &mut decode)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })?;
+            rows.extend(page);
+            after = upto;
+        }
+        Ok(rows)
     }
 
     /// The identities `checkpoint_sealed_set_through` would read, without the claims: what a
@@ -984,10 +1521,14 @@ impl Store {
         self.checkpoint_sealed_identities_paged(cut_unix_ms, through_rowid, SEALED_ENVELOPE_PAGE)
     }
 
-    /// `checkpoint_sealed_identities`, reading `envelope_page` envelopes per read, each on a read
-    /// of its own so the WAL can be checkpointed between pages (see
-    /// `checkpoint_sealed_set_paged`). It read the whole set in one transaction before, which
-    /// held the WAL pinned for 35 seconds on a large store.
+    /// `checkpoint_sealed_identities`, reading at most `envelope_page` rows of each identity table
+    /// per read. The digest is over identities in key order, and both `replica_envelopes` and
+    /// `checkpoint_envelopes` are keyed by identity, so the pass walks the two keys together and
+    /// digests each identity as it passes: it holds one page, not the set (#2492). Each read
+    /// takes the next page of both tables in one snapshot and consumes the key range both pages
+    /// cover, so a trim moving an identity from an envelope to its tombstone between reads can
+    /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
+    /// between them; one read of the whole set held the WAL pinned for 35 seconds.
     pub fn checkpoint_sealed_identities_paged(
         &self,
         cut_unix_ms: u128,
@@ -995,6 +1536,8 @@ impl Store {
         envelope_page: i64,
     ) -> Result<SealedIdentities> {
         self.runtime.checkpoint_preflight()?;
+        anyhow::ensure!(envelope_page > 0, "checkpoint page sizes must be positive");
+        let page = envelope_page.min(SEALED_ENVELOPE_PAGE);
         self.seal_local_batches()?;
         let seal_rowid: i64 = {
             let connection = self.readers.get();
@@ -1006,64 +1549,77 @@ impl Store {
             through_rowid.map_or(high, |through| through.min(high))
         };
         let cut = i64::try_from(cut_unix_ms)?;
-        // As in `checkpoint_sealed_set_through`: an envelope is before the cut when it and every
-        // claim admitted from it, less repaired originals, are dated before the cut.
-        let mut identities = BTreeSet::new();
-        let mut after = 0_i64;
-        while after < seal_rowid {
-            let upto = after.saturating_add(envelope_page).min(seal_rowid);
-            let connection = self.readers.get();
-            let page = connection
-                .prepare_cached(
-                    "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
-                     FROM replica_envelopes AS envelopes
-                     WHERE envelopes.rowid > ?3 AND envelopes.rowid <= ?2
-                       AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM replica_records AS records
-                           JOIN claims ON claims.id=records.claim_id
-                           WHERE records.writer=envelopes.writer
-                             AND records.sequence=envelopes.sequence
-                             AND records.envelope_hash=envelopes.envelope_hash
-                             AND records.state<>'repaired'
-                             AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?1)",
-                )?
-                .query_map(params![cut, upto, after], |row| {
-                    Ok(EnvelopeKey {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            identities.extend(page);
-            after = upto;
-        }
-        {
-            let connection = self.readers.get();
-            let tombstones = connection
-                .prepare_cached(
-                    "SELECT writer, sequence, envelope_hash FROM checkpoint_envelopes
-                     WHERE accepted_at_unix_ms < ?1",
-                )?
-                .query_map(params![cut], |row| {
-                    Ok(EnvelopeKey {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            identities.extend(tombstones);
-        }
+        let identity = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(EnvelopeKey, bool)> {
+            Ok((
+                EnvelopeKey {
+                    writer: row.get(0)?,
+                    sequence: row.get(1)?,
+                    envelope_hash: row.get(2)?,
+                },
+                row.get(3)?,
+            ))
+        };
         let mut digest = Sha256::new();
         digest.update(b"st3-checkpoint-sealed-v1\0");
-        for key in &identities {
-            update_identity_digest(&mut digest, &key.writer, key.sequence, &key.envelope_hash);
+        let mut count = 0_usize;
+        // The last key consumed. Every identity sorts after the first one: sequences are never
+        // negative.
+        let mut after = (String::new(), -1_i64, String::new());
+        loop {
+            let (envelopes, tombstones) = self.read_snapshot(|_| {
+                let connection = self.readers.get();
+                let envelopes = connection
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3247614039e2 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ SEALED_IDENTITY_ENVELOPES_SQL)?
+                    .query_map(
+                        params![cut, after.0, after.1, after.2, seal_rowid, page],
+                        identity,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let tombstones = connection
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hdbb06223bb55 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ SEALED_IDENTITY_TOMBSTONES_SQL)?
+                    .query_map(params![cut, after.0, after.1, after.2, page], identity)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((envelopes, tombstones))
+            })?;
+            // A full page may end before the other table's page does; keys past the smaller
+            // full page's last key wait for the next read, which sees both tables at once again.
+            let full = |rows: &[(EnvelopeKey, bool)]| {
+                (rows.len() == page as usize).then(|| rows.last().map(|(key, _)| key.clone())).flatten()
+            };
+            let bound = [full(&envelopes), full(&tombstones)].into_iter().flatten().min();
+            let within = |key: &EnvelopeKey| bound.as_ref().is_none_or(|bound| key <= bound);
+            let mut envelopes = envelopes.into_iter().filter(|(key, _)| within(key)).peekable();
+            let mut tombstones = tombstones.into_iter().filter(|(key, _)| within(key)).peekable();
+            loop {
+                let (key, included) = match (envelopes.peek(), tombstones.peek()) {
+                    (None, None) => break,
+                    (Some(_), None) => envelopes.next().expect("peeked"),
+                    (None, Some(_)) => tombstones.next().expect("peeked"),
+                    (Some((envelope, _)), Some((tombstone, _))) => match envelope.cmp(tombstone) {
+                        std::cmp::Ordering::Less => envelopes.next().expect("peeked"),
+                        std::cmp::Ordering::Greater => tombstones.next().expect("peeked"),
+                        std::cmp::Ordering::Equal => {
+                            let (key, envelope) = envelopes.next().expect("peeked");
+                            let (_, tombstone) = tombstones.next().expect("peeked");
+                            (key, envelope || tombstone)
+                        }
+                    },
+                };
+                if included {
+                    update_identity_digest(&mut digest, &key.writer, key.sequence, &key.envelope_hash);
+                    count += 1;
+                }
+            }
+            match bound {
+                Some(bound) => {
+                    after = (bound.writer, i64::try_from(bound.sequence)?, bound.envelope_hash);
+                }
+                None => break,
+            }
         }
         Ok(SealedIdentities {
             digest: hex::encode(digest.finalize()),
-            count: identities.len(),
+            count,
             seal_rowid,
         })
     }
@@ -1084,8 +1640,30 @@ impl Store {
             .collect()
     }
 
-    /// Copy this store to `copy` from one consistent snapshot, while the writer carries on.
-    pub fn copy_store_to(&self, copy: &Path) -> Result<()> {
+    /// At daemon startup, remove only proof scratch whose owner lock is no longer held. A
+    /// cleanup error is reported and the next proof refuses until the scratch is cleared.
+    pub fn sweep_checkpoint_proof_scratch(&self, scratch: &Path) -> Result<()> {
+        if scratch.exists() {
+            drop(super::checkpoint_space::ProofOwnership::acquire(scratch)?);
+        }
+        Ok(())
+    }
+
+    /// Copy this store to `copy` from one consistent snapshot, while the writer carries on: a
+    /// filesystem clone where the filesystem can make one, otherwise a full `VACUUM INTO` copy.
+    pub /* sqlite-large-value-flow: allow-for-now flow-h92a2a0ef1c88 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn copy_store_to(&self, copy: &Path) -> Result<StoreCopy> {
+        self.copy_store_to_guarded(copy, None)
+    }
+
+    fn copy_store_to_guarded(
+        &self,
+        copy: &Path,
+        vfs: Option<&super::checkpoint_space::ProofVfs>,
+    ) -> Result<StoreCopy> {
+        if !self.shared_memory && self.clone_store_to(copy, vfs)? {
+            return Ok(StoreCopy::Clone);
+        }
+        if let Some(vfs) = vfs { vfs.vacuum_copy()?; }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
         // holds the WAL pinned for as long as the copy takes. Register it, so a pinned-WAL
         // report can name it: it was the one pin with no live read to blame.
@@ -1096,10 +1674,79 @@ impl Store {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let connection = Connection::open_with_flags(&self.path, flags)?;
-        connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
-        connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
-        Ok(())
+        let connection = if let Some(vfs) = vfs {
+            Connection::open_with_flags_and_vfs(&self.path, flags, vfs.name())?
+        } else {
+            Connection::open_with_flags(&self.path, flags)?
+        };
+        connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h822884cc319d owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [copy.to_string_lossy()])?;
+        Ok(StoreCopy::Full)
+    }
+
+    /// Clone the store file and its WAL to `copy` under one read snapshot, held only while the
+    /// filesystem clones them. While a snapshot is open no checkpoint copies a frame past it into
+    /// the store file, and the frames it reads stay in the WAL, so the two clones open as the
+    /// snapshot or a later commit. The `-shm` index is not copied: opening the copy rebuilds it
+    /// from the WAL. False, with nothing left at `copy`, where the filesystem cannot clone.
+    /* sqlite-large-value-flow: allow-for-now flow-he62b1f3e0130 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn clone_store_to(
+        &self,
+        copy: &Path,
+        vfs: Option<&super::checkpoint_space::ProofVfs>,
+    ) -> Result<bool> {
+        let mut wal = self.path.as_os_str().to_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        let mut copy_wal = copy.as_os_str().to_os_string();
+        copy_wal.push("-wal");
+        let copy_wal = PathBuf::from(copy_wal);
+        let connection = self.readers.get();
+        let snapshot = connection.unchecked_transaction()?;
+        snapshot.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
+        if let Some(vfs) = vfs { vfs.check_clone_source()?; }
+        let store = clone_file(&self.path, copy);
+        if let Some(vfs) = vfs { vfs.check_clone_source()?; }
+        let wal = store.as_ref().map(|()| match clone_file(&wal, &copy_wal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !wal.exists() => Ok(()),
+            result => result,
+        });
+        snapshot.commit()?;
+        drop(connection);
+        if let (Some(vfs), Ok(Ok(()))) = (vfs, &wal) {
+            vfs.check_cloned_files(copy, &copy_wal)?;
+        }
+        match wal {
+            Ok(Ok(())) => {}
+            // A failed clone leaves nothing behind, so only the store clone needs removing.
+            Ok(Err(error)) => {
+                if copy_wal.exists() {
+                    return Err(error).context(format!(
+                        "checkpoint clone left an incomplete WAL at {}",
+                        copy_wal.display()
+                    ));
+                }
+                fs::remove_file(copy)?;
+                return Ok(false);
+            }
+            Err(error) => {
+                if copy.exists() {
+                    anyhow::bail!(
+                        "checkpoint clone left an incomplete database at {}: {error}",
+                        copy.display()
+                    );
+                }
+                return Ok(false);
+            }
+        }
+        // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
+        let cloned = if let Some(vfs) = vfs {
+            Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE, vfs.name())?
+        } else {
+            Connection::open(copy)?
+        };
+        cloned.execute_batch("PRAGMA mmap_size = 0;")?;
+        cloned.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+        Ok(true)
     }
 
     /// Plan the drop for `cut_unix_ms` and prove it on a copy of this store in `scratch`, which
@@ -1109,6 +1756,7 @@ impl Store {
         cut_unix_ms: u128,
         scratch: &Path,
     ) -> Result<(DropPlan, CheckpointProof)> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         self.plan_checkpoint_through(cut_unix_ms, None, scratch)
             .map(|(_, plan, proof)| (plan, proof))
     }
@@ -1121,19 +1769,83 @@ impl Store {
         through_rowid: Option<i64>,
         scratch: &Path,
     ) -> Result<(SealedSet, DropPlan, CheckpointProof)> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight()?;
         let sealed = self.checkpoint_sealed_set_through(cut_unix_ms, through_rowid)?;
         let plan = self.runtime.plan_checkpoint_drops(&sealed);
-        fs::create_dir_all(scratch)?;
-        let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
-        let result = self
-            .copy_store_to(&copy)
-            .and_then(|()| prove_on_copy(&*self.runtime, &copy, &sealed, &plan));
-        for suffix in ["", "-journal", "-wal", "-shm"] {
-            let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
-        }
-        let proof = result?;
+        let proof = self.prove_checkpoint_plan(&sealed, &plan, scratch)?;
         Ok((sealed, plan, proof))
+    }
+
+    /// Prove an already captured plan. Agreement checks persisted failed inputs before
+    /// entering this expensive copy/replay phase.
+    pub fn prove_checkpoint_plan(
+        &self,
+        sealed: &SealedSet,
+        plan: &DropPlan,
+        scratch: &Path,
+    ) -> Result<CheckpointProof> {
+        self.prove_checkpoint_input(&InMemoryProof { sealed, plan }, scratch)
+    }
+
+    /// Prove a staged plan, reading the set and the drop from its staging file.
+    pub fn prove_staged_checkpoint_plan(
+        &self,
+        staged: &super::checkpoint_staging::StagedSet,
+        plan: &super::checkpoint_staging::StagedPlan,
+        scratch: &Path,
+    ) -> Result<CheckpointProof> {
+        self.prove_checkpoint_input(&super::checkpoint_staging::StagedProof { staged, plan }, scratch)
+    }
+
+    fn prove_checkpoint_input(&self, input: &dyn ProofInput, scratch: &Path) -> Result<CheckpointProof> {
+        let _completion = super::checkpoint_completion::Completion::work();
+        self.runtime.checkpoint_preflight()?;
+        // Admission precedes even the lock file. A failed proof cannot spend the writer's reserve.
+        let space = if self.shared_memory { None } else {
+            Some(super::checkpoint_space::SpaceGuard::admit(&self.path, scratch, false)?)
+        };
+        let ownership = super::checkpoint_space::ProofOwnership::acquire(scratch)?;
+        let vfs = space.as_ref().map(super::checkpoint_space::ProofVfs::register).transpose()?;
+        if let Some(vfs) = &vfs {
+            let probe = scratch.join(format!("proof-vfs-test-{}.sqlite3", Uuid::now_v7().simple()));
+            let tested = vfs.self_test(&ownership, &probe);
+            if let Err(close) = vfs.check_closed() {
+                std::mem::forget(ownership);
+                return Err(close.context("checkpoint VFS self-test left an open scratch file; owner lock retained until process exit"));
+            }
+            tested?;
+        }
+        let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
+        ownership.mark(&copy)?;
+        let result = (|| {
+            if let Some(space) = &space { space.check_now()?; }
+            self.copy_store_to_guarded(&copy, vfs.as_ref())?;
+            if let (Some(space), Some(vfs)) = (&space, &vfs) {
+                space.check_copied_image(&copy, vfs)?;
+            }
+            prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
+        })();
+        if let Some(vfs) = &vfs
+            && let Err(close) = vfs.check_closed()
+        {
+            // A live SQLite file could still write after unlink. Keep the owner lock and
+            // marker instead of deleting an open scratch file; only process exit releases
+            // the lock for the next startup sweep.
+            let prior = result.err().map(|error| format!("; also {error}")).unwrap_or_default();
+            std::mem::forget(ownership);
+            return Err(close.context(format!(
+                "checkpoint proof scratch remains owned until process exit{prior}"
+            )));
+        }
+        let result = match space.as_ref() { Some(space) => space.explain(result), None => result };
+        let cleanup = ownership.finish(&copy);
+        match (result, cleanup) {
+            (Ok(proof), Ok(())) => Ok(proof),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(error.context(format!("also {cleanup}"))),
+        }
     }
 
     /// `st replication checkpoint plan`: plan and prove one checkpoint without changing anything.
@@ -1142,7 +1854,29 @@ impl Store {
         cut_unix_ms: u128,
         scratch: &Path,
     ) -> Result<CheckpointPlanView> {
-        let (plan, proof) = self.plan_checkpoint(cut_unix_ms, scratch)?;
+        let _completion = super::checkpoint_completion::Completion::outer();
+        self.runtime.checkpoint_preflight()?;
+        // A directory of its own, so a dry run never replaces the scheduler's resumable capture.
+        let staged = self.checkpoint_staged_set(cut_unix_ms, None, &scratch.join("plan"))?;
+        self.checkpoint_plan_view_from_staged(cut_unix_ms, staged, scratch)
+    }
+
+    /// Plan and prove an already staged set without borrowing the live writer in production.
+    /// Capture can release writer admission before this scratch-file phase runs.
+    /// Keep the staging connection and planning inputs inside the completion boundary.
+    /// Test support's optional in-memory reference comparison can recapture the live set.
+    pub fn checkpoint_plan_view_from_staged(
+        &self,
+        cut_unix_ms: u128,
+        captured: super::checkpoint_staging::StagedSet,
+        scratch: &Path,
+    ) -> Result<CheckpointPlanView> {
+        let _completion = super::checkpoint_completion::Completion::outer();
+        let staged = captured;
+        let plan = self.plan_staged_checkpoint(&staged)?;
+        let proof = self.prove_staged_checkpoint_plan(&staged, &plan, scratch);
+        staged.remove()?;
+        let proof = proof?;
         Ok(CheckpointPlanView {
             checkpoint: checkpoint_name(cut_unix_ms),
             cut_unix_ms,
@@ -1150,12 +1884,288 @@ impl Store {
             sealed_envelopes: plan.sealed_envelopes,
             sealed_claims: plan.sealed_claims,
             sealed_digest: plan.sealed_digest,
-            dropped_envelopes: plan.envelopes.len(),
-            dropped_claims: plan.claims.len(),
+            dropped_envelopes: plan.dropped_envelopes,
+            dropped_claims: plan.dropped_claims,
             by_kind: plan.by_kind,
             drop_digest: plan.drop_digest,
             retained_digest: plan.retained_digest,
             proof,
         })
+    }
+}
+
+/// One-shot completion attempts, glibc calls, and their duration on this thread.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
+    super::checkpoint_completion::reclaim_stats()
+}
+
+/// Hold the proof lock on `scratch`, as a running proof does, until dropped.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_space::ProofOwnership);
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
+    super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_copy_spills_rollback_and_temporary_pages_to_disk() {
+        let scratch = tempfile::tempdir().unwrap();
+        let copy = scratch.path().join("proof.sqlite3");
+        let mut connection = open_checkpoint_copy(&copy, None).unwrap();
+        assert_eq!(
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)).unwrap(),
+            "delete"
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0)).unwrap(),
+            -(crate::sqlite::READ_CACHE_KIB as i64)
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0)).unwrap(),
+            1
+        );
+        connection.execute_batch(
+            "CREATE TABLE payload(body BLOB);
+             INSERT INTO payload VALUES (zeroblob(4 * 1024 * 1024));"
+        ).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute("UPDATE payload SET body=randomblob(4 * 1024 * 1024)", []).unwrap();
+        assert!(
+            fs::metadata(scratch.path().join("proof.sqlite3-journal")).unwrap().len() > 4 * 1024 * 1024,
+            "the overwritten copy pages belong in a disk rollback journal"
+        );
+        transaction.rollback().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod proof_position_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// The proof copy's numbering of the sealed set, after keeping only that set.
+    fn proof_order(copy: &Path, sealed: &[String], vfs: Option<&ProofVfs>) -> Vec<String> {
+        let connection = open_checkpoint_copy(copy, vfs).unwrap();
+        if let Some(vfs) = vfs {
+            vfs.begin_proof(&connection).unwrap();
+        }
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT);
+                 INSERT INTO temp.sealed_envelopes VALUES('writer', 1, 'sealed');",
+            )
+            .unwrap();
+        for id in sealed {
+            connection
+                .execute("INSERT INTO temp.sealed_claims VALUES(?1)", [id])
+                .unwrap();
+        }
+        keep_sealed_claims_in_canonical_order(&connection).unwrap();
+        connection
+            .prepare("SELECT id FROM claims ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_proof_copy_orders_the_sealed_set_alone_whatever_duplicates_a_member_holds() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Store::open(&scratch.path().join("store.sqlite3"), "writer", Arc::new(Plain))
+            .unwrap();
+        let sealed = {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            let mut batch = None;
+            let mut ids = Vec::new();
+            for name in ["first", "second", "third"] {
+                let claim = append_claim_record_tx(
+                    &transaction,
+                    "writer",
+                    &format!("note/{name}"),
+                    "example.note",
+                    None,
+                    &json!({"fields": {"name": name}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch.get_or_insert(claim.batch_id.clone());
+                ids.push(claim.id);
+            }
+            for (position, id) in ids.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                            position, raw, state, claim_id, updated_at_unix_ms)
+                         VALUES (?1, 'writer', 1, 'sealed', ?2, X'00', 'valid', ?3, '0')",
+                        params![format!("record/sealed/{position}"), position as i64, id],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+            ids
+        };
+        // File-backed stores prove through the space-guarded VFS; prove both ways.
+        let proofs = scratch.path().join("proofs");
+        let ownership = ProofOwnership::acquire(&proofs).unwrap();
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let vfs = ProofVfs::register(&space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = |name: &str| {
+            let plain = scratch.path().join(format!("{name}.sqlite3"));
+            let guarded = proofs.join(format!("proof-{name}.sqlite3"));
+            ownership.mark(&guarded).unwrap();
+            for path in [&plain, &guarded] {
+                store
+                    .connection
+                    .write()
+                    .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+                    .unwrap();
+            }
+            (plain, guarded)
+        };
+        let plain = copy("plain");
+        // Another member also holds an unsealed duplicate envelope carrying the third claim first.
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                    position, raw, state, claim_id, updated_at_unix_ms)
+                 VALUES ('record/duplicate/0', 'writer', 1, 'duplicate', 0, X'00', 'valid', ?1, '0')",
+                [&sealed[2]],
+            )
+            .unwrap();
+        let with_duplicate = copy("duplicate");
+        for (copy, guarded) in [plain, with_duplicate] {
+            assert_eq!(proof_order(&copy, &sealed, None), sealed);
+            assert_eq!(proof_order(&guarded, &sealed, Some(&vfs)), sealed);
+        }
+        vfs.check_closed().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clone_growth_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const ROW: &str = "INSERT INTO growth VALUES (randomblob(64 * 1024))";
+
+    fn store_with_rows(dir: &Path, rows: usize) -> Store {
+        fs::create_dir(dir.join("proofs")).unwrap();
+        let store = Store::open(&dir.join("store.sqlite3"), "writer", Arc::new(Plain)).unwrap();
+        let writer = store.connection.write();
+        writer.execute_batch("CREATE TABLE growth(body BLOB)").unwrap();
+        for _ in 0..rows {
+            writer.execute(ROW, []).unwrap();
+        }
+        drop(writer);
+        store
+    }
+
+    fn wal_len(store: &Store) -> u64 {
+        fs::metadata(format!("{}-wal", store.path.display())).map_or(0, |metadata| metadata.len())
+    }
+
+    fn rows(copy: &Path) -> i64 {
+        Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT count(*) FROM growth", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Copy through the guarded VFS the way a proof does, after `space` was admitted.
+    fn guarded_copy(store: &Store, space: &SpaceGuard, proofs: &Path, during: impl Fn() + Sync) -> Result<PathBuf> {
+        let ownership = ProofOwnership::acquire(proofs).unwrap();
+        let vfs = ProofVfs::register(space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = proofs.join("proof-growth.sqlite3");
+        ownership.mark(&copy).unwrap();
+        let stop = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    during();
+                }
+            });
+            let result = store.copy_store_to_guarded(&copy, Some(&vfs));
+            stop.store(true, Ordering::Release);
+            result
+        });
+        vfs.check_closed().unwrap();
+        result.map(|_| copy)
+    }
+
+    // A proof is admitted, then its lock and VFS self-test run while the daemon keeps writing.
+    // The raw clone used to be held to the exact main+WAL bytes seen at admission, so one commit
+    // in that window failed `replication checkpoint plan` with a 500.
+    #[test]
+    fn a_wal_grown_after_admission_still_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let admitted_wal = wal_len(&store);
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+        assert!(wal_len(&store) > admitted_wal, "the live WAL grew after admission");
+
+        let copy = guarded_copy(&store, &space, &proofs, || {}).unwrap();
+        assert_eq!(rows(&copy), 16, "the copy is the store as of the copy, not of admission");
+    }
+
+    #[test]
+    fn a_writer_committing_throughout_the_copy_does_not_fail_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let written = AtomicUsize::new(0);
+
+        let copy = guarded_copy(&store, &space, &proofs, || {
+            store.connection.write().execute(ROW, []).unwrap();
+            written.fetch_add(1, Ordering::AcqRel);
+        })
+        .unwrap();
+        let copied = rows(&copy);
+        assert!(copied >= 8, "the copy holds at least the admitted rows: {copied}");
+        assert!(
+            copied <= 8 + i64::try_from(written.load(Ordering::Acquire)).unwrap(),
+            "the copy holds no row that was never committed: {copied}"
+        );
+    }
+
+    #[test]
+    fn growth_past_the_clone_cap_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let mut space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        space.hold_clone_to_admitted_copy();
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+
+        let error = guarded_copy(&store, &space, &proofs, || {}).unwrap_err().to_string();
+        assert!(error.contains("checkpoint raw clone exceeds admitted clone cap"), "{error}");
     }
 }

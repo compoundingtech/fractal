@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { COLLAPSED_TOOL_LINES, folds, HOME_LEGEND } from '@smalltalk/st3-views';
+import { COLLAPSED_TOOL_LINES, folds, HOME_LEGEND } from '@fractal/views';
 import { tokenColor } from './conversationStyle.ts';
 
 // stui writes the drawing rules; the phone draws from the same file. Every colour it names must
@@ -22,5 +22,5 @@ assert.equal(folds({ kind: 'mail', from: 'planner', to: 'builder', subject: '', 
 assert.equal(folds({ kind: 'mail', from: 'planner', to: 'you', subject: '', text: '' }), false);
 assert.equal(folds({ kind: 'mail', from: 'you', to: 'planner', subject: '', text: '' }), false);
 
-// Home retains the phone's decision and information colors after model extraction.
+// Now retains the phone's decision and information colors after model extraction.
 assert.deepEqual(HOME_LEGEND.map(entry => tokenColor(entry.color)), ['#cba6f7', '#a6e3a1']);
