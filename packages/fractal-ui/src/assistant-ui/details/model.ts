@@ -47,9 +47,12 @@ export interface DetailsSection {
   readonly items: DetailsValue<readonly DetailsResource[]>
   /** Safe host copy for unreported, unavailable or ungranted items; known [] means observed empty. */
   readonly unavailableReason?: string
-  /** First acquisition is pending, distinct from an unavailable or unreported result. */
+  /** This section's own read is in flight: first acquisition, distinct from an unavailable or unreported result, or a retry. */
   readonly pending?: boolean
-  /** This section's own read failed and can be tried again; other sections keep their content. */
+  /**
+   * This section's own read failed and can be tried again; other sections keep their content. Hosts omit it while the
+   * retry is `pending`: the pane keeps the last failure and its action mounted until the read settles.
+   */
   readonly failure?: DetailsReadFailure
 }
 /** A failed host read with its own recovery; refused reads are not failures and offer no retry. */
@@ -68,8 +71,9 @@ export interface DetailsReadFailure {
 export interface DetailsSpendRead {
   /** When the shown spend was read; absent until a read settles. */
   readonly updatedAt?: number
-  /** A requested read is in flight; the shown figures are the previous read. */
+  /** A requested read is in flight; the shown figures are the previous read and any earlier failure stays on screen. */
   readonly refreshing: boolean
   readonly onRefresh: () => void
+  /** Omitted while `refreshing`; the same action then reads Trying again… until the read settles. */
   readonly failure?: DetailsReadFailure
 }

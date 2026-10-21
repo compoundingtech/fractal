@@ -30,6 +30,8 @@ export interface NativeDetailsObservation {
   readonly spendRead?: DetailsSpendRead
   /** The session read failed; Try again re-reads only the session. */
   readonly sessionFailure?: DetailsReadFailure
+  /** The session getter is reading; keep its recovery control mounted until it settles. */
+  readonly sessionPending?: boolean
   /** Next displayed duration step or future-observation fence; absent means no timed wake. */
   readonly nextChangeAt?: number
 }
@@ -54,6 +56,8 @@ const readFailure = (kind: keyof typeof nativeReadFailureMessage, feed: Feed<unk
   ...(feed._tag === 'Observed' && (feed.readAt ?? retainedAt) !== undefined ? { retainedAt: feed.readAt ?? retainedAt } : {}),
   onRetry,
 })
+const readPending = (feed: Feed<unknown> | undefined): boolean => feed?._tag === 'Waiting' ||
+  (feed?._tag === 'Observed' && feed.freshness === 'stale' && feed.error === undefined)
 /**
  * Spend is read on open and on request only. The successful getter read dates the figures;
  * older fixtures fall back to the period end. Refused or unreported spend offers no Refresh.
@@ -223,7 +227,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
       ...(declared.declaredModel === undefined ? [] : [resource({ key: 'binding/model', label: 'Declared model', detail: `${declared.declaredModel} · revision ${declared.revision} · Model from the agent's settings; it may differ while running.` })]),
     ] }, pending: rowFeed._tag === 'Waiting' || declarations._tag === 'Waiting', unavailableReason: factFailure(declarations) },
     { title: 'Terminals', items: row === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: terminal === undefined ? [] : [{ ...resource({ key: 'terminal', label: 'Agent terminal', detail: 'This agent’s terminal opens in the app’s terminal view.' }), uri: terminal, glyph: 'terminal' }] }, unavailableReason: 'The selected agent’s terminal is not reported.' },
-    { title: 'Missions', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, pending: queue?._tag === 'Waiting', unavailableReason: queue === undefined ? 'This session does not report the agent’s queue.' : factFailure(queue),
+    { title: 'Missions', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, pending: readPending(queue), unavailableReason: queue === undefined ? 'This session does not report the agent’s queue.' : factFailure(queue),
       ...(retryableFailure(queue) ? { failure: readFailure('queue', queue!, reads.retryQueue) } : {}) },
     { title: 'Attention', items: projected === undefined || needsMe === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
       resource({ key: 'attention', label: needsMe ? 'Needs your attention' : 'No attention action observed', detail: `${projected.ask._tag === 'Known' ? `Request · ${projected.ask.value}` : 'No request reported'}${row === undefined || Option.isNone(row.reason) ? '' : ` · ${row.reason.value}`} · read-only; respond from the agent’s conversation.` }),
@@ -259,6 +263,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     ...(incarnationId === undefined ? {} : { incarnationId }), ...(nativeHost === undefined ? {} : { host: nativeHost }), ...(projected?.harness === undefined ? {} : { harness: projected.harness }),
     ...(syncStatus === undefined ? {} : { syncStatus }), onRetry,
     ...(spendRead === undefined ? {} : { spendRead }), ...(sessionFailure === undefined ? {} : { sessionFailure }),
+    sessionPending: readPending(sessionRead),
     ...(nextChangeAt === undefined ? {} : { nextChangeAt }),
   }
 }

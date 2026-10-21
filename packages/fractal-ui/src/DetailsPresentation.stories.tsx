@@ -18,14 +18,16 @@ import { group, type WorkbenchPane } from './assistant-ui/workbench/workbench-mo
 import { accentVars as accent, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { Agent, UsagePeriod, decodeUnknownSync } from '@fractal/client/schema'
+import { FractalClient } from '@fractal/client'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import type * as Native from '@fractal/client/schema'
 import { ompAgentRef, ompAgentWire, ompDeclarationsNotReported, ompNow, ompSubagent, ompSupplementFeeds, ompUsagePeriodWire, type OmpSupplementState } from './assistant-ui/details/omp-fixtures'
 import { AgentDetailsPanel } from '../../../apps/fractal-web/src/web/AgentDetailsPanel'
 import { DataSourceProvider } from '../../../apps/fractal-web/src/data/react'
 import { fixtureSource } from '../../../apps/fractal-web/src/data/fixtureSource'
 import type { DataSource, Feed } from '../../../apps/fractal-web/src/data/source'
-import type { NativeDetailsSource } from '../../../apps/fractal-web/src/data/nativeDetailsSource'
+import { gatewayNativeDetails } from '../../../apps/fractal-web/src/data/nativeDetailsSource'
+import { gatewaySubjectReads } from '../../../apps/fractal-web/src/data/subjectReadPort'
 import type { NativeDeclarations } from '../../../apps/fractal-web/src/data/nativeDeclarations'
 import { accountingNoteSummary, spendWindowReason } from '../../../apps/fractal-web/src/web/detailsSupplement'
 
@@ -803,37 +805,106 @@ const ompLines:Record<OmpSupplementState,{readonly line:string;readonly summary:
   reported:{line:'[data-details-accounting-note]',summary:accountingNoteSummary,why:'Why? Agent and total spend',reasons:[spendWindowReason]},
   retained:{line:'[data-details-supplement]',summary:'Subagent activity may be out of date (last updated just now).',why:'Why? Subagent activity',reasons:["The latest update couldn't be loaded, so earlier activity is shown."]},
 }
+type OmpRead='usage'|'session'|'queue'
+type OmpReadOutcome='ok'|'fail'
+const ompSessionRef='session/example-omp-details'
+const ompSessionWire={id:ompSessionRef,kind:'session',revision:'1',updated_at:'1970-01-01T00:00:08.000Z',owner_id:ompAgentRef,state:'running',started_at:'1970-01-01T00:00:02.000Z',ended_at:null,timeline_cursor:'cursor/example-omp-details',runtime_incarnation:'first'} as const
+const ompQueueWire={kind:'agent-queue',agent_id:ompAgentRef,current_work_ids:[],next_work_id:null,move_count:0,moves:[],runs:[]} as const
+const ompCapabilitiesWire={kind:'capabilities',capabilities:[],limits:{max_page_items:100,max_event_items:100,max_wait_ms:0}} as const
+const ompEnvelope=(value:unknown)=>Response.json({api_version:'st3.client.v0',snapshot:{id:'snapshot/example-omp-details',host_id:'host/build-1',store_index:1,projection_version:'client-projection.v0',created_at:'1970-01-01T00:00:09.000Z'},value})
 /**
- * The kit's omp seat over the production fixture source, with its priced session as the native Details read.
- * `unavailable` also fails two reads: spend keeps the figures last read 12 minutes earlier beside Try again, and the
- * agent queue, with nothing kept, has its own Try again.
+ * The gateway as the story sees it, under the production getter adapters: each read answers or fails, or holds its
+ * request until the play releases it, so pending, repeated-failure and success edges are driven without timers.
  */
-function ompStorySource(state:OmpSupplementState):DataSource{
-  const rawDeclarations=Atom.make<Feed<Native.AgentDeclaration>>(ompDeclarationsNotReported),declarations=Atom.make<Feed<NativeDeclarations>>(ompDeclarationsNotReported)
-  const period=decodeUnknownSync(UsagePeriod)(ompUsagePeriodWire),failed=state==='unavailable'
-  // The failed refresh's clock runs 12 minutes past the last successful spend read.
-  const usagePeriod=Atom.make<Feed<Native.UsagePeriod>>(failed?{_tag:'Observed',value:period,freshness:'stale',readAt:ompNow,error:{reason:'failed',detail:'These session details could not be loaded.'}}:{_tag:'Observed',value:period,freshness:'live'})
-  return {
-    ...fixtureSource({world:{now:failed?ompNow+ompRetainedAgeMs:ompNow,agents:[decodeUnknownSync(Agent)(ompAgentWire)],missions:[],attention:[],events:[],conversations:{},terminals:{},envelopes:{},usage:{_tag:'undeclared'}},
-      ...(failed?{overrides:{subjectReads:{agentQueue:{[ompAgentRef]:{_tag:'Unavailable',reason:'failed',detail:'The agent queue could not be loaded.'}}}}}:{})}),
-    nativeDetails:{
-      // A fixed world: Refresh and Try again observe the same period.
-      usagePeriod:()=>usagePeriod,rawDeclarations:()=>rawDeclarations,declarations:()=>declarations,retry:()=>undefined,refresh:()=>undefined,
-    } satisfies NativeDetailsSource,
+class OmpGatewayTransport {
+  private readonly modes:Record<OmpRead,OmpReadOutcome|'hold'>
+  private readonly held=new Map<OmpRead,Set<(outcome:OmpReadOutcome)=>void>>()
+  constructor(initial:Record<OmpRead,OmpReadOutcome>){this.modes={...initial}}
+  /** Later requests for `read` wait until `release`. */
+  hold(read:OmpRead){this.modes[read]='hold'}
+  /** Settles every held `read` request, and answers later ones, with `outcome`. */
+  release(read:OmpRead,outcome:OmpReadOutcome){
+    this.modes[read]=outcome
+    const waiting=[...this.held.get(read)??[]];this.held.get(read)?.clear()
+    for(const settle of waiting)settle(outcome)
   }
+  readonly fetch=async(input:RequestInfo|URL,init?:RequestInit):Promise<Response>=>{
+    const path=new URL(input instanceof Request?input.url:String(input)).pathname
+    if(path==='/v1/client/capabilities')return ompEnvelope(ompCapabilitiesWire)
+    const read:OmpRead|undefined=path==='/v1/client/usage'?'usage':path.startsWith('/v1/client/sessions/')?'session':path.startsWith('/v1/client/agent-queues/')?'queue':undefined
+    if(read===undefined)throw new TypeError(`Unexpected gateway request: ${path}`)
+    const mode=this.modes[read],signal=init?.signal??undefined
+    const outcome=mode!=='hold'?mode:await new Promise<OmpReadOutcome>((resolve,reject)=>{
+      const waiting=this.held.get(read)??new Set();this.held.set(read,waiting)
+      const abort=()=>{waiting.delete(settle);reject(signal?.reason)}
+      const settle=(next:OmpReadOutcome)=>{signal?.removeEventListener('abort',abort);resolve(next)}
+      waiting.add(settle);signal?.addEventListener('abort',abort,{once:true})
+    })
+    if(outcome==='fail')throw new TypeError('Connection lost')
+    return ompEnvelope(read==='usage'?ompUsagePeriodWire:read==='session'?ompSessionWire:ompQueueWire)
+  }
+}
+interface OmpWorld{readonly registry:AtomRegistry.AtomRegistry;readonly source:DataSource;readonly transport:OmpGatewayTransport}
+/** The play's handle on the mounted story's transport; `reset` remounts the inspector over a fresh initial world. */
+let ompStoryControls:{readonly transport:OmpGatewayTransport;readonly reset:()=>void}|undefined
+/** Resolves once `atom` holds a feed `done` accepts; the atom stays mounted with its registry. */
+function ompSettled<A>(registry:AtomRegistry.AtomRegistry,atom:Atom.Atom<A>,done:(feed:A)=>boolean){
+  registry.mount(atom)
+  return new Promise<void>(resolve=>{let finished=false;const stop=registry.subscribe(atom,feed=>{if(!finished&&done(feed)){finished=true;resolve();queueMicrotask(()=>stop())}},{immediate:true})})
+}
+/**
+ * The kit's omp seat over the production fixture source. Spend, and for `unavailable` the session and agent queue,
+ * are read by the production gateway getter adapters over the story transport; successful spend reads are dated by
+ * the gateway clock at `ompNow`. `unavailable` settles three failed reads before the inspector mounts: a spend refresh
+ * that keeps the figures read 12 minutes earlier, the session, and the agent queue with nothing kept, each with its
+ * own Try again.
+ */
+async function ompStoryWorld(state:OmpSupplementState):Promise<OmpWorld>{
+  const failed=state==='unavailable',registry=AtomRegistry.make()
+  const transport=new OmpGatewayTransport({usage:'ok',session:failed?'fail':'ok',queue:failed?'fail':'ok'})
+  const options={baseUrl:'http://gateway.invalid',fetchImpl:transport.fetch},discovery=new FractalClient(options)
+  const gateway=gatewayNativeDetails({options,discovery,registry,now:()=>ompNow})
+  const reads=gatewaySubjectReads({options,discovery,registry})
+  const rawDeclarations=Atom.make<Feed<Native.AgentDeclaration>>(ompDeclarationsNotReported),declarations=Atom.make<Feed<NativeDeclarations>>(ompDeclarationsNotReported)
+  const base=fixtureSource({world:{now:failed?ompNow+ompRetainedAgeMs:ompNow,agents:[decodeUnknownSync(Agent)(failed?{...ompAgentWire,current_session_id:ompSessionRef}:ompAgentWire)],missions:[],attention:[],events:[],conversations:{},terminals:{},envelopes:{},usage:{_tag:'undeclared'}}})
+  const source:DataSource={...base,
+    ...(failed?{subjectReads:{...base.subjectReads,session:reads.session,agentQueue:reads.agentQueue}}:{}),
+    nativeDetails:{...gateway,rawDeclarations:()=>rawDeclarations,declarations:()=>declarations},
+  }
+  const period=gateway.usagePeriod(ompAgentRef)
+  await ompSettled(registry,period,feed=>feed._tag==='Observed'&&feed.freshness==='live')
+  if(failed){
+    // An earlier Refresh failed: the figures read at `ompNow` stay on screen, 12 minutes old on the world clock.
+    transport.release('usage','fail');gateway.refresh(period)
+    await Promise.all([
+      ompSettled(registry,period,feed=>feed._tag==='Observed'&&feed.error!==undefined),
+      ompSettled(registry,reads.session.feed(ompSessionRef),feed=>feed._tag==='Unavailable'),
+      ompSettled(registry,reads.agentQueue.feed(ompAgentRef),feed=>feed._tag==='Unavailable'),
+    ])
+  }
+  return {registry,source,transport}
 }
 /** The real inspector over an omp-driven seat; its subagent activity flows through the composition's feed seam. */
 function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:boolean;readonly state:OmpSupplementState}){
-  const [registry]=React.useState(()=>AtomRegistry.make())
-  const [source]=React.useState(()=>ompStorySource(state))
-  React.useEffect(()=>()=>registry.dispose(),[registry])
-  if(narrow)return <DataSourceProvider source={source} registry={registry}>
-    <ProductionPhoneSheet scheme={scheme}>{close=><AgentDetailsPanel agentRef={ompAgentRef} width="fill" scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>}</ProductionPhoneSheet>
+  const [generation,setGeneration]=React.useState(0)
+  const [world,setWorld]=React.useState<OmpWorld>()
+  React.useEffect(()=>{
+    let mounted=true,next:OmpWorld|undefined
+    void ompStoryWorld(state).then(created=>{
+      next=created
+      if(!mounted){created.registry.dispose();return}
+      setWorld(created)
+      // Unmounts the inspector first, then disposes this world and builds a fresh initial one.
+      ompStoryControls={transport:created.transport,reset:()=>{setWorld(undefined);setGeneration(value=>value+1)}}
+    })
+    return ()=>{mounted=false;ompStoryControls=undefined;next?.registry.dispose()}
+  },[state,generation])
+  const panel=(close:()=>void,width:'fill'|440)=>world===undefined?null:<DataSourceProvider key={generation} source={world.source} registry={world.registry}>
+    <AgentDetailsPanel agentRef={ompAgentRef} width={width} scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
   </DataSourceProvider>
+  if(narrow)return <ProductionPhoneSheet scheme={scheme}>{close=>panel(close,'fill')}</ProductionPhoneSheet>
   return <div role="main" aria-label="Production desktop inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:440,maxWidth:'100%',height:900,display:'flex'}}>
-    <ThemePortal><NarrowLayoutContext.Provider value={false}><DataSourceProvider source={source} registry={registry}>
-      <AgentDetailsPanel agentRef={ompAgentRef} width={440} scheme={scheme} onClose={()=>undefined} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
-    </DataSourceProvider></NarrowLayoutContext.Provider></ThemePortal>
+    <ThemePortal><NarrowLayoutContext.Provider value={false}>{panel(()=>undefined,440)}</NarrowLayoutContext.Provider></ThemePortal>
   </div>
 }
 const ompShape='Production OMP Details line is not one plain summary behind a collapsed Why?'
@@ -938,6 +1009,91 @@ async function checkOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplemen
   try{queueStatus.textContent="Couldn't refresh the agent queue. Showing figures from 12m ago.";await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{queueStatus.textContent=queueCopy}
   assertOmpReads(panel,narrow,state)
 }
+const readFocus='Production OMP read action did not keep its node and focus through the read'
+function ompTransport(){requireContract(ompStoryControls,'OMP story transport is not mounted');return ompStoryControls.transport}
+function ompSection(panel:HTMLElement,name:string){const section=panel.querySelector<HTMLElement>(`section[aria-label$="${name}"]`);requireContract(section,`Missing ${name} section`);return section}
+const focusName=(element:Element|null)=>element===null?'nothing':`${element.tagName} "${element.getAttribute('aria-label')??element.textContent?.trim().slice(0,40)}"`
+/** The same action node, connected and focused, reading `label`; pending is `aria-disabled` and `aria-busy`, never native `disabled`. */
+function assertReadAction(action:HTMLElement,label:string,pending:boolean,status?:string|RegExp){
+  const failures:string[]=[]
+  if(!action.isConnected)failures.push('action disconnected')
+  if(action.ownerDocument.activeElement!==action)failures.push(`focus on ${focusName(action.ownerDocument.activeElement)}`)
+  if(action.textContent!==label)failures.push(`label "${action.textContent}"`)
+  if(action.hasAttribute('disabled'))failures.push('natively disabled')
+  if((action.getAttribute('aria-disabled')==='true')!==pending||(action.getAttribute('aria-busy')==='true')!==pending)failures.push(`aria-disabled ${action.getAttribute('aria-disabled')} aria-busy ${action.getAttribute('aria-busy')}`)
+  const text=action.closest('[data-details-spend-read],[data-details-read-failure]')?.querySelector('[role="status"]')?.textContent??''
+  if(status!==undefined&&(typeof status==='string'?text!==status:!status.test(text)))failures.push(`status "${text}"`)
+  requireContract(failures.length===0,`${readFocus}: ${failures.join('; ')}`)
+}
+/** Keyboard activation, as a user reaches the action. */
+async function pressRead(action:HTMLElement){action.focus();requireContract(action.ownerDocument.activeElement===action,`${readFocus}: action did not take focus`);await userEvent.keyboard('{Enter}')}
+/**
+ * Spend's one button through a held read each way: pending keeps the node focused as Refreshing… or Trying again…,
+ * a failed Refresh and a repeated failure turn it into Try again with the failure sentence, and success into Refresh.
+ * `unavailable` starts on its kept failure and ends there again; a healthy seat starts and ends on Refresh.
+ */
+async function checkSpendFocus(panel:HTMLElement,state:OmpSupplementState){
+  const transport=ompTransport(),spend=ompSection(panel,'Spend'),failed=state==='unavailable'
+  const [kept]=ompRetainedSpend.split('|'),refreshFailed=/^Couldn't refresh spend\. Showing figures from \S/
+  const updated=()=>requireContract(/^Updated \S/.test(spend.querySelector('[data-details-spend-updated]')?.textContent??'')&&!spend.querySelector('[data-details-read-failure]'),`${readFocus}: settled spend is not dated with Refresh`)
+  const action=within(spend).getByRole('button',{name:failed?'Try again':'Refresh'})
+  if(failed){
+    transport.hold('usage');await pressRead(action)
+    await waitFor(()=>assertReadAction(action,'Trying again…',true,kept))
+    transport.release('usage','fail')
+    await waitFor(()=>assertReadAction(action,'Try again',false,kept))
+    transport.hold('usage');await pressRead(action)
+    await waitFor(()=>assertReadAction(action,'Trying again…',true,kept))
+    transport.release('usage','ok')
+    await waitFor(()=>{assertReadAction(action,'Refresh',false);updated()})
+  }
+  transport.hold('usage');await pressRead(action)
+  await waitFor(()=>{assertReadAction(action,'Refreshing…',true);updated()})
+  transport.release('usage','fail')
+  await waitFor(()=>assertReadAction(action,'Try again',false,failed?kept:refreshFailed))
+  if(failed)return
+  transport.hold('usage');await pressRead(action)
+  await waitFor(()=>assertReadAction(action,'Trying again…',true,refreshFailed))
+  transport.release('usage','ok')
+  await waitFor(()=>{assertReadAction(action,'Refresh',false);updated()})
+}
+/**
+ * A section's Try again through a held retry: pending keeps the line, its sentence and the focused action; a repeated
+ * failure keeps focus on the action; success moves focus to the section's heading control, then removes the line.
+ * Every other section keeps its own read line meanwhile.
+ */
+async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
+  const transport=ompTransport(),name=read==='session'?'Overview':'Missions',section=ompSection(panel,name)
+  const copy=read==='session'?"Couldn't load session details.":"Couldn't load the agent queue."
+  const others=()=>requireContract([...panel.querySelectorAll('[data-details-read-action]')].length>=(read==='session'?3:2),`${readFocus}: another section lost its read action during ${name} recovery`)
+  const action=within(section).getByRole('button',{name:'Try again'})
+  transport.hold(read);await pressRead(action)
+  await waitFor(()=>{assertReadAction(action,'Trying again…',true,copy);others()})
+  transport.release(read,'fail')
+  await waitFor(()=>{assertReadAction(action,'Try again',false,copy);others()})
+  transport.hold(read);await pressRead(action)
+  await waitFor(()=>assertReadAction(action,'Trying again…',true,copy))
+  transport.release(read,'ok')
+  await waitFor(()=>{
+    const heading=section.querySelector<HTMLElement>('[data-details-section-control]'),active=panel.ownerDocument.activeElement
+    requireContract(section.isConnected&&heading!==null&&active===heading&&!action.isConnected&&!section.querySelector('[data-details-read-failure]'),`${readFocus}: ${name} success left focus on ${focusName(active)}${action.isConnected?' with its action mounted':''}`)
+  })
+}
+/**
+ * Read recovery from the keyboard over the production adapters: session and queue Try again, then spend. A healthy
+ * seat ends on Refresh; `unavailable` remounts over a fresh transport so it ends on its three initial failures.
+ */
+async function checkReadFocus(canvasElement:HTMLElement,narrow:boolean,state:OmpSupplementState,panel:HTMLElement){
+  if(state==='unavailable'){await checkSectionRetryFocus(panel,'session');await checkSectionRetryFocus(panel,'queue')}
+  await checkSpendFocus(panel,state)
+  if(state!=='unavailable')return panel
+  const before=ompTransport();ompStoryControls!.reset()
+  await waitFor(()=>requireContract(ompStoryControls!==undefined&&ompStoryControls.transport!==before,'OMP story did not remount its initial transport'))
+  const root=narrow?within(canvasElement).getByRole('dialog',{name:'Agent details'}):canvasElement
+  const remounted=await within(root).findByRole('complementary',{name:'Agent inspector'})
+  await waitFor(()=>{requireContract(remounted!==panel&&remounted.isConnected,'OMP story kept the recovered inspector');assertOmpReads(remounted,narrow,state)})
+  return remounted
+}
 function ompPlay(narrow:boolean,state:OmpSupplementState){
   return async({canvasElement}:{canvasElement:HTMLElement})=>{
     const doc=canvasElement.ownerDocument,expected=ompLines[state]
@@ -949,7 +1105,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
       requireContract(panel.getBoundingClientRect().height>=899,'Production desktop inspector lost its dock-height layout')
       assertDesktopClose(panel)
     }
-    await waitFor(()=>{assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state)})
+    await waitFor(()=>{assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertOmpReads(panel,narrow,state)})
     await checkOmpAccounting(panel,narrow,state)
     await checkOmpReads(panel,narrow,state)
     // The pre-fix shape: a second paragraph painted beside the summary.
@@ -994,9 +1150,14 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
       await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
     }
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
+    // Keyboard read recovery on the accounting seat (healthy Refresh) and the failed-reads seat, at phone and desktop widths.
+    if(state==='reported'||state==='unavailable'){
+      const settled=await checkReadFocus(canvasElement,narrow,state,panel)
+      assertOmpLine(settled,narrow,state);assertOmpSpend(settled,state);assertOmpReads(settled,narrow,state);assertNoEpoch(settled)
+    }
   }
 }
-const ompContractFixture={parameters:{scenario:{_tag:'contract-fixture',reason:'Controlled OMP loading, unavailable, reported and retained supplements pin exact accounting summaries, 99% attribution, unknown main-session period, last-7-days subagents and absence of epoch dates, with phone/desktop Why? geometry, dated spend with Refresh, a failed spend refresh that dates its figures kept from 12 minutes earlier, and a failed agent-queue read with nothing kept, each with its own Try again. Catalog details slices do not supply these supplemental feeds, read failures or their accounting facts.'}}} satisfies Story
+const ompContractFixture={parameters:{scenario:{_tag:'contract-fixture',reason:'Controlled OMP loading, unavailable, reported and retained supplements pin exact accounting summaries, 99% attribution, unknown main-session period, last-7-days subagents and absence of epoch dates, with phone/desktop Why? geometry, dated spend with Refresh, a failed spend refresh that dates its figures kept from 12 minutes earlier, and failed session and agent-queue reads with nothing kept, each with its own Try again. A story-held gateway transport under the production getter adapters drives pending, repeated-failure and success edges for keyboard focus. Catalog details slices do not supply these supplemental feeds, read failures, held reads or their accounting facts.'}}} satisfies Story
 // The kit gate runs each story at 440/1440 and dark/light; the inspector keeps its phone or desktop width.
 export const ProductionPhoneSubagentLoading:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="loading"/>,play:ompPlay(true,'loading')}
 export const ProductionPhoneSubagentUnavailable:Story={...ompContractFixture,render:args=><ProductionOmpInspector {...args} narrow state="unavailable"/>,play:ompPlay(true,'unavailable')}

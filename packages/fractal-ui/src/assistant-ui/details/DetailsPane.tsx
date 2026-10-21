@@ -41,7 +41,7 @@ function Section({title,children,hidden}:{title:string;children:React.ReactNode;
   if(hidden) return null
   return <section aria-label={`${labelPrefix}${title}`} {...stylex.props(styles.section)}>
     <div {...stylex.props(styles.sectionHeader)}>
-      <Button data-details-heading aria-expanded={!collapsed} aria-controls={id} onPress={()=>setCollapsed(v=>!v)} {...stylex.props(styles.sectionTitle,narrow&&styles.touchRow)}><Icon name={collapsed?'chevron-right':'chevron-down'}/>{title}</Button>
+      <Button data-details-heading data-details-section-control aria-expanded={!collapsed} aria-controls={id} onPress={()=>setCollapsed(v=>!v)} {...stylex.props(styles.sectionTitle,narrow&&styles.touchRow)}><Icon name={collapsed?'chevron-right':'chevron-down'}/>{title}</Button>
     </div>
     <div id={id} hidden={collapsed}>{children}</div>
   </section>
@@ -64,8 +64,10 @@ export interface DetailsPaneProps {
   spendRead?:DetailsSpendRead;
   /** The session read failed; Overview keeps its other facts and offers Try again for that read only. */
   sessionFailure?:DetailsReadFailure;
+  /** The session getter is reading; a held session failure keeps its action mounted as Trying again… until it settles. */
+  sessionPending?:boolean|undefined;
 }
-export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry,onClose,closeFocusTarget,opening,overview,sections,trace,now,pendingOverview:providedPendingOverview,pendingTrace:providedPendingTrace,pendingShape:suppliedPendingShape,syncStatus:providedSyncStatus,hasPriorContent:providedHasPriorContent,observedAt=now,spendRead,sessionFailure}:DetailsPaneProps) {
+export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry,onClose,closeFocusTarget,opening,overview,sections,trace,now,pendingOverview:providedPendingOverview,pendingTrace:providedPendingTrace,pendingShape:suppliedPendingShape,syncStatus:providedSyncStatus,hasPriorContent:providedHasPriorContent,observedAt=now,spendRead,sessionFailure,sessionPending=false}:DetailsPaneProps) {
   const syncStatus:SyncStatus=providedSyncStatus??(state==='error'?{_tag:'Failed',cause:{_tag:'Unknown'}}:state==='loading'?{_tag:'Connecting',attempt:1,since:now}:{_tag:'Live',since:now})
   const hasPriorContent=providedHasPriorContent??(state!=='loading'&&state!=='error'&&state!=='new')
   const noPriorFailure=syncStatus._tag==='Failed'&&!hasPriorContent
@@ -210,7 +212,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
           return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<>{narrow?<span data-details-duration-label {...stylex.props(styles.shortLabel,styles.valueText)}>{duration.label}</span>:<TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>}{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue value={duration.value} detail={duration.detail}/>}</>}</div>
         })}
         {(pending?pendingTimingMissing:timingMissing)&&<p data-details-overview-line data-details-timing-missing aria-hidden={pending||undefined} {...stylex.props(line,styles.timingMissing)}>{pending?<span inert {...stylex.props(styles.pendingText)}>Timing isn't available for this session.</span>:"Timing isn't available for this session."}</p>}
-        {!pending&&sessionFailure!==undefined&&<DetailsReadFailureLine failure={sessionFailure}/>}
+        {!pending&&<DetailsReadFailureLine failure={sessionFailure} pending={sessionPending}/>}
       </div>
     </Section>
     {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!(title==='Spend'&&spendRead?.failure!==undefined)&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending

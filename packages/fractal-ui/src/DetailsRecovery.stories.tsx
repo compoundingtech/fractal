@@ -87,11 +87,10 @@ async function start(canvas: HTMLElement, width: number, variant: DetailsVariant
   paneFor(canvas).scrollTop = 0
   return paneFor(canvas)
 }
-async function action(canvas: HTMLElement, name: 'loading' | 'failed' | 'busy', settle = 100) {
+async function action(canvas: HTMLElement, name: 'loading' | 'failed' | 'busy') {
   click(canvas, `[data-recovery-action="${name}"]`)
   await waitFor(() => expect(paneFor(canvas)).toHaveAttribute('data-details-sync-state', name === 'failed' ? 'Failed' : name === 'loading' ? 'Connecting' : 'Live'))
   await frames()
-  await delay(settle)
 }
 const shown = (node: Element | null): node is HTMLElement => Boolean(node && node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== 'hidden' && getComputedStyle(node).display !== 'none')
 function clipFor(head: HTMLElement) {
@@ -445,7 +444,10 @@ async function feedbackPlay({ canvasElement: canvas }: Play) {
       requireContract(equal(initial, rectOf(head)), 'Header box changes during observation transitions')
       requireContract(Math.abs(element(head, '[role="tab"]').getBoundingClientRect().left - initialTabLeft) <= 0.5, 'Header title moves during observation transitions')
       for (const [edge, expected] of [['failed', 1], ['busy', 1], ['failed', 1], ['loading', 0], ['busy', 1]] as const) {
-        spoken.length = 0; await action(canvas, edge, 500)
+        spoken.length = 0; await action(canvas, edge)
+        if (expected > 0) await waitFor(() => assertSpoken(spoken, edge, expected))
+        // A bounded silence window checks no extra speech; it is not positive readiness.
+        await delay(100)
         assertSpoken(spoken, edge, expected); assertHeader(pane); assertPhase(pane, edge === 'busy' ? 'live' : edge)
         requireContract(equal(initial, rectOf(head)), 'Header box changes during observation transitions')
         requireContract(Math.abs(element(head, '[role="tab"]').getBoundingClientRect().left - initialTabLeft) <= 0.5, 'Header title moves during observation transitions')

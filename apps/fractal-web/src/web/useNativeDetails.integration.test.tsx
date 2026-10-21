@@ -232,7 +232,8 @@ describe('native Details mounted hook with real getter adapters', () => {
       nativeDetails: gatewayNativeDetails({ options, registry, discovery: client, now: () => 10000 }),
     }
     let last: NativeDetailsObservation | undefined
-    const Pane = ({ agentRef }: { readonly agentRef: string }) => { last = useNativeDetails({ agentRef }); return null }
+    let mounted = false
+    const Pane = ({ agentRef }: { readonly agentRef: string }) => { last = useNativeDetails({ agentRef }); React.useEffect(() => { mounted = true; return () => { mounted = false } }, []); return null }
     const show = (agentRef: string | undefined) => act(async () => root.render(<DataSourceProvider source={source} registry={registry}>{agentRef === undefined ? null : <Pane agentRef={agentRef} />}</DataSourceProvider>))
     const missions = () => last?.sections.find(section => section.title === 'Missions')
     try {
@@ -266,9 +267,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       await act(async () => { await vi.waitFor(() => expect(last?.spendRead?.refreshing).toBe(false)) })
       expect(count('/v1/client/usage')).toBe(before.usage + 3)
       await show(undefined)
-      const settled = Promise.withResolvers<void>()
-      setTimeout(settled.resolve, 50)
-      await settled.promise
+      await vi.waitFor(() => expect(mounted).toBe(false))
       expect(count('/v1/client/usage')).toBe(before.usage + 3)
     } finally {
       await act(async () => root.unmount())

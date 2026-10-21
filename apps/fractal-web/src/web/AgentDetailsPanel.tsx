@@ -161,6 +161,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
       {...(native.observedAt === undefined ? {} : { observedAt: native.observedAt })}
       {...(native.spendRead === undefined ? {} : { spendRead: native.spendRead })}
       {...(native.sessionFailure === undefined ? {} : { sessionFailure: native.sessionFailure })}
+      sessionPending={native.sessionPending}
     />
     <ModalOverlay isOpen={inspection !== undefined} onOpenChange={open => { if (!open) setInspectedUri(undefined) }} isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
       <Modal {...stylex.props(styles.modal)}><Dialog aria-label="Reported resource details" {...stylex.props(styles.inspection)}>

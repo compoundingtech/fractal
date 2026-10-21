@@ -70,27 +70,29 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
       const count = section.title === 'Subagents' ? trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : undefined
         : section.items._tag === 'Known' && section.items.value.length > 0 ? section.items.value.length : undefined
       const pending = state === 'loading' || section.pending === true
-      if (!pending && section.failure !== undefined && section.items._tag === 'Unknown') return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="failed" {...stylex.props(styles.section)}>
-        <div {...stylex.props(styles.header)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span></div>
-        <div {...stylex.props(styles.body)}><DetailsReadFailureLine failure={section.failure} /></div>
-      </section>
-      if (!pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)) return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="unavailable" {...stylex.props(styles.section)}>
+      // Nothing read yet and the read failed: the heading names the section and its failure line is the whole body.
+      const failedOnly = !pending && section.failure !== undefined && section.items._tag === 'Unknown'
+      if (!failedOnly && !pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)) return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="unavailable" {...stylex.props(styles.section)}>
         <div {...stylex.props(styles.header, narrow && styles.headerWrap)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.metaLine)}>{section.title}</span><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></div>
       </section>
-      return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
+      // Failed, retrying and settled share one tree, so the read line and its focused action survive every transition.
+      return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state={failedOnly ? 'failed' : undefined} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
         <div {...stylex.props(styles.header)}>
-          <AriaButton aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton, narrow && styles.touchHeight)}>
-            <Icon name={isCollapsed?'chevron-right':'chevron-down'}/>
-            <span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span>
-            {count !== undefined && (pending
-              ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(count).length} /></span>
-              : <span data-details-section-count {...stylex.props(styles.count)}>{count}</span>)}
-          </AriaButton>
+          {failedOnly
+            ? <><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span></>
+            : <AriaButton data-details-section-control aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton, narrow && styles.touchHeight)}>
+              <Icon name={isCollapsed?'chevron-right':'chevron-down'}/>
+              <span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span>
+              {count !== undefined && (pending
+                ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(count).length} /></span>
+                : <span data-details-section-count {...stylex.props(styles.count)}>{count}</span>)}
+            </AriaButton>}
         </div>
-        {!isCollapsed && <div {...stylex.props(styles.body)}>
-          {!pending && section.failure !== undefined && <DetailsReadFailureLine failure={section.failure} />}
-          <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />
-        </div>}
+        <div {...stylex.props(styles.body, isCollapsed && !failedOnly && styles.bodyCollapsed)}>
+          {/* Pane-level loading has no section read in flight; a section's own pending read keeps its held failure mounted. */}
+          {state !== 'loading' && <DetailsReadFailureLine failure={pending ? undefined : section.failure} pending={section.pending === true} />}
+          {!failedOnly && !isCollapsed && <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />}
+        </div>
       </section>
     })}
     {/* One summary line for every unreported section; their reasons wait behind a collapsed Why? on desktop and phone alike. */}
@@ -372,6 +374,8 @@ const styles = stylex.create({
   headerTitle: { color: ink.fg, fontWeight: t.weightSemibold, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   count: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, flexShrink: 0 },
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInlineStart: s.xxl, paddingInlineEnd: s.md, paddingBottom: s.md, minWidth: 0 },
+  // A collapsed section keeps only a held read line in its body; with none, the body has no height.
+  bodyCollapsed: { paddingBottom: s.zero },
   metaLine: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   // One plain sentence on its own row; its Why? starts beneath it.
   whyLine: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
