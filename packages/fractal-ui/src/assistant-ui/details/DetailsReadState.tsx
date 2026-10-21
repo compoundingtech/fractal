@@ -2,8 +2,8 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, VisuallyHidden } from 'react-aria-components'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { HumanTime, useHumanTimeZone } from '../../time/HumanTime'
-import { formatExact } from '../../time/human-time'
+import { HumanTime, useClockLabel } from '../../time/HumanTime'
+import { formatRelative } from '../../time/human-time'
 import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { DetailsReadFailure, DetailsSpendRead } from './model'
 
@@ -26,10 +26,12 @@ function handOffFocus(action: HTMLElement | null): void {
  */
 function useFailureAnnouncement(failure: FailureSentence | undefined, pending: boolean): string | undefined {
   const [announced, setAnnounced] = React.useState<string>()
-  const zone = useHumanTimeZone()
   const read = React.useRef<{ wasPending: boolean; settles: number; key: string | undefined }>({ wasPending: false, settles: 0, key: undefined })
   const message = failure?.message
   const retainedAt = failure?.retainedAt
+  const label = useClockLabel((now, zone) => retainedAt === undefined ? '' : formatRelative(retainedAt, now, zone))
+  const latestLabel = React.useRef(label)
+  latestLabel.current = label
   React.useLayoutEffect(() => {
     const state = read.current
     if (pending) { state.wasPending = true; return }
@@ -41,11 +43,11 @@ function useFailureAnnouncement(failure: FailureSentence | undefined, pending: b
     setAnnounced(undefined)
     let frame = requestAnimationFrame(() => {
       frame = 0
-      setAnnounced(retainedAt === undefined ? message : `${message} Showing figures from ${formatExact(retainedAt, zone)}.`)
+      setAnnounced(retainedAt === undefined ? message : `${message} Showing figures from ${latestLabel.current}.`)
     })
     // A superseded or unmounted frame never speaks; its key is forgotten so the next settled run announces.
     return () => { if (frame !== 0) { cancelAnimationFrame(frame); state.key = undefined } }
-  }, [pending, message, retainedAt, zone])
+  }, [pending, message, retainedAt])
   return announced
 }
 
