@@ -1281,6 +1281,21 @@ class CommittedPolicy(unittest.TestCase):
                     outside.append(f'{source.relative_to(ROOT)} includes {relative}')
         self.assertEqual(outside, [], 'a compile-time include outside the declared linux-gate inputs: declare it or stop including it')
 
+    def test_no_rust_source_lints_the_whole_tree(self):
+        # A Rust test that lists every file (git ls-files without a path) or runs a whole-tree lint script reads paths outside
+        # the declared linux-gate inputs, so a change to only those paths could reuse a pass. Whole-tree lints belong in
+        # genie-freshness (scripts/check-public-repo, scripts/check-native-names), whose key is the whole tree.
+        listing = re.compile(r'"ls-files"(?![^\]]*"--error-unmatch")')
+        found = []
+        for source in sorted(ROOT.glob('**/*.rs')):
+            parts = source.relative_to(ROOT).parts
+            if 'target' in parts or '.git' in parts or 'node_modules' in parts:
+                continue
+            text = source.read_text(errors='replace')
+            if listing.search(text) or 'check-public-repo' in text or 'check-native-names' in text:
+                found.append(str(source.relative_to(ROOT)))
+        self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
+
     def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         # Nothing enforces anywhere: every check, not only the host ones, keeps enforce false until the flip PR.

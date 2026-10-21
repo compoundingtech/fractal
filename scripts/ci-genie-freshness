@@ -22,4 +22,10 @@ for test in \
 done
 python3 scripts/check-sqlite-large-values-test
 python3 scripts/check-sqlite-large-values
+# Whole-tree lints live here, not in the Linux gate: this check's evidence key is the whole tree, while the Linux gate
+# may skip on a note for another tree with the same declared inputs, which a page under apps/ does not change.
+python3 scripts/check-public-repo-test
+python3 scripts/check-public-repo
+python3 scripts/check-native-names-test
+python3 scripts/check-native-names
 genie --check
