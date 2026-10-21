@@ -1,16 +1,12 @@
 import type { StorybookConfig } from '@storybook/react-vite'
+import type { PreviewAnnotation } from 'storybook/internal/types'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath } from 'node:url'
 import { createStylexVitePlugins } from '../../../apps/fractal-web/scripts/stylex.mjs'
+import { storyGlobs } from './stories.ts'
 
 const config: StorybookConfig = {
-  stories: [
-    '../src/**/*.stories.tsx',
-    '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx',
-    '../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx',
-    // The live roster story replays captured daemon payloads through the SDK decode.
-    '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx',
-  ],
+  stories: storyGlobs,
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
@@ -18,13 +14,15 @@ const config: StorybookConfig = {
   previewAnnotations: async (entries = []) => {
     const original = fileURLToPath(import.meta.resolve('@storybook/addon-a11y/preview'))
     let replaced = false
-    const annotations = entries.map(entry => {
-      // Storybook 10 supplies { bare, absolute } addon entries at runtime.
-      const absolute = typeof entry === 'object' && entry !== null && 'absolute' in entry ? entry.absolute : entry
-      if (absolute !== original) return entry
+    const annotations = [...entries]
+    // The exported preset type also covers structured { bare, absolute } entries.
+    const presetEntries: readonly PreviewAnnotation[] = entries
+    for (const [index, entry] of presetEntries.entries()) {
+      const absolute = typeof entry === 'string' ? entry : entry.absolute
+      if (absolute !== original) continue
       replaced = true
-      return fileURLToPath(new URL('./a11y-timing.mjs', import.meta.url))
-    })
+      annotations[index] = fileURLToPath(new URL('./a11y-timing.mjs', import.meta.url))
+    }
     if (!replaced) throw new Error('Missing pinned a11y preview annotation')
     return annotations
   },
