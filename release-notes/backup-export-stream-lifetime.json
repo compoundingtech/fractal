@@ -14,8 +14,8 @@
     "detail": "No change."
   },
   "compatibility": {
-    "status": "none",
-    "detail": "The successful claim-backup stream and checksum format are unchanged; old clients can download from an upgraded server. Preparation runs after headers; a producer failure aborts the response body and the client never publishes its temporary file."
+    "status": "changed",
+    "detail": "Successful claim-backup archives are unchanged. After headers, preparation failures are a terminal failure record carrying code and message, which is not a valid backup. Updated clients report that cause; old clients reject it as an incomplete/unknown-format export. A concurrent export is refused as backup-busy (503). The CLI has no idle download limit; any separately configured HTTP proxy must allow a long preparation interval before body bytes."
   },
   "downtime": {
     "status": "none",

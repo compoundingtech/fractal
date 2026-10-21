@@ -392,7 +392,7 @@ impl ApiError {
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
+            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
