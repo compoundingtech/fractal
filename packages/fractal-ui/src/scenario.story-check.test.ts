@@ -230,23 +230,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './Workbench.stories.tsx#HostToolReveal': 2936,
   './Workbench.stories.tsx#AllStates': 2936,
   './Workbench.stories.tsx#AllStatesLight': 2936,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#StickyChain': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#PushOutBoundary': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#DepthCap': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#AccessibleRows': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#PinnedClick': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#FocusAndReveal': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#VisibleFocusDoesNotJump': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#CollapseFilterReorder': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#ColdRevealBeforeMeasurement': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#RevealUnvisitedAncestors': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Light440': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Dark1440': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Light1440': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Modal240': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Modal240Light': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#ChevronIcons': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#AllStates': 3355,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardKnown': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardUnknown': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#TimeCohort': 2906,
@@ -257,29 +240,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneTouchTargets': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneFocusNoHover': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#ThemedOverlaysAndFocus': 2906,
-  './stories/milestone/RedesignMilestone.stories.tsx#Slice': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#SliceLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Loading': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#LoadingLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyRoster': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyRosterLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyThread': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyThreadLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NoMatch': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NoMatchLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#RosterError': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#RosterErrorLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ThreadUnavailable': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ThreadUnavailableLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Stale': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#StaleLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Navigation': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NavigationLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#HideChanges': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NavigationKeyboard': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ErrorRecovery': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ThreadRecovery': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Decisions': 3355,
 }
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
@@ -373,13 +333,14 @@ for (const [path, module] of Object.entries(storyModules)) {
       modes.add(tag)
       exemptFiles.set(path, modes)
     } else sliceFiles.add(path)
+    // The full synthetic depth-6 matrix takes about 5–6 seconds to render in jsdom.
     test(`${id} validates its scenario mode`, () => {
       const result = scenarioStoryCheck(story, storyMeta)
       expect(result.failures).toEqual([])
       expect(result._tag).toBe('Passed')
       for (const exemption of result.exemptions) process.stdout.write(`${id}: ${exemption._tag} — ${exemption.reason}\n`)
       expect(result.exemptions).toHaveLength(tag === 'slices' ? 0 : 1)
-    })
+    }, id === './assistant-ui/sidebar/SidebarTree.stories.tsx#AllStates' ? 15_000 : undefined)
   }
 }
 
@@ -452,7 +413,7 @@ test('app mode debt matches its reviewed shrink-only pin', () => {
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(266)
+  expect(exemptions).toHaveLength(306)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 
