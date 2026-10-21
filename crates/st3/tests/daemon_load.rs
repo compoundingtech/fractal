@@ -23,7 +23,9 @@
 //! - `ST_LOAD_GATE=1` runs it. A debug build skips it.
 //! - `ST_LOAD_SCALE` sets the generated store's scale. The default, `1`, is the busy host's size.
 //! - `ST_BENCH_DIR` keeps the generated store for the next run, as for `daemon_bench`.
-//! - `ST_LOAD_SECONDS` sets how long the load runs. The default is 120.
+//! - `ST_LOAD_SECONDS` sets how long the load runs. The default is 400 for the budgets, so every
+//!   budgeted p99 rests on at least [`MIN_SAMPLES`] samples: kinds the busy host sends too rarely
+//!   for that are sampled faster. The hog run's default is 120.
 //! - `ST_LOAD_BASELINE` names main's reports to compare with, a file or a directory of them; the
 //!   comparison takes the worst of each. Without one only the budgets apply.
 //! - `ST_LOAD_REPORT` writes the steady report there, for the next comparison; the explicit
@@ -191,10 +193,20 @@ struct Conditions {
     /// Run a CPU and disk hog at seat priority beside the daemon, holding the load average
     /// above the core count.
     hog: bool,
+    /// Give every budgeted p99 at least [`MIN_SAMPLES`] samples over the run.
+    sampled: bool,
 }
 
-/// The requests of a run: the busy host's [`MIX`], faster where `conditions` measure.
-fn mix(conditions: Conditions) -> Vec<Load> {
+/// The fewest samples a budgeted p99 rests on. Over fewer than a few hundred, a p99 is one of
+/// the run's slowest few samples: at 97, the second slowest.
+const MIN_SAMPLES: usize = 300;
+
+/// How long the budgeted load runs by default: long enough for the replication exchange's p99 to
+/// rest on [`MIN_SAMPLES`] at the busy host's rate. Sparser kinds are sampled faster to reach it.
+const GATE_SECONDS: u64 = 400;
+
+/// The requests of a run: the busy host's [`MIX`], faster where `conditions` measure or sample.
+fn mix(conditions: Conditions, duration: Duration) -> Vec<Load> {
     let mut mix = MIX
         .iter()
         .map(|kind| load(kind.name, kind.per_second, kind.budget.as_millis() as u64))
@@ -206,6 +218,15 @@ fn mix(conditions: Conditions) -> Vec<Load> {
             }
         }
         mix.push(load("person read fresh", 1.0, 1_000));
+    }
+    if conditions.sampled {
+        // A sparse kind goes out just often enough for its p99, each person-read path apiece;
+        // every other kind keeps the busy host's rate.
+        for kind in &mut mix {
+            let paths = if kind.name == "person read" { PERSON_READS.len() } else { 1 };
+            let floor = (MIN_SAMPLES * paths) as f64 / duration.as_secs_f64();
+            kind.per_second = kind.per_second.max(floor);
+        }
     }
     mix
 }
@@ -268,8 +289,19 @@ struct Report {
     fixture_legacy_reconstruction_ms: f64,
     #[serde(default)]
     store_open_ms: f64,
+    /// The runner's single-core speed, from [`runner_reference_ms`].
+    #[serde(default)]
+    runner_reference_ms: f64,
     paths: BTreeMap<String, PathReport>,
     failed: BTreeMap<String, usize>,
+    /// Reads refused because a published list was withdrawn and not folded again yet, by kind
+    /// and error: a retryable 503 "still being prepared" or a window's resync before its first
+    /// snapshot. Reported, and failing only once [`AVAILABILITY_GATED`].
+    #[serde(default)]
+    unavailable: BTreeMap<String, usize>,
+    /// Seconds into the timed load of the first and last of them.
+    #[serde(default)]
+    unavailable_window_s: Option<[f64; 2]>,
     /// The host the run measured on, when it ran beside a hog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hog: Option<HogReport>,
@@ -339,7 +371,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
     }
     let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let scale = env_number("ST_LOAD_SCALE", 1.0_f64);
-    let seconds = env_number("ST_LOAD_SECONDS", 120_u64);
+    let seconds = env_number("ST_LOAD_SECONDS", GATE_SECONDS);
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
@@ -369,7 +401,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
             &peer_source,
             Duration::from_secs(seconds),
             regime,
-            Conditions::default(),
+            Conditions { sampled: true, ..Conditions::default() },
         );
         print(&report);
         if let Some(path) = std::env::var_os("ST_LOAD_REPORT") {
@@ -458,7 +490,7 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
             &peer_source,
             Duration::from_secs(seconds),
             LoadRegime::Steady,
-            Conditions { measured: true, hog },
+            Conditions { measured: true, hog, sampled: false },
         );
         print(&report);
         drop(daemon);
@@ -848,7 +880,31 @@ fn absolute_failures(report: &Report) -> Vec<String> {
             report.failed
         ));
     }
+    if AVAILABILITY_GATED && !report.unavailable.is_empty() {
+        failures.push(unavailable_summary(report));
+    }
     failures
+}
+
+/// Whether reads refused while a published list refolds fail the run. They are reported only
+/// until the store keeps serving each list through a chunked replication receive: today it
+/// withdraws every list once per backlog chunk (#3553). That fix turns this on.
+const AVAILABILITY_GATED: bool = false;
+
+/// A read the daemon refused because a published list was withdrawn and has not folded again:
+/// the list's retryable 503 ("still being prepared", or a `*-not-ready` code, which survives
+/// the report's 90-character cut), or a collection window's resync before its first snapshot.
+fn unavailable_read(error: &str) -> bool {
+    (error.contains("503") && (error.contains("still being prepared") || error.contains("-not-ready")))
+        || error.contains("expected initial snapshot, got Some(Resync")
+}
+
+fn unavailable_summary(report: &Report) -> String {
+    let reads = report.unavailable.values().sum::<usize>();
+    let window = report.unavailable_window_s.map_or(String::new(), |[first, last]| {
+        format!(" from {first:.1} s to {last:.1} s into the load ({:.1} s)", last - first)
+    });
+    format!("{reads} reads found a published list withdrawn{window}: {:?}", report.unavailable)
 }
 
 /// Main's reports at `path`, a report or a directory of them, combined into the worst of each:
@@ -1216,7 +1272,7 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
         roster_subscribers: ROSTER_SUBSCRIBERS,
         ..Report::default()
     };
-    for (name, budget, count) in mix(Conditions { measured: true, ..Conditions::default() })
+    for (name, budget, count) in mix(Conditions { measured: true, ..Conditions::default() }, Duration::from_secs(120))
         .into_iter()
         .map(|load| (load.name, load.budget, 100))
         .chain([
@@ -1304,6 +1360,26 @@ fn relative_tolerance_keeps_every_absolute_budget_and_correctness_check() {
             .any(|failure| failure.contains("requests failed"))
     );
     report.failed.clear();
+    // A withdrawn list's refusals are reported apart from failures, and fail only once gated.
+    for refused in [
+        "person read: /v1/client/work: st API returned 503 internal: the work list is still being prepared; retr",
+        "person read: /v1/client/missions: st API returned 503 mission-list-not-ready: the mission list is still being prepared",
+        // As the report keys it, cut at 90 characters.
+        "person read: /v1/client/missions: st API returned 503 mission-list-not-ready: the mission ",
+        "collection missions: missions: expected initial snapshot, got Some(Resync { id: \"load-9\", code: Some(Unknown)",
+    ] {
+        assert!(unavailable_read(refused), "{refused}");
+    }
+    assert!(!unavailable_read("claim: st API returned 500 internal: disk I/O error"));
+    report.unavailable.insert("person read: /v1/client/work: 503 still being prepared".into(), 3);
+    report.unavailable_window_s = Some([313.1, 315.4]);
+    assert_eq!(
+        absolute_failures(&report).iter().any(|failure| failure.contains("withdrawn")),
+        AVAILABILITY_GATED
+    );
+    assert!(unavailable_summary(&report).contains("3 reads found a published list withdrawn from 313.1 s to 315.4 s"));
+    report.unavailable.clear();
+    report.unavailable_window_s = None;
     report.long_poll_seats = SEATS - 1;
     assert!(
         absolute_failures(&report)
@@ -1334,6 +1410,10 @@ fn print(report: &Report) {
         report.migration_pending_at_load_end,
         report.fixture_legacy_reconstruction_ms,
         report.store_open_ms
+    );
+    println!(
+        "runner reference: {:.1} ms to sort {RUNNER_REFERENCE_VALUES} values on one core (the same work on every host)",
+        report.runner_reference_ms
     );
     if let Some(migration) = &report.event_migration {
         println!(
@@ -1394,6 +1474,10 @@ fn print(report: &Report) {
     }
     if !report.failed.is_empty() {
         println!("failed requests: {:?}", report.failed);
+    }
+    if !report.unavailable.is_empty() {
+        let gate = if AVAILABILITY_GATED { "failing" } else { "report-only until #3553" };
+        println!("unavailable ({gate}): {}", unavailable_summary(report));
     }
 }
 
@@ -1540,6 +1624,24 @@ fn start_event_migration(
 }
 
 #[test]
+fn every_budgeted_p99_rests_on_enough_samples_and_dense_kinds_keep_the_busy_hosts_rate() {
+    let duration = Duration::from_secs(GATE_SECONDS);
+    let sampled = mix(Conditions { sampled: true, ..Conditions::default() }, duration);
+    for (kind, busy) in sampled.iter().zip(MIX) {
+        assert_eq!(kind.name, busy.name);
+        let paths = if kind.name == "person read" { PERSON_READS.len() } else { 1 };
+        let samples = kind.per_second * duration.as_secs_f64() / paths as f64;
+        assert!(samples >= MIN_SAMPLES as f64 - 1e-9, "{}: {samples:.0} samples", kind.name);
+        if busy.per_second * duration.as_secs_f64() / paths as f64 >= MIN_SAMPLES as f64 {
+            assert_eq!(kind.per_second, busy.per_second, "{} keeps its rate", kind.name);
+        }
+    }
+    // The replication exchange reaches it at the busy host's own rate.
+    let exchange = sampled.iter().find(|kind| kind.name == "replication exchange").unwrap();
+    assert_eq!(exchange.per_second, 0.8);
+}
+
+#[test]
 fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
     let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = tempfile::tempdir().unwrap();
@@ -1634,6 +1736,33 @@ fn withdraw_usage_counts(path: &Path) {
         .unwrap();
 }
 
+/// How many values [`runner_reference_ms`] sorts.
+const RUNNER_REFERENCE_VALUES: usize = 1 << 21;
+
+/// The runner's single-core speed, timed before the daemon starts: the fastest of three sorts of
+/// the same pseudo-random values. Runners of one machine type differ by about 2x, so a run's
+/// latencies read against the host they ran on.
+fn runner_reference_ms() -> f64 {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let values = (0..RUNNER_REFERENCE_VALUES)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        })
+        .collect::<Vec<_>>();
+    (0..3)
+        .map(|_| {
+            let mut sorted = values.clone();
+            let started = Instant::now();
+            sorted.sort_unstable();
+            std::hint::black_box(&sorted);
+            started.elapsed().as_secs_f64() * 1_000.0
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
 /// Cached generated sources may already be schema 17. Reconstruct only the legacy event
 /// table on this private fixture copy so the explicit upgrade case really has work to drain.
 /// This fixture preparation is reported separately; it is not production upgrade cost.
@@ -1673,8 +1802,9 @@ fn run(
     conditions: Conditions,
 ) -> Report {
     let profile = LoadProfile::from_env();
+    let runner_reference_ms = runner_reference_ms();
     // Leaked so each kind's task may hold it; a test process ends soon after.
-    let mix: &'static [Load] = Box::leak(mix(conditions).into_boxed_slice());
+    let mix: &'static [Load] = Box::leak(mix(conditions, duration).into_boxed_slice());
     let work = tempfile::tempdir().unwrap();
     let root = work.path();
     let database = root.join("state/claims.sqlite3");
@@ -1835,6 +1965,7 @@ fn run(
 
     let timings = Arc::new(Mutex::new(BTreeMap::<String, Vec<Duration>>::new()));
     let failed = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+    let unavailable_at = Arc::new(Mutex::new(Vec::<f64>::new()));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let running = Arc::new(AtomicBool::new(true));
     let long_poll_seats = Arc::new(AtomicUsize::new(0));
@@ -1852,6 +1983,7 @@ fn run(
     let cpu_by_kind_before = cpu_by_kind();
     let cursor = context.store.index().unwrap();
     let started = Instant::now();
+    let load_started = started;
     load.block_on(async {
         if conditions.hog {
             let (samples, running) = (load_samples.clone(), running.clone());
@@ -1874,6 +2006,7 @@ fn run(
                 in_flight.clone(),
                 running.clone(),
             );
+            let unavailable_at = unavailable_at.clone();
             let mut initial_ready = initial_ready.clone();
             tasks.push(tokio::spawn(async move {
                 // The first person read must not warm the shared roster before the simultaneous
@@ -1897,11 +2030,12 @@ fn run(
                         continue;
                     }
                     // Requests go out on time however slow the last answer was, as a fleet's do.
-                    let (context, timings, failed, in_flight) = (
+                    let (context, timings, failed, in_flight, unavailable_at) = (
                         context.clone(),
                         timings.clone(),
                         failed.clone(),
                         in_flight.clone(),
+                        unavailable_at.clone(),
                     );
                     in_flight.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(async move {
@@ -1921,6 +2055,9 @@ fn run(
                                 .or_default()
                                 .push(took),
                             Ok(Err(error)) => {
+                                if unavailable_read(&error) {
+                                    unavailable_at.lock().unwrap().push(load_started.elapsed().as_secs_f64());
+                                }
                                 *failed
                                     .lock()
                                     .unwrap()
@@ -2162,7 +2299,16 @@ fn run(
         })
         .collect();
     load.shutdown_timeout(Duration::from_secs(5));
-    let failed = std::mem::take(&mut *failed.lock().unwrap());
+    let (unavailable, failed): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut *failed.lock().unwrap())
+        .into_iter()
+        .partition(|(failure, _)| unavailable_read(failure));
+    let unavailable_at = std::mem::take(&mut *unavailable_at.lock().unwrap());
+    let unavailable_window_s = unavailable_at
+        .iter()
+        .copied()
+        .fold(None, |window: Option<[f64; 2]>, at| {
+            Some(window.map_or([at, at], |[first, last]| [first.min(at), last.max(at)]))
+        });
     let collection_change_frames = std::mem::take(&mut *collection_change_frames.lock().unwrap());
     let collection_resyncs = std::mem::take(&mut *collection_resyncs.lock().unwrap());
     Report {
@@ -2185,8 +2331,11 @@ fn run(
         migration_pending_at_load_end,
         fixture_legacy_reconstruction_ms,
         store_open_ms,
+        runner_reference_ms,
         paths,
         failed,
+        unavailable,
+        unavailable_window_s,
         hog: hog_report,
         targets,
     }
