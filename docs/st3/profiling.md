@@ -180,6 +180,27 @@ snapshots open past the target now. `waiting` counts callers waiting for the wri
 waiting for admission, and `threads` counts this process's threads, in all and by name. `st
 doctor` prints it as `slo/writer-hold`.
 
+Three more fields show what keeps the WAL from recycling:
+- `read_loans` lists every read loan now, grouped by the route label of the read budget it works
+  under (`(no budget)` for background work). Each route gives `checkouts`,
+  `snapshot_checkouts`, `expired` (loans whose budget has run out), `oldest_checkout_age_ms` and
+  `oldest_snapshot_confirmed_age_ms`. The eight routes with the oldest checkouts come first, and
+  the rest are summed as `(other)`. A checked-out loan need not hold a read transaction; a
+  confirmed snapshot has completed its first read and does.
+- `wal` is the newest attempt by the WAL checkpoint worker, which tries every five seconds:
+  `checkpoint` (`outcome` empty, recycled, deferred or error, with `frames`, `backfilled`,
+  `not_backfilled` and its phase times), `wal_bytes` (the WAL file's size), `age_ms`, and
+  `deferred_ms`, how long checkpoints have been deferred or failing since one last settled.
+- `snapshot_build` gives windows for the three phases of building a replication snapshot:
+  `wait` for the build lock, which one build holds at a time; `inventory` for reading the
+  envelope inventory; and `digest` for hashing its digests. A build that fails partway still
+  records the phases it reached, so these are not only successful builds.
+
+Waiting for a reader, the writer's queue, commits and checkpoints are measured as OpenTelemetry
+histograms when export is on: `db.client.connection.wait_time` (read admission),
+`st.db.writer.queue.duration` (writer admission), `st.db.writer.commit.duration` and
+`st.db.wal.checkpoint.duration`.
+
 The `database` row is this member's store: `max_live_gb` for the pages in use (the file less its
 free pages, which SQLite reuses before the file grows) and `max_growth_mb_per_day` for their net
 daily growth, what is written less what checkpoints and retention free. The daemon samples the
@@ -192,7 +213,7 @@ to the WAL but not yet copied into the main file, so they are never added to the
 `physical_growth_bytes_per_day` compares it with the sample nearest exactly a day ago, within half
 an hour of it, scaled to a day. It is never extrapolated. A sample dated in the future, after the
 clock went back, is dropped. The newest sample is the one every reader uses
-(`st3::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
+(`fractal_daemon::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
 within it.
 
 The windows live in memory. Each is a ring of slots (12 of 5 seconds, 10 of 30 seconds, 12 of 5
@@ -316,12 +337,12 @@ The socket's existing 30-second timer remains the delivery cadence for clock-onl
 This cache covers the six collections named above.
 
 A disposable local single-client cold-read comparison is available with:
-`cargo test -p st3-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
+`cargo test -p fractal-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
 It compares uncached, cold cached and warm reads for 100 glass rows under Unix and paired
 sessions, alternating case order and reporting aggregate wall/process CPU. Debug-profile
 fixture results do not measure deployed paired-client CPU or production tail latency.
 
-`cargo test -p st3-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
+`cargo test -p fractal-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
 compares 22 uncached projections with shared cold and 22 warm reads over 70 generated missions
 and person steps, asserting projection parity. Its stage profile separates mission attention-run
 selection, definition reads, run overviews, step previews and attention snapshot work. The
@@ -357,6 +378,15 @@ Local opening captures the first page and replay boundary together, using the na
 keyset fold and reusing its bounded head for the header. Remote opening retains the
 two established owner reads (changes with no cursor and zero wait, then timeline);
 profile those reads separately before attributing repeated fold work to local opening.
+The opening admission pins one graph frontier for routing and managed session identity.
+An `agent/` target reads that subject directly, rather than constructing the fleet owner map.
+The local first page carries that owner and its incarnation through transcript selection,
+the follower mark, native ordering and stored-message overlay; those stages do not resolve
+the owner again. Transcript selection is shared with the mark rather than repeated for it.
+Identity fields and runtime-source selection use newest-first indexed seeks; only genuine
+rival runtime origins require the causal conflict proof. The daemon-cost owner regressions
+compare short and long mixed-origin histories without increasing a growth allowance.
+
 For representative receipts, pin the daemon build and capture five successful initial,
 tab-switch and reconnect frames on the used collections route, with client receipt/render
 time beside the internal profile. Record local versus relayed ownership and cold versus
@@ -405,6 +435,121 @@ as writer wait, and the job itself as writer hold. The batch `COMMIT` appears un
 `(unlabeled st3-writer)`, whose statement count is the number of batches. Phase times
 and the enclosing operation can overlap; they must not be added as independent
 request durations.
+
+### Isolated native message-selector cost receipts
+
+The ignored native controls in `crates/fractal-api-core/src/api/client_messages_selector_tests.rs`
+use fresh temporary stores, not daemon databases. Run them in the admitted native
+proof lane with the same optimized build, filesystem and durability settings for
+both designs; retain the exact source/build identity, command, machine/filesystem,
+complete stderr JSON and exit status. Focused Cargo filters (with
+`cargo test --release -p fractal-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
+
+- `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
+  each with 32 metadata claims, explicit native rebuild and first/next pages.
+- `benchmark_client_messages_selector_closed_heavy`: 12,800 real messages,
+  12,672 closed, explicit native rebuild and open first/next pages.
+- `benchmark_client_messages_selector_write_bursts`: identical 128 sends,
+  256 delivered/read setup commits and 128 closes per design. Fresh source-only
+  and selector-enabled stores run in reversed order across two rounds; full
+  authoritative message views must agree.
+- `benchmark_client_messages_selector_deferred_maintenance`: a real 128-message,
+  32-metadata-claims-per-message fixture followed by one native delivered-claim
+  batch that must leave pending work. It drains independent production maintenance
+  calls, retains each loan's interval and maximum, gates every call at 100 ms,
+  and checks fully drained headers, canonical body status and complete page/oracle
+  equality. The source batch's COMMIT and maintenance checkpoint are separate.
+- `benchmark_client_messages_selector_migration_copy`: requires
+  `ST3_CLIENT_MESSAGES_SELECTOR_MIGRATION_COPY` naming an explicitly supplied,
+  checkpointed **offline copy** with 118,000–118,999 claims. Only a further fresh
+  temporary copy is mutated. It reports total Store open, native startup backfill,
+  explicit rebuild, outside-transaction checkpoint and populated reopen separately.
+  A copy with completed selectors is rejected as migration evidence.
+
+The scaling and closed-heavy controls now gate the **maximum** of every real
+rebuild chunk against the existing 100 ms transaction target, independently of
+page p95. The offline control does the same for startup and explicit rebuild.
+`selector_backfill_transactions` reports BEGIN-through-durable-COMMIT maximum,
+the phase and work/COMMIT times for that transaction, plus the independently
+longest COMMIT's phase, work, Unix-microsecond interval and WAL file length.
+Work includes BEGIN and progress/fold bookkeeping, not just one selector SQL
+step. `checkpoint_outside_transactions_ms` is the driver's PASSIVE checkpoint;
+it is not deducted from transaction time or from total Store open. These are
+observed cohort maxima, **not** a universal scheduler/fsync tail guarantee.
+
+The write control retains FULL (`synchronous=2`) and verifies automatic
+checkpointing is disabled. Its `commit_inclusive` distribution includes max and
+the count at or over 100 ms; every append call must be below 100 ms. This is an
+outer call scope, including writer admission, native append/projection, selector
+finalization and COMMIT, **not** an isolated SQL transaction measurement.
+Per-commit indexed wall times and Unix-microsecond intervals allow correlation
+with a contemporaneous native profile or OS trace. They do not by themselves
+attribute a slow call to selector work or fsync. Profiling's batch COMMIT label
+above and the backfill phase counters must not be conflated.
+
+The deferred-maintenance control reports a conservative transaction envelope:
+preflight reads, writer admission, BEGIN, the production finalizer, durable COMMIT
+and remaining-work checks. Unlike the startup/rebuild counters, this public
+maintenance call does not expose separate selector-work/COMMIT timings. A slow
+loan requires native profiling/OS tracing or a contract-preserving test-only phase
+hook at that production boundary; its outer wall time must not be labeled isolated
+SQL work. A finite fixture and passing observed maxima do not establish a universal
+bound for all future workloads.
+
+`client_messages_selector_checkpoint` records TRUNCATE admission/checkpoint
+wall time, SQLite busy/frame results and before/after physical storage; each
+send/close segment must start with a verified zero-length WAL. Send and close
+records include the pre-checkpoint WAL bytes, bytes per commit, post-checkpoint
+storage, and separate checkpoint timing. Delivered/read setup is real work but
+excluded from send/close latency distributions; its WAL is visible in the next
+segment-start checkpoint record. Delta records report absolute extra WAL bytes,
+percentage over the source-only baseline and p95/max/call-sum wall differences
+for the same round and lifecycle workload. These file lengths include the WAL
+header; they are neither daily database growth nor cumulative write I/O.
+Startup/rebuild's PASSIVE checkpoint can leave a reusable WAL file, so their
+post-return file lengths cannot be presented as bytes written by that operation.
+
+A passing new cohort cannot explain or erase an earlier over-target COMMIT.
+For an unexplained tail, preserve the adverse receipt and collect a contemporaneous
+SQLite/OS scheduling and sync trace over its recorded interval before assigning
+a cause; disabling automatic checkpointing does not remove FULL sync or scheduler
+tails. Do not weaken durability, raise 100 ms, or substitute page p95 for transaction
+max. No benchmark result is implied by these commands or instrumentation.
+The repository's database-size/daily-growth targets do not allocate an acceptable
+selector-versus-baseline WAL amplification percentage. That limit and disposition
+of adverse write/WAL receipts require the public contract owner's explicit decision;
+these controls deliberately do not invent a WAL ceiling or a waiver.
+
+#### Production-size offline-copy receipt
+
+`api::client_messages_selector_tests::production_copy::benchmark_client_messages_selector_production_copy`
+is a separate ignored control; the older 118k-claim migration-copy control is unchanged.
+Set `ST3_CLIENT_MESSAGES_SELECTOR_PRODUCTION_COPY` to an explicitly supplied,
+checkpointed offline database and `TMPDIR` to a scratch filesystem with room for
+two fresh database copies, derived indexes and WAL. The input is opened read-only;
+neither copy is a daemon store. A completed selector projection is rejected as
+initial online-build evidence rather than silently rebuilt.
+
+The receipt records source counts/bytes and Git HEAD, every observed online
+backfill transaction's BEGIN-through-COMMIT duration and work/COMMIT split,
+distribution/max and 100 ms counts, and physical WAL start/peak/growth relative
+to the original database bytes against the 20% bar. Real foreground
+send/delivered/read/close lifecycles compete with the independent background
+writer loans. One lifecycle is offered per loan through a capacity-one channel
+(coalescing offers while busy); intervals and actual transaction overlaps are
+reported, not assumed. WAL samples include those competing writes.
+
+After the build, isolated send/close segments report individual physical WAL
+deltas and latency, and compare against a second source-only copy with the same
+foreground workload replayed before measurement. FULL durability is retained;
+automatic build checkpoints are disabled by the production backfill guard.
+One JSON receipt is emitted, including adverse bars and operational errors;
+inspect top-level and nested `error` fields, `errors`, overlap counts and bar
+results even when the test exits successfully. This control deliberately does
+not assert the performance bars before printing the receipt.
+The separate ignored `benchmark_client_messages_selector_production_copy_smoke`
+uses only its own small fresh offline store and asserts receipt completeness.
+
 
 ## Raw terminal cold opens
 
@@ -529,6 +674,24 @@ The value is read once per process. Retention defaults to 128, preserving schema
 Profiling counts fresh connections as
 `read connection opened`.
 
+Each reader also maps the store file (`PRAGMA mmap_size`, 1 TiB by default, so the whole store).
+In WAL mode SQLite empties a reader's page cache whenever its next transaction sees any commit,
+and on a busy store nearly every request starts after one. Without the mapping that request
+fetched every page it touched again with one `read()` call each, from the kernel's file cache
+into the connection's private cache: on dev3, 87,500 calls a second across 73 readers, with 79%
+of the daemon's CPU in the kernel (#3343). A mapped page needs no call and no copy, and all
+readers share the kernel's one copy of it. WAL frames are still read with `read()`. Mapped
+pages the daemon has touched count in its RSS as file-backed memory (`RssFile`), so VmRSS,
+VmHWM and the `st.process.memory.rss` gauge read higher, by up to the hot part of the store:
+1.8 GB after a 30-second replay on a 29 GB store copy, while `RssAnon` fell by about 400 MB.
+They are the same page-cache pages `read()` filled, which the service cgroup's `memory.max`
+(`MemoryMax`, `MemoryHigh`) already counted, and the kernel reclaims them under pressure.
+Compare `RssAnon` for the daemon's own memory. Set
+`SMALLCLAIMS_READ_MMAP_MIB` in the **daemon's** environment to map at most that many MiB,
+or `0` to turn mapping off; values above 1,048,576 or invalid values use the default. The
+bundled SQLite is built with `SQLITE_MAX_MMAP_SIZE` raised to 1 TiB to allow it, since its
+default ceiling is 2 GiB.
+
 Each reader keeps up to 128 prepared statements. Mailbox changed-since, owner/binding,
 local watermark, and snapshot fence checks reuse those statements; caching removes repeated
 SQL preparation. Mailbox streams now use a local dependency index: one dispatcher reads new
@@ -544,7 +707,7 @@ five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expos
 startup and whether routing is currently degraded. There is no debounce. `mailbox.wake_dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
-`cargo test --release -p st3-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
+`cargo test --release -p fractal-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
 `ST_MAILBOX_PROFILE_DIR` retains its generated store, latency/CPU results, doctor counters and
 profile. Its load client and daemon run in separate processes.
 
@@ -614,7 +777,7 @@ projection's frontier, full-card reads bypass shared cached rows and cold-build 
 they do not borrow stale queue fields from an earlier physical snapshot.
 
 The isolated 60-agent, six-mission, 60-step fixture counts canonical claim kinds and local samples:
-`cargo test -p st3-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
+`cargo test -p fractal-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
 Its frozen pre-incremental classification distinguishes the old cold fallback from the current
 selected-card build count. Full JSON parity, including queues, todos and usage, is checked by
 `agent_roster_seeded_claim_sequences_match_cold_json` with reproducible proptest sequences,
@@ -672,14 +835,14 @@ policy. Only recording traced requests perform the additional read-only snapshot
 its cost under claim churn remains unmeasured until the focused native receipt is available.
 
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
-incremental-update costs with `cargo test -p st3-daemon --lib agent_roster_snapshot_fixture_timing --
+incremental-update costs with `cargo test -p fractal-daemon --lib agent_roster_snapshot_fixture_timing --
 --ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
 `perf-load` workload holds concurrent agents WS subscribers and measures first-snapshot
 latency against the roster's 300 ms budget.
 
 Normal tests include a small cached-versus-uncached roster comparison before and after local
 timeline activity, in both history modes. Run the heartbeat-only fixture with
-`cargo test -p st3-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
+`cargo test -p fractal-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
 it prints append/probe/hit counts, hit rate and elapsed time, requires every heartbeat probe to
 reuse the same immutable rows, and requires a subsequent timeline append to miss before rebuild.
 The normal warm HTTP fixture
@@ -739,7 +902,7 @@ Compare mailbox, work, interactive mission and replication API reads in fresh is
 processes using the existing generated benchmark store (scale 0.1):
 
 ```sh
-cargo build -p st3 --features test-support --example reader_cache
+cargo build -p fractal --features test-support --example reader_cache
 target/debug/examples/reader_cache /tmp/reader-cache-fixture --generate-only
 SMALLCLAIMS_READ_CACHE_KIB=8192 target/debug/examples/reader_cache /tmp/reader-cache-fixture
 SMALLCLAIMS_READ_CACHE_KIB=2048 target/debug/examples/reader_cache /tmp/reader-cache-fixture
@@ -750,8 +913,8 @@ process. Compare identical builds and workloads; debug-build latency is not a pr
 latency promise. It prints per-wave CPU, latency, RSS and reader counts. Only generated
 invented data and private sockets are used.
 
-The bundled SQLite build uses `SQLITE_DEFAULT_MEMSTATUS=0` through the workspace Cargo
-configuration, including Cargo-based Nix builds. SQLite's process-wide allocation statistics
+The bundled SQLite build uses `SQLITE_DEFAULT_MEMSTATUS=0` and `SQLITE_MAX_MMAP_SIZE=1 TiB`
+through the workspace Cargo configuration, including Cargo-based Nix builds. SQLite's process-wide allocation statistics
 are disabled by default, removing their shared allocator mutex; statement, process CPU and
 I/O accounting remain available.
 
@@ -901,7 +1064,7 @@ not browser-specific back/forward-cache eligibility. This proves the early path 
 is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
 bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-The daemon's existing [`CollectionSubscribe`](../../crates/st3-api/src/api/client_v0.rs)
+The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/api/client_v0.rs)
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 

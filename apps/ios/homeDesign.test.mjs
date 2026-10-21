@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAnswer } from '@smalltalk/st3-views';
+import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAnswer } from '@fractal/views';
 
 const now = Date.parse('2026-10-14T12:00:00Z');
 const actor = 'person/demo/session/example-phone';
