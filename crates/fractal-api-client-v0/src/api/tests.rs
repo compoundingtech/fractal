@@ -1620,3 +1620,55 @@ mission "{name}" state="ready" {{
         assert_eq!(received, expected, "{collection}");
     }
 }
+
+/// The per-PR contract for fleet::members_with_the_same_envelopes_but_different_claims_report_
+/// divergence: a peer whose graph has differed at the same envelopes for the divergence window
+/// fails the doctor's replication check by name and turns the machines page's sync to
+/// diverged. The fleet test waits that window out between real daemons; here it is backdated.
+#[tokio::test]
+async fn doctor_fails_and_machines_say_diverged_for_a_diverged_peer() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.configured_peers = vec!["birch".into()];
+    for diverged in [false, true] {
+        let now = client_now_ms();
+        let mut progress = smallclaims::store::PeerSyncProgress::default();
+        progress.observe(0, Some((9_000, 0)), now);
+        if diverged {
+            progress.graph_differs_since_unix_ms =
+                Some(now - smallclaims::store::REPLICATION_DIVERGED_AFTER_MS);
+            progress.graph_compared_at_unix_ms = Some(now);
+        }
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .insert("birch".into(), progress);
+        let app = router(state.clone());
+        let (status, doctor) = get_request(app.clone(), "/v1/doctor").await;
+        assert_eq!(status, StatusCode::OK, "{doctor}");
+        let check = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "replication")
+            .cloned()
+            .unwrap();
+        let message = check["message"].as_str().unwrap();
+        let (status, page) = get_request(app, "/v1/client/machines").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if diverged {
+            assert_eq!(check["status"], "fail", "{check}");
+            assert!(message.contains("graph diverged from birch"), "{check}");
+            assert_eq!(page["sync"]["state"], "diverged", "{page}");
+            assert_eq!(page["sync"]["peers"][0]["host_id"], "host/birch", "{page}");
+            assert!(page["sync"]["peers"][0]["diverged_since"].is_string(), "{page}");
+        } else {
+            assert!(!message.contains("graph diverged"), "{check}");
+            assert_eq!(page["sync"]["state"], "catching-up", "{page}");
+            assert!(page["sync"]["peers"][0]["diverged_since"].is_null(), "{page}");
+        }
+    }
+}
