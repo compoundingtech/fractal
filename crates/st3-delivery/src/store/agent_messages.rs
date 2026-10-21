@@ -338,7 +338,12 @@ mod tests {
         }).unwrap().unwrap();
     }
 
-    fn counts(store: &Store) -> (Vec<(String, u64, String)>, Vec<(u64, String, u64)>) {
+    /// Each counted message's subject, send time and recipient.
+    type Sends = Vec<(String, u64, String)>;
+    /// Each day's count per recipient.
+    type Days = Vec<(u64, String, u64)>;
+
+    fn counts(store: &Store) -> (Sends, Days) {
         let connection = store.readers.get();
         let sends = connection.prepare("SELECT subject,sent_ms,recipient FROM agent_message_sends ORDER BY subject").unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
