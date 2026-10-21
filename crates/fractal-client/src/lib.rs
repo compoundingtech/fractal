@@ -13,6 +13,8 @@ pub mod product_dirs;
 pub mod propagation;
 pub use contract::*;
 pub use generated::*;
+mod identities;
+pub use identities::*;
 
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -985,6 +987,11 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::InvalidArrangementKey
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
+        | ErrorCode::IdentityCycle
+        | ErrorCode::IdentityOccupied
+        | ErrorCode::IdentityRetiredSource
+        | ErrorCode::IdentityCrossKind
+        | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
         | ErrorCode::MessageSelectorsNotReady

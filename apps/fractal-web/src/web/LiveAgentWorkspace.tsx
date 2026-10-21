@@ -1,5 +1,5 @@
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
-import { sidebarRow } from './sidebarRow.ts'
+import { sidebarRow, sidebarSubagentRow, subagentRowId } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
@@ -18,13 +18,13 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { ChromeControl, SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, DockedSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@fractal/ui/assistant-ui/shell'
+import { ChromeControl, MilestoneAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, DockedSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@fractal/ui/assistant-ui/shell'
 // Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
 import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
@@ -51,7 +51,6 @@ import { useAgentsLastObservedAt } from './lastObserved.tsx'
 import { RosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 
 const emptyAgents: readonly Agent[] = []
-const sidebarExtraSignals = [] as const
 
 /** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
 const RosterFrozenAt = React.createContext<number | undefined>(undefined)
@@ -59,7 +58,11 @@ const RosterFrozenAt = React.createContext<number | undefined>(undefined)
 /** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. */
 const LiveSidebarAgentRow = React.memo((props: {
   readonly agentRef: string
+  readonly childId?: string
   readonly active: boolean
+  readonly needsMe: boolean
+  readonly openRef?: string
+  readonly touchDisclosure?: React.ReactNode
   readonly select: (ref: string) => void
   readonly actions: SidebarActions
 }) => {
@@ -68,9 +71,14 @@ const LiveSidebarAgentRow = React.memo((props: {
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const frozenAt = React.useContext(RosterFrozenAt)
-  const item = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale }), [agent, stale])
-  const onOpen = React.useCallback(() => props.select(props.agentRef), [props.select, props.agentRef])
-  return item === undefined ? null : <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} actions={props.actions} onOpen={onOpen} {...(stale && frozenAt !== undefined ? { now: frozenAt } : {})} />
+  const item = React.useMemo(() => {
+    if (agent === undefined) return undefined
+    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe })
+    const child = agent.subagents?.find(child => child.id === props.childId)
+    return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
+  }, [agent, stale, props.needsMe, props.childId])
+  const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
+  return item === undefined ? null : <MilestoneAgentRow row={item} displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -85,8 +93,8 @@ const LiveSidebarTreeView = React.memo((props: {
   readonly select: (ref: string) => void
   readonly actions: SidebarActions
 }) => {
-  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
-    <LiveSidebarAgentRow agentRef={node.subject} active={props.current === node.subject} select={props.select} actions={props.actions} />, [props.current, props.select, props.actions])
+  const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>, touchDisclosure?: React.ReactNode) =>
+    <LiveSidebarAgentRow agentRef={node.parent ?? node.subject} childId={node.childId} active={node.parent === undefined && props.current === node.subject} needsMe={node.parent === undefined && props.needsYou.has(node.subject)} openRef={node.parent === undefined ? node.subject : undefined} touchDisclosure={touchDisclosure} select={props.select} actions={props.actions} />, [props.current, props.needsYou, props.select, props.actions])
   const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
     <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
   return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={props.accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
@@ -340,9 +348,25 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     const previous = previousRoster.current
     if (previous !== undefined && previous.length === agents.length && agents.every((agent, index) => {
       const row = previous[index]!
-      return row.id === agent.ref && row.subject === agent.ref && row.label === agent.name && row.host === agent.host
+      return row.id === agent.ref && row.subject === agent.ref && row.label === agent.name && row.host === agent.host &&
+        row.project === (agent.checkout._tag === 'Known' ? agent.checkout.value.repository : undefined) &&
+        (row.children?.length ?? 0) === (agent.subagents?.length ?? 0) &&
+        (agent.subagents ?? []).every((child, index) => {
+          const old = row.children?.[index]
+          return old?.childId === child.id && old.label === (child.description ?? child.id)
+        })
     })) return previous
-    const next = agents.map(row => ({ id: row.ref, subject: row.ref, label: row.name, host: row.host }))
+    const next = agents.map(row => ({
+      id: row.ref, subject: row.ref, label: row.name, host: row.host,
+      project: row.checkout._tag === 'Known' ? row.checkout.value.repository : undefined,
+      children: row.subagents?.map(child => ({
+        _tag: 'Agent' as const, id: subagentRowId({ parent: row.ref, id: child.id }),
+        subject: row.ref, parent: row.ref, childId: child.id,
+        // Roster AgentSubagent has only the parent session_id; the child reference exists
+        // only in SubagentSummary.conversation (conversation_blocks.rs), so this row cannot open.
+        label: child.description ?? child.id,
+      })),
+    }))
     previousRoster.current = next
     return next
   }, [agents])
@@ -365,15 +389,21 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
   const previousAccessibleNames = React.useRef<ReadonlyMap<string, string> | undefined>(undefined)
   const accessibleNames = React.useMemo(() => {
-    const next = new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale }))] as const))
+    const next = new Map(agents.flatMap(agent => [
+      [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale, needsMe: needsYou.has(agent.ref) }))] as const,
+      ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale }))] as const),
+    ]))
     const previous = previousAccessibleNames.current
     if (previous !== undefined && next.size === previous.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
     previousAccessibleNames.current = next
     return next
-  }, [agents, stale])
+  }, [agents, stale, needsYou])
   const selectLatest = React.useRef(select)
   selectLatest.current = select
-  const selectAgent = React.useCallback((ref: string) => selectLatest.current(ref), [])
+  const selectAgent = React.useCallback((ref: string) => {
+    if (previousRoster.current?.some(seat => seat.children?.some(child => child.id === ref))) return
+    selectLatest.current(ref)
+  }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
