@@ -1551,12 +1551,14 @@ class PartialClone(InputKeyed):
     brings the commit's whole history (about 3.4 s each on a runner; 34 of them took a verify past the gate's 30 s)."""
 
     def clone(self):
+        # Both clones get init_repo()'s settings at creation (`clone -c`), so neither starts git's detached maintenance.
+        quiet = ('-c', 'gc.auto=0', '-c', 'maintenance.auto=false')
         server = self.f.root / 'server.git'
-        run('git', 'clone', '-q', '--bare', '--mirror', str(self.f.repo), str(server))
+        run('git', 'clone', '-q', *quiet, '--bare', '--mirror', str(self.f.repo), str(server))
         run('git', '-C', str(server), 'config', 'uploadpack.allowFilter', 'true')
         run('git', '-C', str(server), 'config', 'uploadpack.allowAnySHA1InWant', 'true')
         client = self.f.root / 'client'
-        run('git', 'clone', '-q', '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
+        run('git', 'clone', '-q', *quiet, '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
         return client
 
     def lazy_fetches(self, action):
