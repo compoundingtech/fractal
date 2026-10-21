@@ -540,6 +540,7 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
   await tap(details)
   await waitFor(() => expect(within(document.body).getByRole('dialog', { name: `Reported details for ${noSessionChild.title}` })).toBeVisible())
   await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+  await waitFor(() => expect(within(document.body).getByRole('dialog', { name: `Reported details for ${noSessionChild.title}` })).toHaveFocus())
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
 }
