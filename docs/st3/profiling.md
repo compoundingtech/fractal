@@ -140,7 +140,7 @@ move observers after acknowledgements.
 
 [`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
-the writer, daemon CPU, and this member's database size. Every daemon builds the file in. CI's daemon_load reads the same file.
+the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
 
 The request-latency read adds `targets` and `paths` to `routes`. Each target and each path keeps
@@ -213,7 +213,7 @@ to the WAL but not yet copied into the main file, so they are never added to the
 `physical_growth_bytes_per_day` compares it with the sample nearest exactly a day ago, within half
 an hour of it, scaled to a day. It is never extrapolated. A sample dated in the future, after the
 clock went back, is dropped. The newest sample is the one every reader uses
-(`st3::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
+(`fractal_daemon::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
 within it.
 
 The windows live in memory. Each is a ring of slots (12 of 5 seconds, 10 of 30 seconds, 12 of 5
@@ -246,6 +246,18 @@ allows. A budget is an allowance that resets: each account's weekly and 5-hour l
 the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
+
+The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
+percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
+`NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
+over; a name may declare several percentiles. A `[[count]]` is at most `max_per_hour` events an
+hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci/NAME`, and one
+series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
+time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
+workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
+nextest passed only on a retry and merge groups ejected from the queue, none an hour). Nothing
+feeds these series yet, so each lists as `no-data` with its target; they are not in the
+request-latency read, its gauges or `st doctor`.
 
 `st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
@@ -337,12 +349,12 @@ The socket's existing 30-second timer remains the delivery cadence for clock-onl
 This cache covers the six collections named above.
 
 A disposable local single-client cold-read comparison is available with:
-`cargo test -p st3-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
+`cargo test -p fractal-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
 It compares uncached, cold cached and warm reads for 100 glass rows under Unix and paired
 sessions, alternating case order and reporting aggregate wall/process CPU. Debug-profile
 fixture results do not measure deployed paired-client CPU or production tail latency.
 
-`cargo test -p st3-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
+`cargo test -p fractal-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
 compares 22 uncached projections with shared cold and 22 warm reads over 70 generated missions
 and person steps, asserting projection parity. Its stage profile separates mission attention-run
 selection, definition reads, run overviews, step previews and attention snapshot work. The
@@ -438,12 +450,12 @@ request durations.
 
 ### Isolated native message-selector cost receipts
 
-The ignored native controls in `crates/st3-api-core/src/api/client_messages_selector_tests.rs`
+The ignored native controls in `crates/fractal-api-core/src/api/client_messages_selector_tests.rs`
 use fresh temporary stores, not daemon databases. Run them in the admitted native
 proof lane with the same optimized build, filesystem and durability settings for
 both designs; retain the exact source/build identity, command, machine/filesystem,
 complete stderr JSON and exit status. Focused Cargo filters (with
-`cargo test --release -p st3-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
+`cargo test --release -p fractal-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
 
 - `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
   each with 32 metadata claims, explicit native rebuild and first/next pages.
@@ -707,7 +719,7 @@ five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expos
 startup and whether routing is currently degraded. There is no debounce. `mailbox.wake_dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
-`cargo test --release -p st3-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
+`cargo test --release -p fractal-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
 `ST_MAILBOX_PROFILE_DIR` retains its generated store, latency/CPU results, doctor counters and
 profile. Its load client and daemon run in separate processes.
 
@@ -777,7 +789,7 @@ projection's frontier, full-card reads bypass shared cached rows and cold-build 
 they do not borrow stale queue fields from an earlier physical snapshot.
 
 The isolated 60-agent, six-mission, 60-step fixture counts canonical claim kinds and local samples:
-`cargo test -p st3-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
+`cargo test -p fractal-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
 Its frozen pre-incremental classification distinguishes the old cold fallback from the current
 selected-card build count. Full JSON parity, including queues, todos and usage, is checked by
 `agent_roster_seeded_claim_sequences_match_cold_json` with reproducible proptest sequences,
@@ -835,14 +847,14 @@ policy. Only recording traced requests perform the additional read-only snapshot
 its cost under claim churn remains unmeasured until the focused native receipt is available.
 
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
-incremental-update costs with `cargo test -p st3-daemon --lib agent_roster_snapshot_fixture_timing --
+incremental-update costs with `cargo test -p fractal-daemon --lib agent_roster_snapshot_fixture_timing --
 --ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
 `perf-load` workload holds concurrent agents WS subscribers and measures first-snapshot
 latency against the roster's 300 ms budget.
 
 Normal tests include a small cached-versus-uncached roster comparison before and after local
 timeline activity, in both history modes. Run the heartbeat-only fixture with
-`cargo test -p st3-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
+`cargo test -p fractal-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
 it prints append/probe/hit counts, hit rate and elapsed time, requires every heartbeat probe to
 reuse the same immutable rows, and requires a subsequent timeline append to miss before rebuild.
 The normal warm HTTP fixture
@@ -902,7 +914,7 @@ Compare mailbox, work, interactive mission and replication API reads in fresh is
 processes using the existing generated benchmark store (scale 0.1):
 
 ```sh
-cargo build -p st3 --features test-support --example reader_cache
+cargo build -p fractal --features test-support --example reader_cache
 target/debug/examples/reader_cache /tmp/reader-cache-fixture --generate-only
 SMALLCLAIMS_READ_CACHE_KIB=8192 target/debug/examples/reader_cache /tmp/reader-cache-fixture
 SMALLCLAIMS_READ_CACHE_KIB=2048 target/debug/examples/reader_cache /tmp/reader-cache-fixture
@@ -1064,7 +1076,7 @@ not browser-specific back/forward-cache eligibility. This proves the early path 
 is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
 bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-The daemon's existing [`CollectionSubscribe`](../../crates/st3-api-core/src/api/client_v0.rs)
+The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/api/client_v0.rs)
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 

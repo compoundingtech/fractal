@@ -141,7 +141,7 @@ gateway socket, not a proxy.
   login, read once and kept until a 401 says it changed.
 - Each request is logged by method, path and status, never with the token or the body.
 
-In Rust: `st3::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
+In Rust: `fractal_daemon::sekrets::authorized::authorized_request(&config, "ada/daemon-gh", &request)`
 returns the response or `Unavailable` (no gateway or no node key), `Refused` or `Transport`.
 
 ## The sandbox

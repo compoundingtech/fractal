@@ -1058,8 +1058,8 @@ fn member_context(
     FleetContext::member(store, own, bootstrap, config_peers, legacy)
 }
 
-#[test]
-fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
+#[tokio::test]
+async fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
     let root = tempfile::tempdir().unwrap();
     let state_dir = root.path();
     let file = FleetFile {
@@ -1079,7 +1079,8 @@ fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
             code: "member-left".into(),
             message: "the previous birch incarnation left".into(),
         },
-    );
+    )
+    .await;
     assert!(worker.is_removed(), "the old worker still stops syncing");
     assert_eq!(FleetFile::load(state_dir).unwrap().unwrap(), file);
     assert!(!crate::fleet::RemovalNotice::path(state_dir).exists());
@@ -1091,8 +1092,8 @@ fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
     );
 }
 
-#[test]
-fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
+#[tokio::test]
+async fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
     let root = tempfile::tempdir().unwrap();
     let state_dir = root.path();
     let file = FleetFile {
@@ -1110,7 +1111,8 @@ fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
             code: "member-left".into(),
             message: "birch left the fleet".into(),
         },
-    );
+    )
+    .await;
     let notice = crate::fleet::RemovalNotice::load(state_dir).unwrap();
     assert_eq!(notice.reported_by, "alder");
     assert_eq!(notice.code, "member-left");
@@ -1118,6 +1120,60 @@ fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
     assert!(notice.learned_at_unix_ms > 0);
     assert!(
         FleetFile::load(state_dir)
+            .unwrap()
+            .unwrap()
+            .removed
+            .is_some()
+    );
+}
+
+/// Endpoint publication holds the settings lock across a request to the daemon. A refusal that
+/// arrives meanwhile waits for the lock without stopping the runtime that request needs, so the
+/// lock is released and the removal is written.
+#[test]
+fn a_refusal_waits_for_the_settings_lock_without_blocking_the_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path().to_path_buf();
+    let file = FleetFile {
+        fleet_id: "3b241101-e2bb-4255-8caf-4136c566a962".into(),
+        ..FleetFile::default()
+    };
+    file.save(&state_dir).unwrap();
+    let (finished, done) = std::sync::mpsc::channel();
+    let directory = state_dir.clone();
+    // A runtime with one thread: the refusal and the request holding the lock share it.
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let own = MemberKey::load_or_create(&file.node_key_path(&directory)).unwrap();
+            let store = plain_memory("birch").unwrap();
+            let mut worker = FleetContext::member(&store, &own, &[], &[], false);
+            worker.state_dir = Some(directory.clone());
+            let lock = FleetFile::lock_settings(&directory).unwrap();
+            let publication = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                drop(lock);
+            });
+            worker
+                .mark_removed(
+                    "alder",
+                    &RemovedFromFleet {
+                        code: "member-removed".into(),
+                        message: "birch was removed".into(),
+                    },
+                )
+                .await;
+            publication.await.unwrap();
+        });
+        finished.send(()).unwrap();
+    });
+    done.recv_timeout(Duration::from_secs(30))
+        .expect("the refusal blocked the runtime that holds the settings lock");
+    assert!(
+        FleetFile::load(&state_dir)
             .unwrap()
             .unwrap()
             .removed

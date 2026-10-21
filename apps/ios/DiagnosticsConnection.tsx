@@ -1,8 +1,8 @@
 import * as React from 'react';
-import type { St3Client } from '../../clients/typescript/st3-client';
+import type { FractalClient } from '../../clients/typescript/fractal-client';
 import { connectDiagnostics, disconnectDiagnostics } from './diagnostics';
 
-type Props = { client: St3Client | null; url: string; credential: string | null; enabled: boolean };
+type Props = { client: FractalClient | null; url: string; credential: string | null; enabled: boolean };
 /** A lifecycle adapter, not derived React state. It only provides existing paired
  * context; diagnostics owns persistence, scheduling, and native report transfer. */
 export class DiagnosticsConnection extends React.Component<Props> {

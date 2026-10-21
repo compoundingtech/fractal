@@ -33,6 +33,20 @@ def run(*command, cwd=None, stdin=None):
     return done.stdout.decode().strip()
 
 
+def init_repo(path, *options):
+    """A throwaway repository that git never maintains in the background.
+
+    After a commit or a fetch git starts `git maintenance run --auto --detach`, which outlives the command: it takes
+    objects/maintenance.lock and, past a few hundred loose objects, repacks (git 2.54 does so even with gc.auto=0;
+    only maintenance.auto=false stops it). Running on, it writes into objects/ and objects/pack while the temporary
+    directory is removed ("Directory not empty: '.../.git/objects'" at cleanup), and it can repack the objects the
+    next command is reading (the likely source of a `git commit` failing with "fatal: could not parse HEAD").
+    """
+    run('git', 'init', '-q', *options, str(path))
+    run('git', '-C', str(path), 'config', 'gc.auto', '0')
+    run('git', '-C', str(path), 'config', 'maintenance.auto', 'false')
+
+
 class Fixture:
     def __init__(self, object_format='sha1', layout='tree'):
         # 'tree': refs/notes/evidence/<tree>/<record> (what publishers write); 'tag': refs/tags/evidence/<tree>/<record> (protected, next);
@@ -42,11 +56,7 @@ class Fixture:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.repo = self.root / 'repo'
-        run('git', 'init', '-q', f'--object-format={object_format}', str(self.repo))
-        # No automatic gc or maintenance: git starts it detached after a commit once loose objects pile up, and it then writes into
-        # objects/pack while the temporary directory is being removed (seen in CI as "Directory not empty: 'pack'" at cleanup).
-        run('git', '-C', str(self.repo), 'config', 'gc.auto', '0')
-        run('git', '-C', str(self.repo), 'config', 'maintenance.auto', 'false')
+        init_repo(self.repo, f'--object-format={object_format}')
         self.allowed = []
         self.keys = self.root / 'allowed-signers'
         self.counter = 0
@@ -427,7 +437,7 @@ class Verifier(unittest.TestCase):
         record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
         other = tempfile.TemporaryDirectory()
         self.addCleanup(other.cleanup)
-        run('git', 'init', '-q', other.name)
+        init_repo(other.name)  # its fetch would otherwise start a detached maintenance in it
         run('git', '-C', other.name, 'fetch', '-q', '--depth=1', '--no-tags', 'file://' + str(self.f.repo),
             'refs/notes/evidence/*:refs/notes/evidence/*')
         missing = subprocess.run(['git', '-C', other.name, 'cat-file', '-e', self.commit], capture_output=True)
@@ -1105,6 +1115,69 @@ class LaneDefinitions(unittest.TestCase):
         self.assertEqual((code, json.loads(out)['reason']), (1, 'error'))
 
 
+    # ---- a signer level held to its lane (by_level "lane": true): the agent level --------------------------------------
+
+    def agent_policy(self, lane=True):
+        level = {'command': ['make', 'test'], 'events': ['pull_request']}
+        if lane is not None:
+            level['lane'] = lane
+        return json.dumps({'version': 1, 'checks': {'unit': {'trust_levels': ['machine'], 'kinds': {'wrapper': {
+            'command': ['make', 'test'], 'trust_levels': ['machine', 'agent'], 'by_level': {'agent': level}}}}}})
+
+    def agent_cli(self, tree, base):
+        code, out, _ = self.f.cli('--tree', tree, '--check', 'unit', '--keys', str(self.f.root / 'allowed-signers'),
+                                  '--policy-from', base, '--repository', 'org/repo')
+        return code, json.loads(out)
+
+    def test_an_agent_note_counts_only_with_the_base_lane_digest_and_an_unchanged_definition(self):
+        agent = self.f.key('agent', 'agent/seat-one')
+        base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy()})
+        digest = evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', base + '^{tree}'),
+                                                 self.f.git('rev-parse', base + '^{tree}'), self.rules())['sha256']
+        commit, tree = self.files({'src/code.rs': 'agent change\n'})
+
+        def agent_note(inputs, seconds):
+            return self.f.note(commit, tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'), inputs=inputs, seconds=seconds)
+
+        agent_note({}, 1)
+        self.assertEqual(self.agent_cli(tree, base)[1]['reason'], 'wrong_definition')  # no digest: not signed against the lane
+        agent_note({'lane_definition_sha256': 'f' * 64}, 2)
+        self.assertEqual(self.agent_cli(tree, base)[1]['reason'], 'wrong_definition')
+        agent_note({'lane_definition_sha256': digest}, 3)
+        code, result = self.agent_cli(tree, base)
+        self.assertEqual((code, result['trust_level'], result['events']), (0, 'agent', ['pull_request']), result)
+        # The same note on a tree that edits the lane's own scripts is refused: the change edits its checker.
+        changed, changed_tree = self.files({'scripts/run.sh': 'edited by the change\n'})
+        self.f.note(changed, changed_tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'),
+                    inputs={'lane_definition_sha256': digest}, seconds=4)
+        self.assertEqual(self.agent_cli(changed_tree, base)[1]['reason'], 'definition_changed')
+
+    def test_lane_binding_applies_to_its_level_only_and_needs_a_lane_at_the_base(self):
+        agent = self.f.key('agent', 'agent/seat-one')
+        base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy()})
+        commit, tree = self.files({'src/code.rs': 'two levels\n'})
+        # A machine-level note is not held to the lane: no digest needed, exactly as before.
+        self.f.note(commit, tree, self.ci, 'machine/ci1', runner='wrapper', command=('make', 'test'), seconds=1)
+        code, result = self.agent_cli(tree, base)
+        self.assertEqual((code, result['trust_level']), (0, 'machine'), result)
+        # A base with the policy but no lane for the check: an agent note is refused, never accepted unbound.
+        no_lane, _ = self.files({'.st/required-lanes.json': json.dumps({'version': 1, 'lanes': {}})})
+        commit, tree = self.files({'src/code.rs': 'no lane\n'})
+        self.f.note(commit, tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'),
+                    inputs={'lane_definition_sha256': 'a' * 64}, seconds=2)
+        self.assertEqual(self.agent_cli(tree, no_lane)[1]['reason'], 'no_lane')
+        # Without lane: true the same level would not be held to it (the switch is what makes the difference).
+        unbound, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy(lane=None)})
+        self.assertEqual(self.agent_cli(tree, unbound)[0], 0)
+
+    def test_by_level_lane_must_be_a_boolean(self):
+        for bad in ('yes', 1, None, []):
+            doc = json.loads(self.agent_policy())
+            doc['checks']['unit']['kinds']['wrapper']['by_level']['agent']['lane'] = bad
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as raised:
+                evidence_verify.policy_rules(json.dumps(doc), 'unit', 'org/repo')
+            self.assertEqual(raised.exception.reason, 'error')
+
 class CommittedPolicy(unittest.TestCase):
     """The policy file in this repository, parsed by the same code the gate runs."""
 
@@ -1172,11 +1245,11 @@ class CommittedPolicy(unittest.TestCase):
         declared = {'linux-gate': sorted([
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
-            'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/st3-daemon/src/attach_image.rs
+            'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
             'slo', 'src', 'templates', 'tests', 'vendor', 'wit']), 'typescript-client': sorted([
-            'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json',
+            'apps/fractal-web/package.json', 'apps/fractal-web/packages/fractal-sdk/package.json',
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
-            'clients/typescript', 'crates/stui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
+            'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
         for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
@@ -1208,6 +1281,21 @@ class CommittedPolicy(unittest.TestCase):
                     outside.append(f'{source.relative_to(ROOT)} includes {relative}')
         self.assertEqual(outside, [], 'a compile-time include outside the declared linux-gate inputs: declare it or stop including it')
 
+    def test_no_rust_source_lints_the_whole_tree(self):
+        # A Rust test that lists every file (git ls-files without a path) or runs a whole-tree lint script reads paths outside
+        # the declared linux-gate inputs, so a change to only those paths could reuse a pass. Whole-tree lints belong in
+        # genie-freshness (scripts/check-public-repo, scripts/check-native-names), whose key is the whole tree.
+        listing = re.compile(r'"ls-files"(?![^\]]*"--error-unmatch")')
+        found = []
+        for source in sorted(ROOT.glob('**/*.rs')):
+            parts = source.relative_to(ROOT).parts
+            if 'target' in parts or '.git' in parts or 'node_modules' in parts:
+                continue
+            text = source.read_text(errors='replace')
+            if listing.search(text) or 'check-public-repo' in text or 'check-native-names' in text:
+                found.append(str(source.relative_to(ROOT)))
+        self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
+
     def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         # Nothing enforces anywhere: every check, not only the host ones, keeps enforce false until the flip PR.
@@ -1219,10 +1307,19 @@ class CommittedPolicy(unittest.TestCase):
                 if 'host' in (rule.get('trust_levels') or []) or 'host' in (rule.get('by_level') or {}):
                     with_host[(check, kind)] = rule
             self.assertNotIn('host', entry['trust_levels'], check)  # never the check's own list, so never `observed`
+            self.assertNotIn('agent', entry['trust_levels'], check)
+            for kind, rule in entry['kinds'].items():
+                if 'agent' in (rule.get('trust_levels') or []):
+                    self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
         self.assertEqual(sorted(with_host), [('genie-freshness', 'wrapper'), ('typescript-client', 'wrapper')])
         for (check, kind), rule in with_host.items():
-            self.assertEqual(rule['trust_levels'], ['fleet', 'host'], check)
+            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent'], check)
             override = rule['by_level']['host']
+            self.assertFalse(override.get('lane', False), check)  # a host note is not held to the lane (cooperative machine trust)
+            # The agent level: the host's rule exactly, plus the lane binding, and nowhere else.
+            agent = dict(rule['by_level']['agent'])
+            self.assertIs(agent.pop('lane'), True, check)
+            self.assertEqual(agent, override, check)
             self.assertEqual(override['events'], ['pull_request'], check)
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), False, check)
@@ -1285,7 +1382,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
             # No weaker signer is admitted, except the host level for exactly two checks (see the test for the host level).
             host_checks = ('genie-freshness', 'typescript-client')
-            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host') if check in host_checks else None, check)
+            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in host_checks else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
 
 
@@ -1533,6 +1630,55 @@ class InputKeyed(unittest.TestCase):
         document = json.loads(out)
         self.assertEqual((code, document['paths']), (0, sorted(self.PATHS)))
         self.assertEqual(document['source_inputs'], self.key(self.f.git('rev-parse', 'HEAD^{tree}')))
+
+
+class PartialClone(InputKeyed):
+    """The gate's checkout is a partial clone (it deepens with blob:none) and a record found by input key names another tree's
+    commit, which the checkout lacks. Nothing the verifier reads may be fetched lazily: each such fetch has no negotiation, so it
+    brings the commit's whole history (about 3.4 s each on a runner; 34 of them took a verify past the gate's 30 s)."""
+
+    def clone(self):
+        server = self.f.root / 'server.git'
+        run('git', 'clone', '-q', '--bare', '--mirror', str(self.f.repo), str(server))
+        run('git', '-C', str(server), 'config', 'uploadpack.allowFilter', 'true')
+        run('git', '-C', str(server), 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+        client = self.f.root / 'client'
+        run('git', 'clone', '-q', '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
+        return client
+
+    def lazy_fetches(self, action):
+        trace = self.f.root / f'trace-{self.f.counter}'
+        self.f.counter += 1
+        saved = os.environ.get('GIT_TRACE')
+        os.environ['GIT_TRACE'] = str(trace)
+        try:
+            value = action()
+        finally:
+            os.environ.pop('GIT_TRACE')
+            if saved is not None:
+                os.environ['GIT_TRACE'] = saved
+        text = trace.read_text() if trace.exists() else ''
+        return value, text.count('fetch.negotiationAlgorithm=noop')
+
+    def test_a_record_of_another_tree_and_a_projection_need_no_lazy_fetch(self):
+        self.f.git('branch', '-q', '-M', 'main')
+        old_commit, old_tree = self.commit, self.tree
+        self.f.git('checkout', '-q', '-b', 'other')
+        other, other_tree = self.commit_files({'docs/readme.txt': 'only docs'})  # same key, another tree, on a branch the clone lacks
+        key = self.key(other_tree)
+        record = self.observed(other, other_tree, key)
+        self.f.git('checkout', '-q', 'main')
+        head, head_tree = self.commit_files({'docs/readme.txt': 'main docs', 'src/a.txt': 'a'})
+        self.assertEqual(self.key(head_tree), key)
+        client = self.clone()
+        ref = f'refs/notes/evidence-input/unit/{key}/{record}'
+        run('git', '-C', str(client), 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{ref}:{ref}')
+        self.assertNotEqual(subprocess.run(['git', '-C', str(client), 'cat-file', '-e', other], env=dict(os.environ, GIT_NO_LAZY_FETCH='1'),
+                                           capture_output=True).returncode, 0, 'the record\'s subject commit is not in the clone')
+        result, fetches = self.lazy_fetches(lambda: evidence_verify.verify(str(client), head_tree, 'unit', str(self.f.keys), None, rules=self.rules))
+        self.assertEqual((result['record'], result['match'], fetches), (record, 'inputs', 0), result)
+        projected, fetches = self.lazy_fetches(lambda: evidence_verify.project(str(client), old_tree, tuple(self.PATHS)))
+        self.assertEqual((projected, fetches), (self.key(old_tree), 0), 'an old tree whose blobs the clone lacks projects to the same key')
 
 
 class Sha256Repository(unittest.TestCase):

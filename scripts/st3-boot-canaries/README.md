@@ -13,7 +13,7 @@ or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
 `run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
 back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
 mail exactly once. The Rust wrapper
-`crates/st3/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
+`crates/fractal/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
 
 The boot, no-st2 and subagent fixtures put their private bin directory first, followed by
 inherited `PATH` entries that neither contain an `st2` executable nor name an `st2` path.

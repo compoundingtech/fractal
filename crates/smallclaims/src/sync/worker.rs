@@ -424,7 +424,7 @@ impl FleetContext {
 
     /// Record that a member refused this node for good, so it stops dialing and `st3 doctor`
     /// can say what happened.
-    fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
+    async fn mark_removed(&self, reported_by: &str, removed: &RemovedFromFleet) {
         if self.removed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
@@ -432,23 +432,48 @@ impl FleetContext {
             "st3: {reported_by} refused this node ({}): {}; it stops syncing",
             removed.code, removed.message
         );
-        #[cfg(feature = "test-support")]
-        removal_write_barrier("before-lock");
-        if let Err(error) = self.persist_removal(reported_by, removed) {
+        // The settings lock is a blocking flock, and endpoint publication holds it across a
+        // request to the daemon. Waiting for it on a runtime thread can keep that request from
+        // finishing, so the lock is never released and the removal is never written.
+        let (state_dir, own_key) = (self.state_dir.clone(), self.own_key.clone());
+        let (reported_by, code, message) = (
+            reported_by.to_owned(),
+            removed.code.clone(),
+            removed.message.clone(),
+        );
+        let persisted = tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "test-support")]
+            removal_write_barrier("before-lock");
+            let persisted = Self::persist_removal(
+                state_dir.as_deref(),
+                own_key.as_deref(),
+                &reported_by,
+                &RemovedFromFleet { code, message },
+            );
+            #[cfg(feature = "test-support")]
+            if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
+                std::fs::write(
+                    Path::new(&directory).join("finished"),
+                    b"refusal writer finished",
+                )
+                .expect("publish removal writer completion");
+            }
+            persisted
+        })
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("the refusal writer stopped: {error}")));
+        if let Err(error) = persisted {
             eprintln!("st3: cannot persist fleet refusal: {error:#}");
-        }
-        #[cfg(feature = "test-support")]
-        if let Some(directory) = std::env::var_os("ST3_TEST_REMOVAL_WRITE_BARRIER") {
-            std::fs::write(
-                Path::new(&directory).join("finished"),
-                b"refusal writer finished",
-            )
-            .expect("publish removal writer completion");
         }
     }
 
-    fn persist_removal(&self, reported_by: &str, removed: &RemovedFromFleet) -> Result<()> {
-        let Some(state_dir) = &self.state_dir else {
+    fn persist_removal(
+        state_dir: Option<&Path>,
+        own_key: Option<&str>,
+        reported_by: &str,
+        removed: &RemovedFromFleet,
+    ) -> Result<()> {
+        let Some(state_dir) = state_dir else {
             return Ok(());
         };
         let _lock = FleetFile::lock_settings(state_dir)?;
@@ -462,7 +487,7 @@ impl FleetContext {
         }
         // A foreground worker may outlive leave and a new join. Its old signed refusal
         // cannot end the new local incarnation, even when the fleet and node name match.
-        if let Some(own) = &self.own_key
+        if let Some(own) = own_key
             && MemberKey::load(&file.node_key_path(state_dir))?.public() != own
         {
             return Ok(());
@@ -1768,7 +1793,7 @@ async fn dial_peer<B: Backend>(
             }
             Err(mut error) => {
                 if let Some(removed) = error.downcast_ref::<RemovedFromFleet>() {
-                    fleet.mark_removed(&peer.name, removed);
+                    fleet.mark_removed(&peer.name, removed).await;
                     continue;
                 }
                 // `fabric dial` never connects, so the member's refusal reaches us only as a

@@ -1,4 +1,4 @@
-import { catalog } from '@smalltalk/st3-scenarios'
+import { catalog } from '@fractal/scenarios'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { folders, installPageFolders } from '../folders/client.ts'

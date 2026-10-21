@@ -78,7 +78,7 @@ fn cli_sets_replaces_and_clears_fields_without_changing_identity_or_other_bytes(
         assert_eq!(receipt["value"], value);
     }
 
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     let spec = &found.specs[0];
     assert_eq!(spec.identity, "worker");
@@ -198,7 +198,7 @@ fn cli_clears_a_presentation_field_from_compact_kdl() {
     );
     let authored = fs::read_to_string(root.join("h/worker/agent.kdl")).unwrap();
     assert_eq!(authored, "agent \"worker\" { host \"h\"; command \"x\" }\n");
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert_eq!(found.specs[0].name, None);
 }
@@ -401,7 +401,7 @@ fn concurrent_cli_writers_serialize_without_losing_either_field() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert_eq!(found.specs[0].name.as_deref(), Some("Build owner"));
     assert_eq!(
@@ -466,7 +466,7 @@ fn presentation_and_publication_contend_on_the_same_persistent_catalog_lock() {
 
     let candidate = temporary.path().join("candidate.kdl");
     fs::copy(&declaration_path, &candidate).unwrap();
-    let digest = st2::agent_publish::digest_source(st2::agent_publish::PublishSource::Spec(
+    let digest = fractal_legacy_runner::agent_publish::digest_source(fractal_legacy_runner::agent_publish::PublishSource::Spec(
         candidate.clone(),
     ))
     .unwrap();

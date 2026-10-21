@@ -328,6 +328,17 @@ checks Retry reuses the key, and prints build revision, seat and timings. The ne
 removes the submit binding and proves the send criterion rejects it without issuing mail.
 Both commands skip all live activity when the one-minute `/proc/loadavg` value is 32 or higher.
 
+## Fractal web alert strip live proof
+
+`node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
+alert strip against a real daemon without touching your own st. `up` makes a throwaway instance
+(`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
+agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
+`run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
+headless Chromium, checks with st that each step finished with that answer, and prints the
+timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
+header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
+
 ## Fractal web arrangement edits
 
 The Sidebar first adopts the live reserved subject
@@ -430,7 +441,7 @@ roster-loading fallback that enabled a canonical terminal subject without runtim
 the first-control assertion must fail even if the settled control is correctly disabled.
 
 `data/liveSource.ts` resolves an agent's terminal runtime and passes the decoded runtime
-and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@st3/sdk/effect`.
+and its snapshot ID as `FollowSpec.Terminal.initialRuntime` to `@fractal/sdk/effect`.
 The first attach consumes that observation rather than reading the same runtime twice.
 Admission identity remains the runtime ID; the observation is not a runtime cache.
 Reconnects and resyncs read the runtime afresh before obtaining another attachment.
