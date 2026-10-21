@@ -169,7 +169,8 @@ export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
 
 // AgentRowActions' compact-details query: phone widths and touch-only devices anchor Reported agent details to the row's menu trigger.
 const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
-const detailsRow = /^MissionsUi,/
+// The selected agent starts in view even at 320 × 568; below-fold rows may be virtualized out.
+const detailsRow = /^WorkbenchShell,/
 const tap = (target: Element) => userEvent.pointer([{ keys: '[TouchA>]', target }, { keys: '[/TouchA]', target }])
 const nextFrame = () => {
   const { promise, resolve } = Promise.withResolvers<number>()
