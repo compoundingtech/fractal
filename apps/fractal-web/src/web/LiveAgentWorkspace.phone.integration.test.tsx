@@ -111,12 +111,22 @@ it('keeps conversation actions in the header and gives the Details sheet only on
   }, { timeout: 15_000 })
 })
 
-const phoneTerminal = () => host.querySelector<HTMLButtonElement>('[data-testid="thread-header"] button[aria-label="Terminal"]')!
-const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Agent details'].includes(name ?? ''))
+// The tab row holds the Workspace views tab list and, fixed after it, the labelled Terminal toggle.
+const workspaceTabs = () => host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace views"]')!
+const phoneTerminal = () => workspaceTabs().parentElement!.querySelector<HTMLButtonElement>('button[aria-label="Terminal"]')!
+const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Toggle terminal drawer', 'Agent details'].includes(name ?? ''))
+const phoneHeaderNames = ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Agent details']
+/** One Terminal on the phone: outside the header and outside the tab list, beside it in the tab row. */
+const assertTerminalInTabRow = () => {
+  expect(headerOrder()).toEqual(phoneHeaderNames)
+  expect(host.querySelectorAll('button[aria-label="Terminal"]')).toHaveLength(1)
+  expect(phoneTerminal()).not.toBeNull()
+  expect(workspaceTabs().contains(phoneTerminal())).toBe(false)
+  expect(phoneTerminal().getAttribute('role')).toBeNull()
+}
 
-it('keeps a labelled Terminal toggle in the phone header that stays described and paints its reason when the agent has no terminal', async () => {
-  expect(headerOrder()).toEqual(['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Agent details'])
-  expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Toggle terminal drawer"]')).toBeNull()
+it('keeps a labelled Terminal toggle in the phone tab row that stays described and paints its reason when the agent has no terminal', async () => {
+  assertTerminalInTabRow()
   const terminal = phoneTerminal()
   expect(terminal.textContent).toBe('Terminal')
   expect(terminal.hasAttribute('title')).toBe(false)
@@ -135,7 +145,7 @@ it('keeps a labelled Terminal toggle in the phone header that stays described an
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Terminal unavailable"]')).toBeNull())
 })
 
-it('toggles the terminal drawer from the phone header Terminal button and reports its pressed state', async () => {
+it('toggles the terminal drawer from the phone tab row Terminal button and reports its pressed state', async () => {
   const withTerminal = { ...agent, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/metric-track')] }
   const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
@@ -146,11 +156,12 @@ it('toggles the terminal drawer from the phone header Terminal button and report
   expect(new URLSearchParams(window.location.search).get('open')).toBe('terminal/metric-track:detail')
   expect(phoneTerminal().getAttribute('aria-pressed')).toBe('true')
   expect(host.querySelector('[data-testid="terminal-pane"]')).not.toBeNull()
-  expect(headerOrder()).toEqual(['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Agent details'])
+  assertTerminalInTabRow()
   await act(async () => phoneTerminal().click())
   expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
   expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
   expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+  assertTerminalInTabRow()
 })
 
 it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {

@@ -16,9 +16,12 @@ const storyAgent = 'agent/build-host-a/workbench-shell'
 // Fixture agents report no runtime, so their terminal is unavailable ("This agent has no terminal.").
 const source = { ...fixtureSource({ world: fixtureProjections }), resources }
 // The same world where the roster reports the story agent's runtime, as the live roster does for a seat with a terminal.
-// Its screen is the fixture world's terminal screen for that agent.
+// Its screen is the fixture world's terminal screen for that agent. A second seat with a terminal carries a long name,
+// the phone header's and tab row's worst case at 390px.
 const storyRuntime = decodeUnknownSync(RuntimeId)('runtime/build-host-a/workbench-shell')
-const terminalSource = { ...fixtureSource({ world: { ...fixtureProjections, agents: fixtureProjections.agents.map(row => row.id === storyAgent ? { ...row, runtime_ids: [storyRuntime] } : row) } }), resources }
+const longAgent = 'agent/build-host-a/palette-review'
+const longName = 'Row projection reconciler for long-running workspace sessions'
+const terminalSource = { ...fixtureSource({ world: { ...fixtureProjections, agents: fixtureProjections.agents.map(row => row.id === storyAgent ? { ...row, runtime_ids: [storyRuntime] } : row.id === longAgent ? { ...row, name: longName, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/build-host-a/palette-review')] } : row) } }), resources }
 
 const NarrowLayoutStory = ({ terminalRuntime = false }: { readonly scheme: 'dark' | 'light'; readonly terminalRuntime?: boolean }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
@@ -103,15 +106,17 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
   await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
 }
 
-/** The phone header's controls in order: the conversation actions stay beside a labelled Terminal toggle and Agent details. */
-const phoneHeaderNames = ['Expand sidebar', 'Actions for WorkbenchShell', 'Conversation menu', 'Terminal', 'Agent details']
-/** Every phone header control is a visible 44×44px target inside the window, clear of the breadcrumb and of each other; the header never scrolls sideways. */
-const assertPhoneHeader = async (canvasElement: HTMLElement) => {
+/**
+ * The phone header's four controls in order (the conversation actions between the chevron and Agent details; Terminal
+ * lives in the tab row). Each is a visible 44×44px target inside the window, clear of the breadcrumb and of each other;
+ * the breadcrumb keeps at least a quarter of the window, and the header never scrolls sideways.
+ */
+const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'WorkbenchShell') => {
   const node = within(canvasElement).getByTestId('thread-header')
   const header = within(node)
   const buttons = header.getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(phoneHeaderNames)
-  for (const name of ['Resources', 'View KDL', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
+  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', `Actions for ${agentName}`, 'Conversation menu', 'Agent details'])
+  for (const name of ['Resources', 'View KDL', 'Terminal', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
   await expect(lane.right).toBeLessThanOrEqual(window.innerWidth)
@@ -128,17 +133,52 @@ const assertPhoneHeader = async (canvasElement: HTMLElement) => {
   const breadcrumb = header.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(breadcrumb).toBeVisible()
   const crumb = breadcrumb.getBoundingClientRect()
-  await expect(crumb.width).toBeGreaterThan(0)
   await expect(crumb.left).toBeGreaterThanOrEqual(rects[0]!.right)
   await expect(crumb.right).toBeLessThanOrEqual(rects[1]!.left)
+  // With four controls the host / agent breadcrumb keeps a readable share of the row.
+  await expect(crumb.width).toBeGreaterThanOrEqual(window.innerWidth / 4)
+  return { header, breadcrumb }
+}
+/**
+ * The phone tab row: the Workspace views tabs, then one labelled 44px Terminal toggle fixed at the row's end, outside
+ * the tab list. The tabs scroll and truncate inside their list, which ends before Terminal; the row never scrolls.
+ */
+const assertPhoneTabRow = async (canvasElement: HTMLElement) => {
+  const canvas = within(canvasElement)
+  const list = canvas.getByRole('tablist', { name: 'Workspace views' })
+  const row = list.parentElement!
+  const terminal = within(row).getByRole('button', { name: 'Terminal' })
+  await expect(canvas.getAllByRole('button', { name: 'Terminal' })).toEqual([terminal])
+  await expect(list.contains(terminal)).toBe(false)
   // The Terminal toggle's visible label carries its meaning; touch has no hover tooltip.
-  const terminal = header.getByRole('button', { name: 'Terminal' })
+  await expect(terminal).toBeVisible()
   await expect(terminal).toHaveTextContent('Terminal')
   await expect(terminal).not.toHaveAttribute('title')
-  return { header, terminal }
+  const target = terminal.getBoundingClientRect()
+  await expect(target.width).toBeGreaterThanOrEqual(44)
+  await expect(target.height).toBeGreaterThanOrEqual(44)
+  await expect(target.left).toBeGreaterThanOrEqual(0)
+  await expect(target.right).toBeLessThanOrEqual(window.innerWidth)
+  const strip = list.getBoundingClientRect()
+  await expect(strip.right).toBeLessThanOrEqual(target.left)
+  await expect(getComputedStyle(list).overflowX).toBe('auto')
+  await expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+  const tabs = within(list).getAllByRole('tab')
+  await expect(tabs.length).toBeGreaterThan(0)
+  for (const tab of tabs) {
+    const rect = tab.getBoundingClientRect()
+    await expect(rect.width).toBeGreaterThanOrEqual(44)
+    await expect(rect.height).toBeGreaterThanOrEqual(44)
+    // Only the part inside the scrolling list paints; it never reaches under Terminal.
+    const visibleRight = Math.min(rect.right, strip.right)
+    if (visibleRight > Math.max(rect.left, strip.left)) await expect(visibleRight).toBeLessThanOrEqual(target.left)
+    const label = tab.firstElementChild!.getBoundingClientRect()
+    await expect(label.right).toBeLessThanOrEqual(rect.right)
+  }
+  return { terminal, list }
 }
 
-/** The thread fills the window; the header keeps the chevron, host / agent breadcrumb, status, the conversation actions, Terminal and one Agent details button. */
+/** The thread fills the window; the header keeps the chevron, host / agent breadcrumb, status, the conversation actions and one Agent details button; Terminal ends the tab row. */
 export const Drawers: Story = { play: async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) return assertWide(canvasElement)
@@ -153,12 +193,25 @@ export const Drawers: Story = { play: async ({ canvasElement }) => {
   const breadcrumb = header.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(breadcrumb).toHaveTextContent('build-host-a')
   await expect(breadcrumb).toHaveTextContent('WorkbenchShell')
-  const { terminal } = await assertPhoneHeader(canvasElement)
+  await assertPhoneHeader(canvasElement)
+  const { terminal } = await assertPhoneTabRow(canvasElement)
   // The fixture roster reports no runtime for this agent: the toggle stays, disabled and described by why.
   await expect(terminal).toHaveAttribute('aria-pressed', 'false')
   await expect(terminal).toHaveAttribute('aria-disabled', 'true')
   await expect(terminal).toHaveAccessibleDescription('This agent has no terminal.')
   await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  // Pressing it paints the reason in a popover instead of toggling; Escape returns focus to the toggle.
+  await userEvent.click(terminal)
+  const reason = await within(document.body).findByRole('dialog', { name: 'Terminal unavailable' })
+  await expect(reason).toHaveTextContent('This agent has no terminal.')
+  // The popover mounts at the start of its entrance transition (opacity 0) and is painted once it settles.
+  await waitFor(() => expect(reason).toBeVisible())
+  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Terminal unavailable' })).toBeNull())
+  await waitFor(() => expect(terminal).toHaveFocus())
+  await assertPhoneTabRow(canvasElement)
 } }
 export const DrawersLight: Story = { ...Drawers, args: { scheme: 'light' } }
 
@@ -262,13 +315,16 @@ export const DrawersFlow: Story = { play: restoringStoryUrl(async ({ canvasEleme
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
 }) }
 /**
- * The header's terminal toggle, off then on then off, for an agent whose roster row reports a runtime: on a phone it is
- * the labelled 44px Terminal button; wider windows keep the icon toggle.
+ * The terminal toggle, off then on then off, for an agent whose roster row reports a runtime: on a phone it is the
+ * labelled 44px Terminal button at the end of the tab row; wider windows keep the header's icon toggle. On a phone the
+ * play then selects a seat with a long name: the breadcrumb truncates within its share and the tab row, with the
+ * terminal tab added, still ends before Terminal.
  */
 export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: restoringStoryUrl(async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) await assertWide(canvasElement)
-  const terminal = narrow ? (await assertPhoneHeader(canvasElement)).terminal : header.getByRole('button', { name: 'Toggle terminal drawer' })
+  if (narrow) await assertPhoneHeader(canvasElement)
+  const terminal = narrow ? (await assertPhoneTabRow(canvasElement)).terminal : header.getByRole('button', { name: 'Toggle terminal drawer' })
   await expect(terminal).toHaveAttribute('aria-pressed', 'false')
   await expect(terminal).not.toHaveAttribute('aria-disabled')
   await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
@@ -280,11 +336,32 @@ export const TerminalToggle: Story = { args: { terminalRuntime: true }, play: re
   await expect(await canvas.findByRole('region', { name: 'Terminal drawer' }, { timeout: 15000 })).toBeVisible()
   await expect(canvasElement.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
   await expect(thread!.getBoundingClientRect().height).toBeGreaterThan(0)
-  if (narrow) await assertPhoneHeader(canvasElement)
+  if (narrow) { await assertPhoneHeader(canvasElement); await assertPhoneTabRow(canvasElement) }
   terminal.focus()
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'false'))
   await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull())
-  if (narrow) await assertPhoneHeader(canvasElement)
+  if (!narrow) return
+  await assertPhoneHeader(canvasElement)
+  await assertPhoneTabRow(canvasElement)
+  // A long agent name at 390px: the title truncates inside the breadcrumb, which still keeps its share beside four controls.
+  await userEvent.click(header.getByRole('button', { name: 'Expand sidebar' }))
+  await userEvent.click(within(await canvas.findByRole('dialog', { name: 'Agents' })).getByRole('row', { name: new RegExp(`^${longName},`) }))
+  await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
+  await waitFor(() => expect(within(canvasElement).getByTestId('thread-header')).toHaveTextContent(longName))
+  const { breadcrumb } = await assertPhoneHeader(canvasElement, longName)
+  const title = within(breadcrumb).getByText(longName)
+  await expect(title.scrollWidth).toBeGreaterThan(title.clientWidth)
+  await expect(title.getBoundingClientRect().right).toBeLessThanOrEqual(breadcrumb.getBoundingClientRect().right)
+  // The previous seat keeps its own tab; opening this seat's terminal adds the terminal tab, and the tabs scroll before Terminal.
+  const longTerminal = (await assertPhoneTabRow(canvasElement)).terminal
+  await expect(longTerminal).not.toHaveAttribute('aria-disabled')
+  await userEvent.click(longTerminal)
+  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'true'))
+  await assertPhoneHeader(canvasElement, longName)
+  await assertPhoneTabRow(canvasElement)
+  await userEvent.click(longTerminal)
+  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'false'))
+  await assertPhoneTabRow(canvasElement)
 }) }
 export const TerminalToggleLight: Story = { ...TerminalToggle, args: { ...TerminalToggle.args, scheme: 'light' } }

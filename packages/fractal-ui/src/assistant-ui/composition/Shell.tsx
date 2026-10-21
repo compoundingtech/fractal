@@ -143,7 +143,7 @@ export function ThreadHeader({
   nativeActions?: React.ReactNode
   actionPortalRef?: React.Ref<HTMLDivElement>
   terminalAvailable?: boolean
-  /** Why the terminal is unavailable. With `terminalAvailable` false, a set reason shows the toggle disabled and described by it; without one the toggle stays hidden. A narrow header also opens the reason in a popover on press, since touch has no hover tooltip. */
+  /** Why the terminal is unavailable. With `terminalAvailable` false, a set reason shows the toggle disabled and described by it; without one the toggle stays hidden. A narrow header has no terminal control: the phone host places `PhoneTerminalToggle` beside its workspace tabs. */
   terminalDisabledReason?: string
   onOpen?: () => void
   onCommit?: () => void
@@ -156,7 +156,7 @@ export function ThreadHeader({
   onToggleSidebar?: () => void
   /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
   sidebarSheet?: { readonly open: boolean; readonly id: string }
-  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, a labelled **Terminal** toggle replaces the icon-only terminal control, and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, the terminal control leaves the header (the host renders `PhoneTerminalToggle` in its tab row), and one Agent details button opens `panelOpen`'s sheet. Every header control becomes a 44px touch target and the header clears the left/right safe-area insets; the host owns the top inset. */
   narrow?: boolean
 }) {
   // The `narrow` prop is authoritative for the header's own controls: they size as 44px touch targets even when the host did not provide the context.
@@ -182,7 +182,6 @@ export function ThreadHeader({
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs, narrow && styles.outlineTouch)}>Commit <Icon name="chevron-down" size={12} /></button>}
         {!narrow && terminalAvailable && <ChromeControl icon="drawer" label="Toggle terminal drawer" pressed={drawerOpen} onPress={onToggleDrawer} />}
         {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
-        {narrow && (terminalAvailable || terminalDisabledReason !== undefined) && <NarrowTerminalToggle pressed={drawerOpen} onPress={onToggleDrawer} {...(terminalAvailable || terminalDisabledReason === undefined ? {} : { disabledReason: terminalDisabledReason })} />}
         {narrow
           ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
           : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
@@ -193,11 +192,12 @@ export function ThreadHeader({
 }
 
 /**
- * The phone header's terminal toggle: a 44px button whose visible **Terminal** label names it, so its meaning never
- * depends on a tooltip. Unavailable, it stays focusable and `aria-disabled`, keeps `aria-pressed="false"`, is described
- * by the reason, and opens that reason in a popover on press instead of toggling.
+ * The phone terminal toggle, placed by the host at the trailing end of its workspace tab row: a 44px button whose
+ * visible **Terminal** label names it, so its meaning never depends on a tooltip. Unavailable, it stays focusable and
+ * `aria-disabled`, keeps `aria-pressed="false"`, is described by the reason, and opens that reason in a popover on
+ * press instead of toggling.
  */
-function NarrowTerminalToggle({ pressed, onPress, disabledReason }: { readonly pressed: boolean; readonly onPress: () => void; readonly disabledReason?: string }) {
+export function PhoneTerminalToggle({ pressed, onPress, disabledReason }: { readonly pressed: boolean; readonly onPress: () => void; readonly disabledReason?: string }) {
   const reasonId = React.useId()
   const content = <><Icon name="drawer" /><span>Terminal</span></>
   if (disabledReason === undefined) {
