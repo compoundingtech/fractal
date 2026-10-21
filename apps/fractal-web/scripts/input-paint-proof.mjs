@@ -31,7 +31,7 @@ const vite = await createServer({ root, configFile: false, optimizeDeps: { entri
     if (id === './LiveAgentWorkspace.tsx') return '\0shell-workspace'
   },
   load(id) { return shellFixtures[id.slice(1)] },
-}, ...createStylexVitePlugins({ externalPackages: ['@smalltalk/fractal-ui'], entries: [] }), {
+}, ...createStylexVitePlugins({ externalPackages: ['@fractal/ui'], entries: [] }), {
   name: 'input-paint-proof', configureServer(server) {
     server.middlewares.use('/input-paint-proof', async (req, res, next) => {
       if (req.url?.includes('html-proxy')) { next(); return }
