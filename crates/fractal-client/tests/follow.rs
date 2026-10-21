@@ -215,6 +215,11 @@ async fn resync_fences_old_generation_and_errors_differ_from_stale() {
         .unwrap()
         .to_owned();
     assert_ne!(old, new);
+    let mut barrier = client.watch(Agents, 1).await.unwrap();
+    let barrier_id = command(&mut socket).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     send(
         &mut socket,
         snapshot(
@@ -230,6 +235,21 @@ async fn resync_fences_old_generation_and_errors_differ_from_stale() {
         snapshot("wrong-subscription", json!([]), json!([]), 100),
     )
     .await;
+    // The independent routed frame proves all preceding publications were handled.
+    // Observe the affected receiver before sending any valid replacement snapshot,
+    // so latest-value coalescing cannot hide an incorrect old-generation publication.
+    send(
+        &mut socket,
+        snapshot(&barrier_id, json!([]), json!([]), 101),
+    )
+    .await;
+    state(&mut barrier, |s| s.freshness == Freshness::Fresh).await;
+    assert_eq!(rows.current().freshness, Freshness::Stale);
+    assert_eq!(
+        rows.current().value.as_ref().unwrap().snapshot.store_index,
+        1
+    );
+    assert!(futures_util::poll!(rows.next()).is_pending());
     send(&mut socket, snapshot(&new, json!([]), json!([]), 2)).await;
     state(&mut rows, |s| s.freshness == Freshness::Fresh).await;
     assert_eq!(
@@ -334,4 +354,49 @@ async fn retained_stream_coalesces_burst_and_admission_is_bounded() {
         command(&mut socket).await;
     }
     assert!(client.watch(Agents, 1).await.is_err());
+}
+
+#[tokio::test]
+async fn cancelling_admitted_watch_releases_idle_subscription() {
+    let (_root, client, mut socket) = connection().await;
+    let mut pending = Box::pin(client.watch(Agents, 1));
+    // Queue the request, but never poll the future again after admission.
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    let subscribe = command(&mut socket).await;
+    assert_eq!(subscribe["kind"], "subscribe");
+    drop(pending);
+    // There are no frames or other commands to wake the worker.
+    assert_eq!(
+        command(&mut socket).await,
+        json!({"kind":"unsubscribe", "id":subscribe["id"]})
+    );
+}
+
+#[tokio::test]
+async fn malformed_decoded_row_retains_previous_window_as_error() {
+    let (_root, client, mut socket) = connection().await;
+    let mut rows = client.watch(Agents, 1).await.unwrap();
+    let id = command(&mut socket).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut socket,
+        snapshot(&id, json!([{"id":"a","title":"valid"}]), json!(["a"]), 1),
+    )
+    .await;
+    state(&mut rows, |s| s.freshness == Freshness::Fresh).await;
+    send(
+        &mut socket,
+        snapshot(&id, json!([{"id":"a","title":42}]), json!(["a"]), 2),
+    )
+    .await;
+    let failed = state(&mut rows, |s| s.error.is_some()).await;
+    assert_eq!(failed.freshness, Freshness::Stale);
+    assert!(
+        matches!(&failed.error, Some(FollowError::Protocol(message)) if message.contains("invalid type"))
+    );
+    let retained = failed.value.as_ref().unwrap();
+    assert_eq!(retained.snapshot.store_index, 1);
+    assert_eq!(retained.items[0].title, "valid");
 }

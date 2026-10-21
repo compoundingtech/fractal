@@ -156,6 +156,14 @@ impl FollowClient {
             freshness: Freshness::Pending,
             error: None,
         }));
+        // Install cleanup before either await: cancellation can happen after admission
+        // but before this future observes the receipt. Field drop order closes both
+        // receivers before waking the worker to release the abandoned subscription.
+        let receiver = FollowReceiver {
+            stream: WatchStream::new(retained.clone()),
+            retained,
+            dropped: NotifyDrop(self.dropped.clone()),
+        };
         let (accepted, receipt) = oneshot::channel();
         self.commands
             .send(Add {
@@ -173,11 +181,7 @@ impl FollowClient {
         receipt
             .await
             .map_err(|_| ClientError::Transport("follow connection closed".into()))??;
-        Ok(FollowReceiver {
-            stream: WatchStream::new(retained.clone()),
-            retained,
-            dropped: NotifyDrop(self.dropped.clone()),
-        })
+        Ok(receiver)
     }
 }
 
@@ -426,5 +430,37 @@ async fn run(
     }
     if let Some(active) = socket {
         active.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_watch_commands_apply_backpressure_at_capacity() {
+        // Keep the real command channel unserviced to deterministically saturate
+        // admission, independently of WebSocket buffer sizes and scheduler timing.
+        let (commands, mut pending_commands) = mpsc::channel(MAX_WATCHES);
+        let client = FollowClient {
+            commands,
+            dropped: Arc::new(Notify::new()),
+        };
+        let mut pending = Vec::new();
+        for _ in 0..=MAX_WATCHES {
+            let mut request = Box::pin(client.watch(AttentionDescriptor::default(), 1));
+            assert!(futures_util::poll!(request.as_mut()).is_pending());
+            pending.push(request);
+        }
+        assert_eq!(pending_commands.len(), MAX_WATCHES);
+        assert_eq!(client.commands.capacity(), 0);
+        let admitted = pending_commands.recv().await.unwrap();
+        // The extra request cannot enqueue until the worker consumes a slot.
+        assert_eq!(pending_commands.len(), MAX_WATCHES - 1);
+        assert!(futures_util::poll!(pending[MAX_WATCHES].as_mut()).is_pending());
+        assert_eq!(pending_commands.len(), MAX_WATCHES);
+        assert_eq!(client.commands.capacity(), 0);
+        assert!(admitted.accepted.send(Ok(())).is_ok());
+        assert!(futures_util::poll!(pending[0].as_mut()).is_ready());
     }
 }
