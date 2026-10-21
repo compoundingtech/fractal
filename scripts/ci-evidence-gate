@@ -44,6 +44,8 @@ PROTECTED = (
     'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
     # What decides who may have a head tree used: the author list and the rule that reads it.
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
+    # What an agent-level note is held to (by_level "lane": true reads it from the base).
+    '.st/required-lanes.json',
 )
 
 NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
