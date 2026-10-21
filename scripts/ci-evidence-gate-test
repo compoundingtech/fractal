@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import itertools
 import json
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import re
@@ -1181,8 +1182,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
-            'head_tree', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'head', 'base', 'event', 'pr', 'repo', 'run',
-            'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
+            'head_tree', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing', 'log_fetch',
+            'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))
         self.assertEqual((fields['max_age_s'], fields['tree'], fields['base']), ('-', tree, base))
@@ -1191,6 +1192,40 @@ class EndToEnd(unittest.TestCase):
         # A run with no PR number prints '-', and a refusal prints '-' for everything about a record.
         fields, _ = self.run_gate(base, PR_NUMBER='', check='typescript-client')
         self.assertEqual((fields['pr'], fields['record'], fields['signer'], fields['tier']), ('-', '-', '-', '-'))
+
+
+    def log_head(self, tree, records, key):
+        """refs/evidence-log/main in the repository the gate's checkout fetches from, listing `records` for linux-gate on `tree`."""
+        lines = ''.join(f'record {r} linux-gate 0 fleet/ci {datetime.now(timezone.utc).isoformat()}\n' for r in records)
+        blob = self.f.git('hash-object', '-w', '--stdin', stdin=lines.encode())
+        inner = self.f.git('mktree', stdin=f'100644 blob {blob}\t{tree}\n'.encode())
+        middle = self.f.git('mktree', stdin=f'040000 tree {inner}\t{tree[:2]}\n'.encode())
+        root = self.f.git('mktree', stdin=f'040000 tree {middle}\ttrees\n'.encode())
+        head = self.f.git('-c', 'gpg.format=ssh', '-c', f'user.signingKey={key}', 'commit-tree', '-S', root,
+                          '-m', f'evidence-log v1 as_of={datetime.now(timezone.utc).isoformat()} added={len(records)} gc=0 missing=0')
+        self.f.git('update-ref', 'refs/evidence-log/main', head)
+        return head
+
+    def test_once_the_base_pins_the_log_key_the_line_carries_the_log_s_view_and_the_decision_is_unchanged(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        record = self.note(commit, tree)
+        plain, _ = self.run_gate(base)
+        self.assertEqual((plain['log'], plain['log_fetch']), ('-', '-'), 'no log key at the base: no view, no fetch')
+        log_key = self.f.key('log-key')
+        (self.f.repo / '.st/evidence-log-key').write_text(f'log/evidence namespaces="git" {log_key.with_suffix(".pub").read_text()}')
+        pinned = self.commit_base()
+        commit, tree = self.f.commit('head, on the base that pins the log key')
+        record = self.note(commit, tree)
+        fields, _ = self.run_gate(pinned)
+        self.assertEqual((fields['log'], fields['log_fetch'], fields['decision']), ('absent', 'failed', plain['decision']), fields)
+        head = self.log_head(tree, [record], log_key)
+        fields, _ = self.run_gate(pinned)
+        self.assertEqual((fields['log'], fields['log_head'], fields['log_missing'], fields['log_fetch']), ('ok', head, '0', 'ok'), fields)
+        self.assertEqual((fields['decision'], fields['record']), (plain['decision'], record))
+        self.log_head(tree, [], log_key)
+        fields, _ = self.run_gate(pinned)
+        self.assertEqual((fields['log'], fields['decision']), ('unlogged_pass', plain['decision']), 'shadow only')
 
 
 class WorkflowStructure(unittest.TestCase):

@@ -230,6 +230,22 @@ Measured 2026-10-21 against this repository: the first pull (an empty copy) acce
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
 GC migrates or removes them). A pull with 46 new records took 7.7 s, one with none 0.8 s. The log's files held 426 KB.
 
+**The verifier's view of the log (shadow).** With `--log-keys FILE` or `--log-keys-from COMMIT` (which reads
+`.st/evidence-log-key`; none there means no view), the verifier adds `log`, `log_head`, `log_age_s` and `log_missing`
+to its answer, and changes nothing else. `log` is the first of:
+- `absent`: no `refs/evidence-log/main` here;
+- `unsigned`: the head is not signed by that key (principal `log/...`);
+- `stale`: the head is more than 600 s old (five pulls), names no time, or is dated in the future;
+- `missing`: a record the log lists for this tree, or for its input key and check, after the last `gc` line is not
+  here, because it was deleted or not fetched;
+- `unlogged_pass`: the chosen record is a pass the log does not list;
+- `ok`.
+
+A failure counts whether or not the log lists it, as the verdict already does. Once the base pins the key, the gate
+fetches the one log ref (one commit deep) and prints the view on its decision line. Enforcing it, so that skipping
+requires `ok`, is a later change, after the shadow shows what it would refuse. Every read of the log is made with
+`GIT_NO_LAZY_FETCH`.
+
 The copy never becomes a partial clone, and no git call may fetch lazily (`GIT_NO_LAZY_FETCH`): in a partial clone a
 presence check of a missing record fetches it with no negotiation, that is with its whole history (3.4 GB before the
 first record was logged, in the first measurement).
@@ -1070,7 +1086,8 @@ protected file differs between the branch point and the head, the base, or the c
 keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
 `merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
 it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
-says `notes_fetch=ok|failed` and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), and input-keyed lookups use
+says `notes_fetch=ok|failed` and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), then the evidence
+log's shadow view (`log`, `log_head`, `log_age_s`, `log_missing`, `log_fetch`; `-` until the base pins `.st/evidence-log-key`, see "The evidence log"), and input-keyed lookups use
 the key of the tree the run asks about (the head's, in head mode). The signer is not checked against the author list: signers are the keys of
 `.st/evidence-keys` (the trust root, read from the base), authors are GitHub accounts; the two answer different questions and a host key has no login. **Time
 dependence:** a skip now depends on state outside the pull request. The same head can run when the gate looks (no note yet) and skip on a re-run once the
