@@ -22,7 +22,7 @@ Each JSON line has exactly these fields:
 Buckets have inclusive upper bounds. Fractional milliseconds round upward. The
 last bucket holds everything over 32768 ms. Percentiles printed by `--slo` are
 bucket upper bounds, not interpolated times. The starting targets are guesses for
-a week of measurement, listed together in `crates/stui/src/ui/slo.rs`.
+a week of measurement, listed together in `crates/fractal-tui/src/ui/slo.rs`.
 
 The counters are `active_ms`, `panics`, `silent_exits`, `launches`,
 `first_screen_top_bar_flips`, `first_screen_placeholder_flips`,
@@ -78,7 +78,7 @@ run alongside it.
 ## Phone
 
 The iOS app writes the same version-1 line with shared bucket and target definitions
-in `clients/typescript/st3-views/slo.ts`. A test compares its complete empty summary
+in `clients/typescript/fractal-views/slo.ts`. A test compares its complete empty summary
 against stui's golden JSON fixture. `host` is the generic device class `ios`; `build`
 is the app version and build. Member names and gateway addresses never enter a
 quality line. Quality has its own recorder and storage ports, separate from the

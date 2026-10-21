@@ -1,6 +1,6 @@
 # st3 schema registry
 
-This file is generated from `st3-schema`.
+This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`

@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as temporary:
     checkout = root / 'checkout'
     checkout.mkdir()
     shutil.copy(repo / '.gitignore', checkout / '.gitignore')
-    shutil.copy(repo / 'crates/st-build-stamp/build.rs', checkout / 'build.rs')
+    shutil.copy(repo / 'crates/fractal-build-stamp/build.rs', checkout / 'build.rs')
     shutil.copy(repo / 'Cargo.toml', checkout / 'Cargo.toml')
     run('git', 'init', '-q', cwd=checkout)
     run('git', 'add', '.', cwd=checkout)
@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory() as temporary:
     (checkout / 'build.rs').write_text('// changed source\n')
     assert stamp()['dirty'] is True
     assert release_stamp().returncode != 0
-    shutil.copy(repo / 'crates/st-build-stamp/build.rs', checkout / 'build.rs')
+    shutil.copy(repo / 'crates/fractal-build-stamp/build.rs', checkout / 'build.rs')
     (checkout / 'new-source.rs').write_text('// untracked source\n')
     assert stamp()['dirty'] is True
     # Git abbreviations can expand to a full hash. Test the actual emitted stamp at

@@ -50,7 +50,7 @@ sh install.sh --edge --no-run
 An extracted archive can also be installed with `./install.sh --bin-dir
 "$HOME/.local/bin"`; add `--quiet` to suppress installer notices. The archive's
 command payload is `st3`, the relative `fractal` and `st` links, and `pty`. The source migration
-tool remains available as the separate `st3-migrate` Cargo package.
+tool remains available as the separate `fractal-migrate` Cargo package.
 
 `fractal` opens the same terminal interface; `fractal tui` opens it explicitly, and
 `fractal web` opens the web interface. Other arguments behave like `st`. Release and
