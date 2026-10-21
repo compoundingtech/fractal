@@ -49,9 +49,14 @@ export const nativeReadFailureMessage = {
 const retryableFailure = (feed: Feed<unknown> | undefined): boolean => feed !== undefined && (
   (feed._tag === 'Unavailable' && feed.reason === 'failed' && feed.retryable !== false) ||
   (feed._tag === 'Observed' && feed.error?.reason === 'failed'))
+const readFailure = (kind: keyof typeof nativeReadFailureMessage, feed: Feed<unknown>, onRetry: () => void, retainedAt?: number): DetailsReadFailure => ({
+  message: feed._tag === 'Observed' ? nativeReadFailureMessage[kind].replace("Couldn't load", "Couldn't refresh") : nativeReadFailureMessage[kind],
+  ...(feed._tag === 'Observed' && (feed.readAt ?? retainedAt) !== undefined ? { retainedAt: feed.readAt ?? retainedAt } : {}),
+  onRetry,
+})
 /**
- * Spend is read on open and on request only. `until_ms` is the end of the period the shown figures
- * cover, so it dates them; refused or unreported spend offers no Refresh.
+ * Spend is read on open and on request only. The successful getter read dates the figures;
+ * older fixtures fall back to the period end. Refused or unreported spend offers no Refresh.
  */
 const usageRead = ({ feed, refresh }: { readonly feed: Feed<Native.UsagePeriod>; readonly refresh: () => void }): DetailsSpendRead | undefined => {
   if (feed._tag === 'Waiting') return { refreshing: true, onRefresh: refresh }
@@ -59,11 +64,11 @@ const usageRead = ({ feed, refresh }: { readonly feed: Feed<Native.UsagePeriod>;
   if (feed.error !== undefined && feed.error.reason !== 'failed') return undefined
   return {
     // Zero is an unreported bound, not an epoch time.
-    ...(feed.value.until_ms > 0 ? { updatedAt: feed.value.until_ms } : {}),
+    ...((feed.readAt ?? feed.value.until_ms) > 0 ? { updatedAt: feed.readAt ?? feed.value.until_ms } : {}),
     // Retained figures without an error are the previous read while the next one is in flight.
     refreshing: feed.freshness === 'stale' && feed.error === undefined,
     onRefresh: refresh,
-    ...(feed.error === undefined ? {} : { failure: { message: nativeReadFailureMessage.usage, onRetry: refresh } }),
+    ...(feed.error === undefined ? {} : { failure: readFailure('usage', feed, refresh, feed.value.until_ms > 0 ? feed.value.until_ms : undefined) }),
   }
 }
 /** Read-only display keys; `details:` URIs have no native route and must not be opened. */
@@ -158,7 +163,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const declared = declarations._tag === 'Observed' && declarations.error?.reason !== 'ungranted' && declarations.value.agentRef === agentRef ? declarations.value : undefined
   const stale = [agent, rowFeed, sessionFeed, periodFeed, declarations, missions].some(feed => feed._tag === 'Observed' && feed.freshness === 'stale')
   const spendRead = usageRead({ feed: periodFeed, refresh: reads.refreshUsage })
-  const sessionFailure = retryableFailure(sessionRead) ? { message: nativeReadFailureMessage.session, onRetry: reads.retrySession } : undefined
+  const sessionFailure = retryableFailure(sessionRead) ? readFailure('session', sessionRead!, reads.retrySession) : undefined
   const incarnationId = row === undefined ? undefined : Option.getOrUndefined(row.incarnation_id)
   const attributedRoot = row === undefined || period === undefined ? undefined : nativeDetailsRoot({ row, period })
   // Last-good period data may be displayed stale but cannot authorize a private root query.
@@ -219,7 +224,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     ] }, pending: rowFeed._tag === 'Waiting' || declarations._tag === 'Waiting', unavailableReason: factFailure(declarations) },
     { title: 'Terminals', items: row === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: terminal === undefined ? [] : [{ ...resource({ key: 'terminal', label: 'Agent terminal', detail: 'This agent’s terminal opens in the app’s terminal view.' }), uri: terminal, glyph: 'terminal' }] }, unavailableReason: 'The selected agent’s terminal is not reported.' },
     { title: 'Missions', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, pending: queue?._tag === 'Waiting', unavailableReason: queue === undefined ? 'This session does not report the agent’s queue.' : factFailure(queue),
-      ...(retryableFailure(queue) ? { failure: { message: nativeReadFailureMessage.queue, onRetry: reads.retryQueue } } : {}) },
+      ...(retryableFailure(queue) ? { failure: readFailure('queue', queue!, reads.retryQueue) } : {}) },
     { title: 'Attention', items: projected === undefined || needsMe === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
       resource({ key: 'attention', label: needsMe ? 'Needs your attention' : 'No attention action observed', detail: `${projected.ask._tag === 'Known' ? `Request · ${projected.ask.value}` : 'No request reported'}${row === undefined || Option.isNone(row.reason) ? '' : ` · ${row.reason.value}`} · read-only; respond from the agent’s conversation.` }),
     ] }, unavailableReason: 'This session does not report whether the agent needs your attention.' },

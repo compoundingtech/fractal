@@ -56,6 +56,8 @@ export type Feed<A> =
       readonly _tag: 'Observed'
       readonly value: A
       readonly freshness: 'live' | 'stale'
+      /** Client epoch milliseconds of the last successful getter read; retained across failed refreshes. */
+      readonly readAt?: number
       /** Producer snapshot time, not the client's receipt or display clock. */
       readonly snapshotCreatedAt?: Timestamp
       /** Explicitly bounded published evidence; absence makes no completeness claim. */

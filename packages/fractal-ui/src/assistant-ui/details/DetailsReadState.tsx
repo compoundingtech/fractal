@@ -12,27 +12,28 @@ function ReadAction({ children, onPress, describedBy, ...data }: { readonly chil
   return <Button onPress={onPress} aria-describedby={describedBy} {...data} {...stylex.props(styles.action, narrow && styles.actionTouch)}>{children}</Button>
 }
 
-/** One failed read: its plain sentence and a Try again that re-runs only that read. */
+/**
+ * One failed read: its plain sentence and a Try again that re-runs only that read. A read that kept
+ * earlier figures dates them in the same sentence, so no separate `Updated …` line is needed.
+ */
 export function DetailsReadFailureLine({ failure }: { readonly failure: DetailsReadFailure }) {
+  const narrow = React.useContext(NarrowLayoutContext)
   const id = React.useId()
   return <div data-details-read-failure {...stylex.props(styles.line)}>
-    <span id={id} role="status" {...stylex.props(styles.text)}>{failure.message}</span>
+    <div id={id} role="status" {...stylex.props(styles.text)}>{failure.message}{failure.retainedAt !== undefined && <> Showing figures from <HumanTime at={failure.retainedAt} tooltip={!narrow} />.</>}</div>
     <ReadAction data-details-read-action="retry" describedBy={id} onPress={failure.onRetry}>Try again</ReadAction>
   </div>
 }
 
 /**
  * Spend is read on open and on request, so its age is always visible: `Updated …` and a Refresh
- * action. A failed read keeps the last figures (still dated) beside its own Try again.
+ * action. A failed read replaces both with its own sentence (dating any kept figures) and Try again.
  */
 export function DetailsSpendReadLine({ read }: { readonly read: DetailsSpendRead }) {
   const narrow = React.useContext(NarrowLayoutContext)
   const id = React.useId()
+  if (read.failure !== undefined) return <DetailsReadFailureLine failure={read.failure} />
   const updated = read.updatedAt === undefined ? null : <HumanTime at={read.updatedAt} prefix="Updated " tooltip={!narrow} />
-  if (read.failure !== undefined) return <>
-    <DetailsReadFailureLine failure={read.failure} />
-    {updated !== null && <div data-details-spend-updated {...stylex.props(styles.line, styles.text)}>{updated}</div>}
-  </>
   return <div data-details-spend-read {...stylex.props(styles.line)}>
     <div id={id} data-details-spend-updated {...stylex.props(styles.text)}>{read.refreshing ? 'Refreshing…' : updated}</div>
     {/* Pressing during an in-flight read is a no-op at the source; the button stays focusable. */}

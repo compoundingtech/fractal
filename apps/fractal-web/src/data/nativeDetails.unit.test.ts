@@ -215,9 +215,16 @@ describe('fixture-free native Details projection', () => {
     expect(broken.overview.title).toBe(row.name)
     expect(broken.sections.find(section => section.title === 'Terminals')?.items._tag).toBe('Known')
     // A failed refresh keeps the last figures, still dated, beside its Try again.
-    const retained = view({ selectedPeriod: { _tag: 'Observed', value: period, freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } })
-    expect(retained.spendRead).toMatchObject({ updatedAt: 5000, failure: { message: "Couldn't load spend." } })
+    const retained = view({ selectedPeriod: { _tag: 'Observed', value: period, readAt: 6000, freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } })
+    expect(retained.spendRead).toMatchObject({ updatedAt: 6000, failure: { message: "Couldn't refresh spend.", retainedAt: 6000 } })
     expect(retained.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
+    const keptSession = { _tag: 'Observed', value: session, readAt: 7000, freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } as const
+    expect(view({ selectedSession: keptSession }).sessionFailure).toMatchObject({ message: "Couldn't refresh session details.", retainedAt: 7000 })
+    const keptQueue = { _tag: 'Observed', value: { kind: 'agent-queue', agent_id: row.id, current_work_ids: [], next_work_id: Option.none(), move_count: 0, moves: [], runs: [] } as Native.AgentQueue, readAt: 8000, freshness: 'stale', error: { reason: 'failed', detail: 'Lost' } } as const
+    expect(missions(view({ queue: keptQueue }))?.failure).toMatchObject({ message: "Couldn't refresh the agent queue.", retainedAt: 8000 })
+    expect(broken.spendRead?.failure?.retainedAt).toBeUndefined()
+    expect(broken.sessionFailure?.retainedAt).toBeUndefined()
+    expect(missions(broken)?.failure?.retainedAt).toBeUndefined()
     // Forbidden and non-retryable reads offer neither Try again nor Refresh.
     const forbidden = unavailable({ reason: 'ungranted', detail: 'read.usage denied' })
     const refused = view({ selectedPeriod: forbidden, selectedSession: forbidden, queue: forbidden })

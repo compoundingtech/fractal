@@ -54,8 +54,10 @@ export interface DetailsSection {
 }
 /** A failed host read with its own recovery; refused reads are not failures and offer no retry. */
 export interface DetailsReadFailure {
-  /** One plain sentence, e.g. `Couldn't load spend.` */
+  /** One plain sentence: `Couldn't load spend.`, or `Couldn't refresh spend.` when earlier figures stay on screen. */
   readonly message: string
+  /** When the figures still shown were last read successfully; present only when the failed read kept them. */
+  readonly retainedAt?: number
   /** Re-runs only the read that failed. */
   readonly onRetry: () => void
 }

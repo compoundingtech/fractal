@@ -111,8 +111,9 @@ const retainedReader = <T>({
       read(ref).pipe(
         Effect.match({
           onSuccess: (feed): Feed<T> => {
-            cache.set(ref, feed)
-            return feed
+            const dated = { ...feed, readAt: Date.now() }
+            cache.set(ref, dated)
+            return dated
           },
           onFailure: ({ reason, detail }): Feed<T> => {
             const value = cache.get(ref)

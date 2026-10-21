@@ -3,7 +3,7 @@ import * as Native from '@fractal/client/schema'
 import { Effect, Fiber, Schedule, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { observed, unavailable, waiting, type Feed } from './source.ts'
+import { unavailable, waiting, type Feed } from './source.ts'
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
 
 export interface NativeDetailsSource {
@@ -37,6 +37,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
   /** `polled` re-reads every 15 seconds while mounted; otherwise the getter reads once per mount or refresh. */
   const reader = <T>(read: (client: FractalClient) => Promise<T>, { polled }: { readonly polled: boolean }): Atom.Atom<Feed<T>> => {
     let retained: T | undefined
+    let readAt: number | undefined
     return Atom.make((get): Feed<T> => {
       const readOnce = Effect.tryPromise({
         try: async (signal) => {
@@ -52,17 +53,17 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
         },
         catch: failure,
       }).pipe(Effect.match({
-        onSuccess: (value): Feed<T> => { retained = value; return observed({ value }) },
+        onSuccess: (value): Feed<T> => { retained = value; readAt = now(); return { _tag: 'Observed', value, freshness: 'live', readAt } },
         onFailure: (error): Feed<T> => {
           if (error._tag === 'Unavailable' && error.reason === 'ungranted') retained = undefined
           return retained === undefined || error._tag !== 'Unavailable'
-            ? error : { _tag: 'Observed', value: retained, freshness: 'stale', error: { reason: error.reason, detail: error.detail } }
+            ? error : { _tag: 'Observed', value: retained, freshness: 'stale', readAt, error: { reason: error.reason, detail: error.detail } }
         },
       }))
       const fiber = Effect.runFork((polled ? Stream.fromEffectSchedule(readOnce, Schedule.spaced('15 seconds')) : Stream.fromEffect(readOnce))
         .pipe(Stream.runForEach(value => Effect.sync(() => get.setSelf(value)))))
       get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
-      return retained === undefined ? waiting : observed({ value: retained, freshness: 'stale' })
+      return retained === undefined ? waiting : { _tag: 'Observed', value: retained, freshness: 'stale', readAt }
     })
   }
   // Keyed by the visible agent so each Details open or agent switch reads once; the period is not polled.

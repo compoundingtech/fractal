@@ -81,21 +81,25 @@ describe('native subject reads', () => {
           ),
         ),
       )
-    expect(Array.from(await one())[0]).toEqual(
-      observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
-    )
+    const first = Array.from(await one())[0]!
+    expect(first).toEqual({
+      ...observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
+      readAt: expect.any(Number),
+    })
     failed = true
     expect(Array.from(await one())[0]).toEqual({
       _tag: 'Observed',
       value: { reference: 'blob/document', bytes: [65] },
       snapshotCreatedAt: DateTime.makeUnsafe(3000),
+      readAt: first._tag === 'Observed' ? first.readAt : undefined,
       freshness: 'stale',
       error: { reason: 'failed', detail: 'Gateway disconnected' },
     })
     failed = false
-    expect(Array.from(await one())[0]).toEqual(
-      observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
-    )
+    expect(Array.from(await one())[0]).toEqual({
+      ...observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
+      readAt: expect.any(Number),
+    })
   })
 
   it('decodes the selected machine independently of unrelated malformed list rows', async () => {
