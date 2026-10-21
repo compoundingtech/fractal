@@ -571,3 +571,30 @@ mission "date-upgrade" state="ready" { concurrent-runs; goal "Keep canonical ter
     assert_eq!(terminal_date_capture(&reopened, &run).rows, expected.rows);
     assert_eq!(projection_digest::generation(&reopened.readers.get()).unwrap(), before_reopen);
 }
+
+#[test]
+#[ignore = "requires an admitted, exclusively owned full disposable store copy"]
+fn measure_mission_projection_upgrade_on_disposable_copy() {
+    let path = std::path::PathBuf::from(std::env::var("ST3_PROJECTION_UPGRADE_COPY").unwrap())
+        .canonicalize().unwrap();
+    assert_eq!(path.file_name().unwrap(), "disposable.sqlite3");
+    assert_eq!(std::fs::read_to_string(path.parent().unwrap().join("projection-upgrade-copy-only")).unwrap(),
+        "Disposable copy; no daemon or peer may open this file.\n");
+    let origin = std::env::var("ST3_PROJECTION_UPGRADE_ORIGIN").unwrap();
+    let frontier = {
+        let connection = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let repaired: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='mission_projection_source_rules' AND value='1')",
+            [], |row| row.get(0)).unwrap();
+        assert!(!repaired, "measurement requires a fresh, unprocessed copy");
+        smallclaims::store::current_index(&connection).unwrap()
+    };
+    let started = std::time::Instant::now();
+    let store = Store::open(&path, &origin).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(store.index().unwrap(), frontier, "opening must append no source claims");
+    let digests = projection_digest::tables(&store.readers.get()).unwrap();
+    println!("{}", json!({"opening_seconds":elapsed.as_secs_f64(),"frontier":frontier,
+        "mission_projection_digests": ["mission_runs","run_generations","step_runs"].into_iter()
+            .map(|table| (table,digests[table].clone())).collect::<BTreeMap<_,_>>()}));
+}
