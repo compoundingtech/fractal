@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
@@ -103,7 +103,7 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
     <span {...stylex.props(styles.secondary, narrow && styles.secondaryHidden)}>
       <ChromeControl icon="folder" label="Resources" active={resourcesOpen} expanded={resourcesOpen} {...(resourcesOpen ? { controls: panelId } : {})} onPrefetch={prefetch} onPress={() => changeResourcesOpen(!resourcesOpen)} {...(disabledReason === undefined ? {} : { disabledReason })} />
     </span>
-    {resourcesDock === undefined ? panel : resourcesDock.host === null ? null : createPortal(panel, resourcesDock.host)}
+    {resourcesDock === undefined ? panel : resourcesDock.host === null ? null : <RegisteredPortal container={resourcesDock.host}>{panel}</RegisteredPortal>}
     <span {...stylex.props(styles.secondary, narrow && styles.secondaryHidden)}>
       <Tooltip label="View KDL">
         <Aria.Button aria-label="View KDL" onPress={() => setDeclarationOpen(true)} {...stylex.props(styles.button, styles.declarationButton)}>

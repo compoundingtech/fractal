@@ -13,6 +13,7 @@ import { AgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { todoAgent, todoAgentRef } from '../conversation/todos/fixtures.ts'
 import { projectTodos } from '../conversation/todos/model.ts'
 import { observed } from '../data/source.ts'
+import { PortalContainerRegistrationContext } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const snapshot = { id: 'snapshot/example', host_id: 'host/example', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-10-09T00:00:00Z' }
@@ -156,6 +157,25 @@ it('opens Resources as a non-modal complementary panel that returns focus on Esc
   expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
   expect(document.activeElement).toBe(trigger)
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
+})
+it('registers the docked Resources host for input-to-paint while the dock is mounted', async () => {
+  const dock = document.createElement('div')
+  document.body.append(dock)
+  const registered: Element[] = []
+  const released: Element[] = []
+  const register = (container: Element) => { registered.push(container); return () => { released.push(container) } }
+  const render = (dockHost: HTMLElement | null) => act(async () => root.render(<PortalContainerRegistrationContext.Provider value={register}>
+    <DataSourceProvider source={source} registry={registry}><ConversationHeaderActions agentRef={todoAgentRef} resourcesDock={{ host: dockHost, open: true, onOpenChange: () => {} }} /></DataSourceProvider>
+  </PortalContainerRegistrationContext.Provider>))
+  await render(dock)
+  await settle()
+  // React delegates portal events at the dock host, so the telemetry must observe it like any other portal container.
+  expect(dock.querySelector('aside[aria-label="Agent resources"]')).not.toBeNull()
+  expect(registered.filter(container => container === dock)).toEqual([dock])
+  expect(released.filter(container => container === dock)).toEqual([])
+  await render(null)
+  expect(released.filter(container => container === dock)).toEqual([dock])
+  dock.remove()
 })
 
 it('shows Checking rather than an out-of-date warning while the roster request is pending', async () => {
