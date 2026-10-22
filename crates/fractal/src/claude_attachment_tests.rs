@@ -735,6 +735,7 @@ async fn claude_attachment_publication_transient_api_errors_retain_the_identical
         (409, "idempotency-conflict"),
         (429, "rate-limited"),
         (422, "mailbox-session-starting"), // Actual store::check_mailbox_incarnation code.
+        (422, "mailbox-runtime-indeterminate"),
         (422, "unbound-mailbox"),
         (503, "internal"),
     ] {

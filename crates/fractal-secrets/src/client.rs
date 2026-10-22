@@ -96,6 +96,7 @@ impl Fence {
             token: hex::encode(token),
         }
     }
+
     /// Initial allocation is idempotent under this random request token. Reexec and reconnect
     /// carry the returned epoch; neither the client's clock nor a lost response changes ownership.
     pub async fn bind(&mut self, client: &Client) -> Result<()> {
@@ -110,9 +111,8 @@ impl Fence {
                     return Ok(());
                 }
                 Err(error)
-                    if api_error_code(&error).is_some_and(|code| {
-                        !matches!(code, "internal" | "database-busy" | "database-locked" | "mailbox-session-starting" | "mailbox-authority-unavailable")
-                    }) =>
+                    if api_error_code(&error)
+                        .is_some_and(|code| !retryable_mailbox_bind_code(code)) =>
                 {
                     return Err(error);
                 }
@@ -120,6 +120,18 @@ impl Fence {
             }
         }
     }
+}
+
+fn retryable_mailbox_bind_code(code: &str) -> bool {
+    matches!(
+        code,
+        "internal"
+            | "database-busy"
+            | "database-locked"
+            | "mailbox-session-starting"
+            | "mailbox-authority-unavailable"
+            | "mailbox-runtime-indeterminate"
+    )
 }
 
 /// The daemon route a replication worker hands a read to when it must forward it.
@@ -2034,6 +2046,22 @@ mod tests {
             let base = Duration::from_secs(seconds);
             let pause = retry.failed(&error);
             assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
+        }
+    }
+    #[test]
+    fn mailbox_bind_retries_only_transient_authority_failures() {
+        for code in [
+            "internal",
+            "database-busy",
+            "database-locked",
+            "mailbox-session-starting",
+            "mailbox-authority-unavailable",
+            "mailbox-runtime-indeterminate",
+        ] {
+            assert!(retryable_mailbox_bind_code(code), "{code}");
+        }
+        for code in ["stale-mailbox-session", "unbound-mailbox", "forbidden"] {
+            assert!(!retryable_mailbox_bind_code(code), "{code}");
         }
     }
 

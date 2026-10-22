@@ -242,18 +242,9 @@ read -r _
     let physical = format!("{}:created", shell.id().unwrap());
     let agent_incarnation = format!("{physical}:bound:{INVOCATION}");
     let pty_root = root.path().join("pty");
-    std::fs::create_dir_all(&pty_root).unwrap();
     let runtime_id = TERMINAL.replace('/', ".");
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.pid")),
-        shell.id().unwrap().to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.json")),
-        json!({"createdAt":"created","tags":{"st3.subject":TERMINAL}}).to_string(),
-    )
-    .unwrap();
+    let _pty_listener =
+        register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
     runtime.ptys.lock().unwrap()[0].incarnation_id = Some(physical.clone());
     apply(
         &store,

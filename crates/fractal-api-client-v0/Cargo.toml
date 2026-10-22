@@ -24,8 +24,8 @@ kdl = "6"
 libc = "0.2"
 notify = "8"
 opentelemetry = "0.30"
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "13f4d731f8898417a849de0cd655eb80dbb81e32" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "13f4d731f8898417a849de0cd655eb80dbb81e32" }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
 serde = { version = "1", features = ["derive"] }

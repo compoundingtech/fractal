@@ -99,6 +99,33 @@ fn runtime() -> Arc<Runtime> {
         ..Default::default()
     })
 }
+fn register_live_pty(
+    root: &std::path::Path,
+    runtime_id: &str,
+    subject: &str,
+    pid: u32,
+) -> std::os::unix::net::UnixListener {
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(root.join(format!("{runtime_id}.pid")), pid.to_string()).unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(root.join(format!("{runtime_id}.sock"))).unwrap();
+    let daemon_start_token = pty_core::registry::read_process_start_token(pid as i32).unwrap();
+    let daemon_boot_id = pty_core::boot::read_boot_identity().unwrap();
+    std::fs::write(
+        root.join(format!("{runtime_id}.json")),
+        json!({
+            "createdAt": "created",
+            "daemonPid": pid,
+            "daemonStartToken": daemon_start_token,
+            "daemonBootId": daemon_boot_id,
+            "tags": {"st3.subject": subject},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    listener
+}
+
 fn reconcile(store: &Arc<Store>, runtime: &Arc<Runtime>) {
     Reconciler::new(
         store.clone(),
@@ -375,18 +402,9 @@ read -r _
     let physical = format!("{}:created", shell.id().unwrap());
     let agent_incarnation = format!("{physical}:bound:{INVOCATION}");
     let pty_root = root.path().join("pty");
-    std::fs::create_dir_all(&pty_root).unwrap();
     let runtime_id = TERMINAL.replace('/', ".");
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.pid")),
-        shell.id().unwrap().to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.json")),
-        json!({"createdAt":"created","tags":{"st3.subject":TERMINAL}}).to_string(),
-    )
-    .unwrap();
+    let _pty_listener =
+        register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
     runtime.ptys.lock().unwrap()[0].incarnation_id = Some(physical.clone());
     apply(
         &store,

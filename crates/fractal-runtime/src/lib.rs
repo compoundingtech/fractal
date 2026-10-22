@@ -31,5 +31,6 @@ pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
 };
 pub use pty::{
-    Launch, PtyObservation, PtyRuntime, PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
+    Launch, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout, PtySpawnTimeoutPhase,
+    TerminalSize,
 };
