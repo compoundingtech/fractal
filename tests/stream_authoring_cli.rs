@@ -1,4 +1,4 @@
-use st2::Runner as _;
+use fractal_legacy_runner::Runner as _;
 
 static RUNTIME_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use std::fs;
@@ -13,7 +13,7 @@ fn write_agent(root: &Path) {
         "agent \"worker\" {\n  host \"example-linux\"\n  command \"exec sleep 60\"\n}\n",
     )
     .unwrap();
-    st2::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(root, "example-linux").unwrap();
 }
 
 fn st2(root: &Path, args: &[&str]) -> std::process::Output {
@@ -144,7 +144,7 @@ fn a_direct_adapter_launch_executes_the_exact_event_cli_contract() {
         String::from_utf8_lossy(&add.stderr)
     );
 
-    let spec = st2::discover(catalog.path()).specs.remove(0);
+    let spec = fractal_legacy_runner::discover(catalog.path()).specs.remove(0);
     let adapter = spec
         .tasks
         .iter()
@@ -165,7 +165,7 @@ fn a_direct_adapter_launch_executes_the_exact_event_cli_contract() {
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(receipt["status"], "created");
     assert_eq!(
-        st2::message::list_inbox(&st2::message::inbox_dir(
+        fractal_legacy_runner::message::list_inbox(&fractal_legacy_runner::message::inbox_dir(
             &catalog.path().join("agents/example-linux/worker")
         ))
         .unwrap()
@@ -206,7 +206,7 @@ fn direct_adapter_argv_preserves_spaces_and_metacharacters_exactly() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let spec = st2::discover(catalog.path()).specs.remove(0);
+    let spec = fractal_legacy_runner::discover(catalog.path()).specs.remove(0);
     let stream = spec
         .streams
         .iter()
@@ -214,7 +214,7 @@ fn direct_adapter_argv_preserves_spaces_and_metacharacters_exactly() {
         .unwrap();
     assert_eq!(
         stream.launch,
-        Some(st2::spec::StreamLaunch::Argv(
+        Some(fractal_legacy_runner::spec::StreamLaunch::Argv(
             expected.iter().map(|value| (*value).to_owned()).collect()
         ))
     );
@@ -275,9 +275,9 @@ fn launched_stream_removal_retires_runtime_before_source_publication() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let runner = st2::SystemRunner::new(catalog.path().to_path_buf(), st2::exec_state_dir("example-linux"));
+    let runner = fractal_legacy_runner::SystemRunner::new(catalog.path().to_path_buf(), fractal_legacy_runner::exec_state_dir("example-linux"));
     for _ in 0..3 {
-        let report = st2::up_once(catalog.path(), "example-linux", &runner).unwrap();
+        let report = fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         if runner
             .list_sessions()
@@ -362,9 +362,9 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let runner = st2::SystemRunner::new(catalog.path().to_path_buf(), st2::exec_state_dir("example-linux"));
+    let runner = fractal_legacy_runner::SystemRunner::new(catalog.path().to_path_buf(), fractal_legacy_runner::exec_state_dir("example-linux"));
     assert!(
-        st2::up_once(catalog.path(), "example-linux", &runner)
+        fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner)
             .unwrap()
             .errors
             .is_empty()
@@ -416,6 +416,7 @@ fn launched_stream_removal_escalates_an_ignoring_adapter_before_forgetting_it() 
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
     let _runtime = RUNTIME_TEST.lock().unwrap();
@@ -439,9 +440,9 @@ fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
         .status
         .success()
     );
-    let runner = st2::SystemRunner::new(catalog.path().to_path_buf(), st2::exec_state_dir("example-linux"));
+    let runner = fractal_legacy_runner::SystemRunner::new(catalog.path().to_path_buf(), fractal_legacy_runner::exec_state_dir("example-linux"));
     assert!(
-        st2::up_once(catalog.path(), "example-linux", &runner)
+        fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner)
             .unwrap()
             .errors
             .is_empty()
@@ -469,7 +470,7 @@ fn failed_source_publish_after_stop_keeps_declaration_relaunchable() {
     );
 
     for _ in 0..3 {
-        let report = st2::up_once(catalog.path(), "example-linux", &runner).unwrap();
+        let report = fractal_legacy_runner::up_once(catalog.path(), "example-linux", &runner).unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         if runner
             .list_sessions()

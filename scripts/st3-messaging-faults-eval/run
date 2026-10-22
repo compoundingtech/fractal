@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sys
 import secrets
 import tempfile
 import time
@@ -18,15 +20,25 @@ import tomllib
 import uuid
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from script_process import signal_private
 CASES = ("baseline", "daemon-restart", "binary-swap", "path-deploy", "link-seconds", "link-minutes",
          "receiver-down", "harness-restart", "channel-killed", "old-channel", "handoff-failed")
 
+# delivery-presence's startup grace in the daemon (STARTUP_GRACE). The observation tail must
+# outlast it by this margin, which is what the 25 s tail always was at the real 20 s grace.
+DELIVERY_STARTUP_GRACE_SECONDS = 20
+OBSERVE_MARGIN_SECONDS = 5
 RECOVERY_CASES = ("daemon-restart", "binary-swap", "path-deploy", "receiver-down",
               "harness-restart", "channel-killed")
 
 
 def now_ms():
     return time.time_ns() // 1_000_000
+
+
+# A message must be read within this long after its fault clears (the cases' read oracle).
+READ_DEADLINE_MS = 10_000
 
 
 def write_json(path, value):
@@ -55,13 +67,25 @@ async def until(predicate, timeout=30):
     raise TimeoutError("condition did not become true")
 
 
+async def spawn(*command, **options):
+    marker = secrets.token_hex(16)
+    options['env'] = {**options.get('env', os.environ), 'SCRIPT_TEST_PROCESS': marker}
+    process = await asyncio.create_subprocess_exec(*command, **options)
+    process.signal_marker = marker
+    return process
+
+
 async def stop(process):
     if process:
+        # asyncio's child watcher may already have reaped the group leader.
+        # Never signal that old group number. Revalidate each marked private
+        # group member after pinning its pidfd, including inherited pipe writers.
+        # Detached seats inherit the marker but must survive a daemon restart.
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(process.pid, sig)
-            except ProcessLookupError:
-                pass
+            for proc in Path('/proc').glob('[0-9]*'):
+                signal_private(int(proc.name), sig,
+                               environment={'SCRIPT_TEST_PROCESS': process.signal_marker},
+                               process_group=process.pid)
             if sig == signal.SIGTERM:
                 try:
                     await asyncio.wait_for(process.wait(), 1)
@@ -70,8 +94,27 @@ async def stop(process):
         await process.wait()
 
 
+def give_bytes(source, destination):
+    """Make `destination` a file with `source`'s bytes without writing them again.
+
+    The executables here are debug builds of about a gigabyte and a case used to write 5 to 6 of
+    them (5.4 GB), which stalls on writeback when the build host is busy: 40 s of a 85 s baseline
+    case at load 31, and the 90 s readiness deadline of controller_death_cleanup. Nothing here ever
+    writes through a path in place (a swap is os.replace of a new file over the path), so a hard
+    link is a private file as far as the eval can tell. Only a copy that is appended to must stay a
+    copy. Across filesystems, or where the kernel refuses links to files the user does not own
+    (a Nix store path), copy: those are the real reasons a link is impossible.
+    """
+    try:
+        os.link(source, destination)
+    except OSError as error:
+        if error.errno not in (errno.EXDEV, errno.EPERM, errno.EACCES):
+            raise
+        shutil.copy2(source, destination)
+
+
 async def capture(*command, env):
-    process = await asyncio.create_subprocess_exec(*command, env=env, start_new_session=True,
+    process = await spawn(*command, env=env, start_new_session=True,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         return await asyncio.wait_for(process.communicate(), 5)
@@ -170,7 +213,7 @@ class Node:
         # a small per-user quota). Socket, state and provider-fixture paths stay short.
         self.binary = binary_root / name / "bin/st3"
         self.binary.parent.mkdir(parents=True)
-        shutil.copy2(binary, self.binary)
+        give_bytes(binary, self.binary)
         self.endpoint = self.root / "run/st3.sock"
         self.env = {**env, "HOME": str(self.root / "home"),
                     "XDG_STATE_HOME": str(self.root / "home/state"),
@@ -195,14 +238,14 @@ class Node:
     async def spawn(self, args, log):
         stream = (self.root / log).open("ab")
         self.logs.append(stream)
-        process = await asyncio.create_subprocess_exec(str(self.binary), *args,
+        process = await spawn(str(self.binary), *args,
             env=self.env, cwd=self.root / "ws", stdin=asyncio.subprocess.DEVNULL,
             stdout=stream, stderr=stream, start_new_session=True)
         self.processes.append(process)
         return process
 
     async def cli(self, *args, check=True):
-        process = await asyncio.create_subprocess_exec(str(self.binary), "--endpoint", str(self.endpoint),
+        process = await spawn(str(self.binary), "--endpoint", str(self.endpoint),
             *args, env=self.env, start_new_session=True, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), self.bound)
@@ -286,12 +329,21 @@ class Node:
         # launch a replacement while the registry is being drained.
         try:
             await self.down()
-            # PTY servers are detached, so first close the exact private registry.
-            stdout, _ = await capture("pty", "list", "--json",
-                env={**self.env, "PTY_ROOT": str(self.root / "pty")})
-            for row in json.loads(stdout):
-                await capture("pty", "kill", row["name"],
+            try:
+                # PTY servers are detached, so first close the exact private registry.
+                stdout, _ = await capture("pty", "list", "--json",
                     env={**self.env, "PTY_ROOT": str(self.root / "pty")})
+                for row in json.loads(stdout):
+                    await capture("pty", "kill", row["name"],
+                        env={**self.env, "PTY_ROOT": str(self.root / "pty")})
+            except asyncio.TimeoutError:
+                # Closing the registry is a courtesy ahead of the sweep below, which kills every
+                # process with this eval's endpoint, and the guardian removes the roots. A slow
+                # `pty` call (it waits for the seat's process tree to exit) is not the property
+                # under test and must not fail a case whose verdict is already decided. A
+                # timeout in `down()` above is not covered: it still propagates, because
+                # reconciliation may still be running and could start a replacement.
+                print(f"{self.name}: pty cleanup exceeded its 5 s bound; sweeping the node's processes instead", file=sys.stderr, flush=True)
         except (ValueError, KeyError):
             pass
         finally:
@@ -300,7 +352,7 @@ class Node:
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 for row in self.seats():
                     try:
-                        os.kill(row["pid"], sig)
+                        signal_private(row["pid"], sig, endpoint=self.endpoint, start_ticks=row["start_ticks"])
                     except ProcessLookupError:
                         pass
                 await asyncio.sleep(0.2)
@@ -453,15 +505,16 @@ def judge(proof):
         if delay is None or not 0 <= delay <= 10_000:
             failures.append("recent unoffered recovery missed its 10000 ms deadline")
     delivery = proof["delivery_after"]
-    expected_delivery = "legacy" if proof["case"] == "old-channel" else "current"
-    if delivery.get("state") != expected_delivery:
+    if delivery.get("state") != "current":
         failures.append(f"delivery report is {delivery.get('state', 'unreported')}: {delivery.get('reason')}")
-    # The historical channel runs its own build on purpose; every other st process of the seat
-    # must run the executable the daemon runs once the fault clears.
-    if proof["case"] != "old-channel":
-        replaced = [image for image in proof["seat_images_after"] if image != proof["daemon_image"]]
-        if replaced:
-            failures.append(f"seat st processes still run a replaced binary: {', '.join(replaced)}")
+    replaced = [image for image in proof["seat_images_after"] if image != proof["daemon_image"]]
+    if replaced:
+        failures.append(f"seat st processes still run a replaced binary: {', '.join(replaced)}")
+    if proof["case"] == "old-channel":
+        if not proof.get("channel_pids_before") or proof["channel_pids_before"] != proof.get("channel_pids_after"):
+            failures.append("previous-release channel did not reexec in the same process")
+        if not proof.get("previous_release_channel_observed"):
+            failures.append("previous-release channel was not observed before the upgrade")
     if proof["graph_read_claims"] != 1:
         failures.append(f"graph contains {proof['graph_read_claims']} read claims (expected 1)")
     elif not proof["read_receipt_matches_graph"]:
@@ -471,18 +524,42 @@ def judge(proof):
     return failures
 
 
+def with_startup_grace(env, seconds):
+    """The nodes' environment, with the daemon's delivery-presence grace shortened to `seconds`.
+
+    Test-only and shorten-only: the daemon's own grace is 20 s unless this is set, so the real
+    value adds nothing to the environment.
+    """
+    if seconds >= DELIVERY_STARTUP_GRACE_SECONDS:
+        return env
+    return {**env, "ST3_TEST_DELIVERY_STARTUP_GRACE_MS": str(round(seconds * 1000))}
+
+
 async def run_case(args, case, directory, candidate, old, replacement):
     root = Path(tempfile.mkdtemp(prefix="mfe-", dir=os.environ["ST3_MESSAGING_ROOT"]))
     binary_root = Path(tempfile.mkdtemp(prefix="mfe-bin-", dir=args.scratch))
     nodes = []
     link = Link()
     result = {"case": case, "verdict": "error", "failures": []}
-    phase = "setup"
+    # Wall seconds spent in each named phase, so a slow case says which wait it was in.
+    marks = []
+
+    def enter(name):
+        marks.append((name, time.monotonic()))
+        # Flushed at every phase so a case that is killed or never finishes still says where it was.
+        # A sidecar only: failing to write it must not fail the case or skip its cleanup.
+        try:
+            write_json(directory / "phases.json", [[mark, round(at - marks[0][1], 2)] for mark, at in marks])
+        except OSError:
+            pass
+        return name
+    phase = enter("setup")
     try:
         env = {"PATH": os.environ["PATH"], "USER": os.environ.get("USER", "eval"),
                "LOGNAME": os.environ.get("USER", "eval"), "SHELL": "/bin/bash", "LANG": "C.UTF-8"}
         if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
             env["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]
+        env = with_startup_grace(env, args.startup_grace_seconds)
         source = Node(root, "amber", candidate, env, binary_root, args.ready_seconds)
         target = Node(root, "cobalt", candidate, env, binary_root, args.ready_seconds)
         nodes = [source, target]
@@ -517,35 +594,37 @@ url = "http://127.0.0.1:{proxies[1 - i]}"
                 f'  exec {provider} "$@"\nfi\nexec setsid {provider} "$@"\n'
             )
             wrapper.chmod(0o755)
+        enter("nodes-start")
         # The nodes are independent until both serve; neither startup waits behind the other.
         # Let both starts settle before raising, so cleanup never races a start still spawning.
         for outcome in await asyncio.gather(*(node.start() for node in nodes), return_exceptions=True):
             if isinstance(outcome, BaseException):
                 raise outcome
-        legacy_env = ""
+        release_env = ""
         if case == "old-channel":
-            legacy = target.binary.with_name("legacy-st3")
-            shutil.copy2(old, legacy)
-            legacy_env = f'  env {{ FAULT_OLD_CHANNEL_BIN "{legacy}"; }}\n'
+            release_channel = target.binary.with_name("previous-release-st3")
+            give_bytes(old, release_channel)
+            release_env = f'  env {{ FAULT_OLD_CHANNEL_BIN "{release_channel}"; }}\n'
         seats = target.root / "seats.kdl"
         seats.write_text(f'''version 2
 agent "fault-probe" {{
   identity "eval/fault-probe"
   workspace "{target.root / 'ws'}"
   restart "always"
-{legacy_env}\
+{release_env}\
   harness "omp" {{}}
 }}
 ''')
+        enter("seat-apply")
         await target.cli("apply", str(seats), "--no-gate-check", "--as", "person/eval")
 
         async def ready():
             value = await agent(target)
             return value if value.get("harness_state") == "idle" and provider_pids(target.seats()) else None
-        phase = "provider-readiness"
+        phase = enter("provider-readiness")
         await until(ready, args.ready_seconds)
         # A cross-node warmup proves the fixture before injecting any fault.
-        phase = "cross-node-warmup"
+        phase = enter("cross-node-warmup")
         warmup = await send(source, "warmup")
         async def warm():
             return any(row.get("event") == "read" and row.get("subject") == warmup for row in receipts(target))
@@ -560,7 +639,7 @@ agent "fault-probe" {{
         subject = None
         recovery_started = None
         channel_ready_at = channel_incarnation = None
-        phase = "fault-injection"
+        phase = enter("fault-injection")
         if case == "daemon-restart":
             # Queue before shutting down, without racing a successful handoff.
             # The temporary link gate is removed while the daemon is still down.
@@ -582,12 +661,15 @@ agent "fault-probe" {{
             subject = await send(source, case)
             # Atomic install at the exact path watched by the existing driver/channel.
             next_binary = target.binary.with_suffix(".next")
-            shutil.copy2(candidate if case == "old-channel" else replacement, next_binary)
+            give_bytes(candidate if case == "old-channel" else replacement, next_binary)
             os.replace(next_binary, target.binary)
             await target.down()
             if case == "old-channel":
-                # Ensure the historical poller observes the daemon outage instead of racing
-                # between one-second polls. The real extension owns channel recovery.
+                # Advance the channel's installed reference to the daemon's candidate
+                # inode. The actual release channel must exec it without a provider restart.
+                next_channel = release_channel.with_suffix(".next")
+                next_channel.symlink_to(target.binary)
+                os.replace(next_channel, release_channel)
                 await asyncio.sleep(args.short_seconds)
             await target.start()
             recovery_started = now_ms()
@@ -599,7 +681,7 @@ agent "fault-probe" {{
             # path the seat started from keeps its old executable, unchanged.
             deployed = binary_root / "cobalt/next-store/bin/st3"
             deployed.parent.mkdir(parents=True)
-            shutil.copy2(replacement, deployed)
+            give_bytes(replacement, deployed)
             await target.down()
             target.binary = deployed
             await target.start()
@@ -647,13 +729,16 @@ agent "fault-probe" {{
             fault_started = now_ms()
             fault_monotonic = time.monotonic()
             link.drop()
-            os.kill(channels[0]["pid"], signal.SIGKILL)
+            if not signal_private(channels[0]["pid"], signal.SIGKILL, endpoint=target.endpoint,
+                                  start_ticks=channels[0]["start_ticks"]):
+                raise RuntimeError("channel fault target no longer matches its private receipt")
             subject = await send(source, case)
         elif case == "harness-restart":
             link.drop()
             if len(initial) != 1:
                 raise RuntimeError("expected exactly one provider")
-            os.kill(initial[0], signal.SIGKILL)
+            if not signal_private(initial[0], signal.SIGKILL, endpoint=target.endpoint):
+                raise RuntimeError("harness fault target no longer matches its private endpoint")
             subject = await send(source, case)
             async def restarted():
                 current = provider_pids(target.seats())
@@ -663,7 +748,7 @@ agent "fault-probe" {{
             subject = await send(source, case)
         if case in RECOVERY_CASES and not link.enabled:
             if case == "channel-killed":
-                phase = "replacement-channel-readiness"
+                phase = enter("replacement-channel-readiness")
                 replacement_ready_receipt = await until(lambda: current_replacement_channel(
                     target, baseline_report, old_channel, before_card.get("incarnation_id")), args.ready_seconds)
                 channel = replacement_ready_receipt["card"]
@@ -681,7 +766,7 @@ agent "fault-probe" {{
                 })
         else:
             cleared = recovery_started if recovery_started is not None else now_ms()
-        phase = "fault-observation"
+        phase = enter("fault-observation")
         result.update(message=subject, fault_started_at_unix_ms=fault_started,
                       fault_cleared_at_unix_ms=cleared,
                       fault_duration_ms=round((time.monotonic() - fault_monotonic) * 1000))
@@ -741,7 +826,16 @@ agent "fault-probe" {{
         trace_text = await target.cli("trace", "show", subject, "--json", "--limit", "100")
         claims = [json.loads(line) for line in trace_text.splitlines() if line]
         graph_reads = [claim for claim in claims if claim.get("kind") == "message.read"]
-        source_view = await source.api("/v1/messages/read/" + subject)
+        # The read receipt reaches the sender on an exchange after the read itself. Wait for it
+        # within the same read deadline, measured from this message's send, not one sample.
+        async def sender_converged():
+            view = await source.api("/v1/messages/read/" + subject)
+            return view if (view or {}).get("status") in ("read", "closed") else None
+        try:
+            source_view = await until(sender_converged,
+                                      max(0.0, (cleared + READ_DEADLINE_MS - now_ms()) / 1000))
+        except TimeoutError:
+            source_view = await source.api("/v1/messages/read/" + subject)
         result.update(
             warmup_received_copies=sum(1 for row in all_receipts
                 if row.get("subject") == warmup and row.get("event") == "received"),
@@ -755,6 +849,10 @@ agent "fault-probe" {{
             incarnation_before=before_card.get("incarnation_id"), incarnation_after=after_card.get("incarnation_id"),
             delivery_after=after_card.get("delivery", {}), sender_message_status=(source_view or {}).get("status"),
             seat_images_after=sorted({row["image"] for row in after if " driver " in row["argv"]}),
+            channel_pids_before=sorted(row["pid"] for row in before if " driver omp-channel " in row["argv"]),
+            channel_pids_after=sorted(row["pid"] for row in after if " driver omp-channel " in row["argv"]),
+            previous_release_channel_observed=case == "old-channel" and any(
+                row["image"] == str(release_channel) for row in before if " driver omp-channel " in row["argv"]),
             daemon_image=str(target.binary),
             delivered_during_outage=case in ("daemon-restart", "receiver-down", "binary-swap", "path-deploy", "old-channel", "link-seconds", "link-minutes")
                 and any(row["at_unix_ms"] < cleared for row in received),
@@ -765,8 +863,31 @@ agent "fault-probe" {{
         write_json(directory / "after.json", {"agent": after_card, "processes": after})
         write_json(directory / "trace.json", claims)
         write_json(directory / "reader.json", all_receipts)
+        statuses = {}
         for node in nodes:
-            write_json(directory / f"{node.name}-replication.json", await node.api("/v1/replication/status"))
+            statuses[node.name] = await node.api("/v1/replication/status")
+            write_json(directory / f"{node.name}-replication.json", statuses[node.name])
+        if result["failures"]:
+            # CI keeps only the log, and the test prints this whole result when a case fails: say
+            # what the replication workers and the link did around the clear, relative to it, so a
+            # recovery that took 12 s names the wait it spent them in.
+            def around(at):
+                return None if at is None else int(at - cleared)
+            result["recovery_diagnosis"] = {
+                "workers_at_end": {
+                    name: [{"peer": peer.get("peer"), "status": peer.get("status"),
+                            "phase": (peer.get("worker") or {}).get("phase"),
+                            "last_attempt_ms_from_clear": around((peer.get("worker") or {}).get("last_attempt_at_unix_ms")),
+                            "next_retry_ms_from_clear": around((peer.get("worker") or {}).get("next_retry_at_unix_ms")),
+                            "last_failure_ms_from_clear": around(peer.get("last_failure_at_unix_ms")),
+                            "last_error": (peer.get("last_error") or "")[:160]}
+                           for peer in (status or {}).get("peers", [])]
+                    for name, status in statuses.items()},
+                "link_ms_from_clear": [
+                    [around(event["at_unix_ms"]), event.get("port"), event["event"], event.get("line", "")[:32],
+                     event.get("enabled")]
+                    for event in link.events if cleared - 5000 <= event["at_unix_ms"] <= cleared + 30000][:70],
+            }
     except Exception as error:
         result["fixture_error_phase"] = phase
         result["failures"].append(f"fixture error: {type(error).__name__}: {error}")
@@ -775,13 +896,14 @@ agent "fault-probe" {{
             trace = await node.cli("trace", "show", "agent/eval/fault-probe", "--json", "--limit", "100", check=False)
             (directory / f"{node.name}-error-trace.jsonl").write_text(trace)
     finally:
+        marks.append(("cleanup", time.monotonic()))
         cleaned = set()
         try:
             write_json(directory / "link-events.json", link.events)
             await link.close()
             for node in reversed(nodes):
                 try:
-                    terminal = await asyncio.create_subprocess_exec("pty", "peek", "--plain", "--full", "eval.fault-probe",
+                    terminal = await spawn("pty", "peek", "--plain", "--full", "eval.fault-probe",
                         env={**node.env, "PTY_ROOT": str(node.root / "pty")}, start_new_session=True,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     try:
@@ -814,6 +936,11 @@ agent "fault-probe" {{
             if not args.keep:
                 shutil.rmtree(root)
                 shutil.rmtree(binary_root)
+    marks.append(("end", time.monotonic()))
+    seconds = {}
+    for (name, began), (_, ended) in zip(marks, marks[1:]):
+        seconds[name] = round(seconds.get(name, 0) + ended - began, 2)
+    result["phase_seconds"] = seconds
     return result
 
 
@@ -821,21 +948,26 @@ async def main(args):
     args.out.mkdir(parents=True, exist_ok=False)
     args.scratch.mkdir(parents=True, exist_ok=True)
     started = datetime.datetime.now(datetime.timezone.utc)
+    began = time.monotonic()
     # Pin binaries once: a shared deploy during the eval cannot change its input.
     inputs = Path(tempfile.mkdtemp(prefix="mfi-", dir=args.scratch))
     try:
         candidate, old, replacement = [inputs / name for name in ("candidate", "old", "replacement")]
-        shutil.copy2(args.binary, candidate)
-        shutil.copy2(args.old_binary, old)
-        shutil.copy2(args.swap_binary or args.binary, replacement)
-        probe = await asyncio.create_subprocess_exec(str(old), "resume-probe",
+        give_bytes(args.binary, candidate)
+        give_bytes(args.old_binary, old)
+        if args.swap_binary:
+            give_bytes(args.swap_binary, replacement)
+        else:
+            # Appended to below, so it must be its own file.
+            shutil.copy2(args.binary, replacement)
+        probe = await spawn(str(old), "resume-probe",
             env={"PATH": os.environ["PATH"]}, start_new_session=True, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             probe_stdout, _ = await asyncio.wait_for(probe.communicate(), 5)
         finally:
             await stop(probe)
-        if "old-channel" in args.cases and probe.returncode == 0:
-            raise ValueError("--old-binary supports resume-probe; supply a pre-reexec channel build")
+        if "old-channel" in args.cases and probe.returncode != 0:
+            raise ValueError("--old-binary must be the previous release with the reexec contract")
         if not args.swap_binary:
             with replacement.open("ab") as stream:
                 stream.write(b"\nmessaging-faults replacement\n")
@@ -844,8 +976,11 @@ async def main(args):
                   "old_binary_resume_probe_exit_code": probe.returncode,
                   "old_binary_resume_probe_stdout": probe_stdout.decode().strip(),
                   "read_deadline_ms": 10000, "observe_seconds": args.observe_seconds,
+                  "startup_grace_seconds": args.startup_grace_seconds,
                   "short_seconds": args.short_seconds, "long_seconds": args.long_seconds,
                   "agent_tokens": 0, "judge_tokens": 0, "cases": []}
+        # Copies, resume probe and digests of the three pinned executables, before any case.
+        report["inputs_seconds"] = round(time.monotonic() - began, 2)
         for case in args.cases:
             directory = args.out / case
             directory.mkdir()
@@ -870,7 +1005,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("out", type=Path)
-    parser.add_argument("--old-binary", type=Path, required=True, help="actual pre-reexec build; not a simulated old client")
+    parser.add_argument("--old-binary", type=Path, required=True, help="actual pinned previous-release build")
     parser.add_argument("--swap-binary", type=Path)
     parser.add_argument("--scratch", type=Path, help="directory for large executable copies; defaults to out")
     parser.add_argument("--keep", action="store_true", help="keep private state and executable copies, including on failure")
@@ -878,11 +1013,17 @@ if __name__ == "__main__":
     parser.add_argument("--short-seconds", type=float, default=3)
     parser.add_argument("--long-seconds", type=float, default=120)
     parser.add_argument("--observe-seconds", type=float, default=25)
+    parser.add_argument("--startup-grace-seconds", type=float, default=DELIVERY_STARTUP_GRACE_SECONDS,
+                        help="shorten the daemon's delivery-presence startup grace (test-only; the real value is 20)")
     parser.add_argument("--ready-seconds", type=float, default=60)
     args = parser.parse_args()
     args.scratch = (args.scratch or args.out).resolve()
-    if args.observe_seconds < 25 or args.long_seconds < 120 or args.short_seconds < 2:
-        parser.error("observe >=25s, long outage >=120s, short outage >=2s are required")
+    if not 0 <= args.startup_grace_seconds <= DELIVERY_STARTUP_GRACE_SECONDS:
+        parser.error("the startup grace can only be shortened from 20s")
+    if (args.observe_seconds < args.startup_grace_seconds + OBSERVE_MARGIN_SECONDS
+            or args.long_seconds < 120 or args.short_seconds < 2):
+        parser.error(f"observe >= startup grace + {OBSERVE_MARGIN_SECONDS:g}s (25s at the real 20s grace), "
+                     "long outage >=120s, short outage >=2s are required")
     if os.environ.get("ST_AGENT"):
         parser.error("run detached outside an st seat; see the eval README")
     if not shutil.which("node") or not shutil.which("pty"):

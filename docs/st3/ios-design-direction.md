@@ -32,7 +32,7 @@ Keep alerts answerable above their conversation ([Alerts], [Conversation], [#195
 
 After merge: **Home and alert detail → Agents → Conversation and alert strip → Missions → Fleet → Terminal → Resources and Spaces polish**. Each gets a small PR with before/after screenshots attached using invented data. Home establishes reusable text, color and list primitives. Verify light/dark, large text, VoiceOver, back navigation, live/offline/error states and unchanged actions. Coordinate Home and alerts with #2783 and #1959; keep updates reactive and fix local defects at their cause.
 
-[st3-views]: ../../clients/typescript/st3-views/README.md
+[st3-views]: ../../clients/typescript/fractal-views/README.md
 [packages/fractal-ui]: ../../packages/fractal-ui/README.md
 [LiveAgentWorkspace]: ../../apps/fractal-web/src/web/LiveAgentWorkspace.tsx
 [ConversationPane]: ../../apps/fractal-web/src/web/ConversationPane.tsx
@@ -42,7 +42,7 @@ After merge: **Home and alert detail → Agents → Conversation and alert strip
 [ui]: ../../apps/ios/ui.tsx
 [theme]: ../../apps/ios/theme.ts
 [Now]: ../../apps/ios/screens/Now.tsx
-[homeView]: ../../clients/typescript/st3-views/homeView.ts
+[homeView]: ../../clients/typescript/fractal-views/homeView.ts
 [web Sidebar]: ../../apps/fractal-web/src/shell/Sidebar.tsx
 [Alerts]: ../../apps/ios/screens/Alerts.tsx
 [Conversation]: ../../apps/ios/screens/Conversation.tsx
