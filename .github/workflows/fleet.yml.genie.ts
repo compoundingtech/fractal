@@ -232,8 +232,14 @@ const evidenceGateOutcomes = [
   ['rejected', 'evidence note rejected'],
   ['unavailable', 'evidence verifier unavailable'],
 ] as const
+// A check whose policy compares a note's input with this run's own value (input_order) gets that value from the job that knows
+// it: fractal-web's kit_inputs is its change detection's answer for this run's diff. The gate passes RUN_INPUTS to the verifier.
+const evidenceGateRunInputs: Record<string, { needs: string[], values: Record<string, string> }> = {
+  'fractal-web': { needs: ['fractal-web-changes'], values: { kit_inputs: '${{ needs.fractal-web-changes.outputs.kit-inputs }}' } },
+}
 const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`evidence-gate-${check}`, {
   name: `evidence-gate-${check}`,
+  ...(evidenceGateRunInputs[check] ? { needs: evidenceGateRunInputs[check].needs } : {}),
   'runs-on': 'ubuntu-latest',
   'timeout-minutes': 5,
   'continue-on-error': true,
@@ -264,6 +270,7 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
         TRIGGERING_ACTOR: '${{ github.triggering_actor }}',
         RUN_ID: '${{ github.run_id }}',
         RUN_ATTEMPT: '${{ github.run_attempt }}',
+        ...(evidenceGateRunInputs[check] ? { RUN_INPUTS: JSON.stringify(evidenceGateRunInputs[check].values) } : {}),
       },
       // The gate is taken from the accepted base, like the verifier, so a change cannot rewrite the
       // script that decides whether it is skipped. No gate at the base, or any failure: run the check.

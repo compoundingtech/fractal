@@ -255,6 +255,8 @@ class EndToEnd(unittest.TestCase):
                    BASE_SHA=base, EVENT_NAME='merge_group', HEAD_SHA=self.f.git('rev-parse', 'HEAD'), PR_NUMBER='',
                    RUN_ID='42', RUN_ATTEMPT='1', GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary),
                    GATE_VERIFIER_TIMEOUT=timeout)
+        if check == 'fractal-web':  # the workflow always passes the run's kit_inputs (its change detection) to this gate
+            env['RUN_INPUTS'] = '{"kit_inputs": "false"}'
         env.update(overrides)
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-evidence-gate')], cwd=work, env=env,
                               capture_output=True)
@@ -1125,6 +1127,14 @@ class EndToEnd(unittest.TestCase):
         self.wrapper_note(commit, tree, lock, check='fractal-web')
         fields, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='pull_request')
         self.assertEqual((fields['outcome'], fields['decision']), ('satisfied', 'skip'))
+        # Made without kit plays (kit_inputs=false), it never covers a run whose own detection says the kit changed, nor a run that
+        # did not say; a note made with them covers both.
+        self.assertEqual(self.assertRuns(base, check='fractal-web', RUN_INPUTS='{"kit_inputs": "true"}')['reason'], 'wrong_input')
+        self.assertEqual(self.assertRuns(base, check='fractal-web', RUN_INPUTS='')['reason'], 'no_run_input')
+        self.wrapper_note(commit, tree, lock, check='fractal-web', seconds=1, inputs={'kit_inputs': 'true'})
+        for value in ('true', 'false'):
+            fields, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='pull_request', RUN_INPUTS=f'{{"kit_inputs": "{value}"}}')
+            self.assertEqual((fields['outcome'], fields['decision']), ('satisfied', 'skip'), value)
         for missing in FRACTAL_WEB_INPUTS:
             with self.subTest('missing ' + missing):
                 base, commit, tree, lock = self.wrapper_scenario()
@@ -1785,11 +1795,46 @@ class WorkflowStructure(unittest.TestCase):
         for name, body in jobs:
             self.assertIn('    permissions:\n      contents: read\n', body, name)
             self.assertNotRegex(body, r'write|workflow_dispatch|gh (run|workflow|api)|secrets\.|git push', name)
-            self.assertNotIn('needs:', body.split('steps:')[0], name)
+            # A gate needs nothing, except the job that knows a run value its policy compares a note's with (RUN_INPUTS).
+            header = body.split('steps:')[0]
+            if name == 'evidence-gate-fractal-web':
+                self.assertIn('    needs: [fractal-web-changes]\n', header)
+                self.assertIn('''RUN_INPUTS: '{"kit_inputs":"${{ needs.fractal-web-changes.outputs.kit-inputs }}"}\'''', body)
+            else:
+                self.assertNotIn('needs:', header, name)
+                self.assertNotIn('RUN_INPUTS', body, name)
             self.assertIn('git show \\"$BASE_SHA:scripts/ci-evidence-gate\\"', body, name)  # the gate comes from the base
             self.assertNotIn('python3 scripts/ci-evidence-gate', body, name)  # never the tree under test
             self.assertIn("- name: evidence skip taken\n        id: taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
 
+
+    def test_run_inputs_are_strict_strings_and_reach_the_verifier_only_when_it_takes_them(self):
+        self.assertEqual(gate.run_inputs_from('{"kit_inputs": "true"}'), {'kit_inputs': 'true'})
+        for bad in ('', 'not json', '[]', '"x"', '{"kit_inputs": true}', '{"Kit": "true"}', '{"kit_inputs": "a b"}',
+                    '{"kit_inputs": ""}', '{"kit_inputs": "x\\ny"}'):
+            self.assertEqual(gate.run_inputs_from(bad), {}, bad)
+        self.assertEqual(gate.context_from({'RUN_INPUTS': '{"kit_inputs": "false", "bad key": "x"}'})['run_inputs'], {'kit_inputs': 'false'})
+        self.assertEqual(gate.context_from({})['run_inputs'], {})
+        calls = []
+        def fake(*command, stdin=None, timeout=120):
+            calls.append(command)
+            if command[:2] == ('git', 'rev-parse'):
+                return subprocess.CompletedProcess(command, 0, b'a' * 40 + b'\n', b'')
+            if command[:2] == ('git', 'show') and command[2].endswith(':scripts/evidence-verify'):
+                return subprocess.CompletedProcess(command, 0, verifier_source, b'')
+            if command[0] == sys.executable and '--project' not in command:
+                return subprocess.CompletedProcess(command, 1, b'{"satisfied": false, "reason": "no_record"}', b'')
+            return subprocess.CompletedProcess(command, 0, b'', b'')
+        original = gate.run
+        self.addCleanup(setattr, gate, 'run', original)
+        gate.run = fake
+        context = {'base': 'b' * 40, 'check': 'fractal-web', 'repository': 'org/repo', 'run_inputs': {'kit_inputs': 'true'}}
+        for verifier_source, passed in ((b'... --run-input KEY=VALUE ...', True), (b'an older verifier', False)):
+            calls.clear()
+            gate.observe(dict(context))
+            asked = [command for command in calls if command[0] == sys.executable and '--project' not in command]
+            self.assertEqual(len(asked), 1)
+            self.assertEqual('--run-input=kit_inputs=true' in asked[0], passed, asked[0])
 
     def test_a_push_to_main_gets_a_base_so_the_gate_can_verify_in_shadow_but_never_skips(self):
         # Written out: only a pull request or a merge group may ever skip.
