@@ -53,7 +53,7 @@ if name == "nice":
     os.execvpe(args[2], args[2:], os.environ)
 if name == "pnpm":
     if args == ["install", "--frozen-lockfile", "--ignore-scripts"]:
-        for package in ("", "apps/ios", "clients/typescript/st3-views", "clients/typescript/st3-client"):
+        for package in ("", "apps/ios", "clients/typescript/fractal-views", "clients/typescript/fractal-client"):
             (Path.cwd() / package / "node_modules").mkdir(parents=True, exist_ok=True)
         sys.exit(0)
     if args == ["run", "export:ios"]:
@@ -114,7 +114,8 @@ if name == "xcodebuild":
         # Metro bakes EXPO_PUBLIC values into the bundle at transform time;
         # bundled_build simulates a transform cache serving a stale value.
         (app / "main.jsbundle").write_bytes(
-            control.get("bundled_build", os.environ["EXPO_PUBLIC_ST3_BUILD"]).encode())
+            control.get("bundled_build", os.environ.get(
+                "EXPO_PUBLIC_FRACTAL_BUILD", os.environ["EXPO_PUBLIC_ST3_BUILD"])).encode())
     print("fixture build output", flush=True)
     sys.exit(build_exit)
 if name == "node":
@@ -177,9 +178,12 @@ class ReleaseDeliveryTests(unittest.TestCase):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "Git is required for the delivery fixtures")
+        git_bin = Path(git).parent
         self.env = dict(os.environ)
         self.env.update({
-            "PATH": f"{self.tools}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "PATH": os.pathsep.join((str(self.tools), str(git_bin), "/usr/bin", "/bin")),
             "DELIVERY_FIXTURE_ROOT": str(self.root),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
@@ -198,13 +202,13 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.git("config", "user.email", "delivery-test@example.invalid")
         self.git("remote", "add", "origin", str(self.origin))
         packages = {
-            "apps/ios": {"@smalltalk/st3-views": "workspace:*"},
-            "clients/typescript/st3-views": {"@smalltalk/st3-client": "workspace:*"},
-            "clients/typescript/st3-client": {},
+            "apps/ios": {"@fractal/views": "workspace:*"},
+            "clients/typescript/fractal-views": {"@fractal/client": "workspace:*"},
+            "clients/typescript/fractal-client": {},
         }
         for relative, dependencies in packages.items():
             self.write_source(f"{relative}/package.json", json.dumps({
-                "name": "@smalltalk/" + Path(relative).name, "version": "1.0.0", "dependencies": dependencies,
+                "name": "@fractal/" + Path(relative).name.removeprefix("fractal-"), "version": "1.0.0", "dependencies": dependencies,
             }))
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
         self.write_source("package.json", json.dumps({
@@ -304,8 +308,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assert_installed(self.initial_commit)
         for relative in (
             "apps/ios/index.ts",
-            "clients/typescript/st3-views/index.ts",
-            "clients/typescript/st3-client/index.ts",
+            "clients/typescript/fractal-views/index.ts",
+            "clients/typescript/fractal-client/index.ts",
         ):
             with self.subTest(path=relative):
                 self.write_source(relative, f"export const changed = {json.dumps(relative)};\n")
@@ -334,7 +338,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
 
     def test_dependency_path_prefix_does_not_include_sibling_package(self):
         self.reconcile()
-        self.write_source("clients/typescript/st3-client-extras/index.ts", "export {};\n")
+        self.write_source("clients/typescript/fractal-client-extras/index.ts", "export {};\n")
         self.commit("Unrelated sibling package")
         self.reconcile()
         self.assertIn("irrelevant", self.outcomes())
@@ -511,10 +515,10 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def test_recursive_dependency_scope_recomputes_when_graph_changes(self):
         self.reconcile()
         package = {
-            "name": "@smalltalk/st3-views", "version": "1.0.0",
+            "name": "@fractal/views", "version": "1.0.0",
             "dependencies": {"new-local-package": "file:../new-local-package"},
         }
-        self.write_source("clients/typescript/st3-views/package.json", json.dumps(package))
+        self.write_source("clients/typescript/fractal-views/package.json", json.dumps(package))
         self.write_source("clients/typescript/new-local-package/package.json",
                           json.dumps({"name": "new-local-package", "version": "1.0.0"}))
         self.write_source("clients/typescript/new-local-package/index.ts", "export const fixture = 1;\n")
@@ -525,7 +529,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         changed_commit = self.commit("Change new transitive local dependency")
         self.reconcile()
         self.assert_installed(changed_commit)
-        self.write_source("clients/typescript/st3-client/index.ts", "export const obsolete = true;\n")
+        self.write_source("clients/typescript/fractal-client/index.ts", "export const obsolete = true;\n")
         self.commit("Change package removed from dependency graph")
         self.reconcile()
         self.assert_installed(changed_commit)
@@ -953,7 +957,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
 
     def app_trees(self, commit):
         return [self.git("rev-parse", f"{commit}:{package}") for package in (
-            "apps/ios", "clients/typescript/st3-views", "clients/typescript/st3-client")]
+            "apps/ios", "clients/typescript/fractal-views", "clients/typescript/fractal-client")]
 
     def reset_delivery(self):
         """Fresh delivery state and fault controls for each randomized sequence."""
@@ -1022,12 +1026,15 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
     def test_changed_build_inputs_rebuild_unchanged_revision_before_trusting_artifacts(self):
         self.reconcile("--build-only")
         self.assertEqual(len(self.commands("xcodebuild")), 1)
-        # Unchanged inputs keep no-rebuild retries, including an inherited
-        # build stamp that the worker always overrides from the revision.
-        self.env["EXPO_PUBLIC_ST3_BUILD"] = "inherited-ignored"
-        self.reconcile("--build-only")
-        self.assertEqual(self.outcomes()[-1], "install_held")
-        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        # Both inherited build-stamp aliases are derived from the revision,
+        # including an explicitly empty preferred value.
+        for preferred in ("inherited-stale", ""):
+            with self.subTest(preferred=preferred):
+                self.env["EXPO_PUBLIC_FRACTAL_BUILD"] = preferred
+                self.env["EXPO_PUBLIC_ST3_BUILD"] = "inherited-ignored"
+                self.reconcile("--build-only")
+                self.assertEqual(self.outcomes()[-1], "install_held")
+                self.assertEqual(len(self.commands("xcodebuild")), 1)
         # A pending artifact built from other inputs is never installed.
         self.env["EXPO_PUBLIC_FIXTURE_ENDPOINT"] = "changed"
         self.reconcile()
@@ -1219,6 +1226,20 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertIn("TEST-DEVICE", log)
         self.assertIn("build.log", log)
 
+    def test_daily_build_overwrites_both_inherited_build_stamps(self):
+        for preferred in ("inherited-stale", ""):
+            with self.subTest(preferred=preferred):
+                self.env["EXPO_PUBLIC_FRACTAL_BUILD"] = preferred
+                self.env["EXPO_PUBLIC_ST3_BUILD"] = "legacy-stale"
+                commit = self.change_js(f"overwrite-build-stamp-{preferred}")
+                self.reconcile("--build-only")
+                self.assertEqual(self.saved_state()["pending"]["commit"], commit)
+                inputs = json.loads((self.state / "build-cache" / "inputs.json").read_text())
+                self.assertEqual(inputs["js_env"]["EXPO_PUBLIC_FRACTAL_BUILD"], commit[:12])
+                self.assertEqual(inputs["js_env"]["EXPO_PUBLIC_ST3_BUILD"], commit[:12])
+                bundle = self.state / "artifacts" / commit / "smalltalk.app" / "main.jsbundle"
+                self.assertEqual(bundle.read_text(), commit[:12])
+
     def test_js_only_changes_reuse_native_cache_but_reset_inlined_js_transforms(self):
         self.reconcile("--build-only")
         cache = self.state / "build-cache"
@@ -1226,7 +1247,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         derived = cache / "derived"
         sentinel = derived / "incremental-cache-sentinel"
         sentinel.write_text("keep incremental outputs")
-        for relative in ("apps/ios/index.ts", "clients/typescript/st3-client/index.ts"):
+        for relative in ("apps/ios/index.ts", "clients/typescript/fractal-client/index.ts"):
             with self.subTest(path=relative):
                 transforms = cache / "tmp" / "metro-transform-cache"
                 transforms.mkdir(parents=True, exist_ok=True)
@@ -1239,7 +1260,9 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 after = json.loads((cache / "inputs.json").read_text())
                 self.assertEqual(after["packages"], first_inputs["packages"])
                 self.assertEqual(after["native"], first_inputs["native"])
-                self.assertEqual(after["js_env"], {"EXPO_PUBLIC_ST3_BUILD": commit[:12]})
+                self.assertEqual(after["js_env"], {
+                    "EXPO_PUBLIC_FRACTAL_BUILD": commit[:12],
+                    "EXPO_PUBLIC_ST3_BUILD": commit[:12]})
                 # A changed stamp resets the scoped transform cache while the
                 # native incremental cache stays warm.
                 self.assertFalse(transform_sentinel.exists())
@@ -1258,8 +1281,8 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
         changes = (
-            ("clients/typescript/st3-client/package.json",
-             json.dumps({"name": "@smalltalk/st3-client", "version": "2.0.0", "dependencies": {}})),
+            ("clients/typescript/fractal-client/package.json",
+             json.dumps({"name": "@fractal/client", "version": "2.0.0", "dependencies": {}})),
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
             ("package.json", (self.source / "package.json").read_text().replace("12.7.0", "12.7.1")),

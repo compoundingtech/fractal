@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The Nix typescript-client installation is also named after the effect-utils revision, so a pin bump rebuilds it instead of reusing a stale one",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change; a Nix check and a refresh script only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. Nothing reads the check's result to skip a CI job."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. The CI job and its script are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

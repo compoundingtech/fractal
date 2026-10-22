@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The linux-gate evidence note now carries its input key, so a pull request that changes no linux-gate input can be matched to an earlier pass; the two whole-tree lints moved from the Rust test suite to genie-freshness",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. Every enforce flag stays false: the key only adds shadow evidence until a later reviewed policy change turns skipping on."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. Required check names are unchanged; genie-freshness runs two more lint scripts (about 6 s) and the Rust integration target loses the same two checks."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change. Input-index refs already published stay valid: each still points at a signed record and is only an index."}
+}

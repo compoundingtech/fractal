@@ -52,14 +52,14 @@ A torn prefix can produce both a raw block and a recovered typed record.
 ### Native record visibility audit
 
 The sole omission table is `omission_reason` in
-`crates/st3-store/src/external_sessions.rs`: one named match arm per permitted type with
+`crates/fractal-store/src/external_sessions.rs`: one named match arm per permitted type with
 an explicit reason. It omits only the four categories below. Nothing else may be
 dropped by a parser branch: an otherwise empty projection falls back to raw JSON.
 The coverage test uses harness-specific native record fixtures, the redacted OMP
 resume/tool captures (also exercising Pi’s shared format), and message/part objects
 from the OpenCode 1.18.34 admission capture. It fails if an empty result has no
 table justification; separate probes cover unknown types, malformed bytes and
-direct owner reads. Fixture provenance is in `crates/st3-daemon/fixtures/native-records/SOURCES.md`. When visibility is unproven, retain it.
+direct owner reads. Fixture provenance is in `crates/fractal-daemon/fixtures/native-records/SOURCES.md`. When visibility is unproven, retain it.
 
 | Harness records | Decision and reason |
 | --- | --- |
@@ -84,7 +84,7 @@ OpenCode items whose native rows fit the input bound receive bounded display stu
 and full owner continuations. Rows exceeding that bound produce explicit
 not-fetchable notices, rather than disappearing or acquiring unusable refs.
 
-The normalizer in `crates/st3-store/src/external_sessions.rs` retains exposed reasoning and
+The normalizer in `crates/fractal-store/src/external_sessions.rs` retains exposed reasoning and
 image references. A 512-character unknown excerpt is a UI preference only. Native
 transcript formats remain authoritative.
 
@@ -388,7 +388,7 @@ rendering. An incompatible wire change requires rejecting an old client.
 
 ## Collection timeline frames
 
-The terminal UI (`st3-feed`) and phone (`apps/ios/feed.ts`) subscribe to a conversation on
+The terminal UI (`fractal-feed`) and phone (`apps/ios/feed.ts`) subscribe to a conversation on
 one existing collections socket. The first `replace:true` frame contains the newest 200
 entries, subject to the existing 1 MiB frame limit, with `has_more` when older content exists.
 Older content remains available through the existing 200-entry timeline pages and owner

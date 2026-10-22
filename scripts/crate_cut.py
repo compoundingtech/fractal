@@ -7,9 +7,9 @@ The functions, types and constants the fold, the schema and the open path reach 
 depends on) must stay in the lower crate; everything else only calls down and can move up. This tool
 computes that partition and applies it:
 
-    crate_cut.py plan  --src crates/st3-store/src --config .st/crate-cut.json [--pins FILE] [--json OUT]
-    crate_cut.py apply --src crates/st3-store/src --config .st/crate-cut.json --layer evidence \\
-                       --crate st3-evidence --lower st3-store [--pins FILE]
+    crate_cut.py plan  --src crates/fractal-store/src --config .st/crate-cut.json [--pins FILE] [--json OUT]
+    crate_cut.py apply --src crates/fractal-store/src --config .st/crate-cut.json --layer evidence \\
+                       --crate fractal-evidence --lower fractal-store [--pins FILE]
 
 Items are the unit: free fns, types, consts, statics, traits, macros and inline modules; the fns of
 an `impl Store` block (each moves on its own and becomes a method of an extension trait implemented for
@@ -145,7 +145,7 @@ CONTAINERS = {}  # (file, container) -> (attrs text of the inline mod, use items
 FILE_USES = {}  # file -> the text of its top-level `use` items
 
 
-def add_test_nodes(rel, text, items, whole, container, nodes, store_type):
+def add_test_nodes(rel, text, items, whole, container, nodes, store_type, record=True):
     for it in items:
         if it.kind == "use":
             continue
@@ -160,8 +160,9 @@ def add_test_nodes(rel, text, items, whole, container, nodes, store_type):
                 continue
             if in_test and it.body is not None:
                 sub = ri.parse_items(text, it.body[0], it.body[1])
-                CONTAINERS[(rel, container + (it.name,))] = ("\n".join(it.attrs) + ("\n" if it.attrs else "") + ("pub " if it.is_pub else ""), [c.text for c in sub if c.kind == "use"])
-                add_test_nodes(rel, text, sub, True, container + (it.name,), nodes, store_type)
+                if record:
+                    CONTAINERS[(rel, container + (it.name,))] = ("\n".join(it.attrs) + ("\n" if it.attrs else "") + ("pub " if it.is_pub else ""), [c.text for c in sub if c.kind == "use"])
+                add_test_nodes(rel, text, sub, True, container + (it.name,), nodes, store_type, record)
             continue
         if not in_test:
             continue
@@ -203,21 +204,26 @@ def load(src, store_type="Store", nodes=None, fixed=None):
                     pm = re.fullmatch(r'#\[path\s*=\s*"([^"]+)"\s*\]', at.strip())
                     if pm:
                         target = os.path.normpath(os.path.join(os.path.dirname(rel), pm.group(1)))
-                        MODULE_PATH_OVERRIDE[target] = module_path(rel) + [it.name]
+                        if fixed is None:
+                            MODULE_PATH_OVERRIDE[target] = module_path(rel) + [it.name]
+    for rel, (text, items) in parsed.items():
+        for it in items:
+            if it.kind == "mod" and any(re.fullmatch(r"#\[cfg\(test\)\]", at.strip()) for at in it.attrs):
+                if fixed is None:
+                    TEST_ONLY_MODULES.add(tuple(module_path(rel)) + (it.name,))
     for rel in module_files(src):
-        FILE_USES[rel] = "\n".join(it.text for it in parsed[rel][1] if it.kind == "use")
+        if fixed is None:
+            FILE_USES[rel] = "\n".join(it.text for it in parsed[rel][1] if it.kind == "use")
     for rel in module_files(src):
         text, items = parsed[rel]
         if TEST_FILE.search(rel) or rel in test_files:
             tfiles[rel] = (text, items)
-            if fixed is None:
-                add_test_nodes(rel, text, items, True, (), nodes, store_type)
+            add_test_nodes(rel, text, items, True, (), nodes, store_type, fixed is None)
             continue
         files[rel] = (text, items)
         for it in items:
             if it.cfg_test:
-                if fixed is None:
-                    add_test_nodes(rel, text, [it], False, (), nodes, store_type)
+                add_test_nodes(rel, text, [it], False, (), nodes, store_type, fixed is None)
                 continue
             if it.kind in FREE_KINDS:
                 nodes.append(Node(len(nodes), rel, it, None, it.kind, it.name))
@@ -231,7 +237,7 @@ def load(src, store_type="Store", nodes=None, fixed=None):
                 if it.impl_type == store_type and it.impl_trait is None:
                     for c in it.children:
                         if c.cfg_test:
-                            if c.kind == "fn" and fixed is None:
+                            if c.kind == "fn":
                                 n = Node(len(nodes), rel, c, it, "method", c.name)
                                 n.test = True
                                 nodes.append(n)
@@ -248,8 +254,30 @@ def load(src, store_type="Store", nodes=None, fixed=None):
                     nodes.append(n)
     if fixed is not None:
         for n in nodes[first:]:
-            n.fixed = fixed
+            n.fixed = fixed  # a crate already cut is a referrer like any other, tests included: what its tests name stays below
     return nodes, files, tfiles
+
+
+def _sees(n, t):
+    """Whether code in `n` can name the item `t` at all: a private item is visible in its own module and below it."""
+    if t.kind not in ("fn", "const", "static", "struct", "enum", "union", "type", "trait") or t.item.is_pub or t.test or n.test:
+        return True
+    if n.fixed is not None:
+        return False  # another crate cannot name a private item of this one
+    mp, tp = module_path(n.file), module_path(t.file)
+    return mp[: len(tp)] == tp
+
+
+def _bound_locally(body, name):
+    """Whether `name` is a local binding (a `let`, a parameter, a closure parameter or a pattern) in `body`, so
+    that a bare use of it is not a fn passed as a value."""
+    n = re.escape(name)
+    return bool(
+        re.search(r"\b(?:let|mut|for|ref|Some|Ok|Err)\s*\(?\s*(?:mut\s+)?" + n + r"\b", body)
+        or re.search(r"[(,]\s*(?:mut\s+)?" + n + r"\s*:\s*[&\w\[(]", body)
+        or re.search(r"\|[^|\n]*\b" + n + r"\b[^|\n]*\|", body)
+        or re.search(r"\b" + n + r"\s*(?:=>|@)", body)
+    )
 
 
 def build_refs(nodes, store_type="Store"):
@@ -288,6 +316,33 @@ def build_refs(nodes, store_type="Store"):
                 if c.name:
                     type_methods[(n.merge, c.name)].append(n)
                     methods[c.name].append(n)
+    # a file's items need the `mod x;` that declares the file wherever they stay
+    decls = {(n.file, n.name): n for n in nodes if n.fixed is None and not n.test and n.kind == "mod" and n.item.text.rstrip().endswith(";")}
+    for n in nodes:
+        if n.fixed is not None or n.test or n.kind == "mod" and n.item.body is not None:
+            continue
+        parts = module_path(n.file)
+        parents = ["/".join(parts[:-1]) + ".rs", "/".join(parts[:-1]) + "/mod.rs"] if len(parts) > 1 else ["lib.rs"]
+        for par in parents:
+            d = decls.get((par, parts[-1]))
+            if d is not None and d is not n:
+                n.refs.add(d.id)
+    # `#[cfg(test)] fn x` beside `#[cfg(not(test))] fn x`: the build uses one of them, so they stay together
+    for name, tn_list in tfree.items():
+        for tn in tn_list:
+            if tn.container or tn.kind not in ("fn", "const", "static", "struct", "enum", "type", "trait"):
+                continue
+            for pn in free.get(name, ()):
+                if pn.file == tn.file and pn.kind == tn.kind:
+                    tn.refs.add(pn.id)
+                    pn.refs.add(tn.id)
+    local_defs = {(n.file, n.name) for n in nodes if n.fixed is not None and n.name}
+    crate_modules = {"crate", "super", "self", "r#mod"}
+    for n in nodes:
+        for part in n.file[:-3].split("/"):
+            crate_modules.add(part)
+        if n.kind == "mod" and n.name:
+            crate_modules.add(n.name)
     ident_free_prod = set(free)
     ident_free_all = set(free) | set(tfree)
     # what a test can see of other test files: what its file and containers `use`
@@ -300,15 +355,36 @@ def build_refs(nodes, store_type="Store"):
     for n in nodes:
         pass
 
-    def visible(n, t):
+    includer_of = {}
+    for m_ in nodes:
+        if m_.test and m_.kind == "macro_call" and m_.fixed is None:
+            for mm in re.finditer(r'include!\("([^"]+)"\)', m_.item.text):
+                includer_of[os.path.normpath(os.path.join(os.path.dirname(m_.file), mm.group(1)))] = m_.file
+
+    def visible(n, t, by_name=True):
         if t.file == n.file:
             return True
-        text = use_text.get(n.file, "") + FILE_USES.get(n.file, "")
-        stem = t.file[:-3].split("/")[-1]
-        if re.search(r"\b" + re.escape(stem) + r"\b", text) or (t.name and re.search(r"\b" + re.escape(t.name) + r"\b", text)):
-            return True
-        parent = "/".join(n.file[:-3].split("/")[:-1]) + ".rs"
-        return t.file == parent and "super::*" in text
+        if n.file in includer_of and (t.file == includer_of[n.file] or visible_from(includer_of[n.file], t, by_name)):
+            return True  # an included file runs in the scope of the file that includes it
+        # what the file imports, and through `use super::*` what each parent module imports or defines
+        f = n.file
+        for _ in range(8):
+            text = use_text.get(f, "") + FILE_USES.get(f, "")
+            stem = t.file[:-3].split("/")[-1]
+            if re.search(r"\b" + re.escape(stem) + r"\b", text) or (by_name and t.name and re.search(r"\b" + re.escape(t.name) + r"\b", text)):
+                return True
+            parent = "/".join(f[:-3].split("/")[:-1]) + ".rs"
+            if "super::*" not in text:
+                return False
+            if t.file == parent:
+                return True
+            f = parent
+        return False
+    def visible_from(f, t, by_name=True):
+        class _N:
+            file = f
+        return visible(_N, t, by_name)
+
     placeholder = re.compile(r"\{([A-Za-z_][A-Za-z_0-9]*)(?:[:!][^{}]*)?\}")
     for n in nodes:
         ident_free = ident_free_all if n.test else ident_free_prod
@@ -341,7 +417,7 @@ def build_refs(nodes, store_type="Store"):
             if prev == "." and prev2 != "..":
                 # method call: .w( or .w::<..>(
                 if nxt == "(" or body.startswith("::<", k):
-                    ts = list(methods.get(w, ())) + (list(tmethods.get(w, ())) if n.test else [])
+                    ts = list(methods.get(w, ())) + ([t for t in tmethods.get(w, ()) if visible(n, t)] if n.test else [])
                     for t in ts:
                         if t is n:
                             continue
@@ -373,18 +449,33 @@ def build_refs(nodes, store_type="Store"):
                             n.refs.add(t.id)
                     continue
                 # module path to a free item, or an enum variant / assoc const: keep the free name
+            if n.fixed is not None and qualifier is None and (n.file, w) in local_defs and w != mine:
+                continue  # a crate already cut calls its own item of that name
+            if qualifier is not None and qualifier[:1].islower() and qualifier not in crate_modules:
+                continue  # `fs::read(..)`, `json::to_string(..)`: a path into another crate does not name our fn of that name
             if w in ident_free and w != mine:
                 cands = list(free.get(w, ())) + (list(tfree.get(w, ())) if n.test else [])
                 if n.test:
                     cands = [t for t in cands if not t.test or visible(n, t) or (qualifier and qualifier == t.file[:-3].split("/")[-1])]
+                    # a name that the file imports from a module named in the import is that module's item
+                    strong = [t for t in cands if visible(n, t, by_name=False)]
+                    if strong and len(strong) < len(cands):
+                        cands = strong
                 if nxt == "!" and not body.startswith("!=", k):
                     cands = [t for t in cands if t.kind == "macro_rules"]
                 elif not (w[0].isupper() or w.isupper()):
                     # a lower-case name is a fn (or module): it is a reference only when called or qualified
-                    value_use = "_" in w and prev in "(,&" and nxt in "),"
-                    if not (nxt == "(" or body.startswith("::<", k) or prev2 == "::" or value_use):
-                        continue
-                    cands = [t for t in cands if t.kind == "fn"]
+                    if body.startswith("::", k) and not body.startswith("::<", k) and prev2 != "::":
+                        # `module::item`: the head names the module
+                        cands = [t for t in cands if t.kind == "mod"]
+                    else:
+                        value_use = prev in "(,&" and nxt in "),"
+                        if value_use and "_" not in w and _bound_locally(body, w):
+                            value_use = False
+                        if not (nxt == "(" or body.startswith("::<", k) or prev2 == "::" or value_use):
+                            continue
+                        cands = [t for t in cands if t.kind == "fn"]
+                cands = [t for t in cands if _sees(n, t)]
                 same_c = [t for t in cands if t.file == n.file and t.container == n.container and t.test == n.test]
                 same = same_c or [t for t in cands if t.file == n.file]
                 for t in (same or cands):
@@ -461,15 +552,18 @@ def label_for(rel, config):
     return None
 
 
-def plan(nodes, config, pins=()):
+def plan(nodes, config, pins=(), current=None):
     order = config["order"]
     layer = {d: i + 1 for i, d in enumerate(order)}
-    P = [n for n in nodes if not n.test]
+    P = [n for n in nodes if not n.test or n.fixed is not None]
     comp = scc([n for n in nodes])
     sizes = collections.Counter(comp)
     big = max(sizes, key=sizes.get)
     pinned_keys = set(pins)
     roots = [n.id for n in P if n.fixed is None and (comp[n.id] == big or n.pinned or n.key() in pinned_keys or n.name in pinned_keys)]
+    # the test items a crate already cut names stay where they are, and what they name stays with them
+    if current is not None:
+        roots += sorted({r for f in P if f.fixed is not None and f.fixed < current for r in f.refs if nodes[r].test and nodes[r].fixed is None})
     INF = 10**6
     referrers = collections.defaultdict(set)
     for n in P:
@@ -528,15 +622,18 @@ def plan(nodes, config, pins=()):
     while changed:
         changed = False
         for t in T:
-            m = max((nodes[r].eff for r in t.refs if nodes[r].fixed is None), default=0)
+            if t.id in core:
+                continue
+            # an item of a layer above this one that is not cut yet is still down in the lower crate
+            m = max((nodes[r].eff if (current is None or nodes[r].eff <= current) else 0 for r in t.refs if nodes[r].fixed is None), default=0)
             if m > t.eff:
                 t.eff = m
                 changed = True
-    unify_includes(nodes)
+    unify_includes(nodes, current)
     return comp, order
 
 
-def unify_includes(nodes):
+def unify_includes(nodes, current=None):
     """A test file included by `include!("x.rs")` moves together with the item that includes it."""
     T = [n for n in nodes if n.test and n.fixed is None]
     by_file = collections.defaultdict(list)
@@ -562,7 +659,7 @@ def unify_includes(nodes):
     while changed:
         changed = False
         for t in T:
-            m = max((nodes[r].eff for r in t.refs if nodes[r].fixed is None), default=0)
+            m = max((nodes[r].eff if (current is None or nodes[r].eff <= current) else 0 for r in t.refs if nodes[r].fixed is None), default=0)
             if m > t.eff:
                 t.eff = m
                 changed = True
@@ -593,6 +690,7 @@ WIDEN = re.compile(r"pub\((?:crate|super|self|in [A-Za-z_:]+)\)")
 
 
 MODULE_PATH_OVERRIDE = {}  # file -> module path, for files declared with #[path = "..."]
+TEST_ONLY_MODULES = set()  # module paths (tuples) declared with a plain `#[cfg(test)]`: they do not exist in a test-support build
 
 
 def module_path(rel):
@@ -760,25 +858,48 @@ def render_use(attrs, vis, paths):
     return "\n".join(lines)
 
 
+_EXTERNAL = None
+
+
+def _external_crates():
+    """Identifiers of the crates a `use` can start with that are not this workspace's modules: std and the dependencies."""
+    global _EXTERNAL
+    if _EXTERNAL is None:
+        names = {"std", "core", "alloc"}
+        for manifest in Path("crates").glob("*/Cargo.toml"):
+            for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", manifest.read_text()):
+                names.add(m.group(1).replace("-", "_"))
+        names |= {p.name.replace("-", "_") for p in Path("crates").iterdir()}
+        _EXTERNAL = names
+    return _EXTERNAL
+
+
 def prune_uses(text, items, moved_pairs):
     """Drop from the `use` items of a lower file the paths that name moved items: (module, name) pairs."""
     spans = []
-    for it in items:
-        if it.kind != "use":
-            continue
-        parsed = use_paths(it.text)
-        if not parsed:
-            continue
-        attrs, vis, paths = parsed
-        keep = []
-        for segs, alias in paths:
-            name = segs[-1]
-            mod = segs[-2] if len(segs) >= 2 else None
-            if (mod, name) in moved_pairs or (mod in ("super", "self", "crate") and ("store", name) in moved_pairs and False):
+
+    def walk(its):
+        for it in its:
+            if it.kind == "mod" and it.body:
+                walk(ri.parse_items(text, it.body[0], it.body[1]))  # inline modules (`mod tests { use ..; }`)
                 continue
-            keep.append((segs, alias))
-        if len(keep) != len(paths):
-            spans.append((it.start, it.end, render_use(attrs, vis, keep)))
+            if it.kind != "use":
+                continue
+            parsed = use_paths(it.text)
+            if not parsed:
+                continue
+            attrs, vis, paths = parsed
+            keep = []
+            for segs, alias in paths:
+                name = segs[-1]
+                mod = segs[-2] if len(segs) >= 2 else None
+                if (mod, name) in moved_pairs and segs[0] not in _external_crates():
+                    continue
+                keep.append((segs, alias))
+            if len(keep) != len(paths):
+                spans.append((_attr_start(text, it), it.end, render_use(attrs, vis, keep) if keep else ""))
+
+    walk(items)
     for a, b, rep in sorted(spans, reverse=True):
         text = text[:a] + rep + text[b:]
     return text
@@ -835,6 +956,22 @@ def is_vacant(text):
     return True
 
 
+def _shared_import_lines(lower, mk, shares, prefix="", vis=""):
+    """`use` lines importing a shared module into a destination: the glob, and its names explicitly (an explicit
+    import wins over the globs of the surrounding scope, which the helpers used to shadow)."""
+    path = "::".join([lower] + _shared_path(*mk))
+    names = set()
+    for n in shares.get(mk, ()):
+        if n.kind in ("impl",):
+            continue
+        names |= set(n.names) if n.kind == "macro_call" else ({n.name} if n.name else set())
+    names = sorted(names)
+    lines = []
+    for k in range(0, len(names), 10):
+        lines.append("%s%suse %s::{%s};" % (prefix, vis, path, ", ".join(names[k : k + 10])))
+    return lines
+
+
 def place_tests(nodes, mtests, files, tfiles, lower):
     """Where the moved tests land and what they leave behind.
 
@@ -850,7 +987,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
         removals[t.file].append((t.item.start, t.item.end))
     copied = []
     seen = set()
-    test_types = {(n.file, n.container, n.name): n for n in nodes if n.test and n.kind in ("struct", "enum", "union", "type", "trait")}
+    test_types = {(n.file, n.container, n.name): n for n in nodes if n.test and n.fixed is None and n.kind in ("struct", "enum", "union", "type", "trait")}
 
     def pub_support(rel):
         parts = module_path(rel)
@@ -863,14 +1000,14 @@ def place_tests(nodes, mtests, files, tfiles, lower):
     def shared_pub(n):
         """Whether code outside this test module can name the type: pub, in modules that are pub (a
         prod file, a pub test-support file, or inline modules declared pub)."""
-        if not n.item.is_pub:
+        if not n.item.is_pub or any(re.fullmatch(r"#\[cfg\(test\)\]", at.strip()) for at in n.item.attrs):
             return False
-        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") for k in range(len(n.container))):
+        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") or "#[cfg(test)]" in CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0] for k in range(len(n.container))):
             return False
         return n.file in files or pub_support(n.file)
     defs_by_name = collections.defaultdict(list)
     for n in nodes:
-        if n.test and n.name:
+        if n.test and n.fixed is None and n.name:
             defs_by_name[n.name].append(n)
     dest_names = collections.defaultdict(set)  # (file, container) -> names already there
     for t in mtests:
@@ -899,8 +1036,8 @@ def place_tests(nodes, mtests, files, tfiles, lower):
                 continue  # pub in a module others can reach already
             if u.kind == "impl" and test_types.get((u.file, u.container, u.merge)) is not None and shared_pub(test_types[(u.file, u.container, u.merge)]):
                 continue
-            if u.name and (u.file != t.file or u.container != t.container) and len(defs_by_name[u.name]) > 1:
-                continue  # an ambiguous name that probably names something else
+            if u.name and (u.file != t.file or u.container != t.container) and sum(1 for x in t.refs if nodes[x].test and nodes[x].name == u.name) > 1:
+                continue  # several visible candidates: a name that probably names something else
             mk = (u.file, u.container)
             if kind == "dest":
                 imports[k].add(mk)
@@ -936,13 +1073,18 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             pad = "    " * len(prefix)
             uses = [u2 for u2 in (_without_names(u, defined[(rel, c)] | {x.name for x in copied if x.name}) for u in uses) if u2]
             for mk in sorted(imports.get((rel, c), ())):
-                uses.append("use %s::*;" % "::".join([lower] + _shared_path(*mk)))
+                uses += _shared_import_lines(lower, mk, shares)
             if attrs.rstrip().endswith("pub") and "test-support" in attrs:
                 uses.append("pub use %s::%s::*;" % (lower, "::".join(module_path(rel) + list(c))))
             body = "\n".join(pad + "    " + u for u in uses) + ("\n\n" if uses else "") + inner
             out.append(f"{pad}{attrs}mod {nm} {{\n{body}\n{pad}}}")
         return "\n\n".join(x for x in out if x)
 
+    included = set()
+    for n in nodes:
+        if n.test and n.fixed is None and n.kind == "macro_call":
+            for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
+                included.add(os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1))))
     facade_blocks, new_files, decls = {}, {}, collections.defaultdict(list)
     pub_test_mods = set()
     helper_names = {u.name for u in copied if u.name}
@@ -975,14 +1117,15 @@ def place_tests(nodes, mtests, files, tfiles, lower):
         body = render(rel, (), g)
         body = re.sub(r"\b(?:super::)+(?:tests|\w+_tests)::(" + "|".join(map(re.escape, sorted(helper_names))) + r")\b", r"\1", body) if helper_names else body
         if rel in files:
-            globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
+            globs = [ln for mk in sorted(imports.get((rel, ()), ())) for ln in _shared_import_lines(lower, mk, shares, '#[cfg(any(test, feature = "test-support"))]\n', "pub ")]
             facade_blocks[rel] = ("\n".join(globs) + "\n" if globs else "") + body
         else:
             text, items = tfiles[rel]
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
             uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
-            globs = ["use %s::*;" % "::".join([lower] + _shared_path(*mk)) for mk in sorted(imports.get((rel, ()), ()))]
-            new_files[rel] = "#![allow(unused_imports)]\n" + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
+            uses = [u2 for u2 in _shared_uses(uses, rel, (), items, shares, [], set(), set(tfiles), root=lower, dest=True, lower_files={**files, **tfiles}) if u2]
+            globs = [ln for mk in sorted(imports.get((rel, ()), ())) for ln in _shared_import_lines(lower, mk, shares)]
+            new_files[rel] = ("" if rel in included else "#![allow(unused_imports)]\n") + "\n".join(u for u in uses + globs if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
     return facade_blocks, new_files, decls, removals, copied, pub_test_mods, shares, share_imports, imports
 
 
@@ -999,10 +1142,25 @@ def _dev_dependencies(lower_ident):
     names = [m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", section)]
     normal = text.split("[dependencies]", 1)[1].split("\n[", 1)[0] if "[dependencies]" in text else ""
     normal_names = {m.group(1).replace("-", "_") for m in re.finditer(r"(?m)^([A-Za-z0-9_-]+)\s*=", normal)}
-    return [n for n in names if not n.endswith("_self") and not n.startswith("st3") and n not in normal_names]
+    return [n for n in names if not n.endswith("_self") and not n.startswith("fractal_") and n not in normal_names]
 
 
 TEST_SUPPORT_CFG = '#[cfg(any(test, feature = "test-support"))]'
+
+
+def _vis_position(text, start, code):
+    """Where `pub` goes for an item whose code starts at `code`: before the block comments in front of it (a
+    SQLite inventory marker has to stay adjacent to the `fn`)."""
+    pos = code
+    while True:
+        head = text[start:pos].rstrip()
+        if not head.endswith("*/"):
+            break
+        k = text.rfind("/*", start, pos)
+        if k < 0:
+            break
+        pos = k
+    return pos
 
 
 def _widen_item_edits(text, it):
@@ -1013,19 +1171,45 @@ def _widen_item_edits(text, it):
         edits.append((it.start + m.start(), it.start + m.end(), TEST_SUPPORT_CFG))
     vis = ri._VIS.match(text, code)
     if vis is None:
-        edits.append((code, code, "pub "))
+        pos = _vis_position(text, it.start, code)
+        edits.append((pos, pos, "pub "))
     elif vis.group(0).strip() != "pub":
         edits.append((code, vis.end(), "pub "))
     return edits
 
 
+def _available(path):
+    """Whether the module exists in a test-support build: no module on the way is `#[cfg(test)]` alone."""
+    return not any(tuple(path[:k]) in TEST_ONLY_MODULES for k in range(1, len(path) + 1))
+
+
+def _shared_base(rel):
+    """The module a file's shared module sits in: next to the file when that exists in a test-support build,
+    else in the nearest ancestor that does. A top-level file's shared module is its child (a sibling would be
+    a second top-level module that depends on it both ways)."""
+    p = module_path(rel)
+    if len(p) == 1:
+        return p
+    base = p[:-1]
+    while base and not _available(base):
+        base = base[:-1]
+    return base
+
+
+SHARED_SUFFIX = ""  # a cut on top of another names its shared modules apart from that cut's
+
+
 def _shared_name(rel, container):
-    stem = module_path(rel)[-1]
-    return stem + ("_" + "_".join(container) if container else "") + "_shared"
+    p = module_path(rel)
+    base = _shared_base(rel)
+    suffix = ("_" + "_".join(container)) if container else ""
+    if len(p) == 1:
+        return "shared" + suffix + SHARED_SUFFIX
+    return "_".join(p[len(base):]) + suffix + "_shared" + SHARED_SUFFIX
 
 
 def _shared_path(rel, container):
-    return module_path(rel)[:-1] + [_shared_name(rel, container)]
+    return _shared_base(rel) + [_shared_name(rel, container)]
 
 
 def _insert_position(text, container):
@@ -1058,7 +1242,28 @@ def _resolve_use(segs, base):
     return cur + list(segs[i:])
 
 
-def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
+def _prior_shared(lower_files, module):
+    """[(module path, names it defines)] of the shared modules an earlier cut made for the test-only `module`."""
+    out = []
+    # a shared module sits in the nearest ancestor that exists in a test-support build, named after the rest of the path
+    want = module[:-1]
+    while want and not _available(want):
+        want = want[:-1]
+    stem = "_".join(module[len(want) :]) + "_shared"
+    for rel2, (text2, items2) in lower_files.items():
+        mp = module_path(rel2)
+        if mp[:-1] == want and (mp[-1] == stem or mp[-1].startswith(stem + "_")):
+            names = set()
+            for it in items2:
+                if it.name and it.is_pub:
+                    names.add(it.name)
+                if it.kind == "macro_call":
+                    names |= set(re.findall(r"static\s+(\w+)", it.text))
+            out.append((mp, names))
+    return out
+
+
+def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="crate", dest=False, lower_files=None, depth=0):
     shared_names = {tuple(module_path(r2)): {n.name for n in ns if n.name} for (r2, c2), ns in shares.items() if not c2}
     """The `use` items of the file a shared module is cut from, adjusted to where the module sits: dev
     dependencies dropped, child modules named absolutely, modules that only exist for tests replaced by
@@ -1067,6 +1272,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
     children = {it.name for it in items if it.kind == "mod"}
     shared_of = {tuple(module_path(r2)): _shared_path(r2, c2) for (r2, c2) in shares if not c2 and r2 in test_rels}
     out = []
+    extra_uses = []
     for u in uses:
         parsed = use_paths(u)
         if not parsed:
@@ -1075,13 +1281,16 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
         attrs = re.sub(r"#\[cfg\(test\)\]\s*", "", attrs)
         keep = []
         for segs, alias in paths:
+            orig_segs = segs
             if segs[0] in dev:
                 continue
-            if segs[0] in children:
+            if not dest and segs[0] in children:
                 segs = ["crate"] + f_path + segs
-            elif segs[0] == "self":
+            elif not dest and segs[0] == "self":
                 segs = ["crate"] + f_path + segs[1:]
             absolute = _resolve_use(segs, f_path[:-1] + ["_"])
+            if absolute is not None and segs[0] in ("super", "self", "crate") and not dest:
+                segs = ["crate"] + absolute  # the shared module may not sit where the file does
             extra = None
             if absolute is not None:
                 hit = None
@@ -1089,21 +1298,49 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
                     if tuple(absolute[:k]) in shared_of:
                         hit = (k, shared_of[tuple(absolute[:k])])
                         break
-                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1])
+                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1]) or (len(absolute) > 1 and not _available(absolute[:-1]))
                 if hit is not None:
                     leaf = segs[-1]
                     if leaf == "*":
-                        extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
-                    elif leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
-                        segs = ["crate"] + hit[1] + absolute[hit[0]:]
+                        if len(absolute) == hit[0] + 1:
+                            extra = [root] + hit[1] + absolute[hit[0]:]  # the shared module's items too
+                    elif len(absolute) == hit[0] + 1 and leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
+                        segs = [root] + hit[1] + absolute[hit[0]:]
                         test_only = False
+                    elif len(absolute) == hit[0] + 1:
+                        # not extracted now: an earlier cut may have put it in another shared module of that module
+                        prior = next((mp for mp, defined in _prior_shared(lower_files or {}, list(absolute[:-1])) if leaf in defined), None)
+                        if prior is None:
+                            continue  # it stays in the cfg(test) module
+                        segs = [root] + prior + [leaf]
+                        test_only = False
+                    # deeper than the module (a child module): the path stays as it is
+                if test_only and lower_files:
+                    # an earlier cut already moved this module's helpers into its shared module
+                    prior = _prior_shared(lower_files, list(absolute[:-1]))
+                    leaf = segs[-1]
+                    if leaf == "*":
+                        for mod_path, defined in prior:
+                            keep.append(([root] + mod_path + ["*"], None))
                     else:
-                        continue  # not extracted: it stays in the cfg(test) module
+                        for mod_path, defined in prior:
+                            if leaf in defined:
+                                segs = [root] + mod_path + [leaf]
+                                test_only = False
+                                break
                 if test_only:
+                    if segs[-1] == "*" and lower_files and depth < 6 and not dest:
+                        # the glob served names that module imported itself: take its imports instead
+                        rel2 = next((r for r in lower_files if module_path(r) == list(absolute[:-1])), None)
+                        if rel2 is not None:
+                            items2 = lower_files[rel2][1]
+                            extra_uses.extend(_shared_uses([it.text for it in items2 if it.kind == "use"], rel2, (), items2, shares, dev, pairs, test_rels, root, dest, lower_files, depth + 1))
                     segs = None  # exists only for cfg(test)
             if extra is not None:
                 keep.append((extra, None))
             if segs is None:
+                if dest:
+                    keep.append((orig_segs, alias))  # a destination file may still have that module itself
                 continue
             mod = segs[-2] if len(segs) >= 2 else None
             if (mod, segs[-1]) in pairs:
@@ -1111,17 +1348,125 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
             keep.append((segs, alias))
         if keep:
             out.append(render_use(attrs, vis, keep))
+    return out + [u for u in extra_uses if u not in out]
+
+
+def _make_dev_optional(manifest, idents):
+    """Each dev-dependency in `idents` also becomes an optional dependency that the test-support feature enables."""
+    text = manifest.read_text()
+    dev_section = text.split("[dev-dependencies]", 1)[1].split("\n[", 1)[0] if "[dev-dependencies]" in text else ""
+    for ident in sorted(idents):
+        m = re.search(r"(?m)^(" + re.escape(ident).replace("_", "[-_]") + r")\s*=\s*(.+)$", dev_section)
+        if not m:
+            continue
+        name, spec = m.group(1), m.group(2).strip()
+        deps = text.split("[dependencies]", 1)[1].split("\n[", 1)[0] if "[dependencies]" in text else ""
+        if re.search(r"(?m)^" + re.escape(name) + r"\s*=", deps):
+            continue
+        if spec.startswith("{"):
+            spec = spec.rstrip("}").rstrip() + ", optional = true }"
+        else:
+            spec = "{ version = %s, optional = true }" % spec
+        text = text.replace("[dependencies]\n", "[dependencies]\n%s = %s\n" % (name, spec), 1)
+        text = re.sub(r'(?m)^(test-support\s*=\s*\[)', r'\1"dep:%s", ' % name, text, count=1)
+    manifest.write_text(text)
+
+
+def _attr_start(text, it):
+    """Where the attributes of a `use` item begin (its comments stay): `render_use` writes the attributes itself."""
+    meta, code, _ = ri._leading_meta(text, it.start, len(text))
+    at = text[meta:code].find("#[")
+    return meta + at if at >= 0 else code
+
+
+def _pub_tuple_fields(text):
+    """`struct First(i32);` -> `struct First(pub i32);`"""
+    m = re.search(r"\bstruct\s+\w+(?:<[^>(]*>)?\s*\(", text)
+    if not m:
+        return text
+    end = ri._match_delim(text, m.end() - 1)
+    inner = text[m.end() : end - 1]
+    parts, depth, cur = [], 0, ""
+    for ch in inner:
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    parts = [p if p.strip() == "" or p.lstrip().startswith("pub") else re.sub(r"^(\s*)", r"\1pub ", p) for p in parts]
+    return text[: m.end()] + ",".join(parts) + text[end - 1 :]
+
+
+def _pub_fields(text):
+    """A shared struct's named fields are public: the tests that use it live in another crate."""
+    if re.search(r"\bstruct\s+\w+(?:<[^>(]*>)?\s*\(", text) and not re.search(r"\bstruct\b[^{;(]*\{", text):
+        return _pub_tuple_fields(text)
+    m = re.search(r"\bstruct\b[^{;]*\{", text)
+    end = ri._match_delim(text, m.end() - 1)
+    body = text[m.end() : end - 1]
+    nb = re.sub(r"(?m)^(\s*)(?!pub\b)(?!//)(?!#)(\w+)\s*:", r"\1pub \2:", body)
+    return text[: m.end()] + nb + text[end - 1 :]
+
+
+def _drop_use_names(text, names, keep_path):
+    """Remove the explicit imports of `names` (except from `keep_path`): they are provided by a re-export."""
+    items = [it for it in ri.parse(text) if it.kind == "use"]
+    for it in sorted(items, key=lambda i: -i.start):
+        parsed = use_paths(it.text)
+        if not parsed:
+            continue
+        attrs, vis, paths = parsed
+        keep = [(segs, alias) for segs, alias in paths if segs[-1] == "*" or (alias or segs[-1]) not in names or "::".join(segs).startswith("crate::" + keep_path)]
+        if len(keep) != len(paths):
+            code = _attr_start(text, it)
+            text = text[:code] + (render_use(attrs, vis, keep) if keep else "") + text[it.end :]
+    return text
+
+
+def _dedupe_uses(uses):
+    """The same path imported twice (the file's and its container's `use`) is an error: keep the first. A shared
+    module only exists under test-support, so an import gated by that feature repeats an ungated one."""
+    gate = re.compile(r"\s*#\[cfg\(any\(test, feature = \"test-support\"\)\)\]\s*")
+    ungated = set()
+    for u in uses:
+        parsed = use_paths(u)
+        if parsed and not parsed[0].strip():
+            ungated |= {("::".join(segs), alias) for segs, alias in parsed[2]}
+    seen = set()
+    out = []
+    for u in uses:
+        parsed = use_paths(u)
+        if not parsed:
+            out.append(u)
+            continue
+        attrs, vis, paths = parsed
+        plain = gate.fullmatch(attrs) is not None
+        keep = []
+        for segs, alias in paths:
+            key = ("" if plain or not attrs.strip() else attrs, "::".join(segs), alias)
+            if segs[-1] != "*" and (key in seen or (attrs.strip() and plain and ("::".join(segs), alias) in ungated)):
+                continue
+            seen.add(key)
+            keep.append((segs, alias))
+        if keep:
+            out.append(render_use(attrs, vis, keep) if len(keep) != len(paths) else u)
     return out
 
 
-def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers):
+def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers, dest_src=None, dest_root=None):
     """Extract the lower test items the moved tests need into a shared module next to their file, gated by
     test-support, and re-export it where the items were (`pub use`), so old paths keep resolving."""
     added_decls = collections.defaultdict(list)
+    needed_dev = set()
     for (rel, cont), ns in sorted(shares.items()):
         name = _shared_name(rel, cont)
         parts = module_path(rel)
-        directory = "/".join(parts[:-1])
+        directory = "/".join(_shared_base(rel))
         path = os.path.join(src_dir, directory, name + ".rs") if directory else os.path.join(src_dir, name + ".rs")
         text, items = lower_files[rel]
         file_uses = [it.text for it in items if it.kind == "use"]
@@ -1134,20 +1479,37 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             uses = list(ifile_uses) + [u for u in file_uses]
             for u in CONTAINERS.get((irel, icont), ("", []))[1]:
                 if re.fullmatch(r"\s*use super::\*;\s*", u):
-                    uses.append("use super::%s::*;" % module_path(irel)[-1])
+                    uses.append("use crate::%s::*;" % "::".join(module_path(irel)))
                 else:
-                    uses.append(re.sub(r"\buse super::", "use super::%s::" % module_path(irel)[-1], u))
+                    uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(module_path(irel)), u))
         elif not cont:
-            uses = file_uses
+            uses = list(file_uses)
+            if rel not in test_rels:
+                # a production file's own items (the ones that stay) are neighbours of the shared module;
+                # named explicitly, because a glob import of the same name elsewhere would make them ambiguous
+                uses.append("use crate::%s::*;" % "::".join(parts))
+                groups_ = collections.defaultdict(set)
+                cur_path = os.path.join(src_dir, rel)
+                cur_items = ri.parse(Path(cur_path).read_text()) if os.path.exists(cur_path) else []
+                for it in cur_items:
+                    if it.kind in FREE_KINDS and it.kind != "mod" and it.is_pub and it.name and not any(x.startswith("#[test]") for x in it.attrs):
+                        groups_[tuple(x for x in it.attrs if x.startswith("#[cfg"))].add(it.name)
+                for cfgs, names_ in sorted(groups_.items()):
+                    own = sorted(names_)
+                    for k in range(0, len(own), 12):
+                        uses.append("".join(c + "\n" for c in cfgs) + "use crate::%s::{%s};" % ("::".join(parts), ", ".join(own[k : k + 12])))
         else:
             # inside the inline module `super` is the file's module; here that module is a sibling
             uses = list(file_uses)
             for u in CONTAINERS.get((rel, cont), ("", []))[1]:
                 if re.fullmatch(r"\s*use super::\*;\s*", u):
-                    uses.append("use super::%s::*;" % parts[-1])
+                    uses.append("use crate::%s::*;" % "::".join(parts))
                 else:
-                    uses.append(re.sub(r"\buse super::", "use super::%s::" % parts[-1], u))
-        uses = _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels)
+                    uses.append(re.sub(r"\buse super::", "use crate::%s::" % "::".join(parts), u))
+        # a dev-dependency the shared helpers use has to exist in a test-support build: it becomes optional
+        kept_dev = {d for d in dev if any(re.search(r"\buse\s+" + d + r"\b|\b" + d + r"::", u) for u in uses)}
+        needed_dev |= kept_dev
+        uses = _dedupe_uses(_shared_uses(uses, rel, cont, items, shares, [d for d in dev if d not in kept_dev], pairs, test_rels, lower_files=lower_files))
         globs = ["use %s::*;" % "::".join(["crate"] + _shared_path(*mk)) for mk in sorted(share_imports.get((rel, cont), ()))]
         body = []
         for u in sorted(ns, key=lambda n: n.item.start):
@@ -1155,7 +1517,18 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             code = ri._leading_meta(t, 0, len(t))[1]
             vis = ri._VIS.match(t, code)
             if u.kind in ("fn", "const", "static", "struct", "enum", "type", "trait", "union"):
-                t = t[:code] + "pub " + t[(vis.end() if vis else code):]
+                if vis:
+                    t = t[:code] + "pub " + t[vis.end():]
+                else:
+                    pos = _vis_position(t, 0, code)
+                    t = t[:pos] + "pub " + t[pos:]
+            if u.kind == "fn" and re.search(r"\bpub\s+unsafe\b|\bunsafe\s+(?:extern\s+\"C\"\s+)?fn\b", t) and "missing_safety_doc" not in t:
+                code_ = ri._leading_meta(t, 0, len(t))[1]
+                t = t[:code_] + "#[allow(clippy::missing_safety_doc)]\n" + t[code_:]
+            if u.kind == "struct" and (re.search(r"\bstruct\b[^{;]*\{", t) or re.search(r"\bstruct\s+\w+(?:<[^>(]*>)?\s*\(", t)):
+                t = _pub_fields(t)
+            if u.kind == "macro_call" and t.lstrip().startswith(("thread_local!", "#[")) and "thread_local!" in t:
+                t = re.sub(r"(?m)^(\s*)(?:pub(?:\([^)]*\))?\s+)?static\b", r"\1pub static", t)
             body.append(t)
         # imports of the parent module that only exist for cfg(test) are not there in a test-support build
         extras = []
@@ -1174,7 +1547,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                 absolute = _resolve_use(segs, module_path(parent_rel) + ["_"])
                 target = (["crate"] + absolute) if absolute is not None else segs
                 extras.append(render_use("", "", [(target, alias)]))
-        uses = uses + [e for e in extras if e not in uses]
+        uses = _dedupe_uses(uses + [e for e in extras if e not in uses])
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text("#![allow(unused_imports)]\n" + "\n".join(uses + globs) + "\n\n" + "\n\n".join(body) + "\n")
         parent = (directory + ".rs") if directory else "lib.rs"
@@ -1185,17 +1558,65 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             otext = Path(opath).read_text()
             pos = _insert_position(otext, cont)
             if pos is not None:
-                line = '#[cfg(any(test, feature = "test-support"))]\npub use crate::%s::*;\n' % "::".join(_shared_path(rel, cont))
-                Path(opath).write_text(otext[:pos] + line + otext[pos:])
+                spath = "::".join(_shared_path(rel, cont))
+                line = ""
+                named = sorted({x for u in ns for x in (u.names if u.kind == "macro_call" else ([u.name] if u.name else [])) if u.kind != "impl"})
+                for k in range(0, len(named), 10):
+                    line += '#[cfg(any(test, feature = "test-support"))]\n#[allow(unused_imports)]\npub use crate::%s::{%s};\n' % (spath, ", ".join(named[k : k + 10]))
+                newtext = otext[:pos] + line + otext[pos:]
+                if not cont:
+                    newtext = _drop_use_names(newtext, set(named), spath)
+                Path(opath).write_text(newtext)
+    if needed_dev:
+        _make_dev_optional(Path(src_dir).parent / "Cargo.toml", needed_dev)
     for parent, decls in added_decls.items():
         ppath = os.path.join(src_dir, parent)
         ptext = Path(ppath).read_text()
         Path(ppath).write_text(ptext.rstrip("\n") + "\n\n" + "\n".join(decls))
+    # paths that go through a cfg(test)-only module to an item that now lives in its shared module
+    renames = []
+    for (rel, cont), ns in shares.items():
+        if not cont and rel in test_rels:
+            names = sorted({n.name for n in ns if n.name})
+            if names:
+                stem = module_path(rel)[-1]
+                renames.append((re.compile(r"(?<![\w:])(?:super::)*" + re.escape(stem) + r"::(" + "|".join(map(re.escape, names)) + r")\b(?!::)"), "crate::" + "::".join(_shared_path(rel, ()))))
+    if renames:
+        for f in _src_files([src_dir]):
+            t = Path(f).read_text()
+            nt = t
+            for pat, target in renames:
+                nt = pat.sub(lambda m, target=target: target + "::" + m.group(1), nt)
+            if nt != t:
+                Path(f).write_text(nt)
+        if dest_src:
+            # the same paths in the new crate go through the crate below by name
+            for f in _src_files([dest_src]):
+                t = Path(f).read_text()
+                nt = t
+                for pat, target in renames:
+                    nt = pat.sub(lambda m, target=target: dest_root + target[len("crate"):] + "::" + m.group(1), nt)
+                if nt != t:
+                    Path(f).write_text(nt)
+
+
+
+def _named_elsewhere(stem, rel, files, tfiles):
+    """Whether another file of the crate mentions the module `stem` (an import of it, a glob of it)."""
+    pat = re.compile(r"\b" + re.escape(stem) + r"\b")
+    for other, (text, items) in list(files.items()) + list(tfiles.items()):
+        if other == rel:
+            continue
+        for it in items:
+            if it.kind == "use" and pat.search(it.text):
+                return True
+    return False
 
 
 def apply_cut(args, nodes, files, tfiles, order):
     layer = order.index(args.layer) + 1
-    moved = [n for n in nodes if n.eff == layer and n.fixed is None and (not n.test or n.kind == "method")]
+    # a `mod x;` follows its file (the facade declares the module above); it is not an item that moves
+    moved = [n for n in nodes if n.eff == layer and n.fixed is None and (not n.test or n.kind == "method") and not (n.kind == "mod" and n.item.text.rstrip().endswith(";"))]
     mtests = [n for n in nodes if n.eff == layer and n.fixed is None and n.test and n.kind != "method"]
     lower = args.lower.replace("-", "_")
     facade_blocks, new_test_files, test_decls, test_removals, test_copies, pub_test_mods, test_shares, test_share_imports, test_imports = place_tests(nodes, mtests, files, tfiles, lower)
@@ -1221,6 +1642,7 @@ def apply_cut(args, nodes, files, tfiles, order):
         existing_traits |= set(re.findall(r"(?m)^pub trait (\w+)", Path(f).read_text()))
     traits_out = []
     out_files = {}
+    vacated = []
     top_mods = sorted({module_path(rel)[0] for rel in mod_files})
     stats = collections.Counter()
     for rel in sorted(mod_files):
@@ -1272,11 +1694,18 @@ def apply_cut(args, nodes, files, tfiles, order):
         head = ["//! The part of `%s` that moved up from %s." % (mp, args.lower), "#![allow(unused_imports)]  // the imports serve the modules below through `use super::*`"]
         head += macros  # textual scope: before the modules that use them
         head += uses
-        head.append("pub use %s::%s::*;" % (lower, mp))
-        for k in range(0, len(names), 12):
-            head.append("pub use %s::%s::{%s};" % (lower, mp, ", ".join(names[k : k + 12])))
+        # a file the move empties goes away below, and the module with it
+        emptied = is_vacant(remove_spans(text, spans + test_removals.get(rel, []))) and rel not in {r for (r, _) in test_shares} and rel not in facade_blocks and not _named_elsewhere(module_path(rel)[-1], rel, files, tfiles)
+        if emptied:
+            vacated.append(rel)
+        else:
+            head.append("pub use %s::%s::*;" % (lower, mp))
+            for k in range(0, len(names), 12):
+                head.append("pub use %s::%s::{%s};" % (lower, mp, ", ".join(names[k : k + 12])))
         for ch in sorted(children.get(rel, ())):
-            head.append("pub mod %s;" % ch)
+            # the declaration of a child keeps its attributes (`#[path]`, `#[cfg]`) where the file is found by them
+            decl = next((it for it in items if it.kind == "mod" and it.name == ch and it.text.rstrip().endswith(";")), None)
+            head.append("".join(a + "\n" for a in decl.attrs if a.lstrip().startswith(("#[path", "#[cfg"))) + "pub mod %s;" % ch if decl else "pub mod %s;" % ch)
         for d in test_decls.get(rel, ()):
             head.append(d)
         if rel in facade_blocks:
@@ -1285,24 +1714,35 @@ def apply_cut(args, nodes, files, tfiles, order):
         out_files[rel] = "\n".join(head) + "\n\n" + body + ("\n" if body else "")
         removed[rel] = spans + test_removals.get(rel, [])
         stats["items"] += len(mv)
+    # a file that only gives tests or shared helpers away still loses them
+    for rel, spans in test_removals.items():
+        if rel in files and rel not in mod_files:
+            removed[rel] = list(removed.get(rel, [])) + list(spans)
     # test files the move empties are deleted, with the declaration that pulled them in
     pending_test_writes = {}
     deleted_test_files = []
+    vacant_tests = set()
     for rel, spans in test_removals.items():
         if rel in files:
             continue
         text, items = tfiles[rel]
-        out = remove_spans(text, spans)
-        if is_vacant(out):
-            deleted_test_files.append(rel)
-            parts = module_path(rel)
-            parent = "/".join(parts[:-1]) + ".rs"
-            if parent in files:
-                for it in files[parent][1]:
+        if is_vacant(remove_spans(text, spans)) and rel not in {r for (r, _) in test_shares} and not _named_elsewhere(module_path(rel)[-1], rel, files, tfiles):
+            vacant_tests.add(rel)
+    extra_spans = collections.defaultdict(list)
+    for rel in sorted(vacant_tests):
+        deleted_test_files.append(rel)
+        parts = module_path(rel)
+        parent = "/".join(parts[:-1]) + ".rs"
+        for pool, sink in ((files, removed), (tfiles, extra_spans)):
+            if parent in pool:
+                for it in pool[parent][1]:
                     if it.kind == "mod" and it.name == parts[-1] and it.text.rstrip().endswith(";"):
-                        removed[parent].append((it.start, it.end))
-        else:
-            pending_test_writes[rel] = out
+                        sink[parent].append((it.start, it.end))
+                break
+    for rel in set(test_removals) | set(extra_spans):
+        if rel in files or rel in vacant_tests or rel not in tfiles:
+            continue
+        pending_test_writes[rel] = remove_spans(tfiles[rel][0], test_removals.get(rel, []) + extra_spans.get(rel, []))
     for rel in pub_test_mods:
         if rel in new_test_files and rel not in deleted_test_files:
             new_test_files[rel] = new_test_files[rel].replace("#![allow(unused_imports)]\n", "#![allow(unused_imports)]\npub use %s::%s::*;\n" % (lower, "::".join(module_path(rel))), 1)
@@ -1313,6 +1753,12 @@ def apply_cut(args, nodes, files, tfiles, order):
         open(path, "w").write(content)
     for rel in deleted_test_files:
         os.remove(os.path.join(args.src_dir, rel))
+    for rel in vacated:
+        parts = module_path(rel)
+        parent = ("/".join(parts[:-1]) + ".rs") if len(parts) > 1 else None
+        for it in (files[parent][1] if parent in files else ()):
+            if it.kind == "mod" and it.name == parts[-1] and it.text.rstrip().endswith(";"):
+                removed[parent].append((it.start, it.end))
     for rel, out in pending_test_writes.items():
         open(os.path.join(args.src_dir, rel), "w").write(out)
     for rel in list(by_file):
@@ -1332,14 +1778,14 @@ def apply_cut(args, nodes, files, tfiles, order):
     widen = collections.defaultdict(dict)
     macro_exports = collections.defaultdict(dict)  # lower file -> {start: item}
     macro_imports = collections.defaultdict(set)  # destination file -> macro names
-    for n in moved + mtests + test_copies:
+    for n in moved + mtests + test_copies + [u for ns in test_shares.values() for u in ns]:
         for r in n.refs:
             t = nodes[r]
             if t.kind == "macro_rules" and r not in moved_ids and t.fixed is None and not t.test:
                 macro_exports[t.file][t.item.start] = t.item
                 macro_imports[n.file].add(t.name)
                 continue
-            if r in moved_ids or t.test or t.fixed is not None or t.kind not in FREE_KINDS + ("method", "macro_call") or t.kind in ("mod", "macro_rules"):
+            if r in moved_ids or t.test or t.fixed is not None or t.kind not in FREE_KINDS + ("method", "macro_call") or t.kind == "macro_rules":
                 continue
             widen[t.file][t.item.start] = t.item
     # the types in the signature of what is now public must be public too
@@ -1359,6 +1805,12 @@ def apply_cut(args, nodes, files, tfiles, order):
             widen[t.file][t.item.start] = t.item
             queue.append(t.item)
     widened = 0
+    for rel in vacated:
+        removed.pop(rel, None)
+        widen.pop(rel, None)
+        macro_exports.pop(rel, None)
+        if os.path.exists(os.path.join(args.src_dir, rel)):
+            os.remove(os.path.join(args.src_dir, rel))
     for rel in set(removed) | set(widen) | set(macro_exports):
         text, items = files[rel]
         edits = []
@@ -1379,7 +1831,8 @@ def apply_cut(args, nodes, files, tfiles, order):
             code = ri._leading_meta(text, it.start, len(text))[1]
             m = ri._VIS.match(text, code)
             if m is None:
-                edits.append((code, code, "pub "))
+                pos = _vis_position(text, it.start, code)
+                edits.append((pos, pos, "pub "))
                 widened += 1
             elif not m.group(0).startswith("pub ") and not m.group(0).rstrip() == "pub":
                 edits.append((code, m.end(), "pub "))
@@ -1403,23 +1856,44 @@ def apply_cut(args, nodes, files, tfiles, order):
                 out = out[:a] + r + out[b:]
         open(os.path.join(args.src_dir, rel), "w").write(out)
     print("widened %d items below" % widened)
+    # the test files that stay lose their imports of the test items that moved up
+    tpairs = set(pairs)
+    for n in mtests:
+        if n.name:
+            tpairs.add((module_path(n.file)[-1], n.name))
+    for ns in test_shares.values():
+        for u in ns:
+            tpairs.discard((module_path(u.file)[-1], u.name))
+    for u in test_copies:
+        tpairs.discard((module_path(u.file)[-1], u.name))
     for rel, (text0, items0) in files.items():
         path = os.path.join(args.src_dir, rel)
+        if rel in vacated:
+            continue
         cur = open(path).read()
         base = cur
-        if rel in removed and removed[rel]:
+        # an earlier step may have rewritten the file (a test moved out of it): parse what is there now
+        if rel in removed and removed[rel] or cur != text0:
             items_now = ri.parse(cur)
         else:
             items_now = items0
-        new = prune_uses(cur, items_now, pairs)
+        new = prune_uses(cur, items_now, tpairs)
+        if new != cur:
+            open(path, "w").write(new)
+    for rel in tfiles:
+        path = os.path.join(args.src_dir, rel)
+        if not os.path.exists(path) or rel in deleted_test_files:
+            continue
+        cur = open(path).read()
+        new = prune_uses(cur, ri.parse(cur), tpairs)
         if new != cur:
             open(path, "w").write(new)
     includers = {}
     for n in nodes:
-        if n.test and n.kind == "macro_call":
+        if n.test and n.fixed is None and n.kind == "macro_call":
             for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
                 includers[os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1)))] = (n.file, n.container)
-    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers)
+    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers, new_src, lower)
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
@@ -1435,7 +1909,7 @@ def apply_cut(args, nodes, files, tfiles, order):
     lib = ['//! %s: the %s domain of the store, cut out of %s at function level. Everything of %s is re-exported at the root;' % (args.crate, args.layer, args.lower, args.lower),
            "//! the modules below shadow the lower crate's modules of the same name and re-export them, so every old path still resolves.",
            "",
-           "// Test helpers widened for st3-daemon's tests are unused when only the feature is on.",
+           "// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.",
            '#![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]',
            "",
            '#[cfg(any(test, feature = "test-support"))]',
@@ -1450,8 +1924,8 @@ def apply_cut(args, nodes, files, tfiles, order):
     lib += [""] + ["pub use %s::%s;" % (mp, t) for mp, t in traits_out]
     os.makedirs(new_src, exist_ok=True)
     open(os.path.join(new_src, "lib.rs"), "w").write("\n".join(lib) + "\n")
-    if os.path.exists("crates/st3-daemon/build.rs"):
-        open(os.path.join(crate_dir, "build.rs"), "w").write(open("crates/st3-daemon/build.rs").read())
+    if os.path.exists("crates/fractal-daemon/build.rs"):
+        open(os.path.join(crate_dir, "build.rs"), "w").write(open("crates/fractal-daemon/build.rs").read())
     print("moved %d items into %s (%d files, %d traits)" % (stats["items"], args.crate, len(out_files), stats["traits"]))
     args.traits = [t for _, t in traits_out]
     return top_mods
@@ -1466,7 +1940,7 @@ def wire_crate(args, top_mods):
     crate, lower, upper = args.crate, args.lower, args.upper
     ident = crate.replace("-", "_")
     root = os.path.join("crates", crate)
-    daemon_text = open("crates/st3-daemon/Cargo.toml").read()
+    daemon_text = open("crates/fractal-daemon/Cargo.toml").read()
     files = []
     for dp, _, fs in os.walk(os.path.join(root, "src")):
         files += [os.path.join(dp, f) for f in fs if f.endswith(".rs")]
@@ -1480,16 +1954,16 @@ def wire_crate(args, top_mods):
     dev_section = daemon_text.split("[dev-dependencies]")[1]
     lines = {m.group(1): ln for ln in section.split("\n") if (m := re.match(r"^([A-Za-z0-9_-]+)\s*=", ln))}
     devlines = {m.group(1): ln for ln in dev_section.split("\n") if (m := re.match(r"^([A-Za-z0-9_-]+)\s*=", ln))}
-    skip = {"st3-github", "st3-peer", "st3-reconcile", "st3-api", lower}
+    skip = {"fractal-github", "fractal-peer", "fractal-reconcile", "fractal-api-core", lower}
     out = ["[package]", f'name = "{crate}"', 'version = "0.1.0"', 'edition = "2024"',
            f'description = "{args.description}"', 'license = "MIT"', "", "[features]",
-           "# Forwarded by st3-daemon's feature of the same name; never enabled by a production build.",
+           "# Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.",
            f'test-support = ["{lower}/test-support"]', "", "[dependencies]", f'{lower} = {{ path = "../{lower}" }}']
     out += [ln for k, ln in lines.items() if k not in skip and uses(k)]
-    internal = sorted({m.replace("_", "-") for m in re.findall(r"\b(st3_[a-z0-9_]+)::", text)} - skip - {crate} - set(lines))
+    internal = sorted({m.replace("_", "-") for m in re.findall(r"\b(fractal_[a-z0-9_]+)::", text)} - skip - {crate} - set(lines))
     out += [f'{n} = {{ path = "../{n}" }}' for n in internal if os.path.isdir(f"crates/{n}") and n not in {l.split(" ")[0] for l in out}]
     out += ["", "[dev-dependencies]", f'{ident}_self = {{ package = "{crate}", path = ".", features = ["test-support"] }}']
-    out += [ln for k, ln in devlines.items() if k != "st3_daemon_self" and uses(k)]
+    out += [ln for k, ln in devlines.items() if k != "fractal_daemon_self" and uses(k)]
     out.append("")
     open(os.path.join(root, "Cargo.toml"), "w").write("\n".join(out))
 
@@ -1505,12 +1979,12 @@ def wire_crate(args, top_mods):
     sub("flake.nix", f'            "-p"\n            "{lower}"\n', f'            "-p"\n            "{lower}"\n            "-p"\n            "{crate}"\n')
     sub("scripts/module_layers.py", f'"crates/{lower}/src", ', f'"crates/{lower}/src", "crates/{crate}/src", ')
     nx = open(".config/nextest.toml").read()
-    nx = re.sub(r"package\((=?)st3-daemon\)", lambda m: m.group(0) + f" or package({m.group(1)}{crate})" if f"package({m.group(1)}{crate})" not in nx else m.group(0), nx)
+    nx = re.sub(r"package\((=?)fractal-daemon\)", lambda m: m.group(0) + f" or package({m.group(1)}{crate})" if f"package({m.group(1)}{crate})" not in nx else m.group(0), nx)
     open(".config/nextest.toml", "w").write(nx)
-    dc = open("crates/st3-daemon/Cargo.toml").read()
+    dc = open("crates/fractal-daemon/Cargo.toml").read()
     dc = re.sub(r"(?m)^(" + re.escape(lower) + r' = \{ path = "\.\./' + re.escape(lower) + r'" \}\n)', lambda m: m.group(1) + f'{crate} = {{ path = "../{crate}" }}\n', dc, count=1)
     dc = dc.replace(f'"{lower}/test-support"', f'"{lower}/test-support", "{crate}/test-support"', 1)
-    open("crates/st3-daemon/Cargo.toml", "w").write(dc)
+    open("crates/fractal-daemon/Cargo.toml", "w").write(dc)
     if upper:
         up = f"crates/{upper}/Cargo.toml"
         t = open(up).read()
@@ -1526,12 +2000,38 @@ def wire_crate(args, top_mods):
         t = open(ul).read()
         t = t.replace(f"pub use {lower.replace('-', '_')}::*;", f"pub use {ident}::*;", 1)
         open(ul, "w").write(t)
-    dl = open("crates/st3-daemon/src/lib.rs").read()
+    dl = open("crates/fractal-daemon/src/lib.rs").read()
+    # grouped re-exports (`pub(crate) use fractal_store::{checkout, external_sessions};`) follow the modules too
+    for it in ri.parse(dl):
+        if it.kind != "use":
+            continue
+        parsed = use_paths(it.text)
+        if not parsed:
+            continue
+        attrs, vis, paths = parsed
+        changed = False
+        new_paths = []
+        for segs, alias in paths:
+            if len(segs) >= 2 and segs[0] == lower.replace("-", "_") and segs[1] in top_mods:
+                segs = [ident] + segs[1:]
+                changed = True
+            new_paths.append((segs, alias))
+        if changed:
+            dl = dl.replace(it.text, render_use(attrs, vis, new_paths).join(["\n" if it.text.startswith("\n") else "", ""]), 1)
     for m in top_mods:
-        dl = re.sub(r"(?m)^pub use st3_[a-z_]+::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
+        dl = re.sub(r"(?m)^pub use " + re.escape(lower.replace("-", "_")) + r"::" + re.escape(m) + r";$", f"pub use {ident}::{m};", dl)
     if getattr(args, "traits", None):
-        dl = dl.replace("pub use st3_github::{GitChangesStore", "pub use %s::{%s};\npub use st3_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
-    open("crates/st3-daemon/src/lib.rs", "w").write(dl)
+        dl = dl.replace("pub use fractal_github::{GitChangesStore", "pub use %s::{%s};\npub use fractal_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
+    open("crates/fractal-daemon/src/lib.rs", "w").write(dl)
+    # code that named the crate below directly (`fractal_store::store::..`) now goes through the daemon's re-export
+    pat = re.compile(r"\b" + re.escape(lower.replace("-", "_")) + r"::(" + "|".join(map(re.escape, top_mods)) + r")\b")
+    for f in _src_files(["crates/fractal-daemon/src"]):
+        if f.endswith("/lib.rs") and f.count("/") == 3:
+            continue
+        t = Path(f).read_text()
+        nt = pat.sub(r"crate::\1", t)
+        if nt != t:
+            Path(f).write_text(nt)
     print("wired", crate)
 
 
@@ -1575,13 +2075,29 @@ def _in_trait_block(lines, idx):
     return False
 
 
-def _pub_line(path, line_no):
+def _pub_line(path, line_no, name=None):
+    if not os.path.exists(path):
+        return 0
     lines = Path(path).read_text().split("\n")
+    if name and re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?thread_local!", lines[line_no - 1]):
+        # the statics a thread_local! declares are private until the static itself says otherwise
+        t = "\n".join(lines)
+        at = sum(len(l) + 1 for l in lines[: line_no - 1])
+        end = ri._match_delim(t, t.index("{", at)) if "{" in t[at:] else at
+        pat = re.compile(r"(?m)^(\s*)(?:pub(?:\([^)]*\))?\s+)?static(\s+" + re.escape(name) + r"\b)")
+        body = t[at:end]
+        nb = pat.sub(r"\1pub static\2", body, count=1)
+        if nb != body:
+            Path(path).write_text(t[:at] + nb + t[end:])
+            return 1
+        return 0
     if _in_trait_block(lines, line_no - 1):
         return 0
     ln = lines[line_no - 1]
-    new = re.sub(r"^(\s*)(?!pub\b)((?:async\s+|const\s+|unsafe\s+)*(?:fn|const|static|struct|enum|type|trait|mod|use)\b)", r"\1pub \2", ln)
+    new = re.sub(r"^(\s*)(?!pub\b)((?:/\*.*?\*/\s*)*(?:async\s+|const\s+|unsafe\s+)*(?:fn|const|static|struct|enum|type|trait|mod|use)\b)", r"\1pub \2", ln)
     new = re.sub(r"^(\s*)pub\((?:crate|super|self|in [\w:]+)\)\s+", r"\1pub ", new)
+    if re.match(r"\s*pub use .*::\*;", new) and not re.match(r"\s*pub use .*::\*;", ln):
+        return 0  # a glob import that is private stays private: making it pub re-exports everything it reaches
     if new != ln:
         lines[line_no - 1] = new
         Path(path).write_text("\n".join(lines))
@@ -1607,19 +2123,49 @@ def _make_fields_pub(roots, struct, fields):
 
 
 def _daemon_root(crate_name):
-    """How a crate outside the chain names the daemon library (`st3`, the alias most use, or `st3_daemon`),
-    and whether it only has it for tests."""
+    """The canonical daemon library name, and whether it is only available for tests."""
     manifest = Path("crates") / crate_name / "Cargo.toml"
     text = manifest.read_text() if manifest.exists() else ""
-    for pat, name in ((r"(?m)^st3\s*=", "st3"), (r"(?m)^st3[-_]daemon\s*=", "st3_daemon")):
-        m = re.search(pat, text)
-        if m:
-            dev = text.find("[dev-dependencies]")
-            return name, dev != -1 and m.start() > dev
-    return "st3", False
+    match = re.search(r"(?m)^fractal[-_]daemon\s*=", text)
+    dev = text.find("[dev-dependencies]")
+    return "fractal_daemon", match is not None and dev != -1 and match.start() > dev
+
+
+def _drop_spans(dropped):
+    """Remove the imports at these (byte) spans from their `use` items."""
+    edits = 0
+    for f, spans in dropped.items():
+        raw = Path(f).read_bytes()
+        t = raw.decode()
+        cspans = [(len(raw[:a].decode()), len(raw[:b].decode())) for a, b in spans]
+        for it in sorted(ri.parse(t), key=lambda i: -i.start):
+            if it.kind != "use":
+                continue
+            hit = [(a, b) for a, b in cspans if it.start <= a and b <= it.end]
+            parsed = use_paths(it.text) if hit else None
+            if not parsed:
+                continue
+            attrs, vis, paths = parsed
+            gone = {t[a:b].split("::")[-1].split(" as ")[-1].strip() for a, b in hit}
+            whole = {t[a:b].strip() for a, b in hit}
+            keep = [(segs, alias) for segs, alias in paths if (alias or segs[-1]) not in gone and "::".join(segs) not in whole]
+            code = _attr_start(t, it)
+            t = t[:code] + (render_use(attrs, vis, keep) if keep else "") + t[it.end :]
+            edits += 1
+        Path(f).write_text(t)
+    return edits
 
 
 def fix_once(diags, roots, traits):
+    # a shared test module re-exported a name whose item has moved up: it is not this crate's to export
+    dropped = collections.defaultdict(set)
+    for d in diags:
+        prim = [sp for sp in d["spans"] if sp["is_primary"]]
+        if (d.get("code") or {}).get("code") == "E0432" and prim and "shared" in prim[0]["file_name"]:
+            for sp in prim:
+                dropped[prim[0]["file_name"]].add((sp["byte_start"], sp["byte_end"]))
+    if dropped:
+        return _drop_spans(dropped)
     edits = 0
     names = set()
     imports = collections.defaultdict(set)
@@ -1645,15 +2191,33 @@ def fix_once(diags, roots, traits):
             nm = re.match(r"`(\w+)` is ambiguous", msg)
             if nm and prim:
                 ambiguities[prim[0]["file_name"]].add(nm.group(1))
+                # the globs that clash are in the files the notes point at
+                for c in d["children"]:
+                    if "could refer to" in c["message"] or "could also refer to" in c["message"]:
+                        for sp in c["spans"]:
+                            ambiguities[sp["file_name"]].add(nm.group(1))
+            continue
+        ms = re.match(r"unresolved imports? `((?:super::)+)(\w+)", msg)
+        if code == "E0432" and ms and prim:
+            edits += _absolute_super_import(prim[0], len(ms.group(1)) // 7, ms.group(2))
+            continue
+        mi = re.match(r"module import `(\w+)` is private", msg)
+        if code == "E0603" and mi:
+            # a glob import hides the lower module that the facade's `pub use lower::path::*` also reaches: name it
+            for c in d["children"]:
+                for sp in c["spans"]:
+                    ambiguities[sp["file_name"]].add(mi.group(1))
             continue
         if code in ("E0603", "E0624"):
+            pn = re.match(r"\w+ `(\w+)` is private", msg)
+            pname = pn.group(1) if pn else None
             for c in d["children"]:
                 for sp in c["spans"]:
                     if "defined here" in c["message"] or "defined here" in (sp.get("label") or "") or "private" in (sp.get("label") or ""):
-                        edits += _pub_line(sp["file_name"], sp["line_start"])
+                        edits += _pub_line(sp["file_name"], sp["line_start"], pname)
             for sp in d["spans"]:
                 if not sp["is_primary"] and "defined here" in (sp.get("label") or ""):
-                    edits += _pub_line(sp["file_name"], sp["line_start"])
+                    edits += _pub_line(sp["file_name"], sp["line_start"], pname)
             continue
         nm = re.match(r"cannot find (?:function|value|type|struct, variant or union type|macro) `(\w+)`", msg)
         if nm:
@@ -1681,7 +2245,7 @@ def fix_once(diags, roots, traits):
         t = Path(f).read_text()
         add = []
         crate_name = f.split("/")[1] if f.startswith("crates/") else ""
-        chain = {"st3-store", "st3-github", "st3-peer", "st3-reconcile", "st3-api", "st3-daemon"} | {r.split("/")[1] for r in roots if r.startswith("crates/")}
+        chain = {"fractal-store", "fractal-github", "fractal-peer", "fractal-reconcile", "fractal-api-core", "fractal-api-mailbox", "fractal-api-client-v0", "fractal-daemon"} | {r.split("/")[1] for r in roots if r.startswith("crates/")}
         root, dev_only = ("crate", False) if crate_name in chain else _daemon_root(crate_name)
         for leaf in sorted({u.split("::")[-1] for u in uses}):
             if re.search(r"\buse [^;]*\b" + leaf + r"\b", t):
@@ -1697,11 +2261,68 @@ def fix_once(diags, roots, traits):
         m = re.search(r"(?m)^pub use (\w+)::([\w:]+)::\*;$", t)
         if not m:
             continue
-        lines = "\n".join("pub use %s::%s::%s;" % (m.group(1), m.group(2), n) for n in sorted(nms) if ("::%s;" % n) not in t)
+        defined = set()
+        lower_file = Path("crates") / m.group(1).replace("_", "-") / "src" / (m.group(2).replace("::", "/") + ".rs")
+        if lower_file.exists():
+            defined = {it.name for it in ri.parse(lower_file.read_text()) if it.name}
+        lines = "\n".join("pub use %s::%s::%s;" % (m.group(1), m.group(2), n) for n in sorted(nms) if ("::%s;" % n) not in t and n in defined)
         if lines:
-            Path(f).write_text(t[: m.end()] + "\n" + lines + t[m.end() :])
+            t = t[: m.end()] + "\n" + lines + t[m.end() :]
+            Path(f).write_text(t)
+            edits += 1
+        # a name the file's module does not define but the crate below does: import that one explicitly
+        explicit = []
+        for n in sorted(nms):
+            if n in defined or re.search(r"(?m)^use [\w:]*::" + re.escape(n) + r";", t):
+                continue
+            found = _defined_below(m.group(1), n)
+            if found:
+                explicit.append("use %s;" % found)
+        if explicit:
+            at = m.end() + 1 if lines else m.end()
+            t = Path(f).read_text()
+            Path(f).write_text(t[:at] + "\n" + "\n".join(explicit) + t[at:])
             edits += 1
     return edits
+
+
+def _absolute_super_import(span, supers, first):
+    """`use super::super::operator_error::..` in a file that moved up, where `operator_error` stayed below: name it
+    through the crate below and make its declaration pub."""
+    f = span["file_name"]
+    m = re.match(r"crates/[^/]+/src/(.+)", f)
+    if not m:
+        return 0
+    base = module_path(m.group(1))
+    base = base[: len(base) - supers]
+    raw = Path(f).read_bytes()
+    start = span["byte_start"] - 7 * supers  # the span is the unresolved segment; the `super::`s precede it
+    if raw[start : span["byte_start"]].decode() != "super::" * supers:
+        return 0
+    tail = raw[span["byte_start"] : span["byte_end"]].decode()
+    lower = "fractal_store"
+    decl_file = Path("crates/fractal-store/src") / ("/".join(base) + ".rs")
+    if not decl_file.exists():
+        return 0
+    dt = decl_file.read_text()
+    nd = re.sub(r"(?m)^(\s*)(?:pub\([^)]*\)\s+)?mod " + re.escape(first) + r";", r"\1pub mod " + first + ";", dt)
+    if nd == dt and not re.search(r"(?m)^\s*pub mod " + re.escape(first) + ";", dt):
+        return 0
+    decl_file.write_text(nd)
+    new = "::".join([lower] + base) + "::" + tail
+    Path(f).write_bytes(raw[:start] + new.encode() + raw[span["byte_end"] :])
+    return 1
+
+
+def _defined_below(crate_ident, name):
+    """`crate::module::path::name` when exactly one pub item of the crate below is called `name`."""
+    root = Path("crates") / crate_ident.replace("_", "-") / "src"
+    hits = []
+    for rel in module_files(str(root)):
+        for it in ri.parse((root / rel).read_text()):
+            if it.name == name and it.is_pub and it.kind in ("fn", "const", "static", "struct", "enum", "type", "trait"):
+                hits.append("::".join([crate_ident] + module_path(rel) + [name]))
+    return hits[0] if len(hits) == 1 else None
 
 
 def cmd_fix(args):
@@ -1710,11 +2331,21 @@ def cmd_fix(args):
     for f in _src_files(roots):
         traits |= set(re.findall(r"(?m)^pub trait (\w+)", Path(f).read_text()))
     extra = ["--all-targets"] if args.all_targets else []
+    previous = None
     for rnd in range(1, args.rounds + 1):
         diags = _cargo_json(extra)
         print("round %d: %d errors" % (rnd, len(diags)))
         if not diags:
             return 0
+        signature = sorted(d["rendered"] for d in diags)
+        big = [f for f in _src_files(roots) if os.path.getsize(f) > 2_000_000]
+        if signature == previous or big:
+            for d in diags[:8]:
+                print("  unfixed:", d["rendered"].split("\n")[0][:140])
+            if big:
+                print("  a file grew past 2 MB:", big[:3])
+            return 1
+        previous = signature
         if fix_once(diags, roots, traits) == 0:
             for d in diags[:8]:
                 print("  unfixed:", d["rendered"].split("\n")[0][:140])
@@ -1799,6 +2430,59 @@ def _manifest_text(m):
             out.append(f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}{comma}")
     out.append("}")
     return "\n".join(out) + "\n"
+
+
+def _reanchor_inventory(slv, root, manifest):
+    """Re-derive the site records from the sources. A record is fully derived from its site; what is not derivable
+    is whether the site was accepted, which its adjacent marker says (by an id the inventory knows, with the same
+    fingerprint). When identical sites are split between files, the occurrence counter in their ids shifts, so a
+    marker can name an id the site no longer has: the marker and the record follow the site. Sites in the shared
+    test modules a cut generates come from `cfg(test)` code the scanner skipped; they are accepted as they come."""
+    import bisect
+
+    cache = {}
+    sites, markers = slv.scan(root, cache)
+    contents = {p: v[0] for p, v in cache.items()}
+    old = {e["id"]: e for e in manifest["sites"]}
+    by_path = collections.defaultdict(list)
+    for m in markers:
+        by_path[m[0]].append(m)
+    ends = {p: [m[2] for m in ms] for p, ms in by_path.items()}
+    edits = collections.defaultdict(list)
+    used = set()
+    records = []
+    for site in sites:
+        idx = bisect.bisect_right(ends.get(site.path, []), site.start) - 1
+        marker = by_path[site.path][idx] if idx >= 0 else None
+        if marker is not None and (marker[3] is None or contents[site.path][marker[2] : site.start].strip()):
+            marker = None
+        known = marker is not None and marker[3]["id"] in old and old[marker[3]["id"]]["fingerprint"] == site.fingerprint
+        generated = "_shared" in site.path.rsplit("/", 1)[-1]
+        if not known and not generated:
+            records.append(None)
+            continue
+        text = "/* sqlite-large-value: allow-for-now %s owner=%s TODO=%s */" % (site.id, site.owner, site.todo)
+        if marker is not None:
+            used.add((marker[0], marker[1]))
+            if contents[site.path][marker[1] : marker[2]] != text:
+                edits[site.path].append((marker[1], marker[2], text))
+        else:
+            edits[site.path].append((site.start, site.start, text + " "))
+        records.append(slv.record(site))
+    for path, start, end, marker in markers:
+        if marker is not None and (path, start) not in used:
+            owner_site = any(s.path == path and bisect.bisect_right(ends[path], s.start) - 1 >= 0 and by_path[path][bisect.bisect_right(ends[path], s.start) - 1][1] == start for s in sites)
+            if not owner_site:
+                edits[path].append((start, end + (1 if contents[path][end : end + 1] == " " else 0), ""))
+    for path, es in edits.items():
+        text = Path(path).read_text()
+        for a, b, rep in sorted(es, reverse=True):
+            text = text[:a] + rep + text[b:]
+        Path(path).write_text(text)
+    cache = {}
+    sites, _ = slv.scan(root, cache)
+    accepted = {r["id"] for r in records if r}
+    manifest["sites"] = sorted((slv.record(x) for x in sites if x.id in accepted), key=lambda e: (e["path"], e["id"]))
 
 
 def cmd_inventory(args):
@@ -1886,6 +2570,7 @@ def cmd_inventory(args):
         for a, b, rep in sorted(es, reverse=True):
             text = text[:a] + rep + text[b:]
         Path(path).write_text(text)
+    _reanchor_inventory(slv, root, manifest)
     # the catalogs are derived from the (rewritten) sources
     cache = {}
     sites, _ = slv.scan(root, cache)
@@ -1899,6 +2584,132 @@ def cmd_inventory(args):
     return 1 if problems else 0
 
 
+
+def _unused_imports(cmd, crate):
+    """({lib}, {test}) sets of (file, start, end) for the `unused_imports` warnings one `cargo test --no-run`
+    of `crate` reports, split by the unit that reported them. The library is built the way its tests build
+    it (with the test-support feature), which is also how the workspace builds it. A unit's messages come
+    just before its artifact, whose profile says whether it is the test unit."""
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    lib, test, pending = set(), set(), set()
+    for line in out.split("\n"):
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if crate not in m.get("package_id", "").replace("#", "/"):
+            continue
+        if m.get("reason") == "compiler-message":
+            d = m["message"]
+            if (d.get("code") or {}).get("code") == "unused_imports":
+                for sp in d["spans"]:
+                    if sp["is_primary"]:
+                        pending.add((sp["file_name"], sp["byte_start"], sp["byte_end"]))
+        elif m.get("reason") == "compiler-artifact" and m["target"]["kind"] == ["lib"]:
+            (test if m["profile"]["test"] else lib).update(pending)
+            pending = set()
+    return lib, test
+
+
+def _uses_with_context(text, items, in_test):
+    """Every `use` item of a file, nested inline modules included, with whether it sits in test-only code."""
+    for it in items:
+        if it.kind == "use":
+            yield it, in_test
+        elif it.kind == "mod" and it.body:
+            yield from _uses_with_context(text, ri.parse_items(text, it.body[0], it.body[1]), in_test or it.cfg_test)
+
+
+def _imported_names(src):
+    """The names the `use` items of a crate's files import from the crates below (by `fractal_*`, `crate`, `super`)."""
+    names = set()
+    for rel in module_files(src):
+        text = open(os.path.join(src, rel)).read()
+        for it in ri.parse(text):
+            if it.kind != "use":
+                continue
+            parsed = use_paths(it.text)
+            if not parsed:
+                continue
+            for segs, alias in parsed[2]:
+                if segs[-1] != "*" and (segs[0] in ("crate", "super", "self") or segs[0].startswith("fractal_")):
+                    names.add(segs[-1])
+    return names
+
+
+def cmd_imports(args):
+    """Remove the imports nothing uses. `cargo fix` removes an import that only test code uses (the library
+    build has no use for it); this removes what both the library and its test build leave unused, gates
+    with `#[cfg(test)]` what only the library build does, and removes what the test build leaves unused in
+    code the library never compiles (test-only files and `#[cfg(test)]` modules)."""
+    for crate in [c for c in args.crates.split(",") if c]:
+        lib, test = _unused_imports(["cargo", "test", "-p", crate, "--lib", "--no-run", "--message-format=json"], crate)
+        src = "crates/%s/src" % crate
+        parsed = {os.path.join(src, rel): (open(os.path.join(src, rel)).read(),) for rel in module_files(src)}
+        parsed = {f: (t[0], ri.parse(t[0])) for f, t in parsed.items()}
+        test_files = {os.path.join(src, rel) for rel in test_file_set({os.path.relpath(f, src): v for f, v in parsed.items()})}
+        remove = lib & test
+        gate = lib - test
+        by_file = collections.defaultdict(lambda: ([], [], []))
+        for f, a, b in remove:
+            by_file[f][0].append((a, b))
+        for f, a, b in gate:
+            by_file[f][1].append((a, b))
+        for f, a, b in test - lib:
+            by_file[f][2].append((a, b))
+        removed = gated_total = 0
+        for f, (rem, gat, tonly) in by_file.items():
+            raw = Path(f).read_bytes()
+            text = raw.decode()
+            def cspan(a, b):
+                return len(raw[:a].decode()), len(raw[:b].decode())
+            rem_c = [cspan(a, b) for a, b in rem]
+            gat_c = [cspan(a, b) for a, b in gat]
+            tonly_c = [cspan(a, b) for a, b in tonly]
+            file_in_test = f in test_files or bool(TEST_FILE.search(f))
+            edits = []
+            for it, in_test in _uses_with_context(text, ri.parse(text), file_in_test):
+                parsed_use = use_paths(it.text)
+                if not parsed_use:
+                    continue
+                attrs, vis, paths = parsed_use
+                code = _attr_start(text, it)
+                inside = lambda spans: [(a, b) for a, b in spans if it.start <= a and b <= it.end]
+                r, g = inside(rem_c), inside(gat_c)
+                if in_test:
+                    r += inside(tonly_c)
+                if not r and not g:
+                    continue
+
+                def leaf_text(segs, alias):
+                    return alias or segs[-1]
+
+                def flagged(segs, alias, spans):
+                    names = {text[a:b].split("::")[-1].split(" as ")[-1].strip() for a, b in spans}
+                    whole = {text[a:b].strip() for a, b in spans}
+                    if segs[-1] == "*":
+                        return "::".join(segs[:-1]) in whole or "::".join(segs) in whole  # rustc flags `super` of `super::*`
+                    return leaf_text(segs, alias) in names or "::".join(segs) in whole
+                keep, gated = [], []
+                for segs, alias in paths:
+                    if flagged(segs, alias, r):
+                        removed += 1
+                    elif flagged(segs, alias, g):
+                        gated.append((segs, alias))
+                    else:
+                        keep.append((segs, alias))
+                new = render_use(attrs, vis, keep) if keep else ""
+                if gated:
+                    new = (new + "\n" if new else "") + render_use("#[cfg(test)]\n" + attrs, vis, gated)
+                    gated_total += len(gated)
+                edits.append((code, it.end, new))
+            for a, b, rep in sorted(edits, reverse=True):
+                text = text[:a] + rep + text[b:]
+            Path(f).write_text(text)
+        print("%s: removed %d, gated %d unused imports" % (crate, removed, gated_total))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1907,6 +2718,8 @@ def main(argv=None):
     pf.add_argument("--all-targets", action="store_true")
     pf.add_argument("--rounds", type=int, default=12)
     sub.add_parser("inventory", help="carry the SQLite large-value inventory over a code move")
+    pi = sub.add_parser("imports", help="remove unused imports without breaking the test build")
+    pi.add_argument("--crates", required=True)
     ps = sub.add_parser("sweep", help="remove the dead code a cut leaves in the lower crates")
     ps.add_argument("--roots", required=True)
     ps.add_argument("--rounds", type=int, default=4)
@@ -1933,6 +2746,8 @@ def main(argv=None):
         return cmd_sweep(args)
     if args.cmd == "inventory":
         return cmd_inventory(args)
+    if args.cmd == "imports":
+        return cmd_imports(args)
     config = load_config(args.config)
     pins = [l.strip() for l in open(args.pins)] if args.pins and os.path.exists(args.pins) else []
     nodes, files, tfiles = load(args.src)
@@ -1940,22 +2755,32 @@ def main(argv=None):
     layer_of = {lay: i + 1 for i, lay in enumerate(config["order"])}
     current = layer_of.get(getattr(args, "layer", None), 0)
     for lay, name in existing.items():
-        if layer_of[lay] > current and f"crates/{name}/src={lay}" not in args.above:
+        # a crate already cut, above or below this layer, only refers downwards: what it names stays where it is
+        if lay in layer_of and layer_of[lay] != current and f"crates/{name}/src={lay}" not in args.above:
             args.above.append(f"crates/{name}/src={lay}")
+    named_by_cut = set()
     for spec in args.above:
         path, lay = spec.split("=")
         load(path, nodes=nodes, fixed=config["order"].index(lay) + 1)
+        if config["order"].index(lay) + 1 < current:
+            named_by_cut |= _imported_names(path)
+    # what a crate already cut imports from below by name stays below (its `pub use fractal_store::store::{..}` lists)
+    for n in nodes:
+        if n.fixed is None and not n.test and n.name in named_by_cut and n.kind in FREE_KINDS:
+            n.pinned = True
     if args.cmd == "apply":
+        if args.above:
+            globals()["SHARED_SUFFIX"] = "_" + args.layer + "_tests"
         below = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] < current]
         above = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] > current]
         if not args.lower:
-            args.lower = max(below)[1] if below else "st3-store"
+            args.lower = max(below)[1] if below else "fractal-store"
         if not args.upper:
-            args.upper = min(above)[1] if above else "st3-github"
+            args.upper = min(above)[1] if above else "fractal-github"
         if not args.crate:
             args.crate = config["crates"][args.layer]
     build_refs(nodes)
-    comp, order = plan(nodes, config, pins)
+    comp, order = plan(nodes, config, pins, current or None)
     if args.cmd == "plan":
         for name, c, b, pc in summarize(nodes, order):
             print(f"{name:10s} items {c:5d} bytes {b:8d} ({pc:.0f}%)")
