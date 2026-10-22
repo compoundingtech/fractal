@@ -134,7 +134,8 @@ fn standby(declaration: &Value) -> (&'static str, Option<Value>) {
 fn next_fire(declaration: &Value, origin: Option<&str>, now: u128) -> (Option<String>, &'static str) {
     if stopped(declaration) { return (None, "stopped"); }
     // A future scheduling setting can change the nominal clock. Keep its raw fields without
-    // pretending this reader understands its next tick. Standby is presence-only here.
+    // pretending this reader understands its next tick. Standby is returned raw, but the
+    // nominal tick still requires the scheduler to accept the full declaration.
     if declaration["name"] != "schedule" { return (None, "unknown"); }
     let known = ["host", "at", "every", "anchor", "calendar", "catch-up", "max-catch-up", "work", "standby"];
     if declaration.get("children").and_then(Value::as_array).is_none_or(|nodes| nodes.iter().any(|node|

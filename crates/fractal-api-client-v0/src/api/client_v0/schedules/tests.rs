@@ -27,7 +27,11 @@ fn declarations_show_recorded_owner_local_origin_and_future_fields_without_stand
     let state = fixture(root.path());
     declare(&state,"harvest","every \"1h\"; anchor \"2026-01-01T00:00:00Z\"");
     let mut raw: Value = serde_json::from_str(&state.store.schedule_declaration_rows("",1).unwrap()[0].body.clone().unwrap()).unwrap();
-    let future = json!({"name":"standby","arguments":[],"children":[{"name":"future-mode","arguments":["opaque"],"children":[]}]});
+    let future = json!({"name":"standby","arguments":[],"children":[
+        {"name":"host","arguments":["other"],"children":[]},
+        {"name":"after","arguments":["5m"],"children":[]},
+        {"name":"future-mode","arguments":["opaque"],"children":[]}
+    ]});
     raw["children"].as_array_mut().unwrap().push(future.clone());
     raw["future_top_level"] = json!({"kept":true});
     body(&state,"schedule/harvest",&raw);
@@ -41,10 +45,30 @@ fn declarations_show_recorded_owner_local_origin_and_future_fields_without_stand
     assert_eq!(row["standby_node"],future);
     assert_eq!(row["declaration"]["future_top_level"]["kept"],true);
     assert!(row.get("run_twice_warning").is_none());
-    assert!(row.get("standby").is_none(),"do not introduce interpreted takeover fields before #3099 lands");
+    assert!(row.get("standby").is_none(),"this read returns the raw standby node without takeover interpretation");
     assert_eq!(row["knowledge"]["basis"],"local-read");
     assert_eq!(row["knowledge"]["completeness"],"unknown");
     assert_eq!(row["next_declared_fire_at"],"2026-10-21T08:00:00.000Z");
+}
+
+#[test]
+fn scheduler_rejected_standby_keeps_raw_node_and_reports_unknown_tick() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    declare(&state,"harvest","every \"1h\"; anchor \"2026-01-01T00:00:00Z\"");
+    let mut raw: Value = serde_json::from_str(&state.store.schedule_declaration_rows("",1).unwrap()[0].body.clone().unwrap()).unwrap();
+    let invalid = json!({"name":"standby","arguments":[],"children":[{"name":"future-mode","arguments":["opaque"],"children":[]}]});
+    raw["children"].as_array_mut().unwrap().push(invalid.clone());
+    raw["future_top_level"] = json!({"kept":true});
+    body(&state,"schedule/harvest",&raw);
+    let out = page(&state,"",50,stamp("2026-10-21T08:00:00Z"));
+    let row = &out["items"][0];
+    assert_eq!(row["next_fire_state"],"unknown");
+    assert!(row["next_declared_fire_at"].is_null());
+    assert_eq!(row["state"],"unknown");
+    assert_eq!(row["standby_state"],"declared");
+    assert_eq!(row["standby_node"],invalid);
+    assert_eq!(row["declaration"],raw);
 }
 
 #[test]

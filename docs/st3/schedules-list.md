@@ -21,13 +21,15 @@ Rows show the recorded owner run, generation and step when present; legacy owner
 not recorded. PRIMARY resolves `host "local"` against the declaration's origin, never against the
 member serving the list. STANDBY NODE reports only whether a raw `standby` node is present. The
 JSON keeps that node and unfamiliar declaration fields; it assigns no takeover meaning and adds
-no run-twice warning before the separate standby implementation is on main. Opaque, unfamiliar,
+no run-twice warning in this declaration-only read. Opaque, unfamiliar,
 stopped and oversized declarations remain visible rows rather than disappearing.
 
 NEXT DECLARED is a nominal tick computed from the declaration at the page's `as_of`. It does not
 predict admission, actual execution, completion, catch-up, current ownership or whether a prior
 occurrence ran. A past one-shot has no future declared tick; stopped declarations stay listed
-without a tick. Intervals need an explicit anchor, otherwise the tick is unknown. Calendar ticks
+without a tick. A declaration the scheduler rejects, including invalid standby settings, has an
+unknown next tick while its raw fields remain visible. Intervals need an explicit anchor,
+otherwise the tick is unknown. Calendar ticks
 use the scheduler's existing timezone calculation: the first real minute after a DST gap and the
 first instant of a repeated local minute. An exact tick is included. This read changes no scheduler,
 arming, catch-up, role, heartbeat or occurrence identity behavior.
