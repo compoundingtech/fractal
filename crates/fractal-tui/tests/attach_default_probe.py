@@ -316,16 +316,11 @@ def case_alert(stui):
     wait_for(stui.status, lambda status: status["answered"] == ["ask/probe=Yes"], "answer sent")
     time.sleep(0.2)
     assert bytes(stui.wire_input[start:]) == b"", f"clicks reached the program: {bytes(stui.wire_input[start:])!r}"
-    # Opening it works while attached: "open in Now" opens Home over the space, where Ctrl+H
-    # closes it again onto the terminal. (While the terminal has the keys Ctrl+H is the
-    # program's, a backspace to many; Home is this click, or Ctrl+K, away.)
+    # The card is the whole alert: nothing over the terminal sends the person to Now for it.
     status = stui.status()
-    now = next(alert["rect"] for alert in status["alerts"] if alert["tap"] == "Open")
-    stui.click(now)
-    wait_for(stui.status, lambda status: status["home"] and not status["focused"], "Home opened")
-    stui.send(b"\x1b[104;5u")  # Ctrl+H as a kitty-keyboard terminal sends it
-    wait_for(stui.status, lambda status: not status["home"] and status["focused"], "back on the terminal")
-    print("alert: shown on top of the attached terminal; keys reach the program; clicks show, answer and open it in Now")
+    assert all(alert["tap"] != "Open" for alert in status["alerts"]), status["alerts"]
+    assert "open in Now" not in screen(status), "the band still offers open in Now"
+    print("alert: shown on top of the attached terminal; keys reach the program; clicks show and answer it")
 
 
 def case_reconnect(stui):
