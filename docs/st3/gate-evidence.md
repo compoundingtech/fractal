@@ -1038,10 +1038,13 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
 - no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
   created, or after it;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
-  job the gate skipped is evidence neither way.
+  job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
+  (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
+  `linux-clippy`, `linux-fleet-compat`) failed or was cancelled; a red from a member that always runs (`upgrade-impact`) would show
+  under enforce too, and is reported as `visible_red`, which does not block.
 
 It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
-run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
+and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
 temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
 moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and

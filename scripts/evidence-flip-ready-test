@@ -7,6 +7,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -45,8 +46,9 @@ class FakeGitHub:
     def __init__(self):
         self.runs, self.jobs, self.logs, self.calls, self.open_prs, self.broken = [], {}, {}, [], [], False
 
-    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK):
-        """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job."""
+    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None):
+        """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
+        of other jobs in the same attempt (an aggregate's members)."""
         if run_id not in self.jobs:
             self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created)})
             self.jobs[run_id] = []
@@ -54,6 +56,9 @@ class FakeGitHub:
         self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt})
         if real:
             self.jobs[run_id].append({'id': job_id + 50, 'name': check, 'status': 'completed', 'conclusion': real, 'run_attempt': attempt})
+        for offset, (name, conclusion) in enumerate((members or {}).items()):
+            self.jobs[run_id].append({'id': job_id + 60 + offset, 'name': name, 'status': 'completed', 'conclusion': conclusion,
+                                      'run_attempt': attempt})
         self.logs[job_id] = '\x1b[36mnoise\x1b[0m\n' + TEMPLATE + '\n' + ''.join(f'2026-10-22T05:58:36.1Z \x1b[0m{text}\n' for text in lines)
 
     def __call__(self, command, **kwargs):
@@ -100,10 +105,10 @@ class FlipReady(unittest.TestCase):
         git(self.repo, 'push', '-q', 'origin', 'main')
         self.gh = FakeGitHub()
 
-    def ready_history(self, count=30, first=25):
+    def ready_history(self, count=30, first=25, check=CHECK):
         """`count` satisfied log=ok lines: the first one `first` hours ago, the others over the last 23 hours."""
         for i in range(count):
-            self.gh.run(1000 + i, at(first if i == 0 else 23 - i * 20 / count), [decision()], real='success')
+            self.gh.run(1000 + i, at(first if i == 0 else 23 - i * 20 / count), [decision(check=check)], real='success', check=check)
 
     def report(self, *args):
         out, err = io.StringIO(), io.StringIO()
@@ -115,9 +120,12 @@ class FlipReady(unittest.TestCase):
         return code, (json.loads(text[:text.index('\n}\n') + 2]) if text.startswith('{') else None), text
 
     def check(self, *args):
+        return self.check_of(CHECK, *args)
+
+    def check_of(self, check, *args):
         code, result, _ = self.report(*args)
         self.assertEqual(code, 0, self.err)
-        return result['checks'][CHECK]
+        return result['checks'][check]
 
     def test_thirty_fresh_satisfied_lines_over_a_full_window_are_ready(self):
         self.ready_history()
@@ -125,7 +133,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((code, result['window_s'], result['as_of']), (0, 86400, '2026-10-22T12:00:00Z'))
         entry = result['checks'][CHECK]
         self.assertEqual(entry, {'enforce': False, 'lines': 29, 'satisfied_log_ok': 29, 'log_missing': 0, 'unlogged_pass_unexplained': 0,
-                                 'hidden_red': [], 'log_window_start': stamp(at(25)), 'ready': False,
+                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'ready': False,
                                  'why_not': ['29 satisfied lines with log=ok, fewer than 30']})  # the first run is in the lookback, not the window
         self.gh.run(2000, at(1), [decision()], real='success')
         self.assertEqual(self.check()['why_not'], [])
@@ -173,6 +181,46 @@ class FlipReady(unittest.TestCase):
         self.gh.run(4003, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate')  # another check's red
         entry = self.check()
         self.assertEqual((entry['hidden_red'], entry['why_not']), ([4001], ['1 runs with a hidden red']))
+
+    def test_an_aggregate_red_from_a_member_that_always_runs_is_visible_not_hidden(self):
+        # linux-gate failed only because upgrade-impact failed (run 39700185823: a missing release note). The gate never skips
+        # upgrade-impact, so under enforce the red would still show: reported, not blocking.
+        self.ready_history(count=40, check='linux-gate')
+        self.gh.run(5000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate',
+                    members={'upgrade-impact': 'failure', 'linux-tests': 'success', 'linux-clippy': 'skipped'})
+        self.gh.run(5001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate', attempt=1,
+                    members={'upgrade-impact': 'failure'})
+        self.gh.run(5001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate', attempt=2,
+                    members={'linux-tests': 'failure'})  # another attempt's member red does not make attempt 1's hidden
+        code, result, _ = self.report()
+        entry = result['checks']['linux-gate']
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['ready'], entry['why_not']), ([5001], [5000], False,
+                                                                                                        ['1 runs with a hidden red']))
+        # (a run with a hidden red in any attempt is listed as hidden only)
+        self.gh = FakeGitHub()
+        self.ready_history(count=40, check='linux-gate')
+        self.gh.run(5000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate', members={'upgrade-impact': 'failure'})
+        entry = self.check_of('linux-gate')
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['ready']), ([], [5000], True))
+
+    def test_an_aggregate_red_from_a_member_the_skip_would_skip_is_hidden(self):
+        self.ready_history(count=40, check='linux-gate')
+        self.gh.run(6000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate',
+                    members={'linux-tests': 'failure', 'upgrade-impact': 'success'})
+        self.gh.run(6001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate',
+                    members={'linux-tests-shard-3': 'cancelled', 'upgrade-impact': 'failure'})
+        entry = self.check_of('linux-gate')
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['why_not']), ([6000, 6001], [], ['2 runs with a hidden red']))
+
+    def test_the_members_a_linux_gate_skip_skips_are_the_jobs_whose_condition_reads_its_skip_output(self):
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        gated = set()
+        for found in re.finditer(r'^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)', text, re.M):
+            condition = re.search(r'^    if: (.*(?:\n      .*)*)', found.group(2), re.M)  # the job's own if, not a step's
+            if condition and 'needs.evidence-gate-linux-gate.outputs.skip' in condition.group(1):
+                gated.add(found.group(1))
+        self.assertEqual(sorted(gated), sorted(flip.SKIPPED_MEMBERS['linux-gate']))
+        self.assertNotIn('upgrade-impact', gated)
 
     def test_job_logs_are_cached_by_job_id_and_template_lines_are_ignored(self):
         self.ready_history(count=31)

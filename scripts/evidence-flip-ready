@@ -13,7 +13,9 @@ whether the flip trigger holds (docs/st3/gate-evidence.md, "When a check is read
   - no unexplained log=unlogged_pass: one is explained when the record was observed at most 240 s before the run was
     created (log latency: two 2-minute pulls), or after it;
   - no hidden red: no satisfied line beside the check's own real job (the job named exactly the check, same attempt)
-    that concluded `failure`. A real job the gate skipped is evidence neither way.
+    that concluded `failure`. A real job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red
+    is hidden only when a member the skip would skip failed or was cancelled; a red from a member that always runs
+    (upgrade-impact) would show under enforce too, and is reported as `visible_red`, which does not block.
 Prints JSON; exit 0, or 2 when GitHub could not be read. Read only, except `--propose`: for each ready check that is not
 enforced and has no open pull request from `evidence-flip/<check>`, it makes the flip in a temporary worktree of
 origin/main, pushes that branch and opens the pull request (`--dry-run`: prints the diff instead). Exit 1 when a
@@ -45,6 +47,11 @@ LOOKBACK_S = 2 * 3600  # also read a little before the window, to see whether th
 MIN_SATISFIED_LOG_OK = 30
 LATENCY_S = 240  # two pulls of the log timer (every 2 minutes)
 NOT_FRESH = ('stale', 'absent', 'unsigned', '-')  # '-': the base did not pin the log key, so the window has not started
+# The members of the aggregate `linux-gate` that a skip decision skips at job level: the jobs whose `if` reads
+# needs.evidence-gate-linux-gate.outputs.skip (generated from .github/workflows/fleet.yml.genie.ts; the test checks this
+# list against fleet.yml). Every other member, upgrade-impact first, always runs, so its red is never hidden by a skip.
+SKIPPED_MEMBERS = {'linux-gate': ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
+                                  'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat')}
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 # The gate prints its line on its own, after the runner's timestamp; the step's shell text (echoed before it) has the
 # line too, as a template with `$CHECK`, behind other text.
@@ -127,16 +134,18 @@ def collect(github, checks, since, until):
             check = (job.get('name') or '').removeprefix('evidence-gate-')
             if check == job.get('name') or check not in checks or job.get('status') != 'completed' or job.get('conclusion') == 'skipped':
                 continue
-            wanted.append((run, job, check, real.get((check, job.get('run_attempt')))))
+            attempt = job.get('run_attempt')
+            wanted.append((run, job, check, real.get((check, attempt)),
+                           [name for name in SKIPPED_MEMBERS.get(check, ()) if real.get((name, attempt)) in ('failure', 'cancelled')]))
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         logs = list(pool.map(lambda item: github.decision_lines(item[1]['id']), wanted))
     rows = []
-    for (run, job, check, conclusion), lines in zip(wanted, logs):
+    for (run, job, check, conclusion, members_red), lines in zip(wanted, logs):
         for text in lines:
             fields = fields_of(text)
             if fields.get('check') == check:
                 rows.append({'check': check, 'run': run['id'], 'created_at': parse_time(run.get('created_at')),
-                             'fields': fields, 'real': conclusion})
+                             'fields': fields, 'real': conclusion, 'members_red': members_red})
     return rows
 
 
@@ -152,7 +161,10 @@ def evaluate(rows, enforce, now):
             observed = parse_time(row['fields'].get('observed_at'))
             if observed is None or (row['created_at'] - observed).total_seconds() > LATENCY_S:
                 unexplained += 1
-    hidden = sorted({row['run'] for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure'})
+    red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
+    # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
+    hidden = sorted({row['run'] for row in red if row['check'] not in SKIPPED_MEMBERS or row['members_red']})
+    visible = sorted({row['run'] for row in red} - set(hidden))
     # The log window began with the first line that has a log value after the last line without one.
     unset = [i for i, row in enumerate(rows) if row['fields'].get('log', '-') == '-']
     began = rows[unset[-1] + 1:] if unset else rows
@@ -161,7 +173,7 @@ def evaluate(rows, enforce, now):
         'enforce': enforce, 'lines': len(window),
         'satisfied_log_ok': sum(1 for row, value in zip(window, log) if value == 'ok' and row['fields'].get('outcome') == 'satisfied'),
         'log_missing': log.count('missing'), 'unlogged_pass_unexplained': unexplained, 'hidden_red': hidden,
-        'log_window_start': iso(window_start),
+        'visible_red': visible, 'log_window_start': iso(window_start),
     }
     why = [f'{log.count(value)} lines with log={value}' for value in NOT_FRESH if value in log]
     if window_start is None:
