@@ -368,8 +368,35 @@ pub struct RuntimeObservation {
     pub incarnation_id: Option<String>,
 }
 
+/// Read-only pass evidence; provenance is keyed by the exact observed incarnation.
+#[derive(Default)]
+pub struct PtyRegistrySnapshot {
+    pub observations: Vec<RuntimeObservation>,
+    pub start_operations: HashMap<String, (String, String)>,
+}
+
+type PassPtySnapshot = std::sync::OnceLock<Result<PtyRegistrySnapshot>>;
+
 pub trait RuntimeControl: Send + Sync + 'static {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
+    /// Existing controls can supply provenance separately; native controls read both
+    /// from one registry snapshot so the evidence describes the same incarnation.
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        let observations = self.snapshot_ptys()?;
+        let mut start_operations = HashMap::new();
+        for observation in &observations {
+            if let Some(incarnation) = &observation.incarnation_id
+                && let Some(operation) =
+                    self.start_operation(&observation.runtime_id, true, incarnation)?
+            {
+                start_operations.insert(
+                    observation.runtime_id.clone(),
+                    (incarnation.clone(), operation),
+                );
+            }
+        }
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
     /// Inspect the resulting runtime. Callers must still verify its operation provenance.
     fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
@@ -542,12 +569,13 @@ fn local_process_is_alive(_pid: u32) -> bool {
     true
 }
 
-impl RuntimeControl for NativeRuntime {
-    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+impl NativeRuntime {
+    fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
         fractal_runtime::protect_servers(&observations);
-        observations
+        let mut start_operations = HashMap::new();
+        let observations = observations
             .into_iter()
             .map(|item| {
                 let incarnation_id = match (&item.pid, &item.created_at) {
@@ -555,15 +583,35 @@ impl RuntimeControl for NativeRuntime {
                     _ => None,
                 };
                 let status = observed_pty_status(&item);
-                Ok(RuntimeObservation {
+                if include_provenance
+                    && let Some(incarnation) = &incarnation_id
+                    && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
+                {
+                    start_operations.insert(
+                        item.name.clone(),
+                        (incarnation.clone(), operation.clone()),
+                    );
+                }
+                RuntimeObservation {
                     runtime_id: item.name,
                     terminal: true,
                     status,
                     exit_code: item.exit_code,
                     incarnation_id,
-                })
+                }
             })
-            .collect()
+            .collect();
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
+}
+
+impl RuntimeControl for NativeRuntime {
+    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+        Ok(self.snapshot_pty_registry(false)?.observations)
+    }
+
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        self.snapshot_pty_registry(true)
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -766,10 +814,12 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
-        let mut producer_entered = false;
-        self.start_checked_inner(member, guard, &mut producer_entered)
+        // The backend owns its launch boundary and returns an exact StartRejected
+        // witness when it can prove that no producer was created.
+        let mut backend_entered = false;
+        self.start_checked_inner(member, guard, &mut backend_entered)
             .map_err(|error| {
-                if producer_entered {
+                if backend_entered {
                     error
                 } else {
                     error.context(fractal_runtime::StartRejected {
@@ -783,7 +833,7 @@ impl NativeRuntime {
         &self,
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
-        producer_entered: &mut bool,
+        backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let environment =
@@ -833,7 +883,7 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
                         &launch,
@@ -847,7 +897,7 @@ impl NativeRuntime {
                         guard,
                     )
                 } else {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after(
                         &member.runtime_id,
                         &launch,
@@ -862,7 +912,7 @@ impl NativeRuntime {
                 }
             } else {
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     return runtime.spawn_checked(
                         &member.runtime_id,
                         &launch,
@@ -874,7 +924,7 @@ impl NativeRuntime {
                         guard,
                     );
                 }
-                *producer_entered = true;
+                *backend_entered = true;
                 runtime.spawn(
                     &member.runtime_id,
                     &launch,
@@ -887,13 +937,13 @@ impl NativeRuntime {
             }
         } else {
             if let Some(guard) = guard {
-                *producer_entered = true;
+                *backend_entered = true;
                 return self
                     .exec
                     .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
                     .map(|_| ());
             }
-            *producer_entered = true;
+            *backend_entered = true;
             self.exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
@@ -2480,7 +2530,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
-        self.reconcile_start_jobs()?;
+        // Start completion can mutate the runtime-observation fence. Capture before
+        // it can read the shared snapshot, so pre-completion evidence cannot later
+        // be presented to planning as a post-completion observation.
+        let _observation_capture = self.store.capture_runtime_observations()?;
+        let pty_snapshot = PassPtySnapshot::new();
+        self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -2494,7 +2549,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental
                 .touch(&format!("runtime-observation-drops:{subject}"));
         }
-        let _observation_capture = self.store.capture_runtime_observations()?;
         let observe_span = crate::reconcile_telemetry::phase("pass/changes");
         self.incremental.observe(&self.store)?;
         self.incremental.observe_value(
@@ -2594,7 +2648,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = root_tasks;
         let mut pty_span = crate::reconcile_telemetry::phase("pass/pty-snapshot");
-        let ptys = self.runtime.snapshot_ptys();
+        // Read-only launch completion evidence and planning share one pass snapshot.
+        // A mutation can make it stale: guarded launches and exact native controls
+        // still take their own fresh fences before acting on an incarnation.
+        let ptys = pty_snapshot
+            .into_inner()
+            .unwrap_or_else(|| self.runtime.snapshot_ptys_with_provenance())
+            .map(|snapshot| snapshot.observations);
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
         drop(pty_span);
         let ptys = match ptys {
@@ -3036,6 +3096,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let ((result, due), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     caught(|| -> Result<()> {
+                        if subject.kind == "agent" {
+                            use crate::store::identities::{IdentityKind, IdentityStore as _};
+                            // Naming is an admission fence, never a physical runtime rekey.
+                            // Continue using the original desired subject, runtime ID and
+                            // incarnation for every native/PTY operation below.
+                            self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+                        }
                         // A workspace or render failure blocks only a start or restart. A running member
                         // is still observed, checked, and given its work.
                         let mut blocked = member_errors.remove(&subject.subject);
@@ -6887,6 +6954,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         reason: &str,
         request: Option<&crate::model::ClaimRecord>,
     ) -> Result<bool> {
+        if subject.kind == "agent" {
+            use crate::store::identities::{IdentityKind, IdentityStore as _};
+            self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+        }
         if self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
@@ -6909,9 +6980,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             "a bound terminal seat cannot be spawned"
         );
         self.store.owned_desired_guard(subject)?;
+        // A self-restart released at its quiet boundary is as explicit as an immediate one.
         let explicit_retry = request.is_some_and(|request| {
-            request.body["fields"]["action"] == "restart"
-                && request.actor.as_deref().is_some_and(|actor| {
+            matches!(
+                request.body["fields"]["action"].as_str(),
+                Some("restart" | crate::restart::WHEN_IDLE)
+            ) && request.actor.as_deref().is_some_and(|actor| {
                     actor.starts_with("person/") || actor.starts_with("agent/")
                 })
         });
@@ -7835,16 +7909,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if subject.kind != "agent" {
             return Ok(false);
         }
-        let Some(request) = self
-            .store
-            .claims_for(&subject.subject, Some("runtime.action.requested"))?
-            .into_iter()
-            .rev()
-            .find(|claim| {
-                claim.actor.is_some()
-                    && claim.body.pointer("/fields/action").and_then(Value::as_str)
-                        == Some("restart")
-            })
+        let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)?
         else {
             return Ok(false);
         };
@@ -7877,6 +7942,76 @@ impl<R: RuntimeControl> Reconciler<R> {
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
+        if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
+            && attempted.is_none()
+            && self
+                .store
+                .operation_claim(&crate::restart::release_key(&request))?
+                .is_none()
+            && observation.is_none_or(|item| {
+                item.incarnation_id
+                    .as_deref()
+                    .is_none_or(|incarnation| incarnation == previous)
+            })
+        {
+            let now = now_ms();
+            let quiet = observation.is_some_and(|item| item.status == "running")
+                && crate::restart::fresh_harness(&self.store, &subject.subject, previous, now)?
+                    .as_ref()
+                    .is_some_and(crate::restart::quiet);
+            if !quiet {
+                let deadline = request
+                    .accepted_at_unix_ms
+                    .saturating_add(crate::restart::ATTENTION_AFTER_MS);
+                if now < deadline {
+                    // Harness transitions invalidate this member's tracked reads. This one
+                    // deadline raises attention; it never polls or forces a restart.
+                    self.arm_restart(&format!("self-restart:{}", request.id), deadline);
+                } else {
+                    self.store.record_runtime_failure(
+                        &crate::restart::attention_episode(&request),
+                        &AttentionRequest {
+                            reviewer: self
+                                .store
+                                .agent_person(&subject.subject)?
+                                .unwrap_or_else(|| "person/operator".into()),
+                            title: "A self-restart is still waiting for its turn to end".into(),
+                            reason: format!(
+                                "{} requested restart {} at {}ms and has not reported a fresh idle, quiescent boundary for 30 minutes. The restart remains pending and is never forced. Inspect its harness; to interrupt explicitly, run `st agents restart {} --now --as PERSON_OR_AGENT`.",
+                                subject.subject, request.id, request.accepted_at_unix_ms, subject.subject,
+                            ),
+                            severity: "warning".into(),
+                            targets: vec![subject.subject.clone()],
+                            actor: RECONCILER_ACTOR.into(),
+                            idempotency_key: format!("agent-restart-attention:{}", request.id),
+                        },
+                        crate::restart::WHEN_IDLE,
+                    )?;
+                }
+                // The incumbent still receives ordinary observations, work and mail.
+                return Ok(false);
+            }
+            // Persist the quiet boundary before normal shutdown. A daemon restarting between
+            // shutdown and launch must finish this same request without requiring a report from
+            // the harness it just stopped.
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: request.actor.clone(),
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String("restart".into())),
+                    ("operation_status".into(), Value::String("quiesced".into())),
+                    ("incarnation_id".into(), Value::String(previous.into())),
+                    (
+                        "reason".into(),
+                        Value::String("the self-restart reached an idle, quiescent boundary".into()),
+                    ),
+                ]),
+                evidence: vec![request.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(crate::restart::release_key(&request)),
+            })?;
+        }
         // An unidentified prior target supplies no replacement proof. In
         // particular, an older exited runtime after a closed failed attempt
         // cannot complete a new request that has not admitted any start yet.
@@ -7971,7 +8106,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &format!("restart blocked: {error:#}"),
                 );
             }
+            // A self-restart that waited for its idle, quiescent boundary was asked for by the
+            // seat itself. Asking it to prepare now would wake it into a new turn at that boundary.
+            let quiesced = self
+                .store
+                .operation_claim(&crate::restart::release_key(&request))?
+                .is_some();
             if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+                && !quiesced
                 && !self.restart_may_proceed(
                     &subject.subject,
                     observation,

@@ -17,6 +17,8 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
+    ("identity_heads", &[]),
+    ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
     ("message_index", &["created_index"]),
@@ -126,6 +128,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_directive_note_pending",
         "local_directive_note_dirty",
         "local_custom_dirty",
+        "identity_dirty",
         "graph_generation",
         "fleet_generation",
         "projection_digest_state",
@@ -511,7 +514,7 @@ fn write_audit_history(source: &Store) {
     publish_takeover(
         source,
         &format!(
-            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}"
+            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
         ),
         "audit-desired",
     );
@@ -875,6 +878,21 @@ message "audit-declared" {
         )
         .unwrap();
     source.replay_replication_graph().unwrap();
+    fractal_store::store::identities::IdentityStore::rename_identity(
+        source,
+        fractal_store::store::identities::IdentityKind::Agent,
+        &fractal_store::store::identities::RenameRequest {
+            from: "agent/example-audit-identity/worker".into(),
+            to: "agent/example-audit-renamed/worker".into(),
+            actor: "person/robin".into(),
+            reason: "Exercise durable naming through shuffled replication and replay".into(),
+            expected_naming_revision: None,
+            expected_declaration: None,
+            idempotency_key: "audit-identity-rename".into(),
+        },
+        &[],
+    )
+    .unwrap();
 }
 
 fn trim_for_audit(store: &Store, cut: u128) {
@@ -1243,7 +1261,7 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
             .prepare(/* sqlite-large-value: allow-for-now lv-h94f59e44663f owner=fractal_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))
             .unwrap()
             .query_map([], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, u32>(5)?))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -1256,13 +1274,14 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
                 > 0,
             "shuffle history must exercise {table}"
         );
+        // Primary-key tuples also address WITHOUT ROWID projections.
+        let primary_key = columns.iter().filter(|(_, _, pk)| *pk != 0)
+            .map(|(name, _, _)| name.as_str()).collect::<Vec<_>>().join(",");
+        let key = if primary_key.is_empty() { "rowid" } else { &primary_key };
         // Always cover the indexed agent membership, independent of other desired kinds.
-        let selected_row = if *table == "desired" {
-            "SELECT rowid FROM desired WHERE kind='agent' ORDER BY rowid LIMIT 1".to_owned()
-        } else {
-            format!("SELECT rowid FROM {table} ORDER BY rowid LIMIT 1")
-        };
-        for (column, kind) in columns {
+        let predicate = if *table == "desired" { " WHERE kind='agent'" } else { "" };
+        let selected_row = format!("SELECT {key} FROM {table}{predicate} ORDER BY {key} LIMIT 1");
+        for (column, kind, _) in columns {
             let before_generation = projection_digest::generation(&connection).unwrap();
             let transaction = connection.transaction().unwrap();
             let expression = if matches!(*table, "claims" | "custom_sources") && column == "body" {
@@ -1285,7 +1304,7 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
             };
             let changed = transaction
                 .execute(
-                    &format!(/* sqlite-large-value: allow-for-now lv-h45afc91844ec owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {column}={expression} WHERE rowid=({selected_row})"),
+                    &format!(/* sqlite-large-value: allow-for-now lv-hf30a0d981c85 owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {column}={expression} WHERE ({key})=({selected_row})"),
                     [],
                 )
                 .unwrap_or_else(|error| panic!("mutating {table}.{column}: {error}"));
@@ -1353,6 +1372,7 @@ fn comparable_peers_name_differing_tables_and_legacy_peers_keep_their_digest() {
     let source = Store::open_memory("alder").unwrap();
     write_audit_history(&source);
     let target = Store::open_memory("birch").unwrap();
+    target.capture_divergences(true);
     receive_and_project(
         &target,
         "alder",

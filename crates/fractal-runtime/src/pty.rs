@@ -288,13 +288,51 @@ impl PtyRuntime {
         cutover: Option<(&str, &str)>,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
+        // The backend owns the physical boundary. Until the spawn lock and prior
+        // evidence are read, an earlier detached producer cannot be excluded.
+        let mut producer_entered = true;
+        self.spawn_guarded_inner(
+            id, launch, cwd, env, display_name, tags, size, cutover, guard,
+            &mut producer_entered,
+        ).map_err(|error| {
+            if !producer_entered
+                && let Some(operation) = env.get("ST3_START_OPERATION")
+            {
+                error.context(crate::StartRejected { operation: Some(operation.clone()) })
+            } else {
+                error
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_guarded_inner(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        cutover: Option<(&str, &str)>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+        producer_entered: &mut bool,
+    ) -> Result<()> {
         let _spawn_lock = self.acquire_spawn_lock(id)?;
         let fence = self.spawn_state_path(id, "pending");
+        let prior_pending = fence.try_exists()?;
         let mut before = self
             .snapshot()?
             .into_iter()
             .find(|observation| observation.name == id);
-        if fence.is_file() {
+        // A pending fence is not operation-bound: even after its recovery window,
+        // it cannot prove an earlier producer closed. A same-operation row also
+        // disproves a claim that this operation never launched.
+        *producer_entered = prior_pending || env.get("ST3_START_OPERATION").is_some_and(|operation| {
+            before.as_ref().and_then(|row| row.tags.get("st3.start-operation")) == Some(operation)
+        });
+        if prior_pending {
             let previous = std::fs::read_to_string(&fence)
                 .with_context(|| format!("read PTY publication fence {}", fence.display()))?;
             // Give the unknown launch one recovery window to publish. If it still has not,
@@ -454,7 +492,7 @@ impl PtyRuntime {
             crate::pty_launch_environment::configure_pty_placement(&mut command, &self.root);
             // A later failed attempt cannot close a producer created by an earlier
             // attempt. Only failure to create the first launcher proves rejection.
-            let operation = (attempt == 0)
+            let operation = (!*producer_entered && attempt == 0)
                 .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
                 .flatten();
             if let Some(guard) = guard
@@ -470,6 +508,7 @@ impl PtyRuntime {
                     None => error,
                 });
             }
+            *producer_entered = true;
             let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
@@ -1235,6 +1274,84 @@ exit 0
                 .contains("source superseded")
         );
         assert!(!binary.with_extension("args").exists());
+    }
+
+    #[test]
+    fn guarded_foreign_live_row_is_an_exact_prelaunch_rejection() {
+        for (pending, earlier_operation) in [(false, "older-operation"), (true, "older-operation"), (false, "new-operation")] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("registry");
+            let binary = fake_pty(root.path(), "foreign-prelaunch", "  publish replacement");
+            write_record(&registry, "work", serde_json::json!({
+                "createdAt": "older", "tags": {"st3.start-operation": earlier_operation}
+            }));
+            write_pid(&registry, "work", std::process::id());
+            let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+            if pending {
+                fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+                fs::write(runtime.spawn_state_path("work", "pending"), "").unwrap();
+            }
+            let error = runtime.spawn_checked(
+                "work", &Launch::Argv(vec!["true".into()]), root.path(),
+                &BTreeMap::from([("ST3_START_OPERATION".into(), "new-operation".into())]),
+                None, &BTreeMap::new(), None, &|| Ok(()),
+            ).unwrap_err();
+            let proof = error.downcast_ref::<crate::StartRejected>();
+            if pending || earlier_operation == "new-operation" {
+                assert!(proof.is_none(), "an earlier producer may still publish: {error:#}");
+            } else {
+                assert_eq!(proof.and_then(|proof| proof.operation.as_deref()), Some("new-operation"),
+                    "a fresh guarded refusal never created a launcher: {error:#}");
+            }
+            assert!(!binary.with_extension("count").exists());
+            assert_eq!(runtime.snapshot().unwrap()[0].created_at.as_deref(), Some("older"));
+        }
+    }
+
+    #[test]
+    fn guarded_start_rejection_does_not_close_a_previous_launcher() {
+        for behavior in ["  exit 1", "  sleep 2", ""] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_pty(root.path(), "entered-prelaunch", behavior);
+            let runtime = PtyRuntime::new(root.path().join("registry"))
+                .with_binary(binary.to_string_lossy())
+                .with_spawn_timeout(Duration::from_millis(30))
+                .with_command_timeout(Duration::from_secs(1));
+            let error = runtime.spawn_checked(
+                "work", &Launch::Argv(vec!["true".into()]), root.path(),
+                &BTreeMap::from([("ST3_START_OPERATION".into(), "new-operation".into())]),
+                None, &BTreeMap::new(), None, &|| Ok(()),
+            ).unwrap_err();
+            assert!(error.downcast_ref::<crate::StartRejected>().is_none(), "{error:#}");
+            assert_eq!(fs::read_to_string(binary.with_extension("count")).unwrap().trim(), "1");
+        }
+    }
+
+    #[test]
+    fn a_guard_rejection_after_retry_or_pending_fence_is_not_nonlaunch_proof() {
+        for pending in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_pty(root.path(), "retry-prelaunch", "  echo 'already in use' >&2\n  exit 1");
+            let runtime = PtyRuntime::new(root.path().join("registry"))
+                .with_binary(binary.to_string_lossy())
+                .with_spawn_timeout(Duration::from_millis(30))
+                .with_command_timeout(Duration::from_secs(1));
+            if pending {
+                fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+                fs::write(runtime.spawn_state_path("work", "pending"), "").unwrap();
+            }
+            let calls = std::cell::Cell::new(0);
+            let error = runtime.spawn_checked(
+                "work", &Launch::Argv(vec!["true".into()]), root.path(),
+                &BTreeMap::from([("ST3_START_OPERATION".into(), "new-operation".into())]),
+                None, &BTreeMap::new(), None, &|| {
+                    calls.set(calls.get() + 1);
+                    anyhow::ensure!(!pending && calls.get() == 1, "request revoked");
+                    Ok(())
+                },
+            ).unwrap_err();
+            assert!(error.downcast_ref::<crate::StartRejected>().is_none(), "{error:#}");
+        }
     }
 
     /// A daemon socket for `name` that answers STATUS with `status` and PEEK with `screen`, and

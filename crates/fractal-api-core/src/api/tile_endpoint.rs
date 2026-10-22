@@ -743,9 +743,17 @@ use super::*;
         // Once the launcher records it, the daemon serves the tile under that ID.
         std::fs::create_dir_all(&state_root).unwrap();
         std::fs::write(state_root.join("uids.toml"), format!("atlas = {uid}\n")).unwrap();
+        // The new user ID serves the tile afresh: its endpoint is withdrawn and bound again, and
+        // in between a connect is refused or finds no socket. That is not an answer yet.
+        let answer = |socket: PathBuf| {
+            tokio::task::block_in_place(|| {
+                let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+                keep_alive_get(&mut stream, "/v1/tile/whoami")
+            })
+        };
         let mut answered = None;
         for _ in 0..200 {
-            answered = whoami(socket.clone());
+            answered = answer(socket.clone());
             if answered.is_some() {
                 break;
             }

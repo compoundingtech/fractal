@@ -3093,6 +3093,8 @@ fn work_extensions_waiting_for_run_creation_survive_upgrade_and_later_projection
 #[test]
 fn work_extensions_sync_authority_with_previous_projection_rules_without_comparing_graphs() {
     let (controller, worker, step) = replicated_step_pair();
+    controller.capture_divergences(true);
+    worker.capture_divergences(true);
     worker_work(&worker, &step, "claim", None, "mixed-extension-claim");
     worker_extend(&worker, &step);
     let legacy = canonical_hash(&(

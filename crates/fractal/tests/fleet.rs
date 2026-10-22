@@ -593,7 +593,15 @@ pub(super) async fn wait_for_notes(
 
 /// A founds the fleet and runs; the returned node is listening and announced.
 async fn anchor(root: &Path, name: &str) -> Node {
+    anchor_with(root, name, &[]).await
+}
+
+/// Only the optional divergence check makes members compare projections with each other.
+const DIVERGENCE_CHECK: &[(&str, &str)] = &[("ST3_DIVERGENCE_CHECK_INTERVAL_MS", "3600000")];
+
+async fn anchor_with(root: &Path, name: &str, env: &[(&str, &str)]) -> Node {
     let mut node = Node::new(root, name);
+    node.env.extend(env.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())));
     node.create();
     node.start().await;
     node.wait_listening().await;
@@ -602,7 +610,18 @@ async fn anchor(root: &Path, name: &str) -> Node {
 
 /// `name` joins through `sponsor` and runs.
 async fn joined(root: &Path, sponsor: &Node, name: &str, extra: &[&str]) -> Node {
+    joined_with(root, sponsor, name, extra, &[]).await
+}
+
+async fn joined_with(
+    root: &Path,
+    sponsor: &Node,
+    name: &str,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> Node {
     let mut node = Node::new(root, name);
+    node.env.extend(env.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())));
     let code = sponsor.invite(name, &[]);
     let output = node.join(&code, extra);
     assert!(
@@ -1432,8 +1451,8 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence(
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let a = anchor(root.path(), "a").await;
-    let mut b = joined(root.path(), &a, "b", &[]).await;
+    let a = anchor_with(root.path(), "a", DIVERGENCE_CHECK).await;
+    let mut b = joined_with(root.path(), &a, "b", &[], DIVERGENCE_CHECK).await;
     let mission = root.path().join("probe.kdl");
     fs::write(
         &mission,
@@ -2362,16 +2381,18 @@ async fn refusal_settings_writer_across_leave(stage: &str) {
     } else {
         // An in-flight settings writer owns the directory until both renames finish.
         // No service manager stops it on the CLI's behalf.
+        // The worker's own endpoint publication may contend too; the CLI must be among them.
+        let cli = leave.id().to_string();
         wait_until(
             "the leave CLI contends with the active settings writer",
             20,
-            || async { barrier.join("contended").exists() },
+            || {
+                let contended = fs::read_to_string(barrier.join("contended"))
+                    .is_ok_and(|pids| pids.lines().any(|pid| pid == cli));
+                async move { contended }
+            },
         )
         .await;
-        assert_eq!(
-            fs::read_to_string(barrier.join("contended")).unwrap(),
-            leave.id().to_string()
-        );
     }
     let completed_before_release = leave.try_wait().unwrap().is_some();
     fs::write(barrier.join("release"), b"continue").unwrap();
@@ -2514,9 +2535,9 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let a = anchor(root.path(), "orchard").await;
-    let b = joined(root.path(), &a, "meadow", &[]).await;
-    let mut c = joined(root.path(), &a, "grove", &[]).await;
+    let a = anchor_with(root.path(), "orchard", DIVERGENCE_CHECK).await;
+    let b = joined_with(root.path(), &a, "meadow", &[], DIVERGENCE_CHECK).await;
+    let mut c = joined_with(root.path(), &a, "grove", &[], DIVERGENCE_CHECK).await;
     c.st_ok(&["fleet", "wait", "--timeout", "90s"]);
     c.note("before-leave").await;
     let before = BTreeSet::from(["custom/fleet-test/before-leave".to_owned()]);
