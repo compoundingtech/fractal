@@ -1402,6 +1402,9 @@ class CommittedPolicy(unittest.TestCase):
         jobs = gate['command'][2:]
         self.assertEqual(jobs, sorted(jobs))  # the aggregate lists its needed jobs sorted
         self.assertIn('linux-gate', jobs)
+        # The separate checks have their own notes; the aggregate does not record them (ci-evidence-signing SEPARATE_CHECKS).
+        self.assertNotIn('genie-freshness', jobs)
+        self.assertNotIn('typescript-client', jobs)
         common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
         self.assertEqual(gate['required_inputs'], common)
         self.assertEqual(gate['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})

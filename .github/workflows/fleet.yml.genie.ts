@@ -650,17 +650,20 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"`,
         },
-        // The stage jobs' signed notes, written as packs by each stage's own signing steps.
+        // The stage jobs' signed notes, written as packs by each stage's own signing steps. Collected and published
+        // whenever the key is configured, whether or not the aggregate signed: a stage note stands on its own (its
+        // producer refuses when its own gate skipped, and only notes that verify are published), and an aggregate
+        // that refused simply leaves no linux-gate note among them.
         {
           name: 'Collect the stage notes',
-          if: "${{ steps.sign.outcome == 'success' }}",
+          if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           uses: 'actions/download-artifact@v4',
           with: { pattern: 'evidence-note-*', path: '${{ runner.temp }}/evidence-notes/stages', 'merge-multiple': true },
         },
         {
           name: 'Publish the notes that verify',
-          if: "${{ steps.sign.outcome == 'success' }}",
+          if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
@@ -672,7 +675,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
         // is fail-soft like every other step of this job.
         {
           name: 'Shadow-verify the published notes',
-          if: "${{ always() && steps.sign.outcome == 'success' }}",
+          if: "${{ always() && steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
 [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }

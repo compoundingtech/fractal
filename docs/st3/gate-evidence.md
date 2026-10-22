@@ -594,6 +594,14 @@ notes signed by the stage jobs. The signer accepts extra named string inputs nex
 environment fingerprint, so a check's note can carry more over time; the repository policy decides
 which inputs a check must carry.
 
+The `linux-gate` aggregate records only the members of `linux-gate`: it leaves out the evidence gate jobs, the
+`fractal-web` lane and the two separate checks `genie-freshness` and `typescript-client`, which have their own notes
+(the note job still waits for them, to publish those notes). It refuses, making no note, when the gate of a member
+said skip (`evidence-gate-linux-gate`, `evidence-gate-mail-redelivery-canaries`, `evidence-gate-isolation-vm`; a gate
+added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
+shards may, outside a merge group), so a member that did not run never reads as success. A skip taken by the
+`genie-freshness` or `typescript-client` gate does not stop it.
+
 ### Stage notes and publishing
 
 Each `linux-gate` stage job (the test shards, clippy, fleet-compat and the mail canaries) signs its
@@ -603,8 +611,11 @@ seconds (`STAGE.time`) and the digest of the exact log (`STAGE.log`); a missing 
 file is recorded as a failure, never as success. `evidence-wrap --aggregate FILE --out DIR` signs
 those facts (and records `workspace_clean` rather than refusing a workspace the tests dirtied) and
 writes the note as a pack for upload. A stage job's checkout is shallow and the server refuses a push
-from one, so the aggregate note job collects the packs and `scripts/evidence-publish` publishes them:
-it accepts a note only if its signature verifies against `.st/evidence-keys` from the base commit for
+from one, so the aggregate note job collects the packs and `scripts/evidence-publish` publishes them.
+It does so whenever the job has its key configured, whether or not the aggregate itself signed: when the aggregate
+refused (another lane skipped), the stage notes that ran are still published, just without a `linux-gate` note.
+Each note stands on its own: its producer made none when its own gate skipped, and the publisher
+accepts a note only if its signature verifies against `.st/evidence-keys` from the base commit for
 the principal it claims, it is a full-tier single-note commit about this commit and tree, its check
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
@@ -613,6 +624,7 @@ A step-based job may record extra named inputs next to the fixed ones: `STEP_INP
 lower-case names with nonempty string values (a shard number, a test set). It can add a name but never replace a fixed
 one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
 (`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
+It ignores `genie-freshness` and `typescript-client` the same way, and their gates' decisions.
 
 The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue. Each
 `fractal-web-execution` shard signs its own result (check `fractal-web`, artifact `evidence-note-fractal-web-shard-N`) and
@@ -981,7 +993,8 @@ a typo cannot silently weaken a rule, and a check with no entry never skips. The
 name, the command, the exit code and the output hash are part of every record and are always
 checked. `observed` (the central observer's record of a finished job) and `wrapper` (a note the in-job producer signs
 as `fleet/ci`) are listed for **every** required check, each with the exact command that producer records:
-- `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`;
+- `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`, without the gate jobs, `fractal-web-*`,
+  `genie-freshness` and `typescript-client`;
 - `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
 - `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
   `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`.
