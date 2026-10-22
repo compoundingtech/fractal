@@ -126,7 +126,7 @@ impl Subscription {
                                         retry.received_frame();
                                         if let Frame::Attachment { attached, .. } = frame {
                                             attachment_tx.send_replace(Some(Attachment { attached }));
-                                            continue;
+                                            // control C10: the frame also enters the queue
                                         }
                                         let fenced = matches!(frame, Frame::Fenced { .. });
                                         sender.send(frame).await.context("mailbox receiver ended")?;

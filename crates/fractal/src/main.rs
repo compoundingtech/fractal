@@ -17037,7 +17037,8 @@ async fn publish_pending_claude_attachment(
             // On a push connection this admission can withdraw a write it disagrees with, never
             // choose a phase. Only a never-sent operation is withdrawn; a sent one is resolved as
             // it is, so its outcome stays exactly once.
-            Ok(admitted) if push && !attempted && admitted.attached != (phase == "attached") => {
+            // control C11: no veto, a push authorizes the write
+            Ok(admitted) if push && !attempted && admitted.attached != (phase == "attached") && false => {
                 Ok(None)
             }
             Ok(_) => {

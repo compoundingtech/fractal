@@ -922,7 +922,7 @@ async fn stream_with_timers_inner<F, S, H>(
             let evaluated = crate::api::read_deadline::spawn_blocking(move || {
                 // Presence and deadline wakes skip the durable pass, so check this stream's own
                 // binding too. A stale one sends nothing; the next pass ends the stream.
-                store.check_mailbox(&binding).ok()?;
+                // control C19: the push skips the delivery binding check
                 Some(crate::api::claude_channel_attachment(
                     &store,
                     &binding.subject,
