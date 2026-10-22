@@ -119,8 +119,16 @@ retains only a leaving member's replication carrier until the persisted 120-seco
 receipt deadline, never terminal or client grants. Confirmed, removed, or expired
 remote members lose this owner's records. The leaving machine's own final carrier
 remains CLI-owned until receipt completion and settings removal (or explicit
-offline leave). Re-keying withdraws the old NodeID and grants the new NodeID in one
-revision-checked batch.
+offline leave). When a member publishes a replacement Fabric endpoint, the adapter
+withdraws the old NodeID and grants the new NodeID in one revision-checked batch,
+without an intermediate policy granting both identities or neither. Static and
+other-owner access to the old NodeID is not removed.
+
+This policy replacement does not rotate the local Fabric daemon's identity.
+Fabric owns its identity key and endpoint lifecycle; st does not edit that key.
+Publishing a replacement endpoint also requires a working propagation path:
+stopping the old identity before other Fabric-only members learn the replacement
+can strand the member, even though the adapter's policy update is atomic.
 
 `applied` means this owner's policy matches membership; `leaving` reports retained
 carriers; `leave_unconfirmed` reports missing confirmation after carrier expiry.

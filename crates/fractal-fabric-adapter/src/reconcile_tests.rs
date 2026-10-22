@@ -166,12 +166,16 @@ async fn adds_peer_and_replaces_exact_grants_in_one_atomic_batch() {
 #[tokio::test]
 async fn rekey_removes_old_identity_and_adds_new_in_same_transaction() {
     let root = tempfile::tempdir().unwrap();
+    let services = ["st3-client-v0", "st3/fleet/test-fleet"];
+    let mut membership = view();
+    let member_key = membership.members[1].member_key.clone();
+    membership.members[1].endpoints[0]["node"] = json!("new-node");
     let (socket, server) = serve(
         root.path(),
         vec![
-            Some(list(vec![peer("old-node", OWNER, &["exec", "echo"])], 7)),
+            Some(list(vec![peer("old-node", OWNER, &services)], 7)),
             Some(mutation(vec![], "complete")),
-            Some(list(vec![], 8)),
+            Some(list(vec![peer("new-node", OWNER, &services)], 8)),
         ],
     );
     reconcile(
@@ -179,19 +183,30 @@ async fn rekey_removes_old_identity_and_adds_new_in_same_transaction() {
         &socket,
         FLEET,
         "own-key",
-        &view(),
+        &membership,
         &BTreeSet::new(),
     )
     .await
     .unwrap();
     let requests = server.await.unwrap();
-    let operations = requests[1]["request"]["operations"].as_array().unwrap();
+    assert_eq!(membership.members[1].member_key, member_key);
+    // Only list -> one mutation -> list crosses the control boundary. There is
+    // no separate remove/add request that could expose an intermediate policy.
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0]["request"]["operation"], "list");
+    assert_eq!(requests[2]["request"]["operation"], "list");
+    let batch = &requests[1]["request"];
+    assert_eq!(batch["operation"], "batch");
+    assert_eq!(batch["owner"], OWNER);
+    assert_eq!(batch["expected_revision"], 7);
     assert_eq!(
-        operations[0],
-        json!({"op":"remove_peer", "node_id":"old-node"})
+        batch["operations"],
+        json!([
+            {"op":"remove_peer", "node_id":"old-node"},
+            {"op":"add_peer", "node_id":"new-node"},
+            {"op":"set_grants", "node_id":"new-node", "grants":services}
+        ])
     );
-    assert_eq!(operations[1]["node_id"], "peer-node");
-    assert_eq!(operations.len(), 3);
 }
 
 #[tokio::test]
