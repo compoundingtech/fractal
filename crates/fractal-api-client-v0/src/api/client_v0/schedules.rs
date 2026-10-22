@@ -88,7 +88,6 @@ pub async fn list(
     Extension(session): Extension<ClientSession>,
     Query(query): Query<SchedulesQuery>,
 ) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
-    require_scope(&session, "read.projections")?;
     require_scope(&session, "read.declarations")?;
     let now = client_now_ms();
     let position = query.cursor.as_deref().map(|cursor| decode(cursor, &state, &session, now)).transpose()?;

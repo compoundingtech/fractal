@@ -151,6 +151,41 @@ fn cursor_binds_session_instance_parameters_and_expiry_and_rejects_tampering() {
 }
 
 #[tokio::test]
+async fn listing_accepts_declaration_only_and_both_scope_sessions() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    declare(&state, "harvest", "at \"2030-01-01T00:00:00Z\"");
+    for scopes in [
+        &["read.declarations"][..],
+        &["read.declarations", "read.projections"][..],
+    ] {
+        let mut session = ClientSession::local(Some("person/ada")).unwrap();
+        session.scopes = scopes.iter().map(|scope| (*scope).to_owned()).collect();
+        let (_, Json(page)) = list(
+            State(state.clone()), Extension(session), Query(SchedulesQuery::default()),
+        ).await.unwrap();
+        assert_eq!(page["collection"], "schedules");
+        assert_eq!(page["items"][0]["id"], "schedule/harvest");
+    }
+}
+
+#[tokio::test]
+async fn listing_rejects_projection_only_and_unscoped_sessions_with_declaration_scope_error() {
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    for scopes in [&["read.projections"][..], &[][..]] {
+        let mut session = ClientSession::local(Some("person/ada")).unwrap();
+        session.scopes = scopes.iter().map(|scope| (*scope).to_owned()).collect();
+        let error = list(
+            State(state.clone()), Extension(session), Query(SchedulesQuery::default()),
+        ).await.unwrap_err();
+        assert_eq!(error.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "forbidden");
+        assert_eq!(error.message, "the authenticated client session is not granted `read.declarations`");
+    }
+}
+
+#[tokio::test]
 async fn listing_requires_existing_declaration_scope_and_validates_page_and_cursor_parameters() {
     let root=tempfile::tempdir().unwrap();let state=fixture(root.path());
     assert!(list(State(state.clone()),Extension(ClientSession::local(None).unwrap()),Query(SchedulesQuery::default())).await.is_err());
