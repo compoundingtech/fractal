@@ -454,6 +454,11 @@ const exemptions: string[] = []
 const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
 const sliceFiles = new Set<string>()
 
+// react-stately renders every row in jsdom (no layout); SidebarTree's observed
+// CI maximum is 7.1 s, so 15 s allows about 2x. Other stories take at most ~1.9 s;
+// a global increase would hide regressions outside this expanded-tree fixture.
+const sidebarTreeValidationTimeoutMs = 15_000
+
 for (const [path, module] of Object.entries(storyModules)) {
   const { default: storyMeta, ...exports } = module
   for (const [name, story] of Object.entries(exports)) {
@@ -483,14 +488,13 @@ for (const [path, module] of Object.entries(storyModules)) {
       modes.add(tag)
       exemptFiles.set(path, modes)
     } else sliceFiles.add(path)
-    // The full synthetic depth-6 matrix takes about 5–6 seconds to render in jsdom.
     test(`${id} validates its scenario mode`, () => {
       const result = scenarioStoryCheck(story, storyMeta)
       expect(result.failures).toEqual([])
       expect(result._tag).toBe('Passed')
       for (const exemption of result.exemptions) process.stdout.write(`${id}: ${exemption._tag} — ${exemption.reason}\n`)
       expect(result.exemptions).toHaveLength(tag === 'slices' ? 0 : 1)
-    }, id === './assistant-ui/sidebar/SidebarTree.stories.tsx#AllStates' ? 15_000 : undefined)
+    }, path === './assistant-ui/sidebar/SidebarTree.stories.tsx' ? sidebarTreeValidationTimeoutMs : undefined)
   }
 }
 
