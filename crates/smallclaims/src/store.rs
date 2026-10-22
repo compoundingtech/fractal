@@ -7684,8 +7684,12 @@ impl Store {
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target;
-                    if replayed || chunked {
+                    if replayed {
                         self.runtime.forget_views();
+                    } else if chunked {
+                        // Only more of the admitted claims projected: published lists keep
+                        // serving what readers had until they refold once the backlog is in.
+                        self.runtime.projection_advanced(through >= target);
                     }
                     if through < target {
                         between();

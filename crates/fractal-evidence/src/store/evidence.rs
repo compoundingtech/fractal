@@ -132,14 +132,17 @@ impl EvidenceStore for Store {
         ) -> Option<(u64, Arc<Vec<Value>>, u128)> {
         self.smalltalk.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
-        self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter()
+        let newest = |entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local))
-            .map(|entry| {
-                crate::otel::record_roster("hit", entry.items.len());
-                (entry.index, Arc::clone(&entry.items), entry.published_at_unix_ms)
-            })
+            .map(|entry| (entry.index, Arc::clone(&entry.items), entry.published_at_unix_ms));
+        // While a projection catching up refolds the roster, readers keep the one they had.
+        let roster = newest(&mut self.smalltalk.agent_resources_cache.lock()
+            .expect("agent resources cache poisoned").iter())
+            .or_else(|| newest(&mut self.smalltalk.agent_roster_previous.lock()
+                .expect("previous agent roster poisoned").resources.iter()))?;
+        crate::otel::record_roster("hit", roster.1.len());
+        Some(roster)
     }
 
     fn published_agent_roster_at(
@@ -148,14 +151,16 @@ impl EvidenceStore for Store {
             history: bool,
         ) -> Option<(Arc<Vec<Value>>, u128)> {
         self.smalltalk.agent_roster_refresh.get()?;
-        self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter()
+        let at = |entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index == cut)
             .max_by_key(|entry| entry.local)
-            .map(|entry| {
-                crate::otel::record_roster("hit", entry.items.len());
-                (Arc::clone(&entry.items), entry.published_at_unix_ms)
-            })
+            .map(|entry| (Arc::clone(&entry.items), entry.published_at_unix_ms));
+        let roster = at(&mut self.smalltalk.agent_resources_cache.lock()
+            .expect("agent resources cache poisoned").iter())
+            .or_else(|| at(&mut self.smalltalk.agent_roster_previous.lock()
+                .expect("previous agent roster poisoned").resources.iter()))?;
+        crate::otel::record_roster("hit", roster.0.len());
+        Some(roster)
     }
 
     fn published_agent_roster_head(
@@ -165,14 +170,13 @@ impl EvidenceStore for Store {
         ) -> Option<PublishedRosterHead> {
         self.smalltalk.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
-        let (cut, refs) = self.smalltalk.agent_page_refs_cache.lock()
+        let current = self.smalltalk.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned").iter()
             .filter(|entry| !entry.history && entry.index <= index)
             .max_by_key(|entry| entry.index)
-            .map(|entry| (entry.index, Arc::clone(&entry.items)))?;
-        let cache = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
-        let head = cache.iter().filter(|entry| entry.index == cut && !entry.history)
+            .map(|entry| (entry.index, Arc::clone(&entry.items)));
+        let head_at = |cut: u64, refs: &Arc<Vec<Value>>, entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
+            .filter(|entry| entry.index == cut && !entry.history)
             .find_map(|entry| {
                 let cards = entry.items.iter()
                     .filter_map(|card| Some((card["id"].as_str()?, card)))
@@ -181,7 +185,24 @@ impl EvidenceStore for Store {
                     .map(|reference| cards.get(reference["id"].as_str()?).map(|card| (*card).clone()))
                     .collect::<Option<Vec<_>>>()
                     .map(|head| (head, entry.published_at_unix_ms))
-            })?;
+            });
+        let (cut, refs, head) = match current {
+            Some((cut, refs)) => {
+                let head = head_at(cut, &refs, &mut self.smalltalk.agent_resources_cache.lock()
+                    .expect("agent resources cache poisoned").iter())?;
+                (cut, refs, head)
+            }
+            // While a projection catching up refolds the roster, readers keep the head they had:
+            // its page order and the cards at the same cut.
+            None => {
+                let previous = self.smalltalk.agent_roster_previous.lock()
+                    .expect("previous agent roster poisoned");
+                let refs = previous.page_refs.as_ref().filter(|entry| entry.index <= index)?;
+                let (cut, refs) = (refs.index, Arc::clone(&refs.items));
+                let head = head_at(cut, &refs, &mut previous.resources.iter())?;
+                (cut, refs, head)
+            }
+        };
         crate::otel::record_roster("hit", head.0.len());
         Some((cut, refs, head.0, head.1))
     }
