@@ -1313,8 +1313,8 @@ refuse when it is started with `LD_PRELOAD`.
 (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its wait. Its local
 command is `nix develop -c bash scripts/ci-local STAGE`: the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
-and cache directories are a scratch directory that is removed afterwards, and no st, GitHub, SSH agent, evidence or sekrets
-variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
+and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
+since the rename, `FRACTAL_*`: a seat's live endpoint and identity), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
 stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
