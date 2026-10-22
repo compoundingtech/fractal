@@ -1180,6 +1180,14 @@ person runs `st replication checkpoint resume --reason ...`.
 Checkpoints are on by default. `[checkpoint] enabled = false` in a node's config stops that node
 sealing. Every participant must seal, so this stops trimming for the whole fleet.
 
+`[trim] local = true` in a member's config makes that member trim on its own instead of by
+checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
+checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
+had already committed still finishes; a checkpoint it was still recording stays recorded as it was
+and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
+it stops the old checkpoints on the other members until a person excuses it. No claim family is
+trimmed locally yet.
+
 ## Recovery
 
 Replication never changes a source SQLite file directly. It exchanges immutable authority records through the signed protocol.
