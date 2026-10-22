@@ -73,6 +73,8 @@ def check(name, pages, expected=None, api=True, **overrides):
         if 'common pool group3:' in summary.read_text():
             assert 'common pool group3:' in result.stdout, (name, 'census must be retained in ordinary job logs')
         assert calls.exists() == api, (name, "unexpected API call")
+        if api and overrides.get('MERGE_PRODUCER_OWNED'):
+            assert len(calls.read_text().splitlines()) == 1, (name, 'producer must reuse one existing census read')
         assert (any("**" + label[0].split("-")[0] + "**" in summary.read_text() for label in expected.values()) if expected else "**Namespace**" in summary.read_text()), name
         print(f"passed: {name}")
 
@@ -178,9 +180,9 @@ check("fork cannot use common pool metadata", [{'runners': [ci2_worker]}],
 import re
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
 required_priority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
-for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm", "perf-cost"):
-    assert (job == "perf-cost" or "github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1" in blocks[job]), (job, "supporting merge job uses chosen priority pool")
-    assert (required_priority if job != "perf-cost" else "github.event_name == 'merge_group' && 1 || 3") in blocks[job], (job, "merge precedes PR; optional cost stays separate")
+for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm"):
+    assert "github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1" in blocks[job], (job, "supporting merge job uses chosen priority pool")
+    assert required_priority in blocks[job], (job, "merge precedes PR")
     assert "github.run-id=" in blocks[job], (job, "prevent cross-run assignment")
     if job == 'isolation-vm':
         assert "namespace-profile-linux-x86-64;job.priority={1};github.run-id=" in blocks[job], (job, "profile controls must be inline")
@@ -254,8 +256,10 @@ for job in ("linux-tests", "linux-tests-shard-2", "linux-tests-shard-3", "linux-
 assert "vars.CI1_MIN_IDLE || '1'" in picker, "use an idle general slot without requiring the entire pool"
 
 # Evaluate the generated runs-on expressions, not a second copy of the routing rule.
-def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', partial_primary='', partial_mail=''):
+def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', partial_primary='', partial_mail='', producer_mode='', producer_picked=''):
     expression = blocks[job].split('runs-on: ', 1)[1].splitlines()[0].strip().removeprefix('${{').removesuffix('}}').strip()
+    expression = expression.replace('needs.pick-runner.outputs.ci1_build', repr(producer_picked))
+    expression = expression.replace('vars.CI_MERGE_TEST_BUILD_OWNED', repr(producer_mode))
     expression = expression.replace('needs.pick-runner.outputs.merge_ci1', repr(merge_picked))
     expression = expression.replace('needs.pick-runner.outputs.merge_primary', repr(partial_primary))
     expression = expression.replace('needs.pick-runner.outputs.merge_mail', repr(partial_mail))
@@ -343,8 +347,14 @@ assert gate('pull_request', covered, ['success', 'skipped'], skip='true') != 0  
 print('passed: an evidence skip lets the aggregate accept skipped stages only when its own gate decided, never failures')
 
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/public-repo.yml').read_text()
-assert required_priority not in blocks['perf-cost'], 'optional cost must not join required PR priority'
-assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in blocks['perf-cost']
+# The optional cost check left pull requests for the daily long lanes, where it keeps the lowest priority.
+assert 'perf-cost' not in blocks and 'scripts/ci-perf cost' not in workflow, 'the cost check must not run on pull requests'
+daily = (ROOT / '.github/workflows/daily-long.yml').read_text()
+daily_blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", daily.split("\njobs:\n", 1)[1]))
+assert required_priority not in daily_blocks['perf-cost'], 'optional cost must not join required PR priority'
+assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in daily_blocks['perf-cost']
+assert "namespace-features:github.run-id=" in daily_blocks['perf-cost'], 'prevent cross-run assignment'
+assert 'runs-on: ["namespace-profile-macos-arm64;github.run-id=${{ github.run_id }}"]' in daily_blocks['daily-macos-check'], 'the daily macOS check uses the hog run\'s Mac, pinned to its run'
 print('passed: release/merge precede PR checks, then optional/manual; reservations, shapes and affinity preserved')
 
 # Exercise the actual generated step predicates, including restoring ordinary behavior.
@@ -483,3 +493,69 @@ def falling_quota(path,data):
 result,calls=queue_fixture(change=falling_quota)
 assert result[0] is None and len(calls)==3 and calls[-1]=='rate_limit', 'quota must be rechecked during the snapshot'
 print('passed: reserve 300 repository requests; low/invalid/falling quota stops advisory reads without retry')
+
+# Producer-only admission reads the SAME census, never adding a request or
+# advertising a host without all six current records and an eligible idle role.
+def producer_pages(ci1_busy=2, ci2_busy=4):
+    rows = []
+    for host, busy in [('ci1', ci1_busy), ('ci2', ci2_busy)]:
+        for i in range(6):
+            row = runner('ci1-priority', busy=i < busy)
+            row['name'] = host+'-'+str(i+1) if i < 5 else host+'-merge-1'
+            row['labels'].append({'name': 'ci-host-'+host})
+            rows.append(row)
+    return [{'total_count': len(rows), 'runners': rows}]
+
+build_fallback = [overflow_profile]
+def build_check(name, pages, build, **env):
+    check(name, pages, {'ci1': ['ci1-priority'], 'ci1_build': build},
+          EVENT='merge_group', MERGE_PRODUCER_OWNED='on', **env)
+
+build_check('producer selects lightly loaded ci1 only', producer_pages(), ['ci-host-ci1', 'ci1-priority'])
+build_check('producer selects eligible ci2 when ci1 busy', producer_pages(4, 2), ['ci-host-ci2', 'ci1-priority'])
+build_check('producer admits exactly three busy', producer_pages(3, 4), ['ci-host-ci1', 'ci1-priority'])
+build_check('producer does not admit four busy', producer_pages(4, 4), build_fallback)
+for mutation in ('missing-member', 'offline-member', 'truncated', 'missing-host-label', 'invalid-busy', 'duplicate', 'no-idle-priority', 'one-idle-priority'):
+    pages = producer_pages(2, 4); rows = pages[0]['runners']
+    if mutation == 'missing-member': rows.pop(0); pages[0]['total_count'] -= 1
+    elif mutation == 'offline-member': rows[0]['status'] = 'offline'
+    elif mutation == 'truncated': pages[0]['total_count'] += 1
+    elif mutation == 'missing-host-label':
+        for row in rows[:6]: row['labels'] = [{'name': 'ci1-priority'}]
+    elif mutation == 'invalid-busy': rows[0]['busy'] = None
+    elif mutation == 'duplicate': rows.append(rows[0]); pages[0]['total_count'] += 1
+    elif mutation in ('no-idle-priority', 'one-idle-priority'):
+        start = 2 if mutation == 'no-idle-priority' else 3
+        for row in rows[start:6]: row['labels'] = [{'name': 'ci-host-ci1'}]
+    build_check('producer falls back on '+mutation, pages, build_fallback)
+check('producer read failure falls back without changing other roles', [],
+      {'ci1': ['ci1-priority'], 'ci1_build': build_fallback}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', API_EXIT='1')
+check('producer missing token falls back without another request', [],
+      {'ci1': ['ci1-priority'], 'ci1_build': build_fallback}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', GH_TOKEN='', api=False)
+check('producer explicit off forces Namespace forward-only rollback', producer_pages(),
+      {'ci1': ['ci1-priority'], 'ci1_build': build_fallback}, EVENT='merge_group', MERGE_PRODUCER_OWNED='off')
+check('producer fallback preserves configured Namespace profile', producer_pages(4,4),
+      {'ci1': ['ci1-priority'], 'ci1_build': ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', MERGE_NAMESPACE_PROFILE='existing-custom')
+check('producer API failure preserves configured Namespace profile', [],
+      {'ci1': ['ci1-priority'], 'ci1_build': ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', MERGE_NAMESPACE_PROFILE='existing-custom', API_EXIT='1')
+check('producer off preserves configured Namespace profile', producer_pages(),
+      {'ci1': ['ci1-priority'], 'ci1_build': ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']}, EVENT='merge_group', MERGE_PRODUCER_OWNED='off', MERGE_NAMESPACE_PROFILE='existing-custom')
+margin = producer_pages()
+for row in margin[0]['runners'][4:6]: row['labels'] = [{'name': 'ci-host-ci1'}]
+build_check('exactly two eligible idle workers meet margin', margin, ['ci-host-ci1', 'ci1-priority'])
+check('producer flag unset is inert', producer_pages(), 'ci1-priority', EVENT='merge_group', MERGE_PRODUCER_OWNED='')
+check('producer flag does not alter ordinary PRs', idle, 'ci1', MERGE_PRODUCER_OWNED='on')
+check('producer flag does not alter releases', [], 'ci1-priority', EVENT='push', MODE='priority', MERGE_PRODUCER_OWNED='on')
+
+# Evaluate emitted runs-on, including inactive and failure/skipped-picker paths.
+assert 'ci1_build' in picker and 'MERGE_PRODUCER_OWNED:' in picker
+for event in ('pull_request', 'push', 'workflow_dispatch'):
+    for mode in ('', 'on', 'off'):
+        assert route('linux-test-build', event, producer_mode=mode, producer_picked='["ci-host-ci2","ci1-priority"]') == route('linux-test-build', event)
+for mode in ('on', 'off', 'invalid'):
+    assert route('linux-test-build', 'merge_group', producer_mode=mode)[0].startswith(('namespace-profile-', 'nscloud-'))
+assert route('linux-test-build', 'merge_group', profile='existing-custom', producer_mode='on') == ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']
+assert route('linux-test-build', 'merge_group', producer_mode='on', producer_picked='["ci-host-ci1","ci1-priority"]') == ['ci-host-ci1', 'ci1-priority']
+for job in ('linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4','mail-redelivery-canaries','isolation-vm','linux-clippy','linux-fleet-compat'):
+    assert 'ci1_build' not in blocks[job] and 'CI_MERGE_TEST_BUILD_OWNED' not in blocks[job]
+print('passed: merge producer-only six-member admission, at most three busy and two eligible idle, host affinity, configured Namespace rollback and unchanged other consumers')
