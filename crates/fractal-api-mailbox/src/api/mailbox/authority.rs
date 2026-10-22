@@ -417,6 +417,209 @@ fn unavailable(reason: impl Into<String>) -> St3Error {
     St3Error::new("mailbox-authority-unavailable", reason)
 }
 
+fn runtime_indeterminate(reason: impl Into<String>) -> St3Error {
+    St3Error::new(
+        "mailbox-runtime-indeterminate",
+        format!("the physical runtime cannot be proved: {}", reason.into()),
+    )
+}
+
+#[derive(Clone, Debug)]
+struct PhysicalRuntime {
+    id: String,
+    incarnation: String,
+    required_subject_tag: Option<String>,
+}
+
+fn physical_runtime_from_declaration(
+    node: &str,
+    fence: &Fence,
+    member: &crate::model::MemberSpec,
+    terminal: Option<crate::model::DesiredSubject>,
+) -> Result<PhysicalRuntime, St3Error> {
+    let Some(binding) = member.terminal_binding.as_ref() else {
+        return Ok(PhysicalRuntime {
+            id: member.runtime_id.clone(),
+            incarnation: fence.incarnation.clone(),
+            required_subject_tag: None,
+        });
+    };
+    let terminal = terminal.ok_or_else(|| refused("the bound terminal is no longer declared"))?;
+    let terminal_member = terminal
+        .member
+        .filter(|terminal_member| {
+            terminal.subject == binding.subject
+                && terminal.kind != "stop"
+                && terminal_member.kind == crate::model::MemberKind::Pty
+                && terminal_member.terminal
+                && terminal_member.host == node
+                && terminal_member.host == member.host
+                && terminal_member.runtime_id == member.runtime_id
+        })
+        .ok_or_else(|| refused("the bound terminal declaration is not a local PTY"))?;
+    Ok(PhysicalRuntime {
+        id: terminal_member.runtime_id,
+        incarnation: binding.incarnation.clone(),
+        required_subject_tag: Some(binding.subject.clone()),
+    })
+}
+
+#[cfg(test)]
+fn audit_terminal_binding_roster(
+    desired: &[crate::model::DesiredSubject],
+) -> Result<(), St3Error> {
+    let mut terminals = std::collections::BTreeMap::new();
+    for terminal in desired.iter().filter(|subject| subject.kind != "stop") {
+        let Some(member) = terminal.member.as_ref().filter(|member| {
+            member.kind == crate::model::MemberKind::Pty && member.terminal
+        }) else {
+            continue;
+        };
+        let key = (member.host.as_str(), member.runtime_id.as_str());
+        if terminals.insert(key, terminal).is_some() {
+            return Err(refused(
+                "multiple terminal declarations share one physical runtime key",
+            ));
+        }
+    }
+    for subject in desired {
+        let Some((member, binding)) = subject
+            .member
+            .as_ref()
+            .and_then(|member| member.terminal_binding.as_ref().map(|binding| (member, binding)))
+        else {
+            continue;
+        };
+        let terminal = desired
+            .iter()
+            .find(|terminal| terminal.subject == binding.subject)
+            .filter(|terminal| terminal.kind != "stop")
+            .and_then(|terminal| terminal.member.as_ref())
+            .filter(|terminal| {
+                terminal.kind == crate::model::MemberKind::Pty
+                    && terminal.terminal
+                    && terminal.host == member.host
+                    && terminal.runtime_id == member.runtime_id
+            });
+        if terminal.is_none() {
+            return Err(refused(
+                "a terminal binding disagrees with its canonical declaration",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn physical_runtime(
+    state: &AppState,
+    fence: &Fence,
+    member: &crate::model::MemberSpec,
+) -> Result<PhysicalRuntime, St3Error> {
+    let terminal = match member.terminal_binding.as_ref() {
+        Some(binding) => state
+            .store
+            .desired_subjects_named(std::slice::from_ref(&binding.subject))
+            .map_err(internal)?
+            .into_iter()
+            .next(),
+        None => None,
+    };
+    physical_runtime_from_declaration(&state.node, fence, member, terminal)
+}
+
+fn validate_observed_physical(
+    runtime: &PhysicalRuntime,
+    physical: &fractal_runtime::PtyObservation,
+) -> Result<(), St3Error> {
+    if physical.name != runtime.id
+        || physical.status != "running"
+        || physical
+            .pid
+            .zip(physical.created_at.as_deref())
+            .is_none_or(|(pid, stamp)| format!("{pid}:{stamp}") != runtime.incarnation)
+        || runtime
+            .required_subject_tag
+            .as_ref()
+            .is_some_and(|subject| physical.tags.get("st3.subject") != Some(subject))
+    {
+        return Err(refused(
+            "the exact physical runtime generation or binding was replaced",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_authority_identity(
+    identity: pty_core::registry::DaemonIdentityCheck,
+) -> Result<(), St3Error> {
+    match identity {
+        pty_core::registry::DaemonIdentityCheck::Match => Ok(()),
+        pty_core::registry::DaemonIdentityCheck::Unknown => Err(runtime_indeterminate(
+            "the daemon boot identity is unavailable",
+        )),
+        pty_core::registry::DaemonIdentityCheck::Mismatch
+        | pty_core::registry::DaemonIdentityCheck::Gone => Err(refused(
+            "the exact physical runtime process identity was replaced or ended",
+        )),
+    }
+}
+
+fn observe_physical_runtime(
+    state: &AppState,
+    runtime: &PhysicalRuntime,
+) -> Result<fractal_runtime::PtyObservation, St3Error> {
+    let physical = match fractal_runtime::PtyRuntime::new(state.pty_root.clone())
+        .with_binary(state.pty_binary.to_string_lossy())
+        .keyed_observation(&runtime.id)
+        .map_err(internal)?
+    {
+        fractal_runtime::PtyLookup::Found {
+            observation,
+            identity,
+        } => {
+            validate_authority_identity(identity)?;
+            observation
+        }
+        fractal_runtime::PtyLookup::Missing => {
+            return Err(unavailable("the exact physical runtime is unavailable"));
+        }
+        fractal_runtime::PtyLookup::Indeterminate(error) => {
+            return Err(runtime_indeterminate(error.to_string()));
+        }
+    };
+    validate_observed_physical(runtime, &physical)?;
+    Ok(physical)
+}
+
+fn validate_reobserved_physical(
+    captured: &fractal_runtime::PtyObservation,
+    current: &fractal_runtime::PtyObservation,
+    peer_belongs: bool,
+) -> Result<(), St3Error> {
+    if current != captured || !peer_belongs {
+        return Err(refused(
+            "the channel left or replaced the exact physical runtime",
+        ));
+    }
+    Ok(())
+}
+
+/// Each revalidation call can run under the provider record lock. Native defaults configure at
+/// most three target-only attempts, two 2ms retry delays, and one 500ms socket probe per attempt:
+/// a 1,504ms upper bound per call, not a measured Smalltalk duration.
+fn validate_physical_runtime(
+    state: &AppState,
+    runtime: &PhysicalRuntime,
+    captured: &fractal_runtime::PtyObservation,
+    peer_pid: u32,
+) -> Result<(), St3Error> {
+    let current = observe_physical_runtime(state, runtime)?;
+    let peer_belongs = current
+        .pid
+        .is_some_and(|runtime_pid| belongs_to_runtime(peer_pid, runtime_pid));
+    validate_reobserved_physical(captured, &current, peer_belongs)
+}
+
 fn terminal_identity(
     name: &str,
     created_at: &str,
@@ -629,6 +832,7 @@ pub fn with_authority<T>(
     }
     let provider = member
         .driver
+        .clone()
         .ok_or_else(|| refused("the seat has no native provider"))?;
     let transport = match provider.as_str() {
         "claude" => "claude-channel",
@@ -641,11 +845,6 @@ pub fn with_authority<T>(
     if peer.transport != transport {
         return Err(refused("the channel belongs to another provider"));
     }
-    let physical_incarnation = member
-        .terminal_binding
-        .as_ref()
-        .map(|binding| binding.incarnation.as_str())
-        .unwrap_or(&fence.incarnation);
     if member
         .terminal_binding
         .as_ref()
@@ -653,31 +852,12 @@ pub fn with_authority<T>(
     {
         return Err(refused("the bound terminal invocation was replaced"));
     }
-    let physical = fractal_runtime::PtyRuntime::new(state.pty_root.clone())
-        .with_binary(state.pty_binary.to_string_lossy())
-        .snapshot()
-        .map_err(internal)?
-        .into_iter()
-        .find(|runtime| {
-            runtime
-                .pid
-                .zip(runtime.created_at.as_deref())
-                .is_some_and(|(pid, stamp)| format!("{pid}:{stamp}") == physical_incarnation)
-                && (runtime.name == member.runtime_id
-                    || runtime.tags.get("st3.subject")
-                        == Some(
-                            member
-                                .terminal_binding
-                                .as_ref()
-                                .map(|binding| &binding.subject)
-                                .unwrap_or(&fence.subject),
-                        ))
-        })
-        .ok_or_else(|| unavailable("the exact physical runtime is unavailable"))?;
+    let runtime = physical_runtime(state, fence, &member)?;
+    let physical = observe_physical_runtime(state, &runtime)?;
     let runtime_pid = physical
         .pid
         .ok_or_else(|| refused("the runtime has no process identity"))?;
-    if physical.status != "running" || !belongs_to_runtime(peer.pid, runtime_pid) {
+    if !belongs_to_runtime(peer.pid, runtime_pid) {
         return Err(refused(
             "the channel is outside the exact live physical runtime",
         ));
@@ -756,6 +936,7 @@ pub fn with_authority<T>(
         }
         state.store.mailbox_session_active(fence, &bootstrap)?;
         let validate = || {
+            validate_physical_runtime(state, &runtime, &physical, peer.pid)?;
             witness.validate(state)?;
             // Do not admit a stale bootstrap capture after qualified ownership appeared.
             let current = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
@@ -826,11 +1007,14 @@ pub fn with_authority<T>(
                     "the channel process generation changed",
                 )));
             }
+            let validate =
+                || validate_physical_runtime(state, &runtime, &physical, peer.pid);
+            validate()?;
             // Terminal state may be written without changing session/sequence. Recheck
             // it while holding the record lock rather than admitting a completion race.
             current_provider(state, fence, &agent_dir, &authority)?;
             state.store.promote_current_mailbox_ownership(fence, &authority)?;
-            action(&authority, &|| Ok(())).map_err(anyhow::Error::new)
+            action(&authority, &validate).map_err(anyhow::Error::new)
         },
     )
     .map_err(|error| {
@@ -856,6 +1040,178 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
         })).unwrap()
     }
 
+    fn fixture_member(kind: &str, host: &str, runtime_id: &str) -> crate::model::MemberSpec {
+        serde_json::from_value(json!({
+            "kind": kind, "host": host, "runtime_id": runtime_id,
+            "workspace": "/tmp", "cwd": "/tmp", "terminal": true,
+            "launch": {"type": "argv", "value": ["true"]},
+            "environment": {}, "tags": {}, "display_name": null,
+            "lifecycle": "service", "one_shot": false, "restart": "never",
+            "restart_intensity": {
+                "attempts": 1, "interval_ms": 1000, "delay_ms": 0, "mode": "delay"
+            },
+            "shutdown_timeout_ms": 1000, "driver": null
+        }))
+        .unwrap()
+    }
+
+    fn fixture_desired(
+        subject: &str,
+        kind: &str,
+        member: crate::model::MemberSpec,
+    ) -> crate::model::DesiredSubject {
+        crate::model::DesiredSubject {
+            accountable: None,
+            subject: subject.into(),
+            kind: kind.into(),
+            desired: json!({}),
+            member: Some(member),
+            owner_run: None,
+            owner_generation: None,
+            owner_step: None,
+        }
+    }
+
+    #[test]
+    fn terminal_binding_selects_only_its_canonical_local_pty() {
+        let terminal_subject = "pty/person/example/terminal";
+        let mut agent = fixture_member("agent", "node", "canonical-terminal-runtime");
+        agent.terminal_binding = Some(crate::model::TerminalBinding {
+            subject: terminal_subject.into(),
+            incarnation: "42:created".into(),
+            id: "invocation".into(),
+        });
+        let fence = Fence::new(
+            "agent/example",
+            &agent.terminal_binding.as_ref().unwrap().agent_incarnation(),
+            "delivery",
+        );
+        let terminal = fixture_desired(
+            terminal_subject,
+            "pty",
+            fixture_member("pty", "node", "canonical-terminal-runtime"),
+        );
+        let selected =
+            physical_runtime_from_declaration("node", &fence, &agent, Some(terminal.clone()))
+                .unwrap();
+        assert_eq!(selected.id, "canonical-terminal-runtime");
+        assert_eq!(selected.incarnation, "42:created");
+        assert_eq!(
+            selected.required_subject_tag.as_deref(),
+            Some(terminal_subject)
+        );
+
+        let agent_desired = fixture_desired("agent/example", "agent", agent.clone());
+        audit_terminal_binding_roster(&[agent_desired.clone(), terminal.clone()]).unwrap();
+        let duplicate = fixture_desired(
+            "pty/person/other/duplicate",
+            "pty",
+            terminal.member.as_ref().unwrap().clone(),
+        );
+        assert_eq!(
+            audit_terminal_binding_roster(&[agent_desired, terminal.clone(), duplicate])
+                .unwrap_err()
+                .code,
+            "stale-mailbox-session"
+        );
+
+        let mut inconsistent = vec![None];
+        let mut stopped = terminal.clone();
+        stopped.kind = "stop".into();
+        inconsistent.push(Some(stopped));
+        let mut foreign_subject = terminal.clone();
+        foreign_subject.subject = "pty/person/other/terminal".into();
+        inconsistent.push(Some(foreign_subject));
+        let mut foreign_host = terminal.clone();
+        foreign_host.member.as_mut().unwrap().host = "other-node".into();
+        inconsistent.push(Some(foreign_host));
+        let mut different_runtime = terminal.clone();
+        different_runtime.member.as_mut().unwrap().runtime_id = "other-runtime".into();
+        inconsistent.push(Some(different_runtime));
+        let mut wrong_kind = terminal;
+        wrong_kind.member.as_mut().unwrap().kind = crate::model::MemberKind::Agent;
+        inconsistent.push(Some(wrong_kind));
+        for terminal in inconsistent {
+            assert_eq!(
+                physical_runtime_from_declaration("node", &fence, &agent, terminal)
+                    .unwrap_err()
+                    .code,
+                "stale-mailbox-session"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_runtime_identity_is_distinct_from_replacement_or_loss() {
+        use pty_core::registry::DaemonIdentityCheck;
+
+        validate_authority_identity(DaemonIdentityCheck::Match).unwrap();
+        assert_eq!(
+            validate_authority_identity(DaemonIdentityCheck::Unknown)
+                .unwrap_err()
+                .code,
+            "mailbox-runtime-indeterminate"
+        );
+        for identity in [DaemonIdentityCheck::Mismatch, DaemonIdentityCheck::Gone] {
+            assert_eq!(
+                validate_authority_identity(identity).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_subject_tag_cannot_replace_the_canonical_runtime_name() {
+        let member = fixture_member("agent", "node", "canonical-runtime");
+        let fence = Fence::new("agent/example", "42:created", "delivery");
+        let runtime = physical_runtime_from_declaration("node", &fence, &member, None).unwrap();
+        let physical = fractal_runtime::PtyObservation {
+            name: "renamed-runtime".into(),
+            status: "running".into(),
+            exit_code: None,
+            pid: Some(42),
+            created_at: Some("created".into()),
+            display_name: None,
+            tags: BTreeMap::from([("st3.subject".into(), "agent/example".into())]),
+        };
+        assert_eq!(
+            validate_observed_physical(&runtime, &physical)
+                .unwrap_err()
+                .code,
+            "stale-mailbox-session"
+        );
+    }
+
+    #[test]
+    fn changed_reobservation_is_refused_not_indeterminate() {
+        let captured = fractal_runtime::PtyObservation {
+            name: "canonical-runtime".into(),
+            status: "running".into(),
+            exit_code: None,
+            pid: Some(42),
+            created_at: Some("created".into()),
+            display_name: Some("original".into()),
+            tags: BTreeMap::from([("st3.subject".into(), "agent/example".into())]),
+        };
+        for current in [
+            fractal_runtime::PtyObservation {
+                display_name: Some("renamed".into()),
+                ..captured.clone()
+            },
+            fractal_runtime::PtyObservation {
+                tags: BTreeMap::from([("st3.subject".into(), "agent/replacement".into())]),
+                ..captured.clone()
+            },
+        ] {
+            assert_eq!(
+                validate_reobserved_physical(&captured, &current, true)
+                    .unwrap_err()
+                    .code,
+                "stale-mailbox-session"
+            );
+        }
+    }
+
     #[test]
     fn bootstrap_generation_refusals_leave_capabilities_and_epochs_unchanged() {
         for case in [
@@ -871,6 +1227,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             "uncertain",
             "absent",
             "timeout",
+            "runtime-indeterminate",
             "parent",
         ] {
             let store = Store::open_memory("node").unwrap();
@@ -913,6 +1270,9 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
                 _ => {}
             }
             let validate = || {
+                if case == "runtime-indeterminate" {
+                    return Err(runtime_indeterminate("isolated keyed lookup uncertainty"));
+                }
                 witness.validate_with(
                     if case == "timeout" {
                         Err(unavailable("isolated injected stats timeout"))
@@ -942,10 +1302,10 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
                     },
                 )
             };
-            let expected = if matches!(case, "uncertain" | "absent" | "timeout") {
-                "mailbox-authority-unavailable"
-            } else {
-                "stale-mailbox-session"
+            let expected = match case {
+                "uncertain" | "absent" | "timeout" => "mailbox-authority-unavailable",
+                "runtime-indeterminate" => "mailbox-runtime-indeterminate",
+                _ => "stale-mailbox-session",
             };
             let duplicate = Fence::new(&bound.subject, &bound.incarnation, &bound.component);
             assert_eq!(

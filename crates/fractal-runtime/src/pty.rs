@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use pty_client::{PeekScreenOptions, SendOptions, StopError};
-use pty_core::registry::SessionInfo;
+use pty_core::registry::{
+    DaemonIdentityCheck, KeyedSession, KeyedSessionError, KeyedSessionOptions, SessionInfo,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -76,6 +78,17 @@ pub struct PtyObservation {
     pub display_name: Option<String>,
     #[serde(default)]
     pub tags: BTreeMap<String, String>,
+}
+
+/// One exact-name registry observation with its process-ownership evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PtyLookup {
+    Found {
+        observation: PtyObservation,
+        identity: DaemonIdentityCheck,
+    },
+    Missing,
+    Indeterminate(KeyedSessionError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +169,21 @@ impl PtyRuntime {
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
         self.sessions()?.into_iter().map(observation).collect()
+    }
+
+    /// Observe one immutable runtime id without enumerating the PTY registry.
+    pub fn keyed_observation(&self, id: &str) -> Result<PtyLookup> {
+        match pty_client::list::observe(&self.root, id, &KeyedSessionOptions::default()) {
+            KeyedSession::Found(session) => {
+                let identity = session.identity;
+                observation(session).map(|observation| PtyLookup::Found {
+                    observation,
+                    identity,
+                })
+            }
+            KeyedSession::Missing => Ok(PtyLookup::Missing),
+            KeyedSession::Indeterminate(error) => Ok(PtyLookup::Indeterminate(error)),
+        }
     }
 
     /// One bounded read of the registry. `pty_client` lists an unreadable root as empty, but the
@@ -1477,6 +1505,7 @@ exit 0
             socket_path: PathBuf::from("bad.sock"),
             pid: Some(-1),
             status: pty_core::registry::SessionStatus::Running,
+            identity: DaemonIdentityCheck::Unknown,
             metadata: None,
         };
         let observed = observation(record).unwrap();
