@@ -19,6 +19,7 @@ pub use tombstones::{
     checkpointed_operation, checkpointed_operations, claim_or_tombstone_exists, claim_tombstoned,
     envelope_tombstoned,
 };
+pub use super::checkpoint_space::CheckpointProofBusy;
 
 pub const DAY_MS: u128 = 86_400_000;
 
@@ -335,19 +336,19 @@ pub(super) const RECORDED_TOMBSTONE_FILTER: &str = "accepted_at_unix_ms < ?3
     AND checkpoint NOT IN (SELECT id FROM checkpoints WHERE state='recording')";
 
 /// Record the tombstones of a checkpoint's drop. Recording them again changes nothing.
-pub fn record_checkpoint_tombstones_tx(
+pub /* sqlite-large-value-flow: allow-for-now flow-h98693fb60771 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn record_checkpoint_tombstones_tx(
     transaction: &Transaction<'_>,
     checkpoint: &str,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
 ) -> Result<()> {
     let mut insert_envelope = transaction.prepare_cached(
-        "INSERT OR IGNORE INTO checkpoint_envelopes(
+        /* sqlite-large-value: allow-for-now lv-hf8edc71dff36 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO checkpoint_envelopes(
              writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for envelope in envelopes {
-        insert_envelope.execute(params![
+        insert_envelope.execute(/* sqlite-large-value: allow-for-now lv-h4db2288f7bae owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![
             envelope.writer,
             envelope.sequence,
             envelope.envelope_hash,
@@ -356,13 +357,13 @@ pub fn record_checkpoint_tombstones_tx(
         ])?;
     }
     let mut insert_claim = transaction.prepare_cached(
-        "INSERT OR IGNORE INTO checkpoint_claims(
+        /* sqlite-large-value: allow-for-now lv-h05d4503618a3 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO checkpoint_claims(
              id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
              operation_id, request_digest, accepted_at_unix_ms, checkpoint)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?;
     for claim in claims {
-        insert_claim.execute(params![
+        insert_claim.execute(/* sqlite-large-value: allow-for-now lv-h5a7af5d0161f owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![
             claim.id,
             claim.writer,
             claim.sequence,
@@ -381,28 +382,33 @@ pub fn record_checkpoint_tombstones_tx(
 }
 
 /// Delete dropped claims and their envelopes from a store. The trim uses the same code.
-pub fn delete_dropped_rows_tx(
+pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn delete_dropped_rows_tx(
     transaction: &Transaction<'_>,
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
 ) -> Result<()> {
     for claim in claims {
         if let Some(operation) = &claim.operation_id {
-            transaction.execute(
-                "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2",
-                params![operation, claim.id],
-            )?;
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
         super::principals::forget_claim_tx(transaction, &claim.id)?;
-        transaction.execute("DELETE FROM claims WHERE id=?1", [&claim.id])?;
+        // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
+        // compiles every trigger program again. Per row that cost several times the delete.
+        transaction
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
+            .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
     }
     for envelope in envelopes {
         let batch: Option<String> = transaction
-            .query_row(
+            .prepare_cached(
                 "SELECT batch_id FROM replica_envelopes
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
+            )?
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h5c9af66a6a3a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash],
                 |row| row.get(0),
             )
             .optional()?
@@ -413,20 +419,18 @@ pub fn delete_dropped_rows_tx(
             "replica_envelope_holds",
             "replica_envelopes",
         ] {
-            transaction.execute(
-                &format!(
-                    "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
-                ),
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
-            )?;
+            transaction
+                .prepare_cached(&format!(
+                    /* sqlite-large-value: allow-for-now lv-h5f5425870484 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+                ))?
+                .execute(/* sqlite-large-value: allow-for-now lv-h9bdfd18f2c1e owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash])?;
         }
         if let Some(batch) = batch {
-            transaction.execute(
-                "DELETE FROM batches WHERE id=?1
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
-                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)",
-                [&batch],
-            )?;
+                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
+                .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
         }
     }
     Ok(())
@@ -438,7 +442,7 @@ pub fn claims_of_kind_in_order(
     kind: &str,
 ) -> Result<Vec<ClaimRecord>> {
     connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he2550876b0cb owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind=?2 ORDER BY {CANONICAL_ORDER}"
         ))?
@@ -616,15 +620,24 @@ fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::fd::AsRawFd as _;
-    let source = fs::File::open(source)?;
+    let source_file = fs::File::open(source)?;
     let file = fs::OpenOptions::new().write(true).create_new(true).open(target)?;
     // SAFETY: both descriptors are open for the length of the call.
-    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source_file.as_raw_fd()) } == 0 {
         return Ok(());
     }
     let error = std::io::Error::last_os_error();
     drop(file);
-    let _ = fs::remove_file(target);
+    if let Err(cleanup) = fs::remove_file(target) {
+        return Err(std::io::Error::new(
+            cleanup.kind(),
+            format!(
+                "clone {} failed: {error}; removing incomplete target {} failed: {cleanup}",
+                source.display(),
+                target.display(),
+            ),
+        ));
+    }
     Err(error)
 }
 
@@ -633,15 +646,19 @@ fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
-fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
-    let connection = Connection::open(copy)?;
+fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::ProofVfs>) -> Result<Connection> {
+    let connection = if let Some(vfs) = vfs {
+        Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE, vfs.name())?
+    } else {
+        Connection::open(copy)?
+    };
     projection_digest::register(&connection)?;
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
     // belongs on disk, not in an allocation proportional to the database's size. The copy is
     // discarded after the proof, so its commits need not wait for the disk.
-    connection.execute_batch(&format!(
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd107c49c5ec5 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
-         PRAGMA cache_size = -{}; PRAGMA temp_store = FILE;",
+         PRAGMA cache_size = -{}; PRAGMA temp_store = FILE; PRAGMA mmap_size = 0;",
         crate::sqlite::READ_CACHE_KIB,
     ))?;
     Ok(connection)
@@ -651,8 +668,9 @@ fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
 /// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
 /// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
 fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h346bd8caeba9 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ super::canonical::PROOF_COPY_LEGACY_POSITIONS)?;
     connection.execute_batch(
-        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
+        /* sqlite-large-value: allow-for-now lv-h67cd460ba33d owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
          DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
          DELETE FROM replica_records WHERE NOT EXISTS (
              SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
@@ -662,7 +680,7 @@ fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> 
     // on the same store, whatever order its claims arrived in, so readers that compare store
     // indexes answer alike and the digests can match across nodes.
     connection.execute_batch(&format!(
-        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
+        /* sqlite-large-value: allow-for-now lv-h315c8b6f5aa8 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
          INSERT INTO temp.canonical_index(old, new)
              SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
              FROM claims JOIN batches ON batches.id=claims.batch_id;
@@ -726,17 +744,17 @@ impl ProofInput for InMemoryProof<'_> {
         let mut blobs = BTreeSet::new();
         for sealed_claim in &self.sealed.claims {
             transaction.execute(
-                "INSERT OR IGNORE INTO temp.sealed_claims(id) VALUES (?1)",
+                /* sqlite-large-value: allow-for-now lv-ha3852b2f0b38 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO temp.sealed_claims(id) VALUES (?1)",
                 [&sealed_claim.claim.id],
             )?;
             collect_hash_fields(&sealed_claim.claim.body, &mut blobs);
         }
         for hash in &blobs {
-            transaction.execute("INSERT INTO temp.sealed_blobs(hash) VALUES (?1)", [hash])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hdc42e78f66e6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.sealed_blobs(hash) VALUES (?1)", [hash])?;
         }
         for envelope in &self.sealed.envelopes {
             transaction.execute(
-                "INSERT OR IGNORE INTO temp.sealed_envelopes VALUES (?1, ?2, ?3)",
+                /* sqlite-large-value: allow-for-now lv-h937bff82e5ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO temp.sealed_envelopes VALUES (?1, ?2, ?3)",
                 params![envelope.key.writer, envelope.key.sequence, envelope.key.envelope_hash],
             )?;
         }
@@ -784,7 +802,7 @@ pub fn prove_on_copy(
     sealed: &SealedSet,
     plan: &DropPlan,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, &InMemoryProof { sealed, plan }, false)
+    prove(runtime, copy, &InMemoryProof { sealed, plan }, false, None)
 }
 
 /// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
@@ -796,8 +814,9 @@ fn prove_on_scratch_copy(
     runtime: &dyn Runtime,
     copy: &Path,
     input: &dyn ProofInput,
+    vfs: Option<&super::checkpoint_space::ProofVfs>,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, input, true)
+    prove(runtime, copy, input, true, vfs)
 }
 
 /// Read every dropped subject's answers on `transaction`, a page of subjects at a time, into
@@ -835,7 +854,7 @@ fn record_answers(
                 *subjects += 1;
                 if let Some(history) = history {
                     transaction.execute(
-                        "INSERT OR REPLACE INTO temp.proof_sources(subject, sources) VALUES (?1, ?2)",
+                        /* sqlite-large-value: allow-for-now lv-h796994f6a5b3 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO temp.proof_sources(subject, sources) VALUES (?1, ?2)",
                         params![subject, serde_json::to_string(history)?],
                     )?;
                 }
@@ -880,19 +899,19 @@ fn record_answers(
 /// comparison, in the answer's own reader order.
 fn store_answer(transaction: &Transaction<'_>, phase: i64, subject: &str, answer: &Value) -> Result<()> {
     transaction.execute(
-        "INSERT OR REPLACE INTO temp.proof_answers(phase, subject, text, object) VALUES (?1, ?2, ?3, ?4)",
+        /* sqlite-large-value: allow-for-now lv-h1776f9a0fd34 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO temp.proof_answers(phase, subject, text, object) VALUES (?1, ?2, ?3, ?4)",
         params![phase, subject, canonical_json_text(answer)?, answer.is_object()],
     )?;
     transaction.execute(
-        "DELETE FROM temp.proof_readers WHERE phase=?1 AND subject=?2",
+        /* sqlite-large-value: allow-for-now lv-hbfe0b2c8c68f owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.proof_readers WHERE phase=?1 AND subject=?2",
         params![phase, subject],
     )?;
     if let Some(readers) = answer.as_object() {
         let mut insert = transaction.prepare_cached(
-            "INSERT INTO temp.proof_readers(phase, subject, ordinal, reader, text) VALUES (?1, ?2, ?3, ?4, ?5)",
+            /* sqlite-large-value: allow-for-now lv-h7febd7173f5a owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.proof_readers(phase, subject, ordinal, reader, text) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         for (ordinal, (reader, value)) in readers.iter().enumerate() {
-            insert.execute(params![phase, subject, i64::try_from(ordinal)?, reader, canonical_json_text(value)?])?;
+            insert.execute(/* sqlite-large-value: allow-for-now lv-h4bdc5d594924 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![phase, subject, i64::try_from(ordinal)?, reader, canonical_json_text(value)?])?;
         }
     }
     Ok(())
@@ -962,15 +981,20 @@ fn prove(
     copy: &Path,
     input: &dyn ProofInput,
     commit_preparation: bool,
+    vfs: Option<&super::checkpoint_space::ProofVfs>,
 ) -> Result<CheckpointProof> {
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
-    let mut connection = open_checkpoint_copy(copy)?;
+    let mut connection = open_checkpoint_copy(copy, vfs)?;
+    if let Some(vfs) = vfs { vfs.begin_proof(&connection)?; }
     input.attach(&connection)?;
-    let transaction = connection.transaction()?;
+    let mut transaction = connection.transaction()?;
+    // A VFS refusal latches SQLITE_FULL. The disposable copy is removed after this function
+    // returns, so do not issue a rollback SQL statement from Transaction::drop on an error.
+    if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
     // Keep only the sealed set.
     transaction.execute_batch(
-        "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
+        /* sqlite-large-value: allow-for-now lv-h298c5b9a94f9 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
          CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
          CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              PRIMARY KEY(writer, sequence, envelope_hash));
@@ -984,8 +1008,14 @@ fn prove(
     runtime.clear_checkpoint_projections(&transaction)?;
     let transaction = if commit_preparation {
         transaction.commit()?;
+        if let Some(vfs) = vfs { vfs.refresh_journal_pages(&connection)?; }
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb13e43c5dd77 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE")?;
         keep_sealed_claims_in_canonical_order(&connection)?;
-        connection.transaction()?
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h77d273449aaf owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        if let Some(vfs) = vfs { vfs.refresh_journal_pages(&connection)?; }
+        let mut transaction = connection.transaction()?;
+        if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
+        transaction
     } else {
         keep_sealed_claims_in_canonical_order(&transaction)?;
         transaction
@@ -1193,7 +1223,7 @@ impl Store {
             // One atomic autocommit statement. Already covered bounds take no writer loan;
             // another capture can cover them before this loan, in which case no row changes.
             self.connection.write().execute(
-                "UPDATE checkpoint_capture_epoch
+                /* sqlite-large-value: allow-for-now lv-h73fa7657f133 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch
                  SET envelope_frontier=MAX(envelope_frontier, ?1),
                      cut_unix_ms=MAX(cut_unix_ms, ?2)
                  WHERE id=1 AND (envelope_frontier<?1 OR cut_unix_ms<?2)",
@@ -1277,7 +1307,7 @@ impl Store {
             let page = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
             let page = connection
-                .prepare_cached(&records_sql)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7ca6888d8de3 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &records_sql)?
                 .query_map(params![after, upto, cut, seal_rowid], |row| {
                     Ok((
                         (
@@ -1326,7 +1356,7 @@ impl Store {
         while records.peek().is_some() {
             let page = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
-            let mut statement = connection.prepare_cached(&claim_sql)?;
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6487fa5f41ea owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &claim_sql)?;
             let mut page = Vec::new();
             for _ in 0..record_page {
                 let Some((key, valid)) = records.next() else {
@@ -1339,7 +1369,7 @@ impl Store {
                 };
                 if before.contains(&envelope) {
                     page.push(SealedClaim {
-                        claim: statement.query_row([&key.6], claim_from_row)?,
+                        claim: statement.query_row(/* sqlite-large-value: allow-for-now lv-h66cc50f1bba7 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&key.6], claim_from_row)?,
                         envelope,
                         valid,
                         protected: false,
@@ -1459,7 +1489,7 @@ impl Store {
         let CheckpointCaptureQuery { table, columns, filter } = query;
         let high: i64 = self.checkpoint_capture_page(epoch, || {
             Ok(self.readers.get().query_row(
-                &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"), [], |row| row.get(0),
+                /* sqlite-large-value: allow-for-now lv-ha4da89b94dcd owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"), [], |row| row.get(0),
             )?)
         })?;
         let sql = format!(
@@ -1471,7 +1501,7 @@ impl Store {
             let upto = after.saturating_add(page_size).min(high);
             let page = self.checkpoint_capture_page(epoch, || {
                 let connection = self.readers.get();
-                Ok(connection.prepare_cached(&sql)?
+                Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h44a31e8d721f owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &sql)?
                     .query_map(params![after, upto, cut], &mut decode)?
                     .collect::<rusqlite::Result<Vec<_>>>()?)
             })?;
@@ -1539,14 +1569,14 @@ impl Store {
             let (envelopes, tombstones) = self.read_snapshot(|_| {
                 let connection = self.readers.get();
                 let envelopes = connection
-                    .prepare_cached(SEALED_IDENTITY_ENVELOPES_SQL)?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3247614039e2 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ SEALED_IDENTITY_ENVELOPES_SQL)?
                     .query_map(
                         params![cut, after.0, after.1, after.2, seal_rowid, page],
                         identity,
                     )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let tombstones = connection
-                    .prepare_cached(SEALED_IDENTITY_TOMBSTONES_SQL)?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hdbb06223bb55 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ SEALED_IDENTITY_TOMBSTONES_SQL)?
                     .query_map(params![cut, after.0, after.1, after.2, page], identity)?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 Ok((envelopes, tombstones))
@@ -1610,12 +1640,30 @@ impl Store {
             .collect()
     }
 
+    /// At daemon startup, remove only proof scratch whose owner lock is no longer held. A
+    /// cleanup error is reported and the next proof refuses until the scratch is cleared.
+    pub fn sweep_checkpoint_proof_scratch(&self, scratch: &Path) -> Result<()> {
+        if scratch.exists() {
+            drop(super::checkpoint_space::ProofOwnership::acquire(scratch)?);
+        }
+        Ok(())
+    }
+
     /// Copy this store to `copy` from one consistent snapshot, while the writer carries on: a
     /// filesystem clone where the filesystem can make one, otherwise a full `VACUUM INTO` copy.
-    pub fn copy_store_to(&self, copy: &Path) -> Result<StoreCopy> {
-        if !self.shared_memory && self.clone_store_to(copy)? {
+    pub /* sqlite-large-value-flow: allow-for-now flow-h92a2a0ef1c88 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn copy_store_to(&self, copy: &Path) -> Result<StoreCopy> {
+        self.copy_store_to_guarded(copy, None)
+    }
+
+    fn copy_store_to_guarded(
+        &self,
+        copy: &Path,
+        vfs: Option<&super::checkpoint_space::ProofVfs>,
+    ) -> Result<StoreCopy> {
+        if !self.shared_memory && self.clone_store_to(copy, vfs)? {
             return Ok(StoreCopy::Clone);
         }
+        if let Some(vfs) = vfs { vfs.vacuum_copy()?; }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
         // holds the WAL pinned for as long as the copy takes. Register it, so a pinned-WAL
         // report can name it: it was the one pin with no live read to blame.
@@ -1626,9 +1674,13 @@ impl Store {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let connection = Connection::open_with_flags(&self.path, flags)?;
-        connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
-        connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
+        let connection = if let Some(vfs) = vfs {
+            Connection::open_with_flags_and_vfs(&self.path, flags, vfs.name())?
+        } else {
+            Connection::open_with_flags(&self.path, flags)?
+        };
+        connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h822884cc319d owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "VACUUM INTO ?1", [copy.to_string_lossy()])?;
         Ok(StoreCopy::Full)
     }
 
@@ -1637,7 +1689,11 @@ impl Store {
     /// the store file, and the frames it reads stay in the WAL, so the two clones open as the
     /// snapshot or a later commit. The `-shm` index is not copied: opening the copy rebuilds it
     /// from the WAL. False, with nothing left at `copy`, where the filesystem cannot clone.
-    fn clone_store_to(&self, copy: &Path) -> Result<bool> {
+    /* sqlite-large-value-flow: allow-for-now flow-he62b1f3e0130 owner=smallclaims::store::checkpoint TODO=stage-generation-and-keyed-reclamation */ fn clone_store_to(
+        &self,
+        copy: &Path,
+        vfs: Option<&super::checkpoint_space::ProofVfs>,
+    ) -> Result<bool> {
         let mut wal = self.path.as_os_str().to_os_string();
         wal.push("-wal");
         let wal = PathBuf::from(wal);
@@ -1647,24 +1703,49 @@ impl Store {
         let connection = self.readers.get();
         let snapshot = connection.unchecked_transaction()?;
         snapshot.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
+        if let Some(vfs) = vfs { vfs.check_clone_source()?; }
         let store = clone_file(&self.path, copy);
+        if let Some(vfs) = vfs { vfs.check_clone_source()?; }
         let wal = store.as_ref().map(|()| match clone_file(&wal, &copy_wal) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !wal.exists() => Ok(()),
             result => result,
         });
         snapshot.commit()?;
         drop(connection);
+        if let (Some(vfs), Ok(Ok(()))) = (vfs, &wal) {
+            vfs.check_cloned_files(copy, &copy_wal)?;
+        }
         match wal {
             Ok(Ok(())) => {}
             // A failed clone leaves nothing behind, so only the store clone needs removing.
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
+                if copy_wal.exists() {
+                    return Err(error).context(format!(
+                        "checkpoint clone left an incomplete WAL at {}",
+                        copy_wal.display()
+                    ));
+                }
                 fs::remove_file(copy)?;
                 return Ok(false);
             }
-            Err(_) => return Ok(false),
+            Err(error) => {
+                if copy.exists() {
+                    anyhow::bail!(
+                        "checkpoint clone left an incomplete database at {}: {error}",
+                        copy.display()
+                    );
+                }
+                return Ok(false);
+            }
         }
         // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
-        Connection::open(copy)?.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+        let cloned = if let Some(vfs) = vfs {
+            Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE, vfs.name())?
+        } else {
+            Connection::open(copy)?
+        };
+        cloned.execute_batch("PRAGMA mmap_size = 0;")?;
+        cloned.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
         Ok(true)
     }
 
@@ -1720,15 +1801,51 @@ impl Store {
     fn prove_checkpoint_input(&self, input: &dyn ProofInput, scratch: &Path) -> Result<CheckpointProof> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
-        fs::create_dir_all(scratch)?;
-        let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
-        let result = self
-            .copy_store_to(&copy)
-            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, input));
-        for suffix in ["", "-journal", "-wal", "-shm"] {
-            let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
+        // Admission precedes even the lock file. A failed proof cannot spend the writer's reserve.
+        let space = if self.shared_memory { None } else {
+            Some(super::checkpoint_space::SpaceGuard::admit(&self.path, scratch, false)?)
+        };
+        let ownership = super::checkpoint_space::ProofOwnership::acquire(scratch)?;
+        let vfs = space.as_ref().map(super::checkpoint_space::ProofVfs::register).transpose()?;
+        if let Some(vfs) = &vfs {
+            let probe = scratch.join(format!("proof-vfs-test-{}.sqlite3", Uuid::now_v7().simple()));
+            let tested = vfs.self_test(&ownership, &probe);
+            if let Err(close) = vfs.check_closed() {
+                std::mem::forget(ownership);
+                return Err(close.context("checkpoint VFS self-test left an open scratch file; owner lock retained until process exit"));
+            }
+            tested?;
         }
-        result
+        let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
+        ownership.mark(&copy)?;
+        let result = (|| {
+            if let Some(space) = &space { space.check_now()?; }
+            self.copy_store_to_guarded(&copy, vfs.as_ref())?;
+            if let (Some(space), Some(vfs)) = (&space, &vfs) {
+                space.check_copied_image(&copy, vfs)?;
+            }
+            prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
+        })();
+        if let Some(vfs) = &vfs
+            && let Err(close) = vfs.check_closed()
+        {
+            // A live SQLite file could still write after unlink. Keep the owner lock and
+            // marker instead of deleting an open scratch file; only process exit releases
+            // the lock for the next startup sweep.
+            let prior = result.err().map(|error| format!("; also {error}")).unwrap_or_default();
+            std::mem::forget(ownership);
+            return Err(close.context(format!(
+                "checkpoint proof scratch remains owned until process exit{prior}"
+            )));
+        }
+        let result = match space.as_ref() { Some(space) => space.explain(result), None => result };
+        let cleanup = ownership.finish(&copy);
+        match (result, cleanup) {
+            (Ok(proof), Ok(())) => Ok(proof),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(error.context(format!("also {cleanup}"))),
+        }
     }
 
     /// `st replication checkpoint plan`: plan and prove one checkpoint without changing anything.
@@ -1784,6 +1901,17 @@ pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
     super::checkpoint_completion::reclaim_stats()
 }
 
+/// Hold the proof lock on `scratch`, as a running proof does, until dropped.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_space::ProofOwnership);
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
+    super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
+}
+
 #[cfg(test)]
 mod memory_tests {
     use super::*;
@@ -1792,7 +1920,7 @@ mod memory_tests {
     fn checkpoint_copy_spills_rollback_and_temporary_pages_to_disk() {
         let scratch = tempfile::tempdir().unwrap();
         let copy = scratch.path().join("proof.sqlite3");
-        let mut connection = open_checkpoint_copy(&copy).unwrap();
+        let mut connection = open_checkpoint_copy(&copy, None).unwrap();
         assert_eq!(
             connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)).unwrap(),
             "delete"
@@ -1816,5 +1944,228 @@ mod memory_tests {
             "the overwritten copy pages belong in a disk rollback journal"
         );
         transaction.rollback().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod proof_position_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+
+    /// The proof copy's numbering of the sealed set, after keeping only that set.
+    fn proof_order(copy: &Path, sealed: &[String], vfs: Option<&ProofVfs>) -> Vec<String> {
+        let connection = open_checkpoint_copy(copy, vfs).unwrap();
+        if let Some(vfs) = vfs {
+            vfs.begin_proof(&connection).unwrap();
+        }
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
+                 CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT);
+                 INSERT INTO temp.sealed_envelopes VALUES('writer', 1, 'sealed');",
+            )
+            .unwrap();
+        for id in sealed {
+            connection
+                .execute("INSERT INTO temp.sealed_claims VALUES(?1)", [id])
+                .unwrap();
+        }
+        keep_sealed_claims_in_canonical_order(&connection).unwrap();
+        connection
+            .prepare("SELECT id FROM claims ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_proof_copy_orders_the_sealed_set_alone_whatever_duplicates_a_member_holds() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Store::open(&scratch.path().join("store.sqlite3"), "writer", Arc::new(Plain))
+            .unwrap();
+        let sealed = {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            let mut batch = None;
+            let mut ids = Vec::new();
+            for name in ["first", "second", "third"] {
+                let claim = append_claim_record_tx(
+                    &transaction,
+                    "writer",
+                    &format!("note/{name}"),
+                    "example.note",
+                    None,
+                    &json!({"fields": {"name": name}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch.get_or_insert(claim.batch_id.clone());
+                ids.push(claim.id);
+            }
+            for (position, id) in ids.iter().enumerate() {
+                transaction
+                    .execute(
+                        "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                            position, raw, state, claim_id, updated_at_unix_ms)
+                         VALUES (?1, 'writer', 1, 'sealed', ?2, X'00', 'valid', ?3, '0')",
+                        params![format!("record/sealed/{position}"), position as i64, id],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+            ids
+        };
+        // File-backed stores prove through the space-guarded VFS; prove both ways.
+        let proofs = scratch.path().join("proofs");
+        let ownership = ProofOwnership::acquire(&proofs).unwrap();
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let vfs = ProofVfs::register(&space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = |name: &str| {
+            let plain = scratch.path().join(format!("{name}.sqlite3"));
+            let guarded = proofs.join(format!("proof-{name}.sqlite3"));
+            ownership.mark(&guarded).unwrap();
+            for path in [&plain, &guarded] {
+                store
+                    .connection
+                    .write()
+                    .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+                    .unwrap();
+            }
+            (plain, guarded)
+        };
+        let plain = copy("plain");
+        // Another member also holds an unsealed duplicate envelope carrying the third claim first.
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash,
+                    position, raw, state, claim_id, updated_at_unix_ms)
+                 VALUES ('record/duplicate/0', 'writer', 1, 'duplicate', 0, X'00', 'valid', ?1, '0')",
+                [&sealed[2]],
+            )
+            .unwrap();
+        let with_duplicate = copy("duplicate");
+        for (copy, guarded) in [plain, with_duplicate] {
+            assert_eq!(proof_order(&copy, &sealed, None), sealed);
+            assert_eq!(proof_order(&guarded, &sealed, Some(&vfs)), sealed);
+        }
+        vfs.check_closed().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod clone_growth_tests {
+    use super::super::checkpoint_space::{ProofOwnership, ProofVfs, SpaceGuard};
+    use super::*;
+    use crate::store::runtime::Plain;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const ROW: &str = "INSERT INTO growth VALUES (randomblob(64 * 1024))";
+
+    fn store_with_rows(dir: &Path, rows: usize) -> Store {
+        fs::create_dir(dir.join("proofs")).unwrap();
+        let store = Store::open(&dir.join("store.sqlite3"), "writer", Arc::new(Plain)).unwrap();
+        let writer = store.connection.write();
+        writer.execute_batch("CREATE TABLE growth(body BLOB)").unwrap();
+        for _ in 0..rows {
+            writer.execute(ROW, []).unwrap();
+        }
+        drop(writer);
+        store
+    }
+
+    fn wal_len(store: &Store) -> u64 {
+        fs::metadata(format!("{}-wal", store.path.display())).map_or(0, |metadata| metadata.len())
+    }
+
+    fn rows(copy: &Path) -> i64 {
+        Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT count(*) FROM growth", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Copy through the guarded VFS the way a proof does, after `space` was admitted.
+    fn guarded_copy(store: &Store, space: &SpaceGuard, proofs: &Path, during: impl Fn() + Sync) -> Result<PathBuf> {
+        let ownership = ProofOwnership::acquire(proofs).unwrap();
+        let vfs = ProofVfs::register(space).unwrap();
+        vfs.self_test(&ownership, &proofs.join("proof-vfs-test.sqlite3")).unwrap();
+        let copy = proofs.join("proof-growth.sqlite3");
+        ownership.mark(&copy).unwrap();
+        let stop = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    during();
+                }
+            });
+            let result = store.copy_store_to_guarded(&copy, Some(&vfs));
+            stop.store(true, Ordering::Release);
+            result
+        });
+        vfs.check_closed().unwrap();
+        result.map(|_| copy)
+    }
+
+    // A proof is admitted, then its lock and VFS self-test run while the daemon keeps writing.
+    // The raw clone used to be held to the exact main+WAL bytes seen at admission, so one commit
+    // in that window failed `replication checkpoint plan` with a 500.
+    #[test]
+    fn a_wal_grown_after_admission_still_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let admitted_wal = wal_len(&store);
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+        assert!(wal_len(&store) > admitted_wal, "the live WAL grew after admission");
+
+        let copy = guarded_copy(&store, &space, &proofs, || {}).unwrap();
+        assert_eq!(rows(&copy), 16, "the copy is the store as of the copy, not of admission");
+    }
+
+    #[test]
+    fn a_writer_committing_throughout_the_copy_does_not_fail_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        let written = AtomicUsize::new(0);
+
+        let copy = guarded_copy(&store, &space, &proofs, || {
+            store.connection.write().execute(ROW, []).unwrap();
+            written.fetch_add(1, Ordering::AcqRel);
+        })
+        .unwrap();
+        let copied = rows(&copy);
+        assert!(copied >= 8, "the copy holds at least the admitted rows: {copied}");
+        assert!(
+            copied <= 8 + i64::try_from(written.load(Ordering::Acquire)).unwrap(),
+            "the copy holds no row that was never committed: {copied}"
+        );
+    }
+
+    #[test]
+    fn growth_past_the_clone_cap_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_rows(dir.path(), 8);
+        let proofs = dir.path().join("proofs");
+        let mut space = SpaceGuard::admit(&store.path, &proofs, false).unwrap();
+        space.hold_clone_to_admitted_copy();
+        for _ in 0..8 {
+            store.connection.write().execute(ROW, []).unwrap();
+        }
+
+        let error = guarded_copy(&store, &space, &proofs, || {}).unwrap_err().to_string();
+        assert!(error.contains("checkpoint raw clone exceeds admitted clone cap"), "{error}");
     }
 }

@@ -52,16 +52,17 @@ def check(name, outcome, expected):
 # Match the generated client export graph and web lane inputs, not their Rust generators.
 detector_contract = runpy.run_path(str(detector))
 web_inputs = (
-    "clients/typescript/st3-client/index.ts",
-    "clients/typescript/st3-client/Models.generated.ts",
-    "clients/typescript/st3-client/Client.generated.ts",
-    "clients/typescript/st3-client/Schema.generated.ts",
-    "clients/typescript/st3-client/errors.ts",
-    "clients/typescript/st3-client/package.json",
-    "clients/typescript/st3-client/tsconfig.json",
-    "clients/typescript/st3-client/tsconfig.schema.json",
-    "clients/typescript/st3-client/types.test.ts",
-    "clients/typescript/st3-client/BUCK",
+    "clients/typescript/fractal-client/index.ts",
+    "clients/typescript/fractal-client/Models.generated.ts",
+    "clients/typescript/fractal-client/Client.generated.ts",
+    "clients/typescript/fractal-client/Schema.generated.ts",
+    "clients/typescript/fractal-client/errors.ts",
+    "clients/typescript/fractal-client/package.json",
+    "clients/typescript/fractal-client/tsconfig.json",
+    "clients/typescript/fractal-client/tsconfig.schema.json",
+    "clients/typescript/fractal-client/types.test.ts",
+    "clients/typescript/fractal-client/BUCK",
+    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/transcripts/example.json",
     "fixtures/scenarios/example.json",
@@ -69,13 +70,14 @@ web_inputs = (
     "megarepo.kdl",
     "megarepo.lock",
     "flake.lock",
+    "scripts/ci-web-shell",
+    "scripts/ci-web-shell-test",
 )
 non_web_inputs = (
-    "crates/st3-client/src/lib.rs",
-    "crates/st3-client-codegen/src/main.rs",
-    "crates/st3-schema/x.rs",
+    "crates/fractal-client/src/lib.rs",
+    "crates/fractal-client-codegen/src/main.rs",
+    "crates/fractal-schema/x.rs",
     "docs/st3/client-v0/x.md",
-    "docs/st3/client-v0/schemas/client-v0.schema.json",
     "nested/megarepo.kdl",
     "nested/megarepo.lock",
     "nested/flake.lock",
@@ -114,10 +116,11 @@ def guard_workspace_dependencies(manifest, seen=None):
 
 
 guard_workspace_dependencies(json.loads((root / "packages/fractal-ui/package.json").read_text()))
-workspace_fixture = json.loads('{"devDependencies":{"@smalltalk/st3-scenarios":"workspace:*"}}')
+workspace_fixture = json.loads('{"devDependencies":{"@fractal/scenarios":"workspace:*"}}')
 guard_workspace_dependencies(workspace_fixture)
-assert detector_contract["kit_paths"](["clients/typescript/st3-scenarios/src/index.ts"])
-assert detector_contract["kit_paths"](["clients/typescript/st3-client/index.ts"])
+assert detector_contract["kit_paths"](["clients/typescript/fractal-scenarios/src/index.ts"])
+assert detector_contract["kit_paths"](["clients/typescript/fractal-client/index.ts"])
+assert detector_contract["kit_paths"](["docs/st3/client-v0/schemas/client-v0.schema.json"])
 packages["@fixture/uncovered"] = ("packages/uncovered-fixture", {})
 try:
     guard_workspace_dependencies({"dependencies": {"@fixture/uncovered": "workspace:*"}})
@@ -134,22 +137,22 @@ with tempfile.TemporaryDirectory() as scratch:
     git(repo, "init", "--quiet", "--initial-branch=main")
     git(repo, "config", "user.email", "ci@example.invalid")
     git(repo, "config", "user.name", "ci")
-    base = commit(repo, "base", write=["src/main.rs", "clients/typescript/st3-client/index.ts", "docs/guide.md"])
-    rust = commit(repo, "rust", write=["src/main.rs", "crates/st3-daemon/src/lib.rs"])
+    base = commit(repo, "base", write=["src/main.rs", "clients/typescript/fractal-client/index.ts", "docs/guide.md"])
+    rust = commit(repo, "rust", write=["src/main.rs", "crates/fractal-daemon/src/lib.rs"])
     git(repo, "checkout", "--quiet", "-b", "web", base)
-    client = commit(repo, "client", write=["clients/typescript/st3-client/index.ts"])
+    client = commit(repo, "client", write=["clients/typescript/fractal-client/index.ts"])
     git(repo, "checkout", "--quiet", "-b", "schema", base)
-    schema = commit(repo, "schema", write=["crates/st3-schema/src/lib.rs"])
+    schema = commit(repo, "schema", write=["crates/fractal-schema/src/lib.rs"])
     git(repo, "checkout", "--quiet", "-b", "lock", base)
     lock = commit(repo, "lock", write=["pnpm-lock.yaml"])
     git(repo, "checkout", "--quiet", "-b", "rename-out", base)
-    renamed_out = commit(repo, "rename out", move=[("clients/typescript/st3-client/index.ts", "archive/index.ts")])
+    renamed_out = commit(repo, "rename out", move=[("clients/typescript/fractal-client/index.ts", "archive/index.ts")])
     git(repo, "checkout", "--quiet", "-b", "rename-in", base)
     renamed_in = commit(repo, "rename in", move=[("docs/guide.md", "apps/fractal-web/README.md")])
     git(repo, "checkout", "--quiet", "-b", "delete", base)
-    deleted = commit(repo, "delete", remove=["clients/typescript/st3-client/index.ts"])
+    deleted = commit(repo, "delete", remove=["clients/typescript/fractal-client/index.ts"])
     git(repo, "checkout", "--quiet", "-b", "nested", base)
-    nested = commit(repo, "nested lookalike", write=["crates/st3/package.json", "docs/BUCK.md"])
+    nested = commit(repo, "nested lookalike", write=["crates/fractal/package.json", "docs/BUCK.md"])
     git(repo, "checkout", "--quiet", "-b", "newline", base)
     newline = commit(repo, "newline path", write=["apps/fractal-web/component\nname.ts"])
     git(repo, "checkout", "--quiet", "-b", "app", base)
@@ -164,7 +167,7 @@ with tempfile.TemporaryDirectory() as scratch:
     git(repo, "checkout", "--quiet", "-b", "workflow", base)
     workflow_change = commit(repo, "workflow", write=[".github/workflows/workspace-ci.ts"])
     git(repo, "checkout", "--quiet", "-b", "workspace-dependency", base)
-    dependency_change = commit(repo, "workspace dependency", write=["clients/typescript/st3-scenarios/src/index.ts"])
+    dependency_change = commit(repo, "workspace dependency", write=["clients/typescript/fractal-scenarios/src/index.ts"])
     # main moved on with a web change; a Rust-only PR based on the older main stays Rust-only.
     git(repo, "checkout", "--quiet", "main")
     advanced = commit(repo, "main web", write=["pnpm-workspace.yaml"])
@@ -245,7 +248,7 @@ blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs))
 changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-web-execution"], blocks["fractal-web"]
 for pattern in detector_contract["PATTERNS"]:
     assert f'"{pattern}"' in changes, f"generated detector omits {pattern}"
-for pattern in ("crates/st3-client*/**", "crates/st3-schema/**", "docs/st3/client-v0/**"):
+for pattern in ("crates/fractal-client*/**", "crates/fractal-schema/**", "docs/st3/client-v0/**"):
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
@@ -258,17 +261,64 @@ assert "KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}" in exec
 assert "KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}" in execution, "PRs run the per-commit set"
 assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}" in execution, "merge groups keep axe"
 assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}" in execution, "the per-commit budget"
+assert "APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}" in execution, "PRs run the related app tests, merge groups all"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
 assert "needs: [fractal-web-changes, genie-freshness]" in execution
 assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
 assert "needs.genie-freshness.result == 'success'" in execution
-assert "nix develop '.#web' -c bash scripts/ci-fractal-web" in execution
-assert "actions/cache/restore@" in execution and "actions/cache/save@" not in execution, "only main upkeep publishes caches"
+assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
+assert "nix develop .#web -c" in (root / "scripts/ci-web-shell").read_text(), "a missing shell cache falls back to evaluating the flake"
+assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in execution
+assert execution.index("kernel.apparmor_restrict_unprivileged_userns=0") < execution.index("bash scripts/ci-web-shell run bash scripts/ci-fractal-web")
+assert workflow.count("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0") == 1, "only the Buck TypeScript execution job changes host namespace policy"
+# The strict Nix sandbox fails the installer on runners that forbid unprivileged user namespaces
+# (every daily lane failed at Install Nix on 10-20): only a job that lifts the restriction may keep it.
+for generated in sorted((root / ".github/workflows").glob("*.yml")):
+    for name, job in re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", generated.read_text(), re.MULTILINE | re.DOTALL):
+        if "sandbox-fallback = false" in job:
+            assert "kernel.apparmor_restrict_unprivileged_userns=0" in job, f"{generated.name} {name}: strict Nix sandbox without enabling user namespaces"
+assert "actions/cache/restore@" in execution
+# Execution only restores: PR-scoped shell copies consume repository quota but
+# cannot warm merge groups. Protected-main upkeep remains the sole shell writer.
+assert "actions/cache/save@" not in execution and "actions/cache@" not in execution
+assert "bash scripts/ci-web-shell fill" not in execution
+upkeep = (root / ".github/workflows/main-upkeep.yml").read_text()
+assert "name: Save the web shell closure" in upkeep
+assert "name: Save the pnpm store" in upkeep
+assert "bash scripts/ci-web-shell fill" in upkeep
 assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
 assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"
 print("passed: generated jobs are unfiltered, hosted, bounded and fail closed")
+
+client = blocks["typescript-client"]
+assert "nix develop '.#web' -c pnpm install --frozen-lockfile" in client
+assert "nix develop '.#web' -c bash scripts/ci-typescript-client" in client
+assert "corepack enable" not in client, "Nix owns the client job's pnpm toolchain"
+print("passed: client install and checks use the same Nix web toolchain")
+
+# The shared store renderer emits product views recursively; every workspace endpoint must exist.
+for package in ("fractal-client", "fractal-views"):
+    package_path = f"clients/typescript/{package}"
+    source = (root / package_path / "BUCK").read_text()
+    trees = {}
+    for body in re.findall(r"(?ms)^package_view\(\n(.*?)^\)", source):
+        name = re.search(r'    name = "([^"]+)",', body).group(1)
+        trees[name] = body
+    identity = package_path.replace("/", "_").replace("-", "_")
+    for name, prefix in (("package_tree", "view"), ("product_package_tree", "product_view")):
+        assert name in trees, f"{package_path} lacks {name}"
+        assert re.search(rf'dependency_view = "//buck2/dependencies:{prefix}_{identity}_[0-9a-f]+"', trees[name])
+        assert 'strip_project_references = True' in trees[name]
+        assert 'runtime = "//:package_tree_runtime"' in trees[name]
+        assert 'runtime_entry = "package-tree.ts"' in trees[name]
+    files = [re.search(r"(?ms)    files = \{\n(.*?)^    \},", trees[name]).group(1)
+             for name in ("package_tree", "product_package_tree")]
+    assert files[0] == files[1], f"{package_path} product tree changes its own declared files"
+    typechecks = re.findall(r"(?ms)^tsgo_typecheck\(\n(.*?)^\)", source)
+    assert typechecks and all('package_tree = ":package_tree"' in body for body in typechecks)
+print("passed: ordinary and product package trees match their dependency views and own inputs")
 
 freshness = blocks["genie-freshness"]
 assert "scripts/ci-genie-freshness" in freshness
@@ -277,11 +327,12 @@ assert "python3 scripts/ci-fractal-web-licenses --check-lockfile" in guard
 assert "python3 scripts/ci-fractal-web-licenses-test" in guard
 assert "ci-fractal-web-test" in guard and "genie --check" in guard
 lanes = (root / "scripts/ci-fractal-web").read_text()
-assert lanes.index("pnpm install --frozen-lockfile") < lanes.index("python3 scripts/ci-fractal-web-licenses --check") < lanes.index("buck2 build //:typecheck")
+assert lanes.index("lane \"Frozen install\" pnpm install --frozen-lockfile") < lanes.index("run_streams stream_scenarios"), "the install runs before the parallel streams"
+assert lanes.index("python3 scripts/ci-fractal-web-licenses --check") < lanes.index("buck2 build //:typecheck") < lanes.index("\nlane \"Toolchain and Buck root\"")
 print("passed: license coverage and manifest guards are wired into the generated CI lanes")
-assert 'lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.config.ts' in lanes
-assert 'lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts' in lanes
-sdk = root / "apps/fractal-web/packages/st3-sdk"
+assert 'lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.config.ts' in lanes
+assert 'lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.perf.config.ts' in lanes
+sdk = root / "apps/fractal-web/packages/fractal-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
@@ -290,24 +341,151 @@ assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_t
 print("passed: the CSS asset guard proves its negatives before guarding the app production build")
 
 # Exercise the actual conditional lane wiring without launching browsers or installing dependencies.
-kit_lanes = lanes[lanes.index('case "${KIT_INPUTS:-true}" in'):]
+kit_lanes = lanes[lanes.index("# --- kit lane selection"):lanes.index("# --- end kit lane selection")]
 for required in (False, True):
     with tempfile.TemporaryDirectory() as scratch:
         summary = Path(scratch, "summary")
-        harness = 'set -eu\nlane() { printf "%s\\n" "$1"; }\nsummary=$GITHUB_STEP_SUMMARY\n' + kit_lanes
+        harness = 'set -eu\nkit_storybook() { :; }\nkit_plays() { :; }\nlane() { printf "%s\\n" "$1"; }\nsummary=$GITHUB_STEP_SUMMARY\n' + kit_lanes + "\nstream_kit\nexclusive_lanes\n"
         result = subprocess.run(["bash", "-c", harness], check=True, capture_output=True, text=True,
                                 env={**os.environ, "KIT_INPUTS": str(required).lower(),
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
         for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook and module graph", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
+        assert result.stdout.count("App replay browser e2e") == 1, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
         print(f"passed: kit lanes {'run' if required else 'skip explicitly'}")
+
+# Run the real lane control flow with only lane commands replaced: shard 0 runs every lane once,
+# the full set's other shards only the kit's Storybook build and their share of the strict plays.
+fake_lane = r"""lane() {
+  printf '%s\n' "$1"
+  case "$1" in
+    "App replay browser e2e"|"UI kit context isolation controls"|"UI kit gate set, a11y and budget controls"|"UI kit Storybook"*|"SDK frame CPU budgets"|"UI kit strict plays"*)
+      [ "${TEST_STREAMS_ACTIVE:-0}" -eq 0 ] || { echo "exclusive kit lane overlapped test streams" >&2; return 17; } ;;
+  esac
+  case "$1" in
+    "App unit tests") if [ "${FAIL_APP:-0}" -ne 0 ]; then return "$FAIL_APP"; fi ;;
+    "UI kit Storybook"*)
+      [ -f "$GITHUB_STEP_SUMMARY.registry" ] || { echo "missing changelog registry" >&2; return 1; }
+      if [ "${FAIL_BUILD:-0}" -ne 0 ]; then return "$FAIL_BUILD"; fi ;;
+    "Changelog registry"*) touch "$GITHUB_STEP_SUMMARY.registry" ;;
+    "UI kit play index contracts") if [ "${FAIL_INDEX:-0}" -ne 0 ]; then return "$FAIL_INDEX"; fi ;;
+    "UI kit strict plays"*) if [ "${FAIL_KIT:-0}" -ne 0 ]; then return "$FAIL_KIT"; fi ;;
+  esac
+}
+"""
+control_flow = lanes[:lanes.index("lane() {")] + fake_lane + lanes[lanes.index("toolchain() {"):]
+# Mark the lifetime of the actual parallel runner, including its child processes.
+# Merely checking printed lane order is insufficient: stream logs are buffered until all finish.
+control_flow = control_flow.replace("run_streams() {", "run_streams() {\n  export TEST_STREAMS_ACTIVE=1")
+control_flow = control_flow.replace('  return "$status"\n}', '  unset TEST_STREAMS_ACTIVE\n  return "$status"\n}')
+for shard, app, kit, build, index, expected in (
+    (0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 0, 0),
+    (0, 7, 0, 0, 0, 1), (0, 0, 9, 0, 0, 9), (1, 0, 9, 0, 0, 9),
+    (0, 0, 0, 11, 0, 11), (1, 0, 0, 0, 13, 1),
+):
+    with tempfile.TemporaryDirectory() as scratch:
+        result = subprocess.run(["bash", "-c", control_flow, str(root / "scripts/ci-fractal-web")],
+                                capture_output=True, text=True, env={**os.environ,
+                                    "GITHUB_STEP_SUMMARY": str(Path(scratch, "summary")),
+                                    "KIT_INPUTS": "true", "KIT_SHARD_INDEX": str(shard),
+                                    "FAIL_APP": str(app), "FAIL_KIT": str(kit),
+                                    "FAIL_BUILD": str(build), "FAIL_INDEX": str(index)})
+        assert result.returncode == expected, (expected, result)
+        assert "Changelog registry" in result.stdout, result.stdout
+        assert Path(scratch, "summary.registry").is_file(), result.stdout
+        for name in ("App unit tests", "Scenario tests", "Buck typecheck", "UI kit typecheck"):
+            assert (name in result.stdout) == (shard == 0), (name, result.stdout)
+        assert ("UI kit context isolation controls" in result.stdout) == (shard == 0 and not app and not index), result.stdout
+        assert result.stdout.count("App replay browser e2e") == int(shard == 0 and not (app or build or index)), result.stdout
+        assert ("SDK frame CPU budgets" in result.stdout) == (shard == 0 and not (app or build or index)), result.stdout
+        assert ("UI kit Storybook and module graph" in result.stdout) == (not app and not index), result.stdout
+        assert ("UI kit strict plays" in result.stdout) == (not app and not build and not index), result.stdout
+print("passed: every shard generates Storybook inputs before building; only shard 0 runs non-kit lanes")
+print("passed: browser controls, Storybook and strict plays wait until the non-kit test streams finish")
+
+# Exercise the production hash/receipt aggregator without a browser.
+subprocess.run(["node", "--input-type=module", "-"], cwd=root, check=True, input=r'''
+import assert from 'node:assert/strict'
+import { shardNumber, shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+const provenance = { runId: '1234', runAttempt: 2, headSha: 'a'.repeat(40) }
+const aggregateShards = (receipts, count) => aggregate(receipts, count, provenance)
+const ids = Array.from({ length: 313 }, (_, i) => `story-${i}`).sort()
+assert.equal(shardNumber('story-0', 2), 1)
+for (const count of [1, 2, 3]) {
+  const shards = Array.from({ length: count }, (_, i) => shardStories(ids, i, count))
+  assert.deepEqual(shards.flat().sort(), ids)
+  for (const id of ids) {
+    assert.equal(shardNumber(id, count), shardNumber(id, count))
+    assert.equal(shards[shardNumber(id, count)].includes(id), true)
+  }
+  assert.deepEqual(shardStories([...ids].reverse(), 0, count).sort(), shards[0])
+  assert.deepEqual(shardStories([...ids, 'new-story'], 0, count).filter(id => id !== 'new-story'), shards[0])
+  const receipts = shards.map((selected, shardIndex) => ({
+    ...provenance, pass: true, fullIds: ids, shardIndex, shardCount: count,
+    rows: selected.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width, pass: true })))),
+  }))
+  assert.equal(aggregateShards(receipts, count).cases, 1252)
+  assert.throws(() => aggregateShards(receipts.slice(1), count))
+  const invalid = change => { const copy = structuredClone(receipts); change(copy); assert.throws(() => aggregateShards(copy, count)) }
+  invalid(copy => { copy[0].rows.pop() })
+  invalid(copy => { copy[0].rows[0].pass = false })
+  invalid(copy => { copy[0].pass = false })
+  invalid(copy => { copy[0].rows[0] = copy[0].rows[1] })
+  invalid(copy => { copy[0].rows = [] })
+  invalid(copy => { copy[0].shardIndex = count })
+  invalid(copy => { copy[0].headSha = 'b'.repeat(40) })
+  invalid(copy => { delete copy[0].headSha })
+  invalid(copy => { copy[0].runId = '9999' })
+  invalid(copy => { copy[0].runAttempt = 3 })
+  invalid(copy => { delete copy[0].runAttempt })
+  // Rerun-failed-jobs: retain an older successful shard of the same run/head.
+  const mixed = structuredClone(receipts)
+  mixed[0].runAttempt = 1
+  assert.equal(aggregateShards(mixed, count).pass, true)
+  assert.throws(() => aggregateShards(mixed.slice(1), count))
+  const newer = { ...receipts[0], runAttempt: 2, pass: false }
+  assert.throws(() => aggregateShards([...mixed, newer], count))
+  assert.throws(() => aggregateShards([newer, ...mixed], count))
+  // A successful rerun supersedes an older failure, independent of listing order.
+  const olderFailed = { ...receipts[0], runAttempt: 1, pass: false }
+  assert.equal(aggregateShards([...receipts, olderFailed], count).pass, true)
+  assert.equal(aggregateShards([olderFailed, ...receipts], count).pass, true)
+  assert.equal(shardArtifactName(receipts[0]), `kit-play-1234-${provenance.headSha}-shard-0-attempt-2`)
+  if (count > 1) {
+    invalid(copy => { copy[1] = copy[0] })
+    invalid(copy => { copy[1].fullIds = ids.slice(1) })
+  }
+}
+assert.throws(() => shardStories(['story-0', 'story-0'], 0, 2))
+assert.throws(() => shardStories(['story-0', 'story-2'], 0, 2))
+assert.deepEqual(shardStories(['story-0'], 0, 2), [])
+for (const count of [0, -1, NaN, 1.5]) assert.throws(() => shardStories(ids, 0, count))
+console.log('passed: stable hashes, exact union, configurable count, missing/empty/failed/duplicate shards')
+console.log('passed: workflow provenance, same-head older attempts, newest-attempt precedence')
+''', text=True)
+sharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
+assert "fail-fast: false" in execution
+assert f"""matrix: ${{{{ fromJSON({sharded} && '{{"shard":[0,1]}}' || '{{"shard":[0]}}') }}}}""" in execution, "only the full set (merge groups, manual runs) is sharded"
+assert "KIT_SHARD_INDEX: ${{ matrix.shard }}" in execution
+assert f"KIT_SHARD_COUNT: ${{{{ {sharded} && '2' || '1' }}}}" in execution, "the per-commit set runs unsharded"
+assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}" in execution
+assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*" in gate_job
+assert "actions/upload-artifact@v4" in execution
+assert "actions/download-artifact@v4" in gate_job
+assert "kit-play-shards.mjs" in gate_job
+assert gate_job.count(f"if: {sharded} && needs.fractal-web-changes.outputs.relevant == 'true'") == 3, "pull requests skip the shard aggregation"
+print("passed: merge-group shards preserve receipts and the semantic gate validates complete coverage")
 
 # The kit module graph check: every bundled repository file must be a declared kit input.
 graph_check = root / "scripts/ci-fractal-web-kit-graph"
 detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
 assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
+roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "apps/fractal-web/packages/fractal-sdk/src/effect/resourceDecode.ts"]
+assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
+workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
+assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
 with tempfile.TemporaryDirectory() as scratch:
     def graph(*ids):
@@ -315,8 +493,10 @@ with tempfile.TemporaryDirectory() as scratch:
         path.write_text(json.dumps({"modules": [{"id": identifier} for identifier in ids]}))
         return subprocess.run([str(graph_check), str(path)], capture_output=True, text=True)
     covered = graph("./src/Composer.stories.tsx", "./.storybook/preview.ts?v=1", "./../../node_modules/react/index.js",
-                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx")
-    assert covered.returncode == 0 and "3 repository files, 0 outside" in covered.stdout, covered
+                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
+                    "./../../apps/fractal-web/src/telemetry/inputPaint.ts",
+                    "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
+    assert covered.returncode == 0 and "5 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):
