@@ -305,6 +305,12 @@ def run(st_test, repo, checks, kind, rules, log):
                     stop(CHILD)
                     break
         finally:
+            # Whatever the run left behind in its process group (a test's stray background process) is ended now, before the log is
+            # read: nothing may write to the log after st-test's summary.
+            try:
+                os.killpg(CHILD.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
             CHILD = None
             if scratch:
                 shutil.rmtree(scratch, ignore_errors=True)
@@ -403,7 +409,8 @@ def tick(args):
                 results = {rows.get(name, 'no result') for name in missing}
                 # 'not signed': the tree edits that check's lane, so CI runs it; not a failure of the head.
                 line['outcome'] = ('worker_signed' if results == {'passed'} else
-                                   'worker_signed_lane_edit' if results <= {'passed', 'not signed'} else 'failed')
+                                   'worker_signed_lane_edit' if results == {'passed', 'not signed'} else
+                                   'lane_edit_not_signed' if results == {'not signed'} else 'failed')
                 for name in missing:
                     done.setdefault(tree, {})[name] = {'result': rows.get(name, 'no result'), 'at': stamp()}
                 write_json(paths['done'], done)

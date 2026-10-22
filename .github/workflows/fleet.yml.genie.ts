@@ -232,15 +232,22 @@ const evidenceGateOutcomes = [
   ['rejected', 'evidence note rejected'],
   ['unavailable', 'evidence verifier unavailable'],
 ] as const
+// A check whose policy compares a note's input with this run's own value (input_order) gets that value from the job that knows
+// it: fractal-web's kit_inputs is its change detection's answer for this run's diff. The gate passes RUN_INPUTS to the verifier.
+const evidenceGateRunInputs: Record<string, { needs: string[], values: Record<string, string> }> = {
+  'fractal-web': { needs: ['fractal-web-changes'], values: { kit_inputs: '${{ needs.fractal-web-changes.outputs.kit-inputs }}' } },
+}
 const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`evidence-gate-${check}`, {
   name: `evidence-gate-${check}`,
+  ...(evidenceGateRunInputs[check] ? { needs: evidenceGateRunInputs[check].needs } : {}),
   'runs-on': 'ubuntu-latest',
   'timeout-minutes': 5,
   'continue-on-error': true,
   permissions: { contents: 'read' },
   // The decision the check jobs act on comes from the marker step below, not from the gate step: skip=true can
   // exist only if the marker already ran, so the observer, which keys on the marker, can never miss a skip.
-  outputs: { skip: '${{ steps.taken.outputs.skip }}', record: '${{ steps.taken.outputs.record }}' },
+  // `line` is the gate's decision line, for evidence-presign-notice only; nothing decides a skip from it.
+  outputs: { skip: '${{ steps.taken.outputs.skip }}', record: '${{ steps.taken.outputs.record }}', line: '${{ steps.gate.outputs.line }}' },
   steps: [
     { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
     {
@@ -263,6 +270,7 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
         TRIGGERING_ACTOR: '${{ github.triggering_actor }}',
         RUN_ID: '${{ github.run_id }}',
         RUN_ATTEMPT: '${{ github.run_attempt }}',
+        ...(evidenceGateRunInputs[check] ? { RUN_INPUTS: JSON.stringify(evidenceGateRunInputs[check].values) } : {}),
       },
       // The gate is taken from the accepted base, like the verifier, so a change cannot rewrite the
       // script that decides whether it is skipped. No gate at the base, or any failure: run the check.
@@ -285,6 +293,33 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
     },
   ],
 }]))
+
+// After the gates, on pull requests only: say which checks ran in full only because no pre-signed note covered this head,
+// and how to pre-sign them (scripts/ci-evidence-presign-notice, taken from the accepted base like the gate). A notice and
+// the job summary, nothing more: it never fails, is not a required check, and nothing reads its result.
+const presignNoticeJob = {
+  name: 'evidence-presign-notice',
+  'runs-on': 'ubuntu-latest',
+  'timeout-minutes': 3,
+  'continue-on-error': true,
+  needs: evidenceGateChecks.map((check) => `evidence-gate-${check}`),
+  if: "always() && github.event_name == 'pull_request'",
+  permissions: { contents: 'read', 'pull-requests': 'read' },
+  steps: [
+    { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+    {
+      name: 'Say which checks a pre-signed note would have covered',
+      env: {
+        LINES: evidenceGateChecks.map((check) => `\${{ needs.evidence-gate-${check}.outputs.line }}`).join('\n'),
+        BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        REPOSITORY: '${{ github.repository }}',
+        PR_NUMBER: '${{ github.event.pull_request.number }}',
+        GH_TOKEN: '${{ github.token }}',
+      },
+      run: `git fetch --no-tags --depth=1 -q origin "$BASE_SHA" && git show "$BASE_SHA:scripts/ci-evidence-presign-notice" > "$RUNNER_TEMP/ci-evidence-presign-notice" && python3 "$RUNNER_TEMP/ci-evidence-presign-notice" || echo 'evidence-presign-notice: not at the base yet, or it could not run; nothing to say'`,
+    },
+  ],
+}
 
 export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
@@ -339,6 +374,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(au
       ],
     },
     ...evidenceGateJobs,
+    'evidence-presign-notice': presignNoticeJob,
     // Start immediately on hosted capacity: no Nix setup, downloads or compilation.
     'upgrade-impact': {
       name: 'upgrade-impact',
@@ -735,4 +771,4 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
       steps: skipIfCovered('fractal-web', fractalWebJobs['fractal-web-execution'].steps),
     },
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))

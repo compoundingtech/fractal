@@ -548,6 +548,17 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "shard_inputs": {
+            "count": "kit_shard_count",
+            "results": "shard_results",
+            "pull_request_count": 1
+          },
+          "input_order": {
+            "kit_inputs": [
+              "true",
+              "false"
+            ]
           }
         }
       }

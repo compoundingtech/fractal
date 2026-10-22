@@ -5943,6 +5943,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
+    // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
+    store.trim_locally(config.trim.local);
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6014,7 +6016,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6247,9 +6249,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
             let activation_store = store.clone();
-            let checkpoint_context = config
-                .checkpoint
-                .enabled
+            // A member that trims locally still runs the pass, which only finishes a trim it had
+            // already committed.
+            let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
                 .then(|| fractal_daemon::store::CheckpointContext {
                     now_unix_ms: 0,
                     configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
@@ -7401,6 +7403,12 @@ async fn run_inspect(client: &Client, args: InspectArgs, json_output: bool) -> R
         ))
         .await?;
     let mut shown = json!({ "status": status, "recent_claims": claims.claims });
+    if let Some(standby) = shown["status"]["subjects"].as_array().and_then(|subjects|
+        subjects.iter().find_map(|subject| subject.pointer("/actual/schedule_standby"))) {
+        let standby = standby.clone();
+        shown["schedule_standby"] = standby;
+    }
+
     // Who signed a message a person wrote, and whether that checks.
     if args.subject.starts_with("message/")
         && let Some(provenance) = message_provenance(client, &args.subject).await
@@ -7430,6 +7438,14 @@ async fn run_trace_to(
         client.clone()
     };
     let client = &client;
+    let schedule_standby = if let Some(subject) = args.subject.as_deref().filter(|subject| subject.starts_with("schedule/")) {
+        status_for(client, subject).await?.subjects.into_iter()
+            .find_map(|subject| subject.actual.and_then(|actual| actual.get("schedule_standby").cloned()))
+    } else { None };
+    if !json_output && schedule_standby.is_some() {
+        writeln!(output, "{}", fractal_daemon::schedule_standby::RUN_TWICE_WARNING)?;
+        writeln!(output, "{}", fractal_daemon::schedule_standby::COLD_STANDBY_LIMIT)?;
+    }
     let claims = trace_claims(client, &args).await?;
     let mut cursor = args.after_index.unwrap_or_default();
     for claim in claims {
@@ -7438,7 +7454,9 @@ async fn run_trace_to(
         }
         cursor = cursor.max(claim.store_index);
         if json_output {
-            writeln!(output, "{}", serde_json::to_string(&claim)?)?;
+            let mut shown = serde_json::to_value(&claim)?;
+            if let Some(standby) = &schedule_standby { shown["schedule_standby"] = standby.clone(); }
+            writeln!(output, "{}", serde_json::to_string(&shown)?)?;
         } else {
             write_trace_claim(output, &claim)?;
         }
@@ -7478,7 +7496,9 @@ async fn run_trace_to(
                 return Ok(());
             }
             if json_output {
-                writeln!(output, "{}", serde_json::to_string(&event)?)?;
+                let mut shown = serde_json::to_value(&event)?;
+                if let Some(standby) = &schedule_standby { shown["schedule_standby"] = standby.clone(); }
+                writeln!(output, "{}", serde_json::to_string(&shown)?)?;
             } else {
                 let claims: ClaimsPage = client
                     .get(&format!(

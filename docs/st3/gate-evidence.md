@@ -1085,6 +1085,39 @@ and a signer level's own `events` can only narrow it further (the verifier repor
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
 
+#### Input values (`input_order`, `shard_inputs`)
+
+`required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
+
+**`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
+when its value ranks at or above the run's own value.
+- The run's value comes from the gate: `evidence-verify --run-input KEY=VALUE`.
+- A run that did not say its value is never covered (`no_run_input`).
+- A note whose value is missing, unknown or weaker is refused (`wrong_input`).
+
+It is for inputs that depend on the run, not the tree. fractal-web's `kit_inputs` says whether the diff from the run's base touched kit
+paths; with `false` the lane skips every kit play. A note made without kit plays may cover a run that would skip them too, never one that
+would run them.
+
+**`shard_inputs`** names a sharded job's inputs: `count` (1 to 16) and `results`.
+- `results` must read `0=success,1=success,...` for every shard.
+- `pull_request_count`, when given, is the only count a note from a `pull_request` run may carry.
+
+The fractal-web note's per-shard results come from the matrix's single result, which GitHub reports as success only when every shard
+succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test` holds every shard count in the workflow to the
+matrix's own condition and length.
+
+fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifier through the gate:
+- `evidence-gate-fractal-web` needs `fractal-web-changes` and sets `RUN_INPUTS` to `{"kit_inputs": "<its kit-inputs output>"}`.
+- The gate passes each value as `--run-input` once the base's verifier takes that flag.
+- A malformed `RUN_INPUTS` is dropped, so no note covers the run.
+
+`scripts/evidence-flip-ready` does not propose fractal-web's flip until both keys are in the policy.
+
+`app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
+main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a
+note covers.
+
 ### Which checks skip today
 
 | Check | `enforce` | `events` | `sample_one_in` | Since |
@@ -1412,7 +1445,8 @@ host's signing key within reach, so they carry no secret beyond that key and the
 The heavy class's kept target is shared between heads; that is accepted for our own authors' code (the same trust as a seat's warm
 checkout), and it is one reason the authors file must stay that short. A check's result is read only from st-test's final summary. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
 (pull request, head, tree, class, first seen ready, start, seconds, per-check result, peak IO pressure, outcome `worker_signed`,
-`worker_signed_lane_edit`, `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
+`worker_signed_lane_edit` (signed, apart from a check whose lane the tree edits), `lane_edit_not_signed` (nothing
+signed: the tree edits every lane), `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
 window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
 how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
 
@@ -1481,6 +1515,38 @@ collector reads the outcome from the jobs API: `evidence satisfied by existing n
 `evidence existing note is degraded`, `evidence no note`, `evidence note rejected`,
 `evidence verifier unavailable`, plus `evidence skip taken` when the decision is skip. A note made for a pull request is reused by the merge queue's run
 only when the tree is identical, that is, when main has not moved in between.
+
+The gate step also writes the line as its output `line` (first, with control characters replaced, so it cannot stand in for
+`outcome`, `skip` or `record`), and each gate job passes it on as `outputs.line`. Only `evidence-presign-notice` reads it.
+
+### Not pre-signed: the notice (`scripts/ci-evidence-presign-notice`)
+
+Nothing rejects a pull request for a missing note. A pull request that is not pre-signed runs its checks, and CI signs them.
+The `evidence-presign-notice` job only says so. It runs on pull requests (not drafts) after the six gate jobs and takes
+`scripts/ci-evidence-presign-notice` from the accepted base, like the gate. It never fails, is not a required check, and nothing
+reads its result.
+
+It lists a check only when all of these hold:
+
+- `scripts/st-test` can sign it: the check is a lane of `.st/required-lanes.json` at the base.
+- Its gate ran it for lack of a note: `decision=run outcome=no_note` on a same-repository pull request.
+- The gate asked about the head's own tree (`tree_of=head head_tree=used`). After a fallback to the merge tree, a pre-signed
+  note could not have counted.
+- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refuses to sign
+  such a tree.
+
+With a check listed, it writes one notice annotation and the job summary:
+
+> These jobs ran in full because no pre-signed note covered this head: genie-freshness, typescript-client. Run
+> `scripts/st-test --push origin` before marking the pull request ready, and CI can skip them. How: (#3621). This never fails a
+> check or blocks a merge.
+
+`--all` is added when `mail-redelivery-canaries` is listed. Every run also prints one counting line,
+`evidence-presign-notice v1 pr=… listed=…|- passed_over=check:reason,…|-`. If the lanes file or the file list cannot be read,
+the affected checks are passed over, never listed.
+
+This is phase A, a notice only. Phase B, from a date announced in #3621 first, adds one comment on the pull request, edited
+in place on later pushes. It still never blocks anything.
 
 ### Loops
 

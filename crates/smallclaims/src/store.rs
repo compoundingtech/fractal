@@ -793,6 +793,8 @@ pub struct Store {
     /// needs when they differ. Off unless the daemon's divergence check is on: a default
     /// install never compares, reports no divergence, and settles sync on claims alone.
     pub divergence_capture: std::sync::atomic::AtomicBool,
+    /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
+    trim_local: AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1102,6 +1104,7 @@ impl Store {
             replication_snapshot_build: Mutex::new(()),
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
+            trim_local: AtomicBool::new(false),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -1723,6 +1726,7 @@ impl CompactReplicationInventory {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -2594,13 +2598,21 @@ pub fn fleet_meta(connection: &Connection, key: &str) -> Result<Option<String>> 
         .optional()?)
 }
 
-/// The highest sequence this node holds of a writer, counting envelopes a checkpoint dropped.
+/// The highest sequence this node has held of a writer, counting envelopes a trim dropped: the
+/// writer's batch head (`writer_heads`) and retired envelopes as well as tombstones, the same
+/// floor as `next_replica_sequence`. Adoption can withdraw a trimmed envelope's tombstone, and a
+/// removal's high water or a rejoin floor read only from the tombstones would then fall below a
+/// sequence peers already hold.
 pub fn writer_high_water(connection: &Connection, writer: &str) -> Result<Option<u64>> {
     Ok(connection.query_row(
         "SELECT MAX(sequence) FROM (
              SELECT MAX(sequence) AS sequence FROM replica_envelopes WHERE writer=?1
              UNION ALL
              SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT sequence FROM writer_heads WHERE writer=?1
          )",
         [writer],
         |row| row.get(0),
@@ -4607,6 +4619,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -4635,6 +4648,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         };
         (missing, inventory)
     }
@@ -4704,6 +4718,7 @@ pub fn compact_replication_exchange_lists_only_ranges_that_differ() {
         buckets: Vec::new(),
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     })
     .unwrap()
     .len();
@@ -4808,6 +4823,7 @@ pub fn compact_replication_exchange_waits_for_a_complete_listing() {
         buckets: peer.summary().buckets,
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     };
     let (missing, _) = compact_replication_difference(&inventory, &buckets, &listing, limit);
     assert_eq!(missing, test_envelope_ids("origin", 9..=10, "a"));
@@ -6350,6 +6366,21 @@ impl Store {
     }
 
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, true)
+    }
+
+    /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
+    /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
+    /// This reduced inventory must not be used to construct a signed peer exchange.
+    pub fn export_replication_authority_guard(&self, fleet_id: &str) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, false)
+    }
+
+    fn replication_summary(
+        &self,
+        fleet_id: &str,
+        include_buckets: bool,
+    ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
         let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
@@ -6366,9 +6397,14 @@ impl Store {
             inventory: ReplicationInventory {
                 digest: snapshot.inventory.digest.clone(),
                 envelopes: Vec::new(),
-                buckets: snapshot.buckets.clone(),
+                buckets: if include_buckets {
+                    snapshot.buckets.clone()
+                } else {
+                    Vec::new()
+                },
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
+                claim_range_query: None,
             },
             envelopes: Vec::new(),
             signature_requests,
@@ -6412,6 +6448,21 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
+        // Claims the peer found it lacks travel in their ordinary envelopes, after the
+        // envelopes the inventory difference already sends.
+        if let Some(query) = remote.claim_range_query.as_ref().filter(|query| !query.claims.is_empty()) {
+            let sent: BTreeSet<(String, u64, String)> = exchange
+                .envelopes
+                .iter()
+                .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
+                .collect();
+            let wanted = self
+                .envelopes_carrying_claims(&query.claims)?
+                .into_iter()
+                .filter(|id| !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
+                .collect();
+            exchange.envelopes.extend(self.replica_envelopes(wanted)?);
+        }
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
         fit_exchange_body(&mut exchange, budget)?;
@@ -6452,12 +6503,13 @@ impl Store {
                     buckets: snapshot.buckets.clone(),
                     accepts: Some(replication_accepts()),
                     checkpoint: self.trimmed_checkpoint()?,
+                    claim_range_query: None,
                 },
                 envelopes: self.replica_envelopes(missing)?,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
-                claim_ranges: Some(self.claim_range_summary()?),
+                claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -6518,7 +6570,7 @@ impl Store {
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
-            claim_ranges: Some(self.claim_range_summary()?),
+            claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
         })
     }
 
@@ -6867,12 +6919,9 @@ impl Store {
         }
         // Claims are compared only with a peer that speaks the same claim-range protocol, and
         // only while both range indexes cover every retained claim.
-        let claims_equal = match input.claim_ranges.as_ref() {
-            Some(remote) if remote.version == CLAIM_RANGE_VERSION => {
-                let local = self.claim_range_summary().map_err(internal)?;
-                local.retained.zip(remote.retained.as_ref()).map(|(local, remote)| local == *remote)
-            }
-            _ => None,
+        let claim_ranges = match input.claim_ranges.as_ref() {
+            Some(remote) => self.compare_claim_ranges(remote).map_err(internal)?,
+            None => None,
         };
         let now = now_ms();
         let mut sync = self
@@ -6880,8 +6929,8 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
-        if let Some(equal) = claims_equal {
-            progress.compare_claims(equal, now);
+        if let Some(comparison) = &claim_ranges {
+            progress.compare_claims(comparison.same, now);
         }
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
@@ -6977,7 +7026,9 @@ impl Store {
                 buckets: Vec::new(),
                 accepts: None,
                 checkpoint: None,
+                claim_range_query: None,
             },
+            claim_ranges,
         })
     }
 
@@ -8266,6 +8317,19 @@ impl Store {
     pub fn capture_divergences(&self, on: bool) {
         self.divergence_capture
             .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Trim on this member's own, without checkpoint agreement: the member's `[trim] local`
+    /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
+    /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
+    /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
+    /// on the other members until a person excuses this one.
+    pub fn trim_locally(&self, on: bool) {
+        self.trim_local.store(on, Ordering::Relaxed);
+    }
+
+    pub fn trims_locally(&self) -> bool {
+        self.trim_local.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.

@@ -252,8 +252,20 @@ def clippy_base_pinned(entry):
     return [f'the policy does not require clippy_base_sha of {" and ".join(missing)} linux-gate notes'] if missing else []
 
 
+def web_values_checked(entry):
+    """fractal-web's pull request runs pick their tests from their own diff: a note covers a run only when it ran the kit plays or the
+    run would skip them too (input_order on kit_inputs, true before false), and its shard results must be checked as values."""
+    wrapper = (entry.get('kinds') or {}).get('wrapper') or {}
+    why = []
+    if (wrapper.get('input_order') or {}).get('kit_inputs') != ['true', 'false']:
+        why.append('the policy does not order kit_inputs (true before false) for fractal-web notes')
+    if not wrapper.get('shard_inputs'):
+        why.append('the policy does not check the shard inputs of fractal-web notes')
+    return why
+
+
 # Conditions a check's policy entry must meet before its flip is proposed, whatever the decision lines say.
-PRECONDITIONS = {'linux-gate': clippy_base_pinned}
+PRECONDITIONS = {'linux-gate': clippy_base_pinned, 'fractal-web': web_values_checked}
 
 
 def preconditions(result, check, entry):

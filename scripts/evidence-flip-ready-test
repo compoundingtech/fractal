@@ -168,6 +168,18 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(flip.preconditions({'ready': False, 'why_not': ['x']}, 'linux-gate', {})['why_not'][0], 'x')
         self.assertEqual(flip.preconditions(ready, CHECK, {}), ready)
 
+    def test_fractal_web_is_not_proposed_until_its_notes_values_are_checked(self):
+        ready = {'ready': True, 'why_not': []}
+        entry = lambda **wrapper: {'kinds': {'wrapper': dict({'command': ['fractal-web']}, **wrapper)}}
+        self.assertEqual(flip.preconditions(ready, 'fractal-web', entry())['why_not'], [
+            'the policy does not order kit_inputs (true before false) for fractal-web notes',
+            'the policy does not check the shard inputs of fractal-web notes'])
+        shards = {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1}
+        self.assertEqual(flip.preconditions(ready, 'fractal-web', entry(shard_inputs=shards))['why_not'],
+                         ['the policy does not order kit_inputs (true before false) for fractal-web notes'])
+        self.assertEqual(flip.preconditions(ready, 'fractal-web', entry(shard_inputs=shards, input_order={'kit_inputs': ['false', 'true']}))['ready'], False)
+        self.assertEqual(flip.preconditions(ready, 'fractal-web', entry(shard_inputs=shards, input_order={'kit_inputs': ['true', 'false']})), ready)
+
     def test_the_window_has_not_started_while_the_log_key_is_not_pinned(self):
         self.ready_history(count=40)
         self.gh.run(3000, at(20), [decision(log='-')])

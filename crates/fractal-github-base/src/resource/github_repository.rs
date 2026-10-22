@@ -2565,6 +2565,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_or_short_workspace_ci_listing_fails_the_read_and_a_quiet_one_does_not() {
+        use super::super::github_workflows::workspace_ci_runs;
+        let (github, base) = FakeGithub::start().await;
+        let base = format!("{base}/repos/acme/garden");
+        let now = chrono::Utc::now();
+        let since = (now - chrono::TimeDelta::days(1)).format("%Y-%m-%d");
+        let listing = |filter: &str| format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?{filter}&created=%3E%3D{since}&per_page=100");
+        let newest = |filter: &str| format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?{filter}&per_page=1");
+        let (pulls, groups) = ("event=pull_request&status=success", "event=merge_group&status=completed");
+        // The created= filter answers nothing for pull requests, but their newest run is from today.
+        github.route(&listing(pulls), json!({"total_count": 0, "workflow_runs": []}));
+        github.route(&listing(groups), json!({"total_count": 0, "workflow_runs": []}));
+        github.route(&newest(pulls), json!({"total_count": 9, "workflow_runs": [{"id": 1, "created_at": now.to_rfc3339()}]}));
+        github.route(&newest(groups), json!({"total_count": 9, "workflow_runs": [{"id": 2, "created_at": "2020-01-01T00:00:00Z"}]}));
+        let client = reqwest::Client::new();
+        let auth = GithubAuth::test("fixture-auth");
+        let now_ms = now.timestamp_millis() as u64;
+        let error = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap_err();
+        assert!(error.to_string().contains("listed no event=pull_request&status=success runs"), "{error}");
+        // Newest runs from before the window: the empty listing is a quiet day.
+        github.route(&newest(pulls), json!({"total_count": 9, "workflow_runs": [{"id": 1, "created_at": "2020-01-01T00:00:00Z"}]}));
+        let quiet = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap();
+        assert!(quiet.runs.is_empty());
+        // A listing short of its own total fails too.
+        github.route(&listing(pulls), json!({"total_count": 2, "workflow_runs": [{"id": 3, "created_at": now.to_rfc3339()}]}));
+        let error = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap_err();
+        assert!(error.to_string().contains("listed 1 event=pull_request&status=success runs") && error.to_string().contains("of the 2"), "{error}");
+    }
+
+    #[tokio::test]
     async fn runs_in_the_last_hour_have_their_artifacts_listed_once_for_flaky_tests() {
         use super::super::github_workflows::{read_flaky, WorkspaceCi, WorkspaceRun};
         let (github, base) = FakeGithub::start().await;

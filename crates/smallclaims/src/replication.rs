@@ -28,6 +28,10 @@ pub struct ReplicationInventory {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<InventoryCheckpoint>,
+    /// What the sending node asks about the receiver's claim ranges. The receiver answers in its
+    /// exchange's `claim_ranges`. Older peers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_range_query: Option<ClaimRangeQuery>,
 }
 
 /// A checkpoint as an inventory advertises it.
@@ -92,6 +96,78 @@ pub struct ClaimRangeSummary {
     /// Every retained claim, or `None` while the sender's range index is still folding claims in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained: Option<ClaimRangeDigest>,
+    /// Every non-empty top range, when the peer asked for the tops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tops: Option<Vec<ClaimRangeEntry>>,
+    /// The non-empty leaves of each top range the peer asked about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves: Vec<ClaimRangeLeaves>,
+    /// The retained claim IDs of each leaf range the peer asked about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<ClaimRangeIds>,
+}
+
+/// The most top ranges one query asks the leaves of, and the most leaf ranges it asks the IDs
+/// of. An answer holds at most 256 leaves and, beyond its first leaf, at most
+/// `CLAIM_RANGE_ANSWER_IDS` IDs.
+pub const CLAIM_RANGE_QUERY_TOPS: usize = 4;
+pub const CLAIM_RANGE_QUERY_LEAVES: usize = 8;
+pub const CLAIM_RANGE_ANSWER_IDS: usize = 4096;
+/// The most claims one query asks a peer to send.
+pub const CLAIM_RANGE_QUERY_CLAIMS: usize = 512;
+
+/// One step of walking a peer's claim ranges: the tops, the leaves of some tops, the IDs of some
+/// leaves, and the claims this node found it lacks. The peer sends those claims' envelopes
+/// with its ordinary exchange.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeQuery {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tops: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves_of: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids_of: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<String>,
+}
+
+/// One range's number, population and digest.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeEntry {
+    pub range: u32,
+    pub count: u64,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeLeaves {
+    pub top: u32,
+    pub leaves: Vec<ClaimRangeEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeIds {
+    pub leaf: u32,
+    pub ids: Vec<String>,
+}
+
+/// How a peer's claim ranges differ from this node's, as far as one answer shows.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeComparison {
+    /// Whether both retain the same claims.
+    #[serde(default)]
+    pub same: bool,
+    /// The two whole-set digests compared. A walk runs once for each pair.
+    pub pair: String,
+    /// Top ranges in the answer whose population or digest differs from this node's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tops: Vec<u32>,
+    /// Leaf ranges in the answer that differ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves: Vec<u32>,
+    /// Claim IDs the peer retains that this node neither retains nor has retired.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 /// The population of a claim range and the hex of its 512-bit digest.
@@ -109,6 +185,10 @@ pub struct ReplicationReceipt {
     #[serde(default)]
     pub signatures: usize,
     pub inventory: ReplicationInventory,
+    /// How the peer's claim ranges in this exchange differ from this node's, for the worker
+    /// that walks them. Local to this node; never sent to a peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_ranges: Option<ClaimRangeComparison>,
 }
 
 /// A node's first sync after it joins: it ends once the node holds the same envelopes as a
@@ -146,6 +226,11 @@ pub struct ReplicationExportRequest {
     /// Older local daemons ignore this field; it never changes the exported exchange.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_guard: bool,
+    /// Local-daemon only: the scalar guard does not consume inventory buckets. Honored only
+    /// for a summary with `authority_guard`; ordinary/default and peer exchanges stay full.
+    /// Older local daemons ignore this option and return the complete response in one call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_digest_only: bool,
     /// The other side's signature requests, to answer in the exported exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signature_requests: Vec<ReplicaEnvelopeId>,
