@@ -37,9 +37,10 @@ CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
 # here independently of the policy file so a typo in either cannot make the test agree with itself.
-GATE_ARGV = ['linux-gate', 'aggregate', 'genie-freshness', 'isolation-vm', 'linux-clippy', 'linux-fleet-compat',
+# genie-freshness and typescript-client are separate checks with their own notes: not in the aggregate's command.
+GATE_ARGV = ['linux-gate', 'aggregate', 'isolation-vm', 'linux-clippy', 'linux-fleet-compat',
              'linux-gate', 'linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
-             'linux-tests-shard-4', 'mail-redelivery-canaries', 'typescript-client', 'upgrade-impact']
+             'linux-tests-shard-4', 'mail-redelivery-canaries', 'upgrade-impact']
 CANARIES_ARGV = ['bash', 'scripts/ci-linux', 'mail-redelivery-canaries']
 # The step-outcome notes of the other three checks (nix-evidence, agent/evidence-more-checks).
 STEP_ARGV = {
@@ -1738,20 +1739,42 @@ class WorkflowStructure(unittest.TestCase):
             self.assertIn("((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository)", head)
 
     def test_the_linux_gate_wrapper_rule_is_the_argv_the_aggregate_job_records_from_its_needs(self):
-        """The aggregate note records ['linux-gate', 'aggregate'] + its needed jobs sorted, gates left out.
-        Derived here from the generated workflow so adding a needed job cannot silently disable skipping."""
+        """The aggregate note records ['linux-gate', 'aggregate'] + its needed jobs sorted, gates, the fractal-web lane and
+        the separate checks left out. Recorded here by ci-evidence-signing aggregate itself from the generated workflow's
+        needs, so adding a needed job cannot silently disable skipping."""
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
         names = [line.strip()[2:] for line in needs.splitlines()]
-        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith(('evidence-gate-', 'fractal-web-')))
+        needs_json = {name: {'result': 'success', 'outputs': {'skip': 'false'} if name.startswith('evidence-gate-') else {}} for name in names}
+        with tempfile.TemporaryDirectory() as scratch:
+            out = Path(scratch) / 'facts.json'
+            env = {k: v for k, v in os.environ.items() if not k.startswith(('GITHUB_', 'PR_', 'EVIDENCE_', 'RUNNER_', 'PROJECT_'))}
+            done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-evidence-signing'), 'aggregate', str(out)], capture_output=True,
+                                  text=True, env=dict(env, NEEDS_JSON=json.dumps(needs_json), GITHUB_EVENT_NAME='merge_group'))
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            recorded = json.loads(out.read_text())['command']
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], derived)
-        self.assertEqual(GATE_ARGV, derived)
+        self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], recorded)
+        self.assertEqual(GATE_ARGV, recorded)
         self.assertIn('linux-gate', names)
-        # Every real gate job is awaited, so a skip taken anywhere stops the note.
+        # The note job still waits for the separate checks (it publishes their own notes), but they are not in its command.
+        for separate in ('genie-freshness', 'typescript-client'):
+            self.assertIn(separate, names)
+            self.assertNotIn(separate, recorded)
+        # Every real gate job is awaited; a skip taken by a gate of a linux-gate member stops the note.
         self.assertEqual(sorted(n for n in names if n.startswith('evidence-gate-')),
                          sorted(f'evidence-gate-{c}' for c in CHECKS))
+
+    def test_the_stage_notes_publish_whenever_the_key_is_configured_not_only_when_the_aggregate_signed(self):
+        """An aggregate that refuses (a lane skipped) must not hold back the stage notes that ran and verify."""
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
+        for step in ('Collect the stage notes', 'Publish the notes that verify', 'Shadow-verify the published notes'):
+            condition = re.search(rf'^      - name: {re.escape(step)}\n        if: (.*)$', job, re.M)
+            self.assertIsNotNone(condition, step)
+            self.assertIn("steps.configure.outcome == 'success'", condition.group(1), step)
+            self.assertNotIn('steps.sign', condition.group(1), step)
 
     def test_the_aggregate_note_job_signs_only_for_the_queue_main_and_pull_requests_of_this_repository(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
