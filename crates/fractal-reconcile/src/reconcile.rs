@@ -19965,18 +19965,38 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
     }
 
+    /// A pass of the loop can also write to a subject the plan read, such as the mission run,
+    /// between planning and applying. The apply then refuses the plan as `stale-subject`, and an
+    /// operator would plan again, so this does too.
     fn apply_source_beside_the_loop(store: &Store, source: &str, idempotency_key: &str) {
         let intent = parse_intent(source, "node").unwrap();
-        let mission = beside_the_loop(|| {
-            store.mission(
-                &intent,
-                crate::model::IntentInput {
-                    kdl: source.into(),
-                    source_name: None,
-                },
-            )
-        });
-        beside_the_loop(|| store.apply(&intent, &mission.subject_tokens, idempotency_key));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mission = beside_the_loop(|| {
+                store.mission(
+                    &intent,
+                    crate::model::IntentInput {
+                        kdl: source.into(),
+                        source_name: None,
+                    },
+                )
+            });
+            let applied = beside_the_loop(|| {
+                match store.apply(&intent, &mission.subject_tokens, idempotency_key) {
+                    Ok(_) => Ok(true),
+                    Err(error)
+                        if error.code == "stale-subject" && std::time::Instant::now() < deadline =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            });
+            if applied {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
