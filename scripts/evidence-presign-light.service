@@ -1,0 +1,13 @@
+[Unit]
+Description=Pre-sign worker, light class: sign the light checks (about a minute each) for one ready pull request head of our own authors (scripts/evidence-presign-worker)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/evidence-presign/env
+ExecStart=/usr/bin/env bash %h/.local/bin/evidence-presign-timer light
+TimeoutStartSec=30min
+Nice=5
+IOSchedulingClass=idle

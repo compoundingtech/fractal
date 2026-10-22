@@ -1387,6 +1387,31 @@ holds both the host and the agent level to its definition (`scripts`, `.st`, `.c
 edits the scripts that decide what the stage runs never skips on a local note; the host and agent levels cover pull requests
 only, and the merge queue runs the stage.
 
+**The pre-sign worker (`scripts/evidence-presign-worker`).** Signing at push time depends on the push: a push with `ST_SKIP_EVIDENCE=1`
+does not wait, a push made where no hook runs signs nothing, and no push signs the heavy checks. The worker closes that gap on the signing
+host, from the tools' side. Two systemd user timers (`scripts/evidence-presign-light.timer` every 2 minutes, `scripts/evidence-presign-heavy.timer`
+every 5) each run one tick of one class through `scripts/evidence-presign-timer`, which reads the worker from `origin/main` of a clone the
+worker owns (one per class, so a light tick never moves the checkout under a heavy run). A tick lists the open pull requests and keeps the
+ready ones (not drafts) that target `main`, come from the repository itself (no forks) and are authored by a GitHub login in
+`~/.config/evidence-presign/authors`. That file is the host's own configuration, not repository data a pull request could edit; without it,
+or with no login in it, the worker refuses to run, and an outside author's code is never run (it would run with the host's key within
+reach). Newest first, it takes the first head with a check of its class that `st-test --status` does not call covered and that it has not
+run for that tree before, runs `st-test --check NAME... --push origin` on it, records the result and stops: one head per tick, serially per
+class (a lock; a tick still running skips the next). The light class is st-test's default checks; the heavy class is what `--all` adds. A
+failure or a lane-edit refusal is a result, recorded and not retried for that tree (CI runs the check); a run stopped for load is not, and
+that head waits 30 minutes before it is tried again. Load, for the heavy class: it starts only after IO pressure (some avg60) stayed under
+8% for 10 minutes with no admitted heavy build active and at least 140 GiB free (it clears nothing to make room), runs with `TMPDIR` on
+`/dev/shm`, and is stopped (TERM, then KILL of its process group) above 15% avg60, under 16 GiB available memory, under 136 GiB free disk
+or past 20 GB of scratch; the light class starts below 15% and stops the same way. The heavy class keeps its cargo target between runs
+in `~/.cache/evidence-presign-target`, so a head does not start cold (a cold target costs about 10 minutes and 19 GB of writes). It is
+never pinned: the host's scratch sweep may reclaim it when it has been idle for two hours and disk runs short, and the worker removes it
+itself before a run once it passes 25 GB. Every tick that does not start for load or disk appends a line to `skips.jsonl`. `~/.config/evidence-presign/limits.json` overrides these numbers (agreed with operations) and
+`~/.config/evidence-presign/off` stops every tick. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
+(pull request, head, tree, class, first seen ready, start, seconds, per-check result, peak IO pressure, outcome `worker_signed`,
+`worker_signed_lane_edit`, `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
+window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
+how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,
