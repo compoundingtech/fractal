@@ -11,6 +11,11 @@ import { assertStrictEvidence } from './kit-play-gate-runner.mjs'
 // it reports an a11y result unless the a11y.manual global is set; `report` overrides that report.
 const iframe = (report, probes = [], navigation) => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
 <script>
+  ${navigation?.startsWith('reload-') ? `
+  if (!sessionStorage.getItem('reloaded')) {
+    sessionStorage.setItem('reloaded', 'true')
+    ${navigation === 'reload-before-dom' ? "location.reload()" : "document.addEventListener('DOMContentLoaded', () => location.reload(), { once: true })"}
+  }` : ''}
   const listeners = new Map()
   const manual = new URLSearchParams(location.search).get('globals') === 'a11y.manual:!true'
   const id = new URLSearchParams(location.search).get('id')
@@ -25,7 +30,7 @@ const iframe = (report, probes = [], navigation) => `<!doctype html><meta charse
         await new Promise(resolve => setTimeout(resolve, 2))
         phase('played')
         phase('completing')
-        ${navigation === 'document' ? "location.assign('/away.html'); return" : navigation ? `history.${navigation}State({}, '', '/w/fixture/missions')` : ''}
+        ${navigation === 'document' ? "location.assign('/away.html'); return" : ['push', 'replace'].includes(navigation) ? `history.${navigation}State({}, '', '/w/fixture/missions')` : ''}
         if (!manual) {
           window.dispatchEvent(new CustomEvent('kit-a11y-timing', { detail: { storyId: id, phase: 'start', at: performance.now() } }))
           await new Promise(resolve => setTimeout(resolve, 2))
@@ -150,6 +155,15 @@ test('cross-document navigation away from Storybook fails closed', { timeout: 60
   assert.equal(receipt.pass, false)
   assert.ok(receipt.rows.every(row => /story document was replaced|Execution context was destroyed/.test(row.error)))
 })
+
+for (const navigation of ['reload-before-dom', 'reload-after-dom']) {
+  test(`same-URL ${navigation} fails closed`, { timeout: 60000 }, async () => {
+    const { code, receipt } = await runGate({ navigation, env: { KIT_PLAY_SET: 'critical' } })
+    assert.equal(code, 1)
+    assert.equal(receipt.pass, false)
+    assert.ok(receipt.rows.every(row => /story document was replaced/.test(row.error)), JSON.stringify(receipt.rows.map(row => row.error)))
+  })
+}
 
 test('a11y on rejects a case whose axe report is missing', { timeout: 60000 }, async () => {
   const { code, receipt } = await runGate({ report: [] })

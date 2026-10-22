@@ -751,8 +751,12 @@ card under the pointer) waits for that state itself rather than relying on the s
 Each case must have exactly one completed strict story record for its requested story.
 The guard follows the iframe document's identity, not its current URL: `pushState` and
 `replaceState` keep collecting lifecycle and axe evidence at the final in-app URL.
-A replacement document fails closed. Receipts record both the initial Storybook URL
-and the final evidence URL; empty records or missing/duplicate completions cannot pass.
+A replacement document fails closed: Node observes main-frame document navigation
+requests before the initial `goto`, rejecting a second request even for a same-URL
+reload before DOMContentLoaded. History API changes do not request another document.
+Receipts record both the initial Storybook URL and the final evidence URL; empty
+records or missing/duplicate completions cannot pass. This detects accidental
+navigation, not an application deliberately forging evidence.
 
 The gate takes three options. Pull requests run the per-commit set (`KIT_PLAY_SET=commit`)
 with a11y off and a 100-second budget; merge groups (observed and signed by Evidence
