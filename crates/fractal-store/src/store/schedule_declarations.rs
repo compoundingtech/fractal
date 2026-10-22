@@ -134,9 +134,9 @@ mod tests {
             assert_eq!(times["never"],None);
             let steps=*guard.steps;
             // Negative controls prove that the guard really forbids both history and run reads.
-            let history_error=connection.prepare("SELECT body FROM claims LIMIT 1").err().expect("history read was allowed");
+            let history_error=connection.prepare("SELECT body FROM claims LIMIT 1").expect_err("history read was allowed");
             assert!(history_error.to_string().contains("prohibited"),"{history_error}");
-            let run_error=connection.prepare("SELECT id FROM mission_runs LIMIT 1").err().expect("run read was allowed");
+            let run_error=connection.prepare("SELECT id FROM mission_runs LIMIT 1").expect_err("run read was allowed");
             assert!(run_error.to_string().contains("prohibited"),"{run_error}");
             Ok(steps)
         }).unwrap()

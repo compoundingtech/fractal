@@ -175,7 +175,7 @@ fn row_value(row: &ScheduleDeclarationRow, now: u128) -> Value {
         "declaration_origin_host_id":row.origin.as_ref().map(|name| format!("host/{name}")),
         "owner":{"run_id":row.owner_run,"generation_id":row.owner_generation,"step_id":row.owner_step,"state":owner_state},
         "primary_host_id":host,"standby_state":standby_state,"standby_node":standby_node,
-        "state":if raw.as_ref().is_some_and(|raw| stopped(raw)) {"stopped"} else if raw.as_ref().is_some_and(Value::is_object) && next_state != "unknown" {"declared"} else {"unknown"},
+        "state":if raw.as_ref().is_some_and(stopped) {"stopped"} else if raw.as_ref().is_some_and(Value::is_object) && next_state != "unknown" {"declared"} else {"unknown"},
         "declaration":raw,"declaration_bytes":row.body_bytes,"read_problem":problem,
         "next_declared_fire_at":next,"next_fire_state":next_state,"next_fire_basis":"declaration-only",
     })
