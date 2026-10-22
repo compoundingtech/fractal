@@ -178,6 +178,112 @@ proptest! {
 }
 
 #[test]
+fn preparation_non_resource_append_flushes_legacy_resource_work_before_read() {
+    let store = Store::open_memory("example-non-resource-preparation").unwrap();
+    let subject = "message/example-preparation";
+    let legacy = append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"custom.legacy","status":"sent"}}));
+    change(&store, "install retained legacy non-resource subject", |transaction| {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h5c8d7cd8a53b owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject=?2 WHERE id=?1", params![legacy, subject],
+        ).unwrap();
+    });
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let before = snapshot(&transaction, subject);
+    // This is the actual append entrypoint, not a manual projection flush. A legacy
+    // resource subject need not have a resource/ prefix, and its later claims need
+    // not be resource.observed. The claims INSERT tracking trigger admits this work.
+    append_claim_tx(&transaction, &store.origin, subject, "message.read",
+        Some("person/robin"), &json!({"fields":{"status":"read"}}), &[], None).unwrap();
+    let expected = canonical_snapshot(&transaction, subject);
+    assert_ne!(expected, before, "the non-resource claim must change the canonical fold");
+    assert_eq!(snapshot(&transaction, subject), expected,
+        "a preparation read immediately after append must not see the previous actual");
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn preparation_non_resource_append_flushes_batch_insert_dirty_work_before_read() {
+    let store = Store::open_memory("example-batch-insert-preparation").unwrap();
+    let resource = append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"custom.legacy","phase":"retained"}}));
+    store.set_write_clock_at(20).unwrap();
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let sequence = smallclaims::store::next_replica_sequence(&transaction, &store.origin).unwrap();
+    let previous = smallclaims::store::previous_batch_hash(&transaction, &store.origin).unwrap();
+    let at = smallclaims::store::write_time(&transaction, &store.origin).unwrap();
+    let hash = smallclaims::hash::batch_header_hash(&store.origin, sequence, previous.as_deref(), at).unwrap();
+    let batch = format!("batch/{}/{sequence}/{hash}", store.origin);
+    // Model an import transaction admitting retained claims before their header.
+    // The real append below supplies that header through its ordinary batches
+    // INSERT. No synthetic trigger or manual projector invocation admits it.
+    transaction.execute_batch("PRAGMA defer_foreign_keys=ON;").unwrap();
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-he4cd3845ae8c owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET batch_id=?2 WHERE id=?1", params![resource, batch],
+    ).unwrap();
+    flush(&transaction).unwrap();
+    assert!(snapshot(&transaction, SUBJECTS[0]).0.is_none());
+    let claim = append_claim_tx(
+        &transaction, &store.origin, "agent/example-batch-trigger", "harness.diagnostic",
+        None, &json!({"fields":{"code":"provider-capacity","status":"waiting"}}), &[], None,
+    ).unwrap();
+    assert_eq!(claim.batch_id, batch, "the real append must insert the resource's missing batch");
+    let expected = canonical_snapshot(&transaction, SUBJECTS[0]);
+    assert!(expected.0.is_some(), "admitting the batch must change the canonical resource fold");
+    assert_eq!(snapshot(&transaction, SUBJECTS[0]), expected,
+        "preparation_batches_INSERT work must be flushed even for a non-resource append");
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn preparation_non_resource_append_flushes_dirty_batch_siblings_before_read() {
+    let store = Store::open_memory("example-dirty-preparation").unwrap();
+    let first = append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"custom.first","phase":"first"}}));
+    append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"custom.second","phase":"second"}}));
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let before = snapshot(&transaction, SUBJECTS[0]);
+    // Canonical metadata can be changed by a companion write in the append's
+    // transaction. The batches UPDATE trigger dirties a DIFFERENT subject.
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-ha713aeaf90dd owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE batches SET origin='example-zzz' WHERE id=(SELECT batch_id FROM claims WHERE id=?1)",
+        [&first],
+    ).unwrap();
+    assert_ne!(canonical_snapshot(&transaction, SUBJECTS[0]), before);
+    append_claim_tx(&transaction, &store.origin, "agent/example-diagnostic", "harness.diagnostic",
+        None, &json!({"fields":{"code":"provider-capacity","status":"waiting"}}), &[], None).unwrap();
+    assert_eq!(snapshot(&transaction, SUBJECTS[0]), canonical_snapshot(&transaction, SUBJECTS[0]));
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn preparation_managed_commit_flushes_dirty_work_without_an_append_projector() {
+    let store = Store::open_memory("example-finalizer-preparation").unwrap();
+    let first = append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"custom.first","phase":"first"}}));
+    append_wire(&store, SUBJECTS[0], "10", "resource.observed",
+        json!({"fields":{"kind":"custom.second","phase":"second"}}));
+    let before = snapshot(&store.readers.get(), SUBJECTS[0]);
+    {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        // Admission/import and repair can change canonical inputs without APPEND.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h1de2a6df8b44 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE batches SET origin='example-zzz' WHERE id=(SELECT batch_id FROM claims WHERE id=?1)",
+            [&first],
+        ).unwrap();
+        assert_ne!(canonical_snapshot(&transaction, SUBJECTS[0]), before);
+        transaction.commit().unwrap();
+    }
+    let reader = store.readers.get();
+    assert_eq!(snapshot(&reader, SUBJECTS[0]), canonical_snapshot(&reader, SUBJECTS[0]));
+}
+
+#[test]
 fn preparation_preserves_null_and_flat_shapes() {
     let store = Store::open_memory("example-shapes").unwrap();
     append_wire(&store, SUBJECTS[0], "9", "resource.observed", Value::Null);
@@ -219,7 +325,7 @@ fn preparation_tracks_canonical_batch_positions_and_repaired_replica_records() {
         json!({"fields":{"kind":"custom.second","phase":"second"}}));
     change(&store, "change canonical batch origin", |transaction| {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-ha713aeaf90dd owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE batches SET origin='example-zzz' WHERE id=(SELECT batch_id FROM claims WHERE id=?1)",
+            /* sqlite-large-value: allow-for-now lv-h153f9754e6d8 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE batches SET origin='example-zzz' WHERE id=(SELECT batch_id FROM claims WHERE id=?1)",
             [&first],
         ).unwrap();
     });

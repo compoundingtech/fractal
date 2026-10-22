@@ -6,7 +6,7 @@ mod preparation;
 pub use preparation::{PreparationObservation, preparation_observation, rebuild_preparation};
 
 pub(super) fn flush_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    preparation::flush(transaction)
+    preparation::flush_if_pending(transaction)
 }
 
 #[cfg(test)]

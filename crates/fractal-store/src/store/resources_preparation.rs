@@ -30,6 +30,127 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_dirty (
 ) WITHOUT ROWID;
 "#;
 
+// SQLite owns the signal, so it follows the native connection when the writer
+// loan moves threads and cannot survive close/address reuse. No SQL is needed to
+// inspect it. Keep it raised until the OUTER transaction ends: rolling back a
+// savepoint can restore queue rows that an earlier flush removed.
+mod work_signal {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    const NAME: &std::ffi::CStr = c"smalltalk.resource-preparation-work";
+
+    fn state(connection: &Connection) -> Option<&AtomicBool> {
+        // SAFETY: this private name holds only an Arc<AtomicBool> transferred below.
+        // SQLite retains it until connection close; the borrow cannot outlive the
+        // connection, and no caller replaces the client data while it is borrowed.
+        unsafe {
+            let pointer = rusqlite::ffi::sqlite3_get_clientdata(connection.handle(), NAME.as_ptr());
+            pointer.cast::<AtomicBool>().as_ref()
+        }
+    }
+
+    unsafe extern "C" fn destroy(pointer: *mut std::ffi::c_void) {
+        // SAFETY: SQLite releases exactly the strong reference transferred by
+        // install, including allocation failure in sqlite3_set_clientdata.
+        unsafe { drop(Arc::from_raw(pointer.cast::<AtomicBool>())); }
+    }
+
+    pub(super) fn install(connection: &Connection) -> Result<()> {
+        if state(connection).is_some() { return Ok(()); }
+        let pending = Arc::new(AtomicBool::new(false));
+        // SAFETY: SQLite owns this strong reference after the call and releases it
+        // with the matching destructor. Clones also back the safe callbacks.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_set_clientdata(
+                connection.handle(), NAME.as_ptr(),
+                Arc::into_raw(pending.clone()).cast_mut().cast(), Some(destroy),
+            )
+        };
+        if result != rusqlite::ffi::SQLITE_OK {
+            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(result), None).into());
+        }
+        let inserted = pending.clone();
+        connection.create_scalar_function(
+            "resource_preparation_work_pending", 0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            move |_| {
+                inserted.store(true, Ordering::Relaxed);
+                Ok(0)
+            },
+        )?;
+        let committed = pending.clone();
+        connection.commit_hook(Some(move || {
+            committed.store(false, Ordering::Relaxed);
+            false
+        }));
+        connection.rollback_hook(Some(move || pending.store(false, Ordering::Relaxed)));
+        Ok(())
+    }
+
+    pub(super) fn pending(connection: &Connection) -> bool {
+        // Bare replay/proof connections without capture still flush normally.
+        state(connection).is_none_or(|pending| pending.load(Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn preparation_signal_is_connection_local_and_resets_on_commit_and_rollback() {
+            let mut connection = Connection::open_in_memory().unwrap();
+            super::super::create_schema(&connection).unwrap();
+            super::super::capture_work(&connection).unwrap();
+            let other = Connection::open_in_memory().unwrap();
+            super::super::create_schema(&other).unwrap();
+            super::super::capture_work(&other).unwrap();
+            for commit in [false, true] {
+                assert!(!pending(&connection));
+                let transaction = connection.transaction().unwrap();
+                transaction.execute(
+                    "INSERT INTO local_resource_preparation_dirty(subject) VALUES('resource/example-signal')", [],
+                ).unwrap();
+                assert!(pending(&transaction));
+                assert!(!pending(&other));
+                transaction.execute("DELETE FROM local_resource_preparation_dirty", []).unwrap();
+                // Draining is not an outer boundary: a savepoint could restore it.
+                assert!(pending(&transaction));
+                if commit { transaction.commit().unwrap(); }
+                else { transaction.rollback().unwrap(); }
+                assert!(!pending(&connection));
+            }
+        }
+
+        #[test]
+        fn preparation_signal_survives_rollback_to_a_savepoint_that_restores_work() {
+            let mut connection = Connection::open_in_memory().unwrap();
+            super::super::create_schema(&connection).unwrap();
+            super::super::capture_work(&connection).unwrap();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                "INSERT INTO local_resource_preparation_dirty(subject) VALUES('resource/example-savepoint')", [],
+            ).unwrap();
+            transaction.execute_batch("SAVEPOINT preparation_flush;
+                DELETE FROM local_resource_preparation_dirty;
+                ROLLBACK TO preparation_flush; RELEASE preparation_flush;").unwrap();
+            let restored: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_dirty)", [], |row| row.get(0),
+            ).unwrap();
+            assert!(restored);
+            assert!(pending(&transaction));
+            transaction.rollback().unwrap();
+            assert!(!pending(&connection));
+        }
+    }
+}
+
+pub(super) fn flush_if_pending(transaction: &Transaction<'_>) -> Result<()> {
+    if work_signal::pending(transaction) { flush(transaction)?; }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct PreparationObservation {
     pub actual: Option<Value>,
@@ -54,6 +175,21 @@ pub fn preparation_observation(connection: &Connection, subject: &str) -> Result
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-he1e45213e1dd owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ PREPARATION_SCHEMA)?;
+    Ok(())
+}
+
+fn capture_work(connection: &Connection) -> Result<()> {
+    work_signal::install(connection)?;
+    // TEMP capture belongs to this writer, not to the database. Other tools may
+    // still make durable dirty marks without registering our scalar function;
+    // open() unconditionally drains those marks before serving reads.
+    for queue in ["pending", "dirty"] {
+        connection.execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-hdf8a14a98dc4 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER IF NOT EXISTS preparation_work_{queue}
+             AFTER INSERT ON main.local_resource_preparation_{queue} BEGIN
+             SELECT resource_preparation_work_pending(); END;"
+        ))?;
+    }
     Ok(())
 }
 
@@ -167,6 +303,7 @@ fn create_repair_triggers(connection: &Connection) -> Result<()> {
 }
 
 pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+    capture_work(transaction)?;
     create_tracking_triggers(transaction)?;
     let version: Option<String> = transaction.query_row(
         "SELECT value FROM meta WHERE key='resource_preparation_version'", [], |row| row.get(0),

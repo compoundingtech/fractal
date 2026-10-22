@@ -477,6 +477,10 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        // Replication admission/import, repair and pruning can dirty preparation
+        // without running APPEND (or can do so after its last claim projector).
+        // The native connection signal makes the no-work boundary SQL-free.
+        resources::flush_preparation(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {
