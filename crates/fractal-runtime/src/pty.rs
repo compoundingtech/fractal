@@ -14,6 +14,8 @@ use pty_core::registry::SessionInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod producer;
+
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -389,7 +391,11 @@ impl PtyRuntime {
                 "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
         }
-        let unit = crate::scope_unit("st3", id);
+        let operation = env.get("ST3_START_OPERATION")
+            .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
+        let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
+        let unit = crate::scope_unit("st3", &scope_identity);
+        let mut producer = self.prepare_producer(id, operation, &unit)?;
         if crate::isolation_mode() == crate::Isolation::Scope {
             // The session's record removes itself once its harness exits, so st keeps the name
             // of the scope to end what the harness leaves behind.
@@ -509,6 +515,7 @@ impl PtyRuntime {
                 });
             }
             *producer_entered = true;
+            self.acknowledge_launcher(&mut producer, false)?;
             let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
@@ -516,11 +523,12 @@ impl PtyRuntime {
                     return Err(error);
                 }
             };
+            self.acknowledge_launcher(&mut producer, true)?;
             if output.status.success() {
                 let published = self.wait_for_publication(id, previous_incarnation.as_deref())?;
                 std::fs::remove_file(&fence)
                     .with_context(|| format!("clear PTY publication fence {}", fence.display()))?;
-                crate::protect_servers(std::slice::from_ref(&published));
+                self.protect_servers(std::slice::from_ref(&published))?;
                 return Ok(());
             }
             // Classify captured output privately; only the closed kind and status

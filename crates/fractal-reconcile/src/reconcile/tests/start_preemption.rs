@@ -2163,3 +2163,84 @@ async fn unreadable_start_provenance_does_not_block_an_authorized_fenced_stop() 
     assert!(operation.revoked_by.is_some() && !operation.cleanup_verified);
     assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 1));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let environment = crate::environment::snapshot().unwrap();
+    fractal_runtime::initialize_isolation(&environment);
+    if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+        eprintln!("requires a real systemd user manager; native scope coverage unavailable");
+        return;
+    }
+    for different_operation in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let pty = root.path().join("pty");
+        let child_pid = root.path().join("producer.pid");
+        std::fs::write(&pty, format!(
+            "#!/bin/sh\nsleep 120 </dev/null >/dev/null 2>&1 &\nprintf '%s' \"$!\" > {:?}\nexit 1\n",
+            child_pid.display().to_string(),
+        )).unwrap();
+        std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = root.path().join("registry");
+        std::fs::create_dir(&registry).unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"example-native/worker\" {{ workspace {:?}; argv {:?} \"120\"; }}",
+            root.path().display().to_string(), sleep_program(),
+        ), "native-pidless");
+        let desired = store.desired_subjects_named(&["agent/example-native/worker".into()])
+            .unwrap().remove(0);
+        let mut member = desired.member.as_ref().unwrap().clone();
+        member.environment.insert("PATH".into(), format!("{}:${{PATH}}", root.path().display()));
+        let row = registry.join(format!("{}.json", member.runtime_id));
+        std::fs::write(&row, serde_json::json!({
+            "createdAt": "older", "tags": {"st3.start-operation": "older-operation"}
+        }).to_string()).unwrap();
+        let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new()));
+        assert!(reconciler.dispatch_start(start_jobs::PreparedStart {
+            subject: desired.clone(), launch_member: member.clone(), member,
+            reason: "native pidless scope regression".into(), request: None,
+            desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(), start_request: String::new(),
+            start_request_receipt: None, control_request: None, control_request_receipt: None,
+            expected_incarnation: None, resume_operation: None,
+        }).unwrap());
+        let operation = store.runtime_start_for(&desired.subject).unwrap().unwrap();
+        assert!(operation.finished && operation.revoked_by.is_some());
+        let prepared: start_jobs::PreparedStart = serde_json::from_value(operation.body.clone()).unwrap();
+        let pid: i32 = std::fs::read_to_string(&child_pid).unwrap().parse().unwrap();
+        struct KillOnDrop(i32);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) { unsafe { libc::kill(self.0, libc::SIGKILL); } }
+        }
+        let child = KillOnDrop(pid);
+        std::fs::write(&row, serde_json::json!({
+            "createdAt": "older", "tags": {"st3.start-operation":
+                if different_operation { "older-operation" } else { &operation.id }}
+        }).to_string()).unwrap();
+        let snapshot = runtime.snapshot_ptys().unwrap();
+        assert_eq!(snapshot[0].status, "vanished");
+        assert!(snapshot[0].incarnation_id.is_none());
+        assert!(!runtime.start_operation_closed(&prepared.launch_member).unwrap());
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(!store.runtime_start_for(&desired.subject).unwrap().unwrap().cleanup_verified);
+        drop(child);
+        // Wait for real manager/cgroup evidence, not an elapsed-time absence claim.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !runtime.start_operation_closed(&prepared.launch_member).unwrap() {
+            assert!(std::time::Instant::now() < deadline, "producer scope did not empty");
+            std::thread::yield_now();
+        }
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+        assert!(row.exists(), "retirement must not delete the retained registry row");
+    }
+}

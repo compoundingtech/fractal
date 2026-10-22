@@ -2,10 +2,10 @@
   "version": 1,
   "summary": "Revoked runtime starts no longer hold a seat forever behind a terminal PTY row without a PID: retirement requires positive closure proof for the revoked operation's producer and work scopes, even when the retained row belongs to an older operation",
   "replay": {"status": "none", "detail": "No graph replay; reconciliation rechecks retained revoked starts."},
-  "schema": {"status": "none", "detail": "No database schema change or registry row deletion."},
+  "schema": {"status": "none", "detail": "No database schema change or registry row deletion. New Linux-scope launches persist versioned operation-owned launcher, publication and scope evidence in local runtime state."},
   "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
-  "compatibility": {"status": "none", "detail": "No wire contract change. Non-terminal incarnation-less rows remain blocked and now record a diagnostic; terminal rows retire only with operation-fenced producer closure evidence."},
+  "compatibility": {"status": "none", "detail": "No wire contract change. Non-terminal incarnation-less rows remain blocked and now record a diagnostic. Native Linux-scope closure requires acknowledged launchers and empty operation-owned work and server scopes; detached, crash-before-ack and legacy launches without ownership remain held."},
   "downtime": {"status": "none", "detail": "No service interruption."},
-  "manual": {"status": "none", "detail": "No ledger edits or registry cleanup required."},
+  "manual": {"status": "changed", "detail": "Legacy unresolved launches without persisted operation ownership cannot be certified automatically. They remain held until an operator independently establishes physical producer and work-scope closure; a missing row, free lock or missing scope alone is not proof. Do not delete registry rows or edit the ledger as a substitute."},
   "recovery": {"status": "none", "detail": "Reverting restores the previous conservative retention of terminal incarnation-less rows."}
 }
