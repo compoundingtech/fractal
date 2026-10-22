@@ -1299,13 +1299,17 @@ class CommittedPolicy(unittest.TestCase):
             'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
+        # Both run on linux-test-build's archive of the same tree and are members of the linux-gate aggregate, whose list
+        # covers what its members read; sharing it gives the three one key (docs: The skip policy).
+        declared['isolation-vm'] = declared['mail-redelivery-canaries'] = declared['linux-gate']
         for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
-        self.assertEqual(self.rules('linux-gate')['sample_one_in'], 5)
+        for check in ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries'):
+            self.assertEqual(self.rules(check)['sample_one_in'], 5, check)
 
     def test_every_compile_time_include_of_the_rust_sources_is_inside_the_declared_inputs_of_linux_gate(self):
         # The declared list comes from a textual scan, which cannot see paths built at run time but CAN enumerate the
