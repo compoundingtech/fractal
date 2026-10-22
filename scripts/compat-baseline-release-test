@@ -66,6 +66,32 @@ class Policy(unittest.TestCase):
             with self.assertRaisesRegex(baseline.ReleaseAPIError, 'release API unreachable; baseline freshness could not be determined'):
                 baseline.published_releases()
 
+    def test_an_empty_listing_is_asked_again_and_not_read_as_no_releases(self):
+        good = json.dumps([[release('v0.3.18', 8)], [release('v0.3.17', 7)]])
+        answers = [json.dumps([]), json.dumps([[]]), json.dumps([[release('v0.3.18', 8)], []]), good]
+        with patch.object(baseline, 'run', side_effect=answers) as run, patch.object(baseline.time, 'sleep') as sleep:
+            self.assertEqual(len(baseline.published_releases()), 2)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
+
+    def test_a_listing_that_stays_empty_is_unreadable(self):
+        with patch.object(baseline, 'run', return_value=json.dumps([])) as run, \
+                patch.object(baseline.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(baseline.ReleaseAPIError,
+                                        'release API unreachable; baseline freshness could not be determined: '
+                                        'the release listing was empty 4 times'):
+                baseline.published_releases()
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
+
+    def test_a_listing_without_a_stable_release_is_still_none_without_asking_again(self):
+        rows = json.dumps([[release('v0.4.0-rc.1', 11), release('v0.3.99', 9, draft=True)]])
+        with patch.object(baseline, 'run', return_value=rows) as run, patch.object(baseline.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(baseline.BaselineError, 'No published stable releases found'):
+                baseline.published_releases()
+        self.assertEqual(run.call_count, 1)
+        sleep.assert_not_called()
+
     def test_current_and_one_behind_pass(self):
         baseline.check({'fleet': pin('v0.3.18'), 'messaging': pin()}, self.releases)
 
