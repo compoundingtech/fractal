@@ -1110,6 +1110,21 @@ that rewrites the script, the verifier, the policy and the lane file and shows t
 `skipped`. With no check requiring a note the job is a no-op that fetches nothing. A new `pull_request_target` workflow does not run for the pull
 request that adds it (the base does not have it yet), so its first runs are the next pull requests after it lands.
 
+### SLO counters (`scripts/ci-evidence-slo`)
+
+`scripts/ci-evidence-slo --repository OWNER/NAME [--hours 24 | --since T --until T] [--max-logs N] [--json]` reads the finished `Workspace CI` runs of an
+interval (GitHub's read API only; nothing is written or started) and, for every `evidence-gate-<check>` job, the one fixed step the gate ended with. Per check
+and event (`pull_request`, `merge_group`, `push`) it reports:
+
+- `decisions`: gate jobs that completed with an outcome, the DENOMINATOR of every rate (a gate job that failed or was cancelled before printing an outcome is `gate_incomplete`, not a decision);
+- `satisfied`: an existing trusted note covered the run, split into `skipped` (the gate took the skip: `enforce` true) and `shadow` (it would have), and `satisfied_by_producer`, the same count by `kind/trust_level` of the note
+  read from the gate's decision line (`unread` for jobs beyond `--max-logs`, the log budget, which only bounds the producer and reason split, never the outcome counts);
+- `produced_not_verified`: a note exists and is NOT usable, `rejected` (refused: bad signature, untrusted signer, failed check ...) plus `degraded` (only an unsigned degraded record), with the reasons. TARGET ZERO;
+- `no_note` and `unavailable`: nothing usable was found, or the verifier or notes could not be obtained (the check ran as before).
+
+Runs still in progress are not counted (their gate jobs may not have finished) and an API that cannot be read exits 1 instead of printing zeros. The counters measure the gate in
+shadow today (`skipped` is 0 while every `enforce` is false); they are the numbers the flip decisions in the proof table read.
+
 ### Which tree a pull request run asks about
 
 A `pull_request` run checks out GitHub's merge of the head into the CURRENT base, a new tree whenever main moved, so a note for the tree an agent
