@@ -142,6 +142,8 @@ pub struct FleetFile {
     pub sponsor_routes: Vec<String>,
     pub mode: FleetMode,
     pub port: Option<u16>,
+    /// Enabled automatic transports, in dial preference order; loopback is always last.
+    /// Explicit config peer (`--peer`) routes retain precedence over this list.
     pub transports: Vec<String>,
     pub fabric_protocol: Option<String>,
     /// Accept HMAC-only exchanges from config peers. True only during a migration.

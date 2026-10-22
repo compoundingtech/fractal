@@ -685,8 +685,20 @@ async fn run_fleet_transports(
         .transports
         .iter()
         .any(|configured| configured == transport);
-    // A repeated add never reconfigures an existing exposure, even with a different flag.
-    if matches!(&command, FleetTransportsCommand::Add { .. }) && enabled {
+    // Re-adding can change local preference, but never reconfigures the exposure.
+    if let FleetTransportsCommand::Add {
+        prefer, no_service, ..
+    } = &command
+        && enabled
+    {
+        if *prefer && file.transports.first() != Some(transport) {
+            file.transports.retain(|configured| configured != transport);
+            file.transports.insert(0, transport.clone());
+            file.save(&config.state_dir)?;
+            drop(lock);
+            println!("Fabric is now preferred; its existing protocol is unchanged.");
+            return refresh_fleet_worker(*no_service);
+        }
         println!("Fabric is already enabled; remove it before changing its protocol.");
         return Ok(());
     }
@@ -707,6 +719,7 @@ async fn run_fleet_transports(
     let no_service = match command {
         FleetTransportsCommand::Add {
             fabric_protocol,
+            prefer,
             no_service,
             ..
         } => {
@@ -738,7 +751,11 @@ async fn run_fleet_transports(
                 .expose(&protocol, &format!("127.0.0.1:{port}"))
                 .await
                 .context("Fabric exposure failed; fleet settings and endpoints are unchanged")?;
-            file.transports.push("fabric".into());
+            if prefer {
+                file.transports.insert(0, "fabric".into());
+            } else {
+                file.transports.push("fabric".into());
+            }
             file.fabric_protocol = Some(protocol.clone());
             endpoints.retain(|endpoint| endpoint["transport"] != "fabric");
             endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));

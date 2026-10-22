@@ -420,6 +420,13 @@ exit status, evidence, remediation, stable repair classes, approval token, and z
 Why: transport reachability and immutable-record convergence need explicit diagnostics rather than
 being mistaken for mission health.
 
+For transport preference, inspect `st fleet transports add fabric --help`.
+On an intentionally selected listening member, `st fleet transports add fabric --prefer`
+enables Fabric or moves an existing Fabric route first without changing its exposure.
+Omit `--prefer` to preserve existing transport order; see
+[automatic transport selection](replication.md#automatic-transport-selection) for
+explicit peer override precedence and the loopback-last fallback.
+
 ```sh
 st replication --help
 st replication status --help

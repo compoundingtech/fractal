@@ -930,6 +930,9 @@ enum FleetTransportsCommand {
         /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
         #[arg(long)]
         fabric_protocol: Option<String>,
+        /// Prefer Fabric over other automatic routes, including when already enabled.
+        #[arg(long)]
+        prefer: bool,
         /// Leave the replication worker restart to the operator.
         #[arg(long)]
         no_service: bool,

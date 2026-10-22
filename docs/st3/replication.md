@@ -11,6 +11,30 @@ or replica. Devices read and act through a member's client gateway and are not s
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
 
+## Automatic transport selection
+
+The local `fleet.toml` `transports` list is both an enablement filter and a
+preference order for automatic replication and peer-relay routes. With
+`["fabric", "tailscale"]`, available Fabric routes precede Tailscale; reversing
+the list reverses that preference. A carrier absent from an explicit list is not
+used automatically, even if its executable is installed. An empty list disables
+both Fabric and Tailscale automatic routes. Loopback remains the last automatic
+fallback, independent of its list position.
+
+Explicit config peer URLs (`[[peers]]` / `--peer`) retain precedence over automatic
+routes for backward compatibility. To let fleet preference select the carrier,
+remove the explicit override. Legacy operation without `fleet.toml` retains
+Tailscale-first automatic routing among locally available carriers.
+
+Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
+front, or to prefer an already enabled Fabric route without changing its saved
+protocol or exposure. An add without `--prefer` appends a new carrier and leaves
+an existing list unchanged. `st fleet transports remove fabric` keeps the relative
+order of remaining carriers and refuses to remove the last usable transport.
+These are local settings: choose the preference on each member independently.
+Installed services restart automatically; otherwise restart
+`st3 replication-worker` as instructed, including when using `--no-service`.
+
 ## Local adapter membership and leave authority
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
