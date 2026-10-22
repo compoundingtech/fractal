@@ -1412,7 +1412,8 @@ host's signing key within reach, so they carry no secret beyond that key and the
 The heavy class's kept target is shared between heads; that is accepted for our own authors' code (the same trust as a seat's warm
 checkout), and it is one reason the authors file must stay that short. A check's result is read only from st-test's final summary. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
 (pull request, head, tree, class, first seen ready, start, seconds, per-check result, peak IO pressure, outcome `worker_signed`,
-`worker_signed_lane_edit`, `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
+`worker_signed_lane_edit` (signed, apart from a check whose lane the tree edits), `lane_edit_not_signed` (nothing
+signed: the tree edits every lane), `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
 window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
 how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
 
