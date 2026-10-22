@@ -5,6 +5,7 @@ import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
+import { AlertsPopover } from './AlertsPopover.tsx'
 import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
@@ -488,7 +489,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
                   <header {...stylex.props(styles.brand)}>
                     <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} />
-                    {collapsed ? null : <strong>Fractal</strong>}
+                    {collapsed ? null : <><strong>Fractal</strong><ClockedAlertsPopover onOpen={select} /></>}
                   </header>
                   {collapsed ? null : sidebarBody}
                 </aside>
@@ -563,6 +564,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
 function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean }) {
   const row = agent === undefined ? undefined : sidebarRow({ agent, stale })
   return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
+}
+
+/** The alert ages tick from the wall clock here, so the workspace providers do not re-render with it. */
+function ClockedAlertsPopover({ onOpen }: { readonly onOpen: (ref: string) => void }) {
+  return <AlertsPopover onOpen={onOpen} now={useNow()} />
 }
 
 
