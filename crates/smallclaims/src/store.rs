@@ -1266,6 +1266,8 @@ pub struct PeerSyncProgress {
     pub window_received: u64,
     pub graph_compared_at_unix_ms: Option<u128>,
     pub graph_differs_since_unix_ms: Option<u128>,
+    pub claims_compared_at_unix_ms: Option<u128>,
+    pub claims_differ_since_unix_ms: Option<u128>,
     /// The last exchange at which both nodes held the same envelopes and every projection was
     /// settled, so the two projections were comparable.
     pub aligned_comparison: Option<AlignedComparison>,
@@ -1317,6 +1319,16 @@ impl PeerSyncProgress {
             self.graph_differs_since_unix_ms = None;
         } else {
             self.graph_differs_since_unix_ms.get_or_insert(now);
+        }
+    }
+
+    /// Record one comparison of the claims this node retains with the peer's.
+    pub fn compare_claims(&mut self, equal: bool, now: u128) {
+        self.claims_compared_at_unix_ms = Some(now);
+        if equal {
+            self.claims_differ_since_unix_ms = None;
+        } else {
+            self.claims_differ_since_unix_ms.get_or_insert(now);
         }
     }
 
@@ -1457,6 +1469,8 @@ impl PeerSyncProgress {
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
         sync.graph_compared_at_unix_ms = self.graph_compared_at_unix_ms;
         sync.graph_differs_since_unix_ms = self.graph_differs_since_unix_ms;
+        sync.claims_compared_at_unix_ms = self.claims_compared_at_unix_ms;
+        sync.claims_differ_since_unix_ms = self.claims_differ_since_unix_ms;
         sync.diverged = self
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
@@ -6359,6 +6373,7 @@ impl Store {
             signature_requests,
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary()?),
         })
     }
 
@@ -6440,6 +6455,7 @@ impl Store {
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+                claim_ranges: Some(self.claim_range_summary()?),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -6500,6 +6516,7 @@ impl Store {
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary()?),
         })
     }
 
@@ -6846,12 +6863,24 @@ impl Store {
             self.observe_first_sync(relay, snapshot.inventory.envelopes.len() as u64)
                 .map_err(internal)?;
         }
+        // Claims are compared only with a peer that speaks the same claim-range protocol, and
+        // only while both range indexes cover every retained claim.
+        let claims_equal = match input.claim_ranges.as_ref() {
+            Some(remote) if remote.version == CLAIM_RANGE_VERSION => {
+                let local = self.claim_range_summary().map_err(internal)?;
+                local.retained.zip(remote.retained.as_ref()).map(|(local, remote)| local == *remote)
+            }
+            _ => None,
+        };
         let now = now_ms();
         let mut sync = self
             .replication_sync
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
+        if let Some(equal) = claims_equal {
+            progress.compare_claims(equal, now);
+        }
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
             local_inventory_generation: snapshot.inventory_generation,
