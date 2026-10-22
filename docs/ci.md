@@ -587,11 +587,15 @@ for generated-client consumers. The main ruleset requires `typescript-client`.
 
 ### Fractal web
 
-The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
-workflow-level path filters. `linux-gate` does not depend on them.
+The non-required Fractal web jobs run without workflow-level path filters.
+`linux-gate` does not depend on them. Detection and the aggregate gate run on
+GitHub-hosted `ubuntu-latest`; `fractal-web-execution` runs on the Linux stages'
+`nscloud-ubuntu-24.04-amd64-8x16-with-features` shape and priority policy, because the
+strict kit plays are CPU-bound (9-15 minutes on 4 vCPU, 3 min 45 s on 8 vCPU in one
+workflow run; st document `doc/fleet/factory/test-speed/web-setup-audit`).
 Only `fractal-web-execution` enables unprivileged user namespaces with
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` on its ephemeral
-Ubuntu runner VM before entering the web lanes. The effect-utils Buck TypeScript
+runner VM before entering the web lanes. The effect-utils Buck TypeScript
 actions require those namespaces for Bubblewrap containment (effect-utils #1784);
 their sandbox flags and declared-input boundary remain unchanged.
 
