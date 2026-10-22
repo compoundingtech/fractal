@@ -1,7 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
 import { SyncLine } from './assistant-ui/st3-views/SyncLine'
 import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
@@ -21,14 +20,15 @@ function TransitionPreview({ scheme, sequence, next, retry }: { scheme: Scheme; 
     <div {...stylex.props(styles.statusBar)}><SyncLine status={current.status} label="socket" socket gateway="gateway-1" now={syncNow} observedAt={current.observedAt} onRetry={retry} /></div>
   </ThemePortal></main>
 }
-function TransitionStory({ args, updateArgs }: { args: SyncArgs; updateArgs: (patch: Partial<SyncArgs>) => void }) {
-  const next = React.useCallback(() => updateArgs({ sequence: (args.sequence + 1) % syncObservations.length }), [args.sequence, updateArgs])
-  const retry = React.useCallback(() => updateArgs({ sequence: 1 }), [updateArgs])
-  return <TransitionPreview scheme={args.scheme} sequence={args.sequence} next={next} retry={retry} />
+function TransitionStory({ scheme, sequence: initialSequence }: SyncArgs) {
+  // These are component transitions, not new Storybook renders/play lifecycles.
+  const [sequence, setSequence] = React.useState(initialSequence)
+  const next = React.useCallback(() => setSequence(value => (value + 1) % syncObservations.length), [])
+  const retry = React.useCallback(() => setSequence(1), [])
+  return <TransitionPreview scheme={scheme} sequence={sequence} next={next} retry={retry} />
 }
 function StoryRender(args: SyncArgs) {
-  const [, updateArgs] = useArgs<SyncArgs>()
-  return <TransitionStory args={args} updateArgs={updateArgs} />
+  return <TransitionStory key={args.sequence} {...args} />
 }
 function ObservationRow({ observation, label }: { observation: typeof syncObservations[number]; label?: string }) {
   const [retried, setRetried] = React.useState(false)
