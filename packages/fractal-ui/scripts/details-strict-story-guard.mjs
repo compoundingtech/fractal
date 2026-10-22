@@ -1,6 +1,7 @@
 // dt10 strict lifecycle: only the two exact resource 404s are tolerated.
 export async function strictStoryGuard(page, base) {
   const errors = [], records = [], ignored = []
+  let storyDocument, recordIndex
   const allow404 = message => message.type() === 'error' && message.text() === 'Failed to load resource: the server responded with a status of 404 (Not Found)' && [`${base}/vite-inject-mocker-entry.js`, `${base}/favicon.ico`].includes(message.location().url)
   const originalOn = page.on.bind(page), originalOff = page.off.bind(page), listeners = new WeakMap()
   originalOn('console', message => { if (message.type() === 'error') { const fact = { text: message.text(), location: message.location() }; (allow404(message) ? ignored : errors).push(fact) } })
@@ -8,6 +9,8 @@ export async function strictStoryGuard(page, base) {
   page.off = (event, listener) => originalOff(event, event === 'console' ? listeners.get(listener) ?? listener : listener)
   originalOn('pageerror', error => errors.push({ kind: 'page', message: error.message }))
   await page.addInitScript(() => {
+    // History API navigation keeps this identity; a replacement document does not.
+    window.__dt10StrictDocument = { token: crypto.randomUUID(), initialUrl: location.href }
     window.__dt10StrictEvents = []
     window.__kitPlayTiming = { phases: [], a11y: [] }
     document.addEventListener('DOMContentLoaded', () => { window.__kitPlayTiming.dom = performance.now() }, { once: true })
@@ -31,24 +34,35 @@ export async function strictStoryGuard(page, base) {
     }, 5)
   })
   const check = async () => {
-    if (!page.url().includes('/iframe.html')) return
-    const { events, timing } = await page.evaluate(() => ({
+    if (!storyDocument) return
+    const { events, timing, documentIdentity, url } = await page.evaluate(() => ({
       events: window.__dt10StrictEvents ?? [],
       timing: window.__kitPlayTiming ? { ...window.__kitPlayTiming, observed: performance.now() } : undefined,
+      documentIdentity: window.__dt10StrictDocument,
+      url: location.href,
     }))
+    if (documentIdentity?.token !== storyDocument.token) throw new Error('strict-storybook-readiness: story document was replaced')
     const finished = events.filter(event => event.name === 'storyFinished'), exceptions = events.filter(event => event.name !== 'storyFinished')
-    const record = { url: page.url(), finished, exceptions, errors: [...errors], allowed404s: [...ignored] }
+    const record = { url, initialUrl: storyDocument.initialUrl, finished, exceptions, errors: [...errors], allowed404s: [...ignored] }
     record.timing = timing
     if (errors.length || exceptions.length || !finished.length || finished.some(event => event.payload.status !== 'success')) throw new Error(JSON.stringify({ rule: 'strict-storybook-readiness', ...record }))
-    records.push(record)
+    // goto and the caller may both check: refresh one record, never count it twice.
+    records[recordIndex] = record
   }
   const goto = page.goto.bind(page)
   page.goto = async (...args) => {
     await check()
     errors.length = 0; ignored.length = 0
+    storyDocument = undefined
     const result = await goto(...args)
-    if (page.url().includes('/iframe.html')) {
-      await page.waitForFunction(() => window.__dt10StrictEvents?.some(event => ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored'].includes(event.name)), undefined, { timeout: 600000 })
+    if (new URL(args[0], base).pathname.endsWith('/iframe.html')) {
+      storyDocument = await page.evaluate(() => window.__dt10StrictDocument)
+      if (storyDocument?.initialUrl !== new URL(args[0], base).href) throw new Error('strict-storybook-readiness: story document was replaced during navigation')
+      recordIndex = records.length
+      await page.waitForFunction(token => {
+        if (window.__dt10StrictDocument?.token !== token) throw new Error('strict-storybook-readiness: story document was replaced')
+        return window.__dt10StrictEvents?.some(event => ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored'].includes(event.name))
+      }, storyDocument.token, { timeout: 600000 })
       await check()
     }
     return result
