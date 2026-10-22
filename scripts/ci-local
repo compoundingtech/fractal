@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Run Linux gate stages on this machine the way their CI jobs run them, for a note signed here (scripts/st-test, a lane in
+# .st/required-lanes.json). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
+#
+#   scripts/ci-local mail-redelivery-canaries
+#
+# Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
+# first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
+# test-archive setup does.
+#
+# The stages start daemons and harnesses, so they run with a home of their own: HOME and the XDG state, config, data and cache
+# directories are a scratch directory that is removed afterwards, and no st, GitHub or SSH agent variable reaches them, so
+# nothing they start can read or write this account's st state, harness configuration or credentials, and no PATH entry
+# inside the account's st state (a seat's command recorder) stays. Two things are kept:
+# the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus, because the build
+# admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
+set -euo pipefail
+if [ "$#" -eq 0 ]; then
+  echo "usage: scripts/ci-local STAGE..." >&2
+  exit 2
+fi
+for stage in "$@"; do
+  case "$stage" in
+    mail-redelivery-canaries) ;;
+    *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
+  esac
+done
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/ci-local.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+# The cargo the stages build with is the dev shell's own, handed to the build admission shim as CARGO_REAL: CI_LOCAL_CARGO
+# when set, otherwise the first cargo on PATH outside the account's home that is not the shim itself (the shim exports
+# CARGO_SHIM_DEPTH). A build host's default real cargo may source a saved dev shell environment from another day, whose tools
+# (an older pty) are not the tree's, and the stages would test those.
+cargo_real=${CI_LOCAL_CARGO:-}
+if [ -z "$cargo_real" ]; then
+  IFS=':' read -r -a entries <<< "$PATH"
+  for entry in "${entries[@]}"; do
+    case "$entry" in ''|"$HOME"|"$HOME"/*) continue ;; esac
+    [ -f "$entry/cargo" ] && [ -x "$entry/cargo" ] || continue
+    if ! grep -q -a CARGO_SHIM_DEPTH "$entry/cargo"; then cargo_real="$entry/cargo"; break; fi
+  done
+fi
+if [ -z "$cargo_real" ]; then
+  echo "ci-local: no cargo executable of the dev shell on PATH (run it inside nix develop, or set CI_LOCAL_CARGO)" >&2
+  exit 2
+fi
+while IFS='=' read -r -d '' name _; do
+  case "$name" in
+    ST_*|ST3_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
+  esac
+done < <(env -0)
+# A seat's PATH can start with directories inside the account's st state (a command recorder); those leave it too.
+st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
+kept=()
+IFS=':' read -r -a entries <<< "$PATH"
+for entry in "${entries[@]}"; do
+  case "$entry" in "$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
+done
+PATH=$(IFS=':'; printf '%s' "${kept[*]}")
+export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
+export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
+export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
+touch "$GITHUB_STEP_SUMMARY"
+cargo build --locked -p fractal-drivers --bin ci-hooks-install
+bash scripts/ci-install-built-hooks
+# A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless
+# CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority.
+export CI_TEST_THREADS=${CI_TEST_THREADS:-6}
+low=()
+if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
+if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
+status=0
+for stage in "$@"; do
+  code=0
+  "${low[@]}" bash scripts/ci-linux "$stage" || code=$?
+  echo "ci-local: $stage exit $code"
+  if [ "$status" -eq 0 ]; then status=$code; fi
+done
+exit "$status"

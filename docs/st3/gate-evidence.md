@@ -1257,8 +1257,8 @@ the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
-`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+`scripts/st-test` runs each required check that has a local command (today `genie-freshness`, `typescript-client` and
+`mail-redelivery-canaries`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
@@ -1306,6 +1306,26 @@ then starts it by absolute path without any `LD_*`, `DYLD_*` or `PYTHON*` variab
 and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `st-test` starts the signer's interpreter with `-I`. The checks themselves
 keep the caller's environment. Tests set these variables in the caller and require a signed note, and require the signer to still
 refuse when it is started with `LD_PRELOAD`.
+
+
+**Heavy checks and Linux gate stages (`scripts/ci-local`).** A check that builds and tests the Rust workspace
+(`mail-redelivery-canaries` today) is heavy: tens of minutes of a shared build host. st-test runs it only when it is named
+(`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its wait. Its local
+command is `nix develop -c bash scripts/ci-local STAGE`: the `scripts/ci-linux` stage as its CI job runs it, after building and
+installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
+and cache directories are a scratch directory that is removed afterwards, and no st, GitHub, SSH agent, evidence or sekrets
+variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
+configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
+rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
+stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
+shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+`ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
+`CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
+default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
+pty first on PATH, which made every boot canary fail on that host (the seat launch passes environment names only). The lane in `.st/required-lanes.json`
+holds both the host and the agent level to its definition (`scripts`, `.st`, `.config/nextest.toml`, the flake), so a tree that
+edits the scripts that decide what the stage runs never skips on a local note; the host and agent levels cover pull requests
+only, and the merge queue runs the stage.
 
 ### When the gate says skip
 
