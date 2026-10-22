@@ -957,6 +957,17 @@ those scripts. The aggregate `linux-gate` note signs its input key like a stage 
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
 
+`isolation-vm` and `mail-redelivery-canaries` declare the same list (shadow only too: `enforce` stays false, `sample_one_in` 5),
+so the three lanes share one input key. Both are members of the `linux-gate` aggregate, whose list already covers what its members
+read, and neither reads anything outside it. The canaries are `scripts/ci-linux mail-redelivery-canaries`, which runs
+`scripts/ci-mail-redelivery-canaries`: a fixed set of the Rust tests from `linux-test-build`'s archive, with the `ci` profile of
+`.config/nextest.toml`. `isolation-vm` builds the two VM drivers from `flake.nix`, `flake.lock`, `nix/transport-isolation-vm.nix` and
+`nix/sekrets-vm.nix` (the `pty` package is a flake input), the provider components from the workspace's Rust sources, and runs the
+same archive and the `sekrets-st3` binary of the same build, with only `Cargo.toml` copied into the VM; its other steps are
+`scripts` and the baselines under `.github`. Each job signs its key itself (`STEP_CHECK` and `STAGE_JOB` are the policy's check
+names, and both steps set `PROJECT_BASE_SHA`), and the aggregate job's publish step indexes every accepted record with a key, so
+nothing in the workflow changes.
+
 The projection reads names as bytes and passes them NUL-terminated both ways (`ls-tree -z`, `update-index -z`),
 so a newline in a name cannot split one file into two entries; symlinks and gitlinks keep their modes. When none
 of the declared paths exists the projection would be the empty tree that every such tree shares, so there is no
