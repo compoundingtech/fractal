@@ -1256,7 +1256,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
             let mut environment = member.environment.clone();
             let operation = environment.remove("ST3_START_OPERATION").unwrap();
             assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             assert_eq!(
                 environment.get("FRACTAL_LAUNCH_DESIRED_TOKEN"),
                 environment.get(fractal_daemon::suspension::LAUNCH_DESIRED_TOKEN_ENV),

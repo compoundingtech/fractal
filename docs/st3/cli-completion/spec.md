@@ -201,7 +201,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
   interactive zsh under `zpty`). The shells come from `nativeCheckInputs` and the dev shell; a
   missing shell fails the test. The interactive zsh phase is temporarily skipped on the
   persistent CI runner when `GITHUB_ACTIONS=true` and `CI_LOCAL_CARGO_HOME` is set
-  ([#1344](https://github.com/compoundingtech/smalltalk/issues/1344)); other phases still run,
+  ([#1344](https://github.com/compoundingtech/fractal/issues/1344)); other phases still run,
   and the zsh phase runs locally and on other runners.
 - `checks.st3-help` runs `scripts/check-installed-completions` against the built package with its
   `bin` directory on PATH: fish and bash complete a subcommand through `st`, zsh registers it,

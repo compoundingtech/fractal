@@ -66,7 +66,7 @@ governs profile-installed commands.
 
 ## Opt-in host cutover staging
 
-<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 Updating the module alone retains the legacy service names and state directories.
 For an existing installation whose `stateDir` is the default `st3` state root or
 a directory beneath it (for example `st3/store`), explicitly stage the replacement:

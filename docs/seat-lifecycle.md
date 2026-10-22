@@ -191,7 +191,7 @@ seat you declare, and it appears in `agents`, `terminals`, and `conversations`.
 Codex imports select the exact thread through st's strict resume handshake and pin the
 originating `CODEX_HOME`. Discovery currently reads `$HOME/.codex/sessions`, including a
 symlink to another home; sessions stored only in another home are not discovered yet
-([#1495](https://github.com/compoundingtech/smalltalk/issues/1495)).
+([#1495](https://github.com/compoundingtech/fractal/issues/1495)).
 
 OMP imports use the same strict resume handshake, with `ST3_NATIVE_RESUME_SESSION`
 holding the native session ID and `ST3_NATIVE_RESUME_PATH` pinning the absolute

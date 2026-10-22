@@ -702,7 +702,7 @@ test('producer conformance fixtures decode strictly without losing tool results'
 });
 
 test('known daemon sender schema gap remains an explicit rejection (issue #1957)', async () => {
-    // https://github.com/compoundingtech/smalltalk/issues/1957 — pending sender amendment.
+    // https://github.com/compoundingtech/fractal/issues/1957 — pending sender amendment.
     const [, Rich] = await modules;
     const entry = {
         id: 'timeline-entry/ada', sequence: 0, revision: 1, final: true,

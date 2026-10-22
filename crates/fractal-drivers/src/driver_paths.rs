@@ -30,7 +30,7 @@ impl Paths {
             (IDENTITY_ENV, identity.to_owned()),
         ]
         .into_iter()
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         .flat_map(|(key, value)| [
             (key.to_owned(), value.clone()),
             (crate::contracts::fractal_env_name(key).unwrap(), value),
@@ -46,7 +46,7 @@ impl Paths {
         var: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Option<Self>> {
         let names = [ROOT_ENV, AGENT_DIR_ENV, SESSION_DIR_ENV, IDENTITY_ENV];
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let values = names.map(|name| {
             crate::contracts::env_with(name, var).or_else(|| {
                 // Presence is significant: an empty/conflicting native contract cannot

@@ -351,7 +351,7 @@ def propose(report, root, github, runner, dry_run, today):
 
 def main(argv, runner=default_runner, now=None, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--repo', default='compoundingtech/smalltalk')
+    parser.add_argument('--repo', default='compoundingtech/fractal')
     parser.add_argument('--cache', default=os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'evidence-flip-ready'))
     parser.add_argument('--propose', action='store_true', help='open a flip pull request for each ready check')
     parser.add_argument('--dry-run', action='store_true', help='with --propose: print the diff, change nothing')

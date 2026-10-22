@@ -278,6 +278,6 @@ gh pr checks "$garden_pr"
 gh pr merge "$garden_pr" --auto
 ```
 
-For `compoundingtech/smalltalk`, `linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries` are required; [CI operations](ci.md) explains its queue. `--auto` requests landing when GitHub's requirements pass; it is not a substitute for review or proof that a PR has already merged.
+For `compoundingtech/fractal`, `linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries` are required; [CI operations](ci.md) explains its queue. `--auto` requests landing when GitHub's requirements pass; it is not a substitute for review or proof that a PR has already merged.
 
 See [repository intake examples](../examples/st3/github-intake.kdl), [review/triage examples](../examples/st3/github-intake-work.kdl), and [subscriptions](st3/resource-subscriptions.md) for larger setups and cleanup.

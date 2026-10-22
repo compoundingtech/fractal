@@ -5,7 +5,7 @@ your coding agents and follow their work. Give them a mission with goals, constr
 and checks; durable seats carry it through and bring you the decisions that need you.
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
 ```
 
 The installer selects your platform, verifies the downloaded archive and opens `st`.

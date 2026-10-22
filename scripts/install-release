@@ -119,7 +119,7 @@ for binary in "${binaries[@]}"; do
   cp "$source_dir/$binary" "$stage/$binary"
   chmod 0755 "$stage/$binary"
 done
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 ln -s st3 "$stage/st"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 if [[ $(uname -s) == Darwin ]]; then

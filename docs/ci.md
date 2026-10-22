@@ -1150,7 +1150,7 @@ all came from the slower ones.
 At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
 "still being prepared", or a window's resync before its first snapshot. Today the store withdraws
 every list once per chunk while it projects a replication backlog, so these come in bursts of a
-few seconds ([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)). The report keeps
+few seconds ([#3553](https://github.com/compoundingtech/fractal/issues/3553)). The report keeps
 them apart from failed requests, under `unavailable` with the seconds they spanned, and the step
 summary shows them. They fail nothing until the store fix lands and turns `AVAILABILITY_GATED` on.
 Generated usage history contains cumulative response rollups for long-lived standing sessions
@@ -1439,7 +1439,7 @@ never reports fails its entry after 60 minutes. Repository settings enable nativ
 branch deletion after merge. Check the live settings against the file with `gh-check-settings`:
 
 ```sh
-nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/smalltalk --file .github/repo-settings.json
+nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
 
 A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
@@ -1452,7 +1452,7 @@ as drifted during that window.
 pull request has merged through the queue.
 
 To roll back, restore the previous ruleset (the JSON is in the body of pull request #916) with
-`gh api --method PUT repos/compoundingtech/smalltalk/rulesets/20563764 --input old-main-ruleset.json`,
+`gh api --method PUT repos/compoundingtech/fractal/rulesets/20563764 --input old-main-ruleset.json`,
 then start the train again with `st missions start` on its mission.
 
 ## Measured concurrency
@@ -1538,7 +1538,7 @@ job stayed `queued` with no runner (13 minutes and counting). A plain `gh run ca
 to it. Recover with the force-cancel endpoint and a rerun:
 
 ```sh
-gh api --method POST repos/compoundingtech/smalltalk/actions/runs/RUN_ID/force-cancel
+gh api --method POST repos/compoundingtech/fractal/actions/runs/RUN_ID/force-cancel
 gh run rerun RUN_ID
 ```
 

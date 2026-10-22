@@ -6305,7 +6305,7 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (key == name).then(|| value.to_owned())
@@ -6365,7 +6365,7 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
         env.iter().find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
