@@ -28,7 +28,8 @@ opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
+# Preparation capture uses scalar functions, connection clientdata (bundled SQLite), and transaction hooks.
+rusqlite = { version = "0.32", features = ["bundled", "trace", "functions", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

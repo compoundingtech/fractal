@@ -7648,6 +7648,23 @@ pub fn normalize_resource_observation(
         return Ok(None);
     }
     let prior_kind = latest_resource_kind(transaction, &input.subject)?;
+    normalize_resource_observation_with_actuals(transaction, input, prior_kind, || {
+        latest_actual(transaction, &input.subject)
+    })
+}
+
+/// Normalize using resource history already selected at the caller's read cut.
+/// The ordinary append path keeps its canonical history reader; preparation supplies
+/// the semantically identical materialized state from its pinned connection.
+pub fn normalize_resource_observation_with_actuals(
+    transaction: &Connection,
+    input: &ClaimInput,
+    prior_kind: Option<String>,
+    previous: impl FnOnce() -> Result<Option<Value>>,
+) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
+    if input.kind != "resource.observed" {
+        return Ok(None);
+    }
     let desired_kind = current_desired_row_tx(transaction, &input.subject)
         .map_err(internal)?
         .filter(|desired| desired.kind == "resource")
@@ -7678,12 +7695,13 @@ pub fn normalize_resource_observation(
     let spec = fractal_schema::registry()
         .validate_resource_facts(&kind, &facts)
         .map_err(|error| St3Error::new(error.code, error.message))?;
-    if let Some(previous) = latest_actual(transaction, &input.subject).map_err(internal)? {
+    if let Some(previous) = previous().map_err(internal)? {
+        let empty = serde_json::Map::new();
         let previous = previous
             .get("facts")
             .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_else(|| previous.as_object().cloned().unwrap_or_default());
+            .or_else(|| previous.as_object())
+            .unwrap_or(&empty);
         // Issue and pull request attribution belongs to its publisher, not to the latest
         // observer or fixer. Keep each named field, including a mission-run-only opener, across
         // observations, so a partial snapshot such as a merge never erases it.
@@ -10101,6 +10119,11 @@ fn nonowner_terminal_observation(
         )
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static ACTUAL_HISTORY_BODIES_DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn latest_actual_at(
     connection: &Connection,
     subject: &str,
@@ -10138,6 +10161,8 @@ pub fn latest_actual_at(
             let index: u64 = row.get(0)?;
             let (kind, body): (String, String) =
                 bodies.query_row(/* sqlite-large-value: allow-for-now lv-h6a4734d1f7f8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            #[cfg(any(test, feature = "test-support"))]
+            ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
             Ok((kind, serde_json::from_str::<Value>(&body)?))
         })())
     }))
@@ -10154,41 +10179,51 @@ fn fold_latest_parsed_values(
     rows: impl IntoIterator<Item = Result<(String, Value)>>,
 ) -> Result<Option<Value>> {
     let mut merged = serde_json::Map::new();
-    let registry = fractal_schema::registry();
     let mut any = false;
     for row in rows {
         let (kind, value) = row?;
         any = true;
-        let source = match value {
-            Value::Object(mut body) => match body.remove("fields") {
-                Some(fields) => fields,
-                None => Value::Object(body),
-            },
-            other => other,
-        };
-        if let Value::Object(fields) = source {
-            if kind == "resource.observed" {
-                resources::merge_observation(&mut merged, &fields);
-                continue;
-            }
-            if registry
-                .claim(&kind)
-                .is_some_and(|spec| spec.cardinality == fractal_schema::Cardinality::StateTransition)
-            {
-                for field in registry
-                    .claim(&kind)
-                    .into_iter()
-                    .flat_map(|spec| spec.fields.keys())
-                {
-                    merged.remove(field);
-                }
-            }
-            for (key, value) in fields {
-                merged.insert(key, value);
-            }
-        }
+        merge_actual_value(&mut merged, &kind, value);
     }
     Ok(any.then_some(Value::Object(merged)))
+}
+
+/// Apply one eligible claim in canonical order, shared by history folds and the
+/// rebuildable current-cut resource preparation projection.
+fn merge_actual_value(
+    merged: &mut serde_json::Map<String, Value>,
+    kind: &str,
+    value: Value,
+) {
+    let source = match value {
+        Value::Object(mut body) => match body.remove("fields") {
+            Some(fields) => fields,
+            None => Value::Object(body),
+        },
+        other => other,
+    };
+    if let Value::Object(fields) = source {
+        if kind == "resource.observed" {
+            resources::merge_observation(merged, &fields);
+            return;
+        }
+        let registry = fractal_schema::registry();
+        if registry
+            .claim(kind)
+            .is_some_and(|spec| spec.cardinality == fractal_schema::Cardinality::StateTransition)
+        {
+            for field in registry
+                .claim(kind)
+                .into_iter()
+                .flat_map(|spec| spec.fields.keys())
+            {
+                merged.remove(field);
+            }
+        }
+        for (key, value) in fields {
+            merged.insert(key, value);
+        }
+    }
 }
 
 /// `columns` of subject `?1`'s claims of one `kind` at or before store index `?2`, newest first
