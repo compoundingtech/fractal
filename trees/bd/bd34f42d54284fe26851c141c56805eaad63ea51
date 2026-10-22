@@ -7,3 +7,4 @@ record aaba5def814a4b694a891047cd19a6ebe28878c7 mail-redelivery-canaries 0 fleet
 record cc8e86d4eac13d3f8dd5ea7d07bc8ca9b49db367 linux-gate 0 fleet/ci 2026-10-22T00:45:21Z
 record d45e4b78134ad6f51e5d742aa982320a4a535298 isolation-vm 0 fleet/ci 2026-10-22T00:38:14Z
 record e0303d064fc235e9a9483f512c2c4c3e8747e826 linux-fleet-compat 0 fleet/ci 2026-10-22T00:31:42Z
+record 91a7509a6fcf3313dbc0765b6c50aca39fafb17e typescript-client 0 host/forge 2026-10-22T19:27:09Z
