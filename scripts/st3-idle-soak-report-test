@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 
-JQ_BIN=${ST3_SOAK_JQ_BIN:-$(command -v jq)}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+JQ_BIN=${FRACTAL_SOAK_JQ_BIN-${ST3_SOAK_JQ_BIN:-$(command -v jq)}}
 report="$(dirname "$0")/st3-idle-soak-report"
 
 fixture() {
@@ -21,10 +24,11 @@ fixture() {
 
 check() {
   local expected=$1 evidence=$2 result status
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   if result=$(printf '%s\n' "$evidence" | \
-    ST3_IDLE_REPORT_LOG=/dev/stdin ST3_IDLE_REPORT_NOW_UNIX=120 \
-    ST3_IDLE_REPORT_DURATION_SECONDS=120 ST3_IDLE_REPORT_MAX_GAP_SECONDS=60 \
-    ST3_IDLE_REPORT_MIN_SAMPLES=3 ST3_IDLE_REPORT_MIN_QUIET=2 \
+    FRACTAL_IDLE_REPORT_LOG=/dev/stdin ST3_IDLE_REPORT_LOG=/dev/stdin FRACTAL_IDLE_REPORT_NOW_UNIX=120 ST3_IDLE_REPORT_NOW_UNIX=120 \
+    FRACTAL_IDLE_REPORT_DURATION_SECONDS=120 ST3_IDLE_REPORT_DURATION_SECONDS=120 FRACTAL_IDLE_REPORT_MAX_GAP_SECONDS=60 ST3_IDLE_REPORT_MAX_GAP_SECONDS=60 \
+    FRACTAL_IDLE_REPORT_MIN_SAMPLES=3 ST3_IDLE_REPORT_MIN_SAMPLES=3 FRACTAL_IDLE_REPORT_MIN_QUIET=2 ST3_IDLE_REPORT_MIN_QUIET=2 \
     "$report"); then status=0; else status=$?; fi
   [[ $status == "$expected" ]] || { printf 'unexpected idle report status %s: %s\n' "$status" "$result" >&2; exit 1; }
 }
@@ -47,10 +51,11 @@ short_spaced=$(for host in example-linux example-mac; do
         peer_last_success_ms:($at*1000)}'
   done
 done)
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 if printf '%s\n' "$short_spaced" | \
-  ST3_IDLE_REPORT_LOG=/dev/stdin ST3_IDLE_REPORT_NOW_UNIX=120 \
-  ST3_IDLE_REPORT_DURATION_SECONDS=120 ST3_IDLE_REPORT_MAX_GAP_SECONDS=60 \
-  ST3_IDLE_REPORT_MIN_SAMPLES=5 ST3_IDLE_REPORT_MIN_QUIET=4 "$report" >/dev/null; then
+  FRACTAL_IDLE_REPORT_LOG=/dev/stdin ST3_IDLE_REPORT_LOG=/dev/stdin FRACTAL_IDLE_REPORT_NOW_UNIX=120 ST3_IDLE_REPORT_NOW_UNIX=120 \
+  FRACTAL_IDLE_REPORT_DURATION_SECONDS=120 ST3_IDLE_REPORT_DURATION_SECONDS=120 FRACTAL_IDLE_REPORT_MAX_GAP_SECONDS=60 ST3_IDLE_REPORT_MAX_GAP_SECONDS=60 \
+  FRACTAL_IDLE_REPORT_MIN_SAMPLES=5 ST3_IDLE_REPORT_MIN_SAMPLES=5 FRACTAL_IDLE_REPORT_MIN_QUIET=4 ST3_IDLE_REPORT_MIN_QUIET=4 "$report" >/dev/null; then
   echo 'short manual samples incorrectly passed the quiet-window gate' >&2
   exit 1
 fi

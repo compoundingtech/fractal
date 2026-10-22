@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
 import { ImageCache, ImageReads, imageFailure, imageKey, imageLabel, imageWords } from './imageView.ts';
-import { deliveredImages } from '@smalltalk/st3-views';
+import { deliveredImages } from '@fractal/views';
 import { ConversationImageViewport, VisibleConversationImage, errorCode } from './visibleConversationImages.ts';
 import { encodeBase64 } from './images.ts';
 

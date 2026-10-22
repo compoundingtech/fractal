@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
 
@@ -70,6 +70,36 @@ describe('kit transcript turn mapping', () => {
     expect(inspected[0]!.items.filter(item => item._tag === 'Notice')).toHaveLength(2)
     expect(JSON.stringify(inspected)).not.toContain('private-event')
   })
+  it('keeps mixed messages visible by default with their full body available only for explicit disclosure', () => {
+    const data = { text: 'Synthetic visible prose', blocks: [
+      { visibility: 'visible', payload: { text: 'Synthetic visible prose' } },
+      { visibility: 'internal', payload: { raw: 'synthetic-internal-sentinel' } },
+    ] }
+    const mixed: ConversationItem = { _tag: 'UnknownEvent', id: 'mixed', eventType: 'synthetic-kind', mixedContent: true, data }
+    const internal: ConversationItem = { ...mixed, id: 'internal', mixedContent: false }
+    const unspecified: ConversationItem = { _tag: 'UnknownEvent', id: 'unspecified', eventType: 'synthetic-kind', data }
+    for (const showSystemEvents of [false, true]) {
+      const state = mapConversationFeed({
+        _tag: 'Observed', freshness: 'live',
+        value: { items: [mixed, internal, unspecified], hasOlder: false, observation: { empty: false } },
+      }, { showSystemEvents })
+      expect(state._tag).toBe('Observed')
+      if (state._tag !== 'Observed') throw new Error('Expected observed mixed message')
+      expect(state.filteredEmpty).toBe(false)
+      expect(state.items[0]).toBe(mixed)
+      expect(state.items[0]!._tag === 'UnknownEvent' && state.items[0]!.data).toBe(data)
+      expect(state.items.slice(1).map(item => item._tag)).toEqual(showSystemEvents ? ['Notice', 'Notice'] : [])
+      const converted = convertConversationItem(state.items[0]!)
+      expect(converted.content).toEqual([{ type: 'text', text: 'Message with internal records' }])
+      expect(JSON.stringify(converted.content)).not.toContain('synthetic-internal-sentinel')
+      expect(JSON.stringify(converted.content)).not.toContain('synthetic-kind')
+    }
+    const control = mapConversationFeed({
+      _tag: 'Observed', freshness: 'live',
+      value: { items: [internal, unspecified], hasOlder: false, observation: { empty: false } },
+    }, {})
+    expect(control).toMatchObject({ _tag: 'Observed', filteredEmpty: true, items: [] })
+  })
   it('prepares the leading assistant tail as a prompt-less turn without losing its work', () => {
     const leading = [scenario[1]!, scenario[2]!, scenario[3]!]
     const prepared = prepareTranscriptTurns([...leading, ...scenario], { firstTurnComplete: false })
@@ -86,6 +116,16 @@ describe('kit transcript turn mapping', () => {
     expect(turns[0]!.prompt).toBe(scenario[0])
     expect(turns[0]!.items.map(item => item.id)).toEqual(['read', 'reasoning', 'answer', 'status'])
     expect(turns[1]!.items.map(item => item.id)).toEqual(['run'])
+  })
+  it('preserves native event identity without adding text send state', () => {
+    const event: ConversationItem = {
+      _tag: 'Event', id: 'harness', kind: 'harness-message', title: 'Harness',
+      text: 'Ready', data: { native: true }, sender: { kind: 'system', label: 'Harness' },
+    }
+    const prepared = prepareTranscriptTurns([event], { firstTurnComplete: true })
+    expect(prepared[0]!.items[0]).toBe(event)
+    expect(prepared[0]!.items[0]).not.toHaveProperty('sendState')
+    expect(prepared[0]!.items[0]).toHaveProperty('data', event.data)
   })
 
   it.each(['credential_pin', 'title_change', 'model_change', 'thinking_level_change'])('omits known internal kind %s', eventType => {
@@ -249,8 +289,8 @@ describe('conversation feed mapping', () => {
     ['ungranted', undefined, 'ungranted', 'Conversation access not granted', 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
     ['unsupported', undefined, 'unsupported', 'Conversation not supported', 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.'],
     ['failed', 'not-found', 'not-found', 'Conversation not found', 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
-    ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.'],
-    ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.'],
+    ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
+    ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
   ] as const)('classifies Unavailable(%s, code %s) as %s with one fixed reason', (reason, code, classification, title, detail) => {
     const sentinel = 'raw-read-diagnostic-sentinel: the requested resource was not found'
     const state = mapConversationFeed({ _tag: 'Unavailable', reason, detail: sentinel, ...(code === undefined ? {} : { code }) }, {})
@@ -266,7 +306,7 @@ describe('conversation feed mapping', () => {
   it.each(['not found', '<img src=x onerror=alert(1)>', 'Not-Found', '-leading', 'x'.repeat(41), ''])('omits a diagnostic code outside the allowlist (%s)', code => {
     const state = mapConversationFeed({ _tag: 'Unavailable', reason: 'failed', detail: 'diagnostic', code }, {})
     expect(state).toEqual({ _tag: 'Unavailable', classification: 'failed', code: undefined,
-      availability: { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.' } })
+      availability: { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' } })
   })
 
   it('keeps an allowlisted diagnostic code at the length limit', () => {

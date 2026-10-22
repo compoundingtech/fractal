@@ -1,9 +1,12 @@
 # Sourced helper. Aggregate the reviewer report and the supervisor verdict from Small Talk.
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 ROOT="${CATALOG:-$PWD}"
 R="$ROOT/rev"
-SUP_ID="agent/$ST_MISSION_RUN/prx.sup"
-REVIEWER_ID="agent/$ST_MISSION_RUN/prx.rev"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+SUP_ID="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/prx.sup"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+REVIEWER_ID="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/prx.rev"
 
 messages_to() {
   local recipient=$1

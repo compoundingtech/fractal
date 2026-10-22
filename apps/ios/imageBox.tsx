@@ -7,7 +7,7 @@ import { Image, Modal, Pressable, ScrollView, Share, StyleSheet, useWindowDimens
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { imageLabel, imageWords, type ImageFacts } from './imageView';
 import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from './visibleConversationImages';
-import type { MailImage } from '@smalltalk/st3-views';
+import type { MailImage } from '@fractal/views';
 import { useStore } from './store';
 import { theme } from './theme';
 import { T } from './ui';
