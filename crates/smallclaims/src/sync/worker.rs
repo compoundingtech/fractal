@@ -2913,6 +2913,7 @@ async fn exchange_inner<B: Backend>(
     )
     .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None))?;
     telemetry.pull(received.receipt.received);
+    let claim_ranges = received.receipt.claim_ranges.clone();
     // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
     // or keeps being sent, envelopes that are never stored must not keep the worker busy.
     let pulled = received.receipt.received != 0;
@@ -2971,8 +2972,167 @@ async fn exchange_inner<B: Backend>(
         backend.changed().await;
         refresh_fleet_view(backend, fleet).await;
     }
-    let progressed = pulled || pulled_follow_up || pushed || adopted;
+    let mut progressed = pulled || pulled_follow_up || pushed || adopted;
+    // Walking differing claim ranges is the lowest-priority sync work: it runs only once
+    // envelope transport has nothing left to move.
+    if let Some(comparison) = claim_ranges.filter(|comparison| !comparison.same && !progressed) {
+        progressed = walk_claim_ranges(
+            http, backend, node, peer, auth, fleet, telemetry, carrier, attempt, &query, &comparison,
+        )
+        .await?;
+    }
     Ok(progressed)
+}
+
+/// How far this node has walked one peer's differing claim ranges, by node and peer.
+static CLAIM_WALKS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<(String, String), ClaimWalk>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The most claim-range round trips one exchange spends; a walk that needs more continues at
+/// the next exchange.
+const CLAIM_WALK_ROUND_TRIPS: usize = 4;
+
+/// One walk over the claim ranges that differ between this node and a peer, for one pair of
+/// whole-set digests: the tops, then the leaves of differing tops, then the IDs of differing
+/// leaves, then the claims this node lacks. A walk that finishes is not repeated until either
+/// side's claims change, so claims this node retired, or holds that the peer lacks, cost one
+/// walk, not one per exchange.
+#[derive(Debug, Default)]
+pub(crate) struct ClaimWalk {
+    pair: String,
+    asked_tops: bool,
+    tops: std::collections::VecDeque<u32>,
+    leaves: std::collections::VecDeque<u32>,
+    missing: BTreeSet<String>,
+}
+
+impl ClaimWalk {
+    pub(crate) fn new(pair: &str) -> Self {
+        Self { pair: pair.to_owned(), ..Default::default() }
+    }
+
+    /// The next question for the peer: fetch what was found missing first, then descend.
+    pub(crate) fn next_query(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
+        use crate::replication::*;
+        let mut query = ClaimRangeQuery::default();
+        if !self.missing.is_empty() {
+            while query.claims.len() < CLAIM_RANGE_QUERY_CLAIMS {
+                let Some(id) = self.missing.pop_first() else { break };
+                query.claims.push(id);
+            }
+        } else if !self.leaves.is_empty() {
+            let take = self.leaves.len().min(CLAIM_RANGE_QUERY_LEAVES);
+            query.ids_of = self.leaves.drain(..take).collect();
+        } else if !self.tops.is_empty() {
+            let take = self.tops.len().min(CLAIM_RANGE_QUERY_TOPS);
+            query.leaves_of = self.tops.drain(..take).collect();
+        } else if !self.asked_tops {
+            self.asked_tops = true;
+            query.tops = true;
+        } else {
+            return None;
+        }
+        Some(query)
+    }
+
+    /// A walk with nothing left to ask: the claims already agree.
+    pub(crate) fn finished(pair: &str) -> Self {
+        Self { pair: pair.to_owned(), asked_tops: true, ..Default::default() }
+    }
+
+    /// Ask `query` again later: an index was still folding claims in, so the answer showed
+    /// nothing.
+    pub(crate) fn retry(&mut self, query: crate::replication::ClaimRangeQuery) {
+        self.asked_tops &= !query.tops;
+        for top in query.leaves_of.into_iter().rev() {
+            self.tops.push_front(top);
+        }
+        for leaf in query.ids_of.into_iter().rev() {
+            self.leaves.push_front(leaf);
+        }
+        self.missing.extend(query.claims);
+    }
+
+    /// Take in what one answer showed.
+    pub(crate) fn absorb(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
+        self.tops.extend(&comparison.tops);
+        self.leaves.extend(&comparison.leaves);
+        self.missing.extend(comparison.missing.iter().cloned());
+    }
+}
+
+/// Continue this node's walk of a peer's differing claim ranges for a few round trips, each an
+/// ordinary summary exchange carrying one bounded query. Claims found missing arrive as
+/// ordinary envelopes and are admitted like any other. Returns whether any were stored.
+#[allow(clippy::too_many_arguments)]
+async fn walk_claim_ranges<B: Backend>(
+    http: &reqwest::Client,
+    backend: &B,
+    node: &str,
+    peer: &PeerConfig,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    telemetry: &mut super::telemetry::Round,
+    carrier: crate::replication::ReplicationCarrier,
+    attempt: std::time::Instant,
+    summary: &ReplicationExchange,
+    comparison: &crate::replication::ClaimRangeComparison,
+) -> Result<bool> {
+    let key = (node.to_owned(), peer.name.clone());
+    let mut walk = CLAIM_WALKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key)
+        .filter(|walk| walk.pair == comparison.pair)
+        .unwrap_or_else(|| ClaimWalk::new(&comparison.pair));
+    let mut fetched = false;
+    let mut result = Ok(());
+    for _ in 0..CLAIM_WALK_ROUND_TRIPS {
+        let Some(query) = walk.next_query() else { break };
+        let mut ask = summary.clone();
+        ask.inventory.claim_range_query = Some(query.clone());
+        let started = std::time::Instant::now();
+        let answer = match post_signed(http, backend, peer, node, auth, fleet, &ask, false).await {
+            Ok((answer, _)) => answer,
+            Err(error) => {
+                result = Err(error);
+                break;
+            }
+        };
+        let received = match receive_from_peer(
+            backend,
+            fleet,
+            &peer.name,
+            auth.fleet_id(),
+            &answer,
+            Some(started.elapsed()),
+            carrier,
+        )
+        .await
+        {
+            Ok(received) => received,
+            Err(error) => {
+                result = Err(exchange_failure(error, ReplicationFailurePhase::LocalReceive, attempt, None));
+                break;
+            }
+        };
+        telemetry.pull(received.receipt.received);
+        fetched |= received.receipt.received != 0;
+        match &received.receipt.claim_ranges {
+            // Either index is still folding claims in, so the answer shows nothing yet.
+            None => {
+                walk.retry(query);
+                break;
+            }
+            Some(comparison) if comparison.same => {
+                walk = ClaimWalk::finished(&walk.pair);
+                break;
+            }
+            Some(comparison) => walk.absorb(comparison),
+        }
+    }
+    CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);
+    result.map(|()| fetched)
 }
 
 /// When an adoption last failed, by this node and the checkpoint's drop digest, so a manifest

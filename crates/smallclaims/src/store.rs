@@ -1723,6 +1723,7 @@ impl CompactReplicationInventory {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -4607,6 +4608,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         }
     }
 
@@ -4635,6 +4637,7 @@ impl TestReplica {
             buckets,
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         };
         (missing, inventory)
     }
@@ -4704,6 +4707,7 @@ pub fn compact_replication_exchange_lists_only_ranges_that_differ() {
         buckets: Vec::new(),
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     })
     .unwrap()
     .len();
@@ -4808,6 +4812,7 @@ pub fn compact_replication_exchange_waits_for_a_complete_listing() {
         buckets: peer.summary().buckets,
         accepts: None,
         checkpoint: None,
+        claim_range_query: None,
     };
     let (missing, _) = compact_replication_difference(&inventory, &buckets, &listing, limit);
     assert_eq!(missing, test_envelope_ids("origin", 9..=10, "a"));
@@ -6369,6 +6374,7 @@ impl Store {
                 buckets: snapshot.buckets.clone(),
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
+                claim_range_query: None,
             },
             envelopes: Vec::new(),
             signature_requests,
@@ -6412,6 +6418,21 @@ impl Store {
     ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
+        // Claims the peer found it lacks travel in their ordinary envelopes, after the
+        // envelopes the inventory difference already sends.
+        if let Some(query) = remote.claim_range_query.as_ref().filter(|query| !query.claims.is_empty()) {
+            let sent: BTreeSet<(String, u64, String)> = exchange
+                .envelopes
+                .iter()
+                .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
+                .collect();
+            let wanted = self
+                .envelopes_carrying_claims(&query.claims)?
+                .into_iter()
+                .filter(|id| !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
+                .collect();
+            exchange.envelopes.extend(self.replica_envelopes(wanted)?);
+        }
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
         fit_exchange_body(&mut exchange, budget)?;
@@ -6452,12 +6473,13 @@ impl Store {
                     buckets: snapshot.buckets.clone(),
                     accepts: Some(replication_accepts()),
                     checkpoint: self.trimmed_checkpoint()?,
+                    claim_range_query: None,
                 },
                 envelopes: self.replica_envelopes(missing)?,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
-                claim_ranges: Some(self.claim_range_summary()?),
+                claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -6518,7 +6540,7 @@ impl Store {
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
-            claim_ranges: Some(self.claim_range_summary()?),
+            claim_ranges: Some(self.claim_range_summary_answering(remote.claim_range_query.as_ref())?),
         })
     }
 
@@ -6867,12 +6889,9 @@ impl Store {
         }
         // Claims are compared only with a peer that speaks the same claim-range protocol, and
         // only while both range indexes cover every retained claim.
-        let claims_equal = match input.claim_ranges.as_ref() {
-            Some(remote) if remote.version == CLAIM_RANGE_VERSION => {
-                let local = self.claim_range_summary().map_err(internal)?;
-                local.retained.zip(remote.retained.as_ref()).map(|(local, remote)| local == *remote)
-            }
-            _ => None,
+        let claim_ranges = match input.claim_ranges.as_ref() {
+            Some(remote) => self.compare_claim_ranges(remote).map_err(internal)?,
+            None => None,
         };
         let now = now_ms();
         let mut sync = self
@@ -6880,8 +6899,8 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
-        if let Some(equal) = claims_equal {
-            progress.compare_claims(equal, now);
+        if let Some(comparison) = &claim_ranges {
+            progress.compare_claims(comparison.same, now);
         }
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
@@ -6977,7 +6996,9 @@ impl Store {
                 buckets: Vec::new(),
                 accepts: None,
                 checkpoint: None,
+                claim_range_query: None,
             },
+            claim_ranges,
         })
     }
 

@@ -22,6 +22,11 @@
 //!
 //! These are transport summaries. They do not authenticate claims; ordinary admission does.
 use super::*;
+use crate::replication::{
+    CLAIM_RANGE_ANSWER_IDS, CLAIM_RANGE_QUERY_CLAIMS, CLAIM_RANGE_QUERY_LEAVES, CLAIM_RANGE_QUERY_TOPS,
+    CLAIM_RANGE_VERSION, ClaimRangeComparison, ClaimRangeDigest, ClaimRangeEntry, ClaimRangeIds,
+    ClaimRangeLeaves, ClaimRangeQuery, ClaimRangeSummary,
+};
 use sha2::Sha512;
 
 /// The namespace of claims this store retains. Retired claim IDs will be a separate namespace.
@@ -306,20 +311,140 @@ impl Store {
 
     /// What this node tells a peer about the claims it retains: the whole set's count and digest,
     /// read with the index's completeness in one read transaction, or none while it folds.
-    pub fn claim_range_summary(&self) -> Result<crate::replication::ClaimRangeSummary> {
+    pub fn claim_range_summary(&self) -> Result<ClaimRangeSummary> {
+        self.claim_range_summary_answering(None)
+    }
+
+    /// The summary, with answers to a peer's query from the same read. An index still folding
+    /// answers nothing, since its ranges do not yet match its claims. Each answer is bounded by
+    /// the `CLAIM_RANGE_*` limits whatever the query asks. The irregular range is never listed:
+    /// only fixtures write such IDs, and listing it reads every claim.
+    pub fn claim_range_summary_answering(
+        &self,
+        query: Option<&ClaimRangeQuery>,
+    ) -> Result<ClaimRangeSummary> {
         let connection = self.readers.get();
         let read = connection.unchecked_transaction()?;
-        let retained = if complete(&read)? {
-            let (count, digest) = whole(&read)?;
-            Some(crate::replication::ClaimRangeDigest { count, digest: hex::encode(digest) })
-        } else {
-            None
+        let mut summary = ClaimRangeSummary { version: CLAIM_RANGE_VERSION, ..Default::default() };
+        if !complete(&read)? {
+            return Ok(summary);
+        }
+        let (count, digest) = whole(&read)?;
+        summary.retained = Some(ClaimRangeDigest { count, digest: hex::encode(digest) });
+        let Some(query) = query else {
+            return Ok(summary);
         };
-        Ok(crate::replication::ClaimRangeSummary {
-            version: crate::replication::CLAIM_RANGE_VERSION,
-            retained,
-        })
+        if query.tops {
+            summary.tops = Some(tops(&read)?.iter().map(entry).collect());
+        }
+        for &top in query.leaves_of.iter().take(CLAIM_RANGE_QUERY_TOPS) {
+            if top <= TOP_RANGES {
+                let leaves = leaves(&read, top)?.iter().map(entry).collect();
+                summary.leaves.push(ClaimRangeLeaves { top, leaves });
+            }
+        }
+        let mut listed = 0;
+        for &leaf in query.ids_of.iter().take(CLAIM_RANGE_QUERY_LEAVES) {
+            if listed >= CLAIM_RANGE_ANSWER_IDS {
+                break;
+            }
+            if leaf < LEAF_RANGES {
+                let ids = ids_in_leaf(&read, leaf)?;
+                listed += ids.len();
+                summary.ids.push(ClaimRangeIds { leaf, ids });
+            }
+        }
+        Ok(summary)
     }
+
+    /// Compare a peer's claim-range summary, and the answers in it, with this node's index.
+    /// `None` when they cannot be compared: another protocol version, or either index still
+    /// folding. Only ranges the peer holds claims
+    /// in are named, since only those can hold a claim this node lacks; a claim this node has
+    /// retired is never named missing.
+    pub fn compare_claim_ranges(
+        &self,
+        remote: &ClaimRangeSummary,
+    ) -> Result<Option<ClaimRangeComparison>> {
+        let Some(theirs) = remote.retained.as_ref().filter(|_| remote.version == CLAIM_RANGE_VERSION)
+        else {
+            return Ok(None);
+        };
+        let connection = self.readers.get();
+        let read = connection.unchecked_transaction()?;
+        if !complete(&read)? {
+            return Ok(None);
+        }
+        let (count, digest) = whole(&read)?;
+        let ours = hex::encode(digest);
+        let mut comparison =
+            ClaimRangeComparison { pair: format!("{ours}/{}", theirs.digest), ..Default::default() };
+        if count == theirs.count && ours == theirs.digest {
+            comparison.same = true;
+            return Ok(Some(comparison));
+        }
+        if let Some(remote_tops) = &remote.tops {
+            comparison.tops = differing(&tops(&read)?, remote_tops);
+        }
+        for group in remote.leaves.iter().take(CLAIM_RANGE_QUERY_TOPS) {
+            if group.top <= TOP_RANGES {
+                comparison.leaves.extend(differing(&leaves(&read, group.top)?, &group.leaves));
+            }
+        }
+        let mut examined = 0;
+        for group in remote.ids.iter().take(CLAIM_RANGE_QUERY_LEAVES) {
+            if group.leaf >= LEAF_RANGES || examined >= CLAIM_RANGE_ANSWER_IDS {
+                continue;
+            }
+            let local: BTreeSet<String> = ids_in_leaf(&read, group.leaf)?.into_iter().collect();
+            for id in &group.ids {
+                examined += 1;
+                if leaf(id) == group.leaf
+                    && !local.contains(id)
+                    && !retired::claim_retired(&read, id)?
+                {
+                    comparison.missing.push(id.clone());
+                }
+            }
+        }
+        Ok(Some(comparison))
+    }
+
+    /// The envelopes that carry these claims, for a peer that found it lacks them; at most
+    /// `CLAIM_RANGE_QUERY_CLAIMS` claims are looked up.
+    pub fn envelopes_carrying_claims(&self, claims: &[String]) -> Result<Vec<ReplicaEnvelopeId>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+             FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+             WHERE claims.id=?1",
+        )?;
+        let mut found = BTreeSet::new();
+        for id in claims.iter().take(CLAIM_RANGE_QUERY_CLAIMS) {
+            let rows = statement.query_map([id], |row| {
+                Ok(ReplicaEnvelopeId { writer: row.get(0)?, sequence: row.get(1)?, hash: row.get(2)? })
+            })?;
+            for row in rows {
+                found.insert(row?);
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+}
+
+fn entry(range: &ClaimRange) -> ClaimRangeEntry {
+    ClaimRangeEntry { range: range.range, count: range.count, digest: hex::encode(range.digest) }
+}
+
+/// The ranges the peer holds claims in whose population or digest differs from this node's.
+fn differing(local: &[ClaimRange], remote: &[ClaimRangeEntry]) -> Vec<u32> {
+    let local: BTreeMap<u32, (u64, String)> =
+        local.iter().map(|range| (range.range, (range.count, hex::encode(range.digest)))).collect();
+    remote
+        .iter()
+        .filter(|range| local.get(&range.range) != Some(&(range.count, range.digest.clone())))
+        .map(|range| range.range)
+        .collect()
 }
 
 #[cfg(test)]
