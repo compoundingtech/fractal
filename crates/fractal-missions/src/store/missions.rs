@@ -1923,13 +1923,13 @@ fn set_step_state_guarded(
             let current: Option<StepStateRow> = transaction
                 .query_row(
                     "SELECT step_runs.status,
-                            step_runs.generation_id=mission_runs.current_generation_id,
-                            step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
-                            run_generations.status, root_runs.status, root_runs.phase
-                     FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-                     JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
-                     JOIN run_generations ON run_generations.id=step_runs.generation_id
-                     WHERE step_runs.subject=?1",
+                                step_runs.generation_id=mission_runs.current_generation_id,
+                                step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
+                                run_generations.status, root_runs.status, root_runs.phase
+                         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
+                         JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
+                         JOIN run_generations ON run_generations.id=step_runs.generation_id
+                         WHERE step_runs.subject=?1",
                     [&subject],
                     |row| {
                         Ok((
