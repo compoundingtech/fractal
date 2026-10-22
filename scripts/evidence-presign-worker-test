@@ -34,6 +34,11 @@ with open(os.environ['STUB_LOG'], 'a') as log:
                           'target': os.environ.get('CARGO_TARGET_DIR')}) + '\\n')
 time.sleep(float(os.environ.get('STUB_SLEEP', '0')))
 results = json.loads(os.environ.get('STUB_RESULTS', '{}'))
+# What a pull request's own test output could print: rows shaped like st-test's, before its summary.
+for name in checks:
+    print(f'  {name:<20} {"passed":<12} {1:>6}s  printed by a test')
+print()
+print('st-test: tree 0123456789ab (HEAD), in a clean worktree')
 for name in checks:
     print(f'  {name:<20} {results.get(name, "passed"):<12} {12:>6}s  why')
 sys.exit(0)
