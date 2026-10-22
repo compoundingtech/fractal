@@ -1,5 +1,5 @@
 [package]
-name = "st3-client-tui"
+name = "fractal-client-tui"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -10,11 +10,15 @@ description = "Small client built from Small Talk's reusable pieces"
 anyhow = "1"
 crossterm = "0.29"
 ratatui = { workspace = true }
-st3-client = { path = "../../crates/st3-client" }
-st3-feed = { path = "../../crates/st3-feed" }
-st3-conversation-ui = { path = "../../crates/st3-conversation-ui", features = ["ratatui"] }
+fractal-client = { path = "../../crates/fractal-client" }
+fractal-feed = { path = "../../crates/fractal-feed" }
+fractal-conversation-ui = { path = "../../crates/fractal-conversation-ui", features = ["ratatui"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
 serde_json = "1"
+
+[[bin]]
+name = "st3-client-tui"
+path = "src/main.rs"

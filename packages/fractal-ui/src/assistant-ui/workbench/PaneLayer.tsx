@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal } from '../taste/PortalContainer'
 import { displayedTabKey, paneKey, paneKind, type WorkbenchLayout, type WorkbenchPane, type TabGroupLayout } from './workbench-model'
 import { readStoredActiveTab } from './workbench-state'
 
@@ -84,11 +84,9 @@ export function usePaneLayer(layout: WorkbenchLayout, workspaceId: string, focus
 
 /** Layout owns only empty slots. React owns each pane once, under this stable portal layer. */
 export function PaneLayer({ visible, canClose, render }: { visible: readonly PanePlacement[]; canClose: (group: TabGroupLayout) => boolean; render: (pane: WorkbenchPane) => React.ReactNode }) {
-  return visible.map(({ mount, group }) => createPortal(
-    <PaneCloseContext.Provider value={paneKind(mount.pane) === 'diff' && canClose(group) ? mount.close : undefined}>{render(mount.pane)}</PaneCloseContext.Provider>,
-    mount.element,
-    String(mount.id),
-  ))
+  return visible.map(({ mount, group }) => <RegisteredPortal key={String(mount.id)} container={mount.element}>
+    <PaneCloseContext.Provider value={paneKind(mount.pane) === 'diff' && canClose(group) ? mount.close : undefined}>{render(mount.pane)}</PaneCloseContext.Provider>
+  </RegisteredPortal>)
 }
 
 export const PaneSlotsProvider = PaneSlotsContext.Provider

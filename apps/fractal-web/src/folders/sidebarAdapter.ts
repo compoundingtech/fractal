@@ -1,10 +1,10 @@
 import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { drawnParents, insertAt, isLive, liveAncestor, positionKey, project, wouldCycle, type FolderDoc, type Insertion, type Projection, type ProjectedFolder } from './core.mts'
 import { refusalText, sidebarOperations, type ArrangementEditorState, type RestageVerdict, type SidebarOperation } from './edit.ts'
-import type { SidebarCreateFolder, SidebarDropVerdict, SidebarMove, SidebarNode, SidebarRowStatus } from './sidebarContract.ts'
+import type { SidebarAgent, SidebarCreateFolder, SidebarDropVerdict, SidebarMove, SidebarNode, SidebarRowStatus } from './sidebarContract.ts'
 
 /** A seat's row key is not its shared membership subject. Lifecycle does not filter this roster. */
-export interface SidebarSeat { readonly id: string; readonly subject: string; readonly host: string; readonly label: string }
+export interface SidebarSeat { readonly id: string; readonly subject: string; readonly host: string; readonly label: string; readonly project?: string; readonly children?: readonly SidebarAgent[] }
 export type SidebarDocument = FolderDoc & { readonly roster: readonly SidebarSeat[] }
 export type SidebarCollapse = ReadonlyMap<string, boolean>
 const compare = (left: string, right: string): number => {
@@ -15,10 +15,14 @@ const compare = (left: string, right: string): number => {
 }
 
 export const sidebarTree = (projection: Projection, roster: readonly SidebarSeat[], collapse: SidebarCollapse): SidebarNode[] => {
+  const agent = (seat: SidebarSeat): SidebarNode => ({
+    _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label,
+    children: seat.children, collapsed: collapse.get(seat.id) ?? true,
+  })
   const seats = new Map<string, SidebarNode[]>()
   for (const seat of roster) {
     const rows = seats.get(seat.subject) ?? []
-    rows.push({ _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label })
+    rows.push(agent(seat))
     seats.set(seat.subject, rows)
   }
   const folder = (item: ProjectedFolder): SidebarNode => ({
@@ -26,16 +30,21 @@ export const sidebarTree = (projection: Projection, roster: readonly SidebarSeat
     children: [...item.folders.map(folder), ...item.members.flatMap((subject) => seats.get(subject) ?? [])],
   })
   const unfiled = new Set(projection.unfiled)
-  const hosts = new Map<string, SidebarSeat[]>()
-  for (const seat of roster) if (unfiled.has(seat.subject)) {
-    const rows = hosts.get(seat.host) ?? []
-    rows.push(seat)
-    hosts.set(seat.host, rows)
+  const rows = roster.filter(seat => unfiled.has(seat.subject)).toSorted((a, b) => compare(a.host, b.host) || compare(a.id, b.id))
+  const projects = new Map<string, typeof rows>()
+  for (const row of rows) {
+    const project = row.project ?? ''
+    const members = projects.get(project) ?? []
+    members.push(row)
+    projects.set(project, members)
   }
-  return [...projection.folders.map(folder), ...[...hosts].sort(([a], [b]) => compare(`host:${a}`, `host:${b}`)).map(([host, rows]): SidebarNode => ({
-    _tag: 'Group', id: `host:${host}`, label: host, collapsed: collapse.get(`host:${host}`) ?? false,
-    children: rows.sort((a, b) => compare(a.id, b.id)).map((seat) => ({ _tag: 'Agent', id: seat.id, subject: seat.subject, label: seat.label })),
-  }))]
+  return [...projection.folders.map(folder), ...[...projects].map(([project, members]): SidebarNode => {
+    const id = project === '' ? 'wf/unfiled' : `wf/project/${encodeURIComponent(project)}`
+    return {
+      _tag: 'Group', id, label: project === '' ? 'Unfiled' : project, collapsed: collapse.get(id) ?? false,
+      children: members.map(agent),
+    }
+  })]
 }
 
 /** Filtering is a view operation; all move plans continue to use the complete document. */
@@ -43,9 +52,13 @@ export const filterSidebarTree = (tree: readonly SidebarNode[], query: string): 
   const needle = query.trim().toLocaleLowerCase()
   if (needle === '') return [...tree]
   return tree.flatMap((node): SidebarNode[] => {
-    if (node._tag === 'Agent') return node.label.toLocaleLowerCase().includes(needle) ? [node] : []
+    if (node._tag === 'Agent') {
+      const children = node.children === undefined ? undefined : filterSidebarTree(node.children, query) as readonly SidebarAgent[]
+      if (node.label.toLocaleLowerCase().includes(needle)) return [{ ...node, collapsed: false }]
+      return children?.length ? [{ ...node, collapsed: false, children }] : []
+    }
     const children = filterSidebarTree(node.children, query)
-    return children.length === 0 ? [] : [{ ...node, children }]
+    return children.length === 0 ? [] : [{ ...node, collapsed: false, children }]
   })
 }
 
@@ -115,7 +128,7 @@ const planMove = (doc: SidebarDocument, move: SidebarMove): MovePlan | { refused
   return { item, parent, siblings, index: anchor === undefined ? siblings.length : siblings.indexOf(anchor), unchanged }
 }
 
-/** Keep aligned with MAX_KEY_BYTES and valid_key in crates/st3-schema/src/arrangements.rs, and with the fractal TUI port in flakes/fractal (schickling/dotfiles). */
+/** Keep aligned with MAX_KEY_BYTES and valid_key in crates/fractal-schema/src/arrangements.rs, and with the fractal TUI port in the dotfiles repository's flakes/fractal. */
 const maxArrangementKeyBytes = 128
 const validArrangementKey = (key: string): boolean => {
   if (!/^[A-Za-z]/.test(key) || /[^0-9A-Za-z]/.test(key) || key.length > maxArrangementKeyBytes) return false

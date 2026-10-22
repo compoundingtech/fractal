@@ -32,9 +32,9 @@ Finish macOS installation by hand in the VM window. Create the invented user
 Configure automatic GUI login as ada, enable Remote Login for ada, and keep its
 login session unlocked. Install Python 3.11 or newer for the test instrumentation
 and archive installer. Make Python available in ada's fresh login shell. Leave
-Smalltalk, provider CLIs, gh, Rust and other developer tools absent. A base image
+Fractal, provider CLIs, gh, Rust and other developer tools absent. A base image
 with a preinstalled provider/toolchain will fail the clean-tool-path assertion.
-Do not grant Smalltalk privacy permissions in the clean base.
+Do not grant Fractal privacy permissions in the clean base.
 
 Copy only the **public** SSH key into `/Users/ada/.ssh/authorized_keys` inside the
 VM, set the directory mode to700 and file mode to600. Never copy the host private
@@ -59,20 +59,20 @@ or an explicit `--sha256 HEX`.
 
 ```sh
 scripts/onboarding-mac-test --scenario first-run \
-  --archive /tmp/smalltalk-aarch64-apple-darwin.tar.gz \
+  --archive /tmp/fractal-aarch64-apple-darwin.tar.gz \
   --tart-image studio-clean --ssh-key ~/.ssh/st-onboarding-test \
   --strict-release --keep --out /tmp/onboarding-mac-first-run
 
 # A second fresh clone tests setup flags and config merge rather than first-run answers.
 scripts/onboarding-mac-test --scenario setup \
-  --archive /tmp/smalltalk-aarch64-apple-darwin.tar.gz \
+  --archive /tmp/fractal-aarch64-apple-darwin.tar.gz \
   --tart-image studio-clean --ssh-key ~/.ssh/st-onboarding-test \
   --strict-release --out /tmp/onboarding-mac-setup
 ```
 
 `--scenario no-harness` is another flags-based run. All three cases require a
 clean base without providers; they verify the explicit no-harness explanation and
-absence of the built-in Smalltalk Assistant/mission. Provider transport and model/content
+absence of the built-in Fractal Assistant/mission. Provider transport and model/content
 completion remain separate tests. Multiple `--scenario` options create fresh
 clones sequentially. No task is scheduled in CI.
 

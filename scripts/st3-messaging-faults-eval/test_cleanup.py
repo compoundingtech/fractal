@@ -19,6 +19,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from script_process import signal_private
 loader = importlib.machinery.SourceFileLoader('cleanup_eval', str(HERE / 'run'))
 runner = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(runner)
@@ -51,11 +53,45 @@ def descendants(pid):
     return result
 
 
+class StartupGraceTests(unittest.TestCase):
+    def test_only_a_shortened_grace_reaches_the_daemons_environment(self):
+        env = {'PATH': '/bin'}
+        self.assertEqual(runner.with_startup_grace(env, 20), env)
+        shortened = runner.with_startup_grace(env, 1.5)
+        self.assertEqual(shortened['ST3_TEST_DELIVERY_STARTUP_GRACE_MS'], '1500')
+        self.assertNotIn('ST3_TEST_DELIVERY_STARTUP_GRACE_MS', env)
+
+
 class CleanupTests(unittest.TestCase):
+    def test_stop_preserves_a_detached_process_with_the_inherited_marker(self):
+        async def exercise():
+            command = (sys.executable, '-c', 'import time; time.sleep(60)')
+            owned = await runner.spawn(*command, start_new_session=True)
+            # A detached provider inherits the daemon's marker, but owns a new
+            # session/group and is meant to outlive a daemon restart.
+            detached = await asyncio.create_subprocess_exec(*command,
+                env={**os.environ, 'SCRIPT_TEST_PROCESS': owned.signal_marker},
+                start_new_session=True)
+            try:
+                candidates = [Path(f'/proc/{owned.pid}'), Path(f'/proc/{detached.pid}')]
+                with patch.object(runner.Path, 'glob', return_value=candidates):
+                    await runner.stop(owned)
+                self.assertEqual(owned.returncode, -signal.SIGTERM)
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(detached.wait()), 0.05)
+                self.assertIsNone(detached.returncode)
+                self.assertTrue(Path(f'/proc/{detached.pid}').exists())
+            finally:
+                for process in (owned, detached):
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+        asyncio.run(exercise())
+
     def test_evidence_failure_still_cleans_both_nodes_and_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
-            args = SimpleNamespace(scratch=parent, keep=False, ready_seconds=60)
+            args = SimpleNamespace(scratch=parent, keep=False, ready_seconds=60, startup_grace_seconds=20)
             nodes = [SimpleNamespace(cleanup=AsyncMock(), name=name, root=parent / name) for name in ('amber', 'cobalt')]
             with patch.dict(os.environ, ST3_MESSAGING_ROOT=directory), \
                  patch.object(runner, 'Node', side_effect=nodes), \
@@ -67,6 +103,38 @@ class CleanupTests(unittest.TestCase):
             for node in nodes:
                 node.cleanup.assert_awaited_once()
             self.assertEqual(list(parent.iterdir()), [])
+
+    def test_a_slow_pty_registry_does_not_fail_cleanup_and_the_sweep_still_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = []
+            process = SimpleNamespace(pid=0)
+            node = SimpleNamespace(name='amber', root=Path(directory), env={}, logs=[], processes=[process],
+                                   down=AsyncMock(), seats=lambda: [])
+            async def stop(target):
+                stopped.append(target)
+            with patch.object(runner, 'capture', new=AsyncMock(side_effect=asyncio.TimeoutError)), \
+                 patch.object(runner, 'stop', new=stop):
+                asyncio.run(runner.Node.cleanup(node))
+            node.down.assert_awaited_once()
+            self.assertEqual(stopped, [process])
+
+    def test_a_timeout_stopping_reconciliation_still_propagates_after_the_sweep(self):
+        # `down()` stops reconciliation; if it timed out, restart=always may still start a
+        # replacement, so the case must not pass as if cleanup had worked.
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = []
+            process = SimpleNamespace(pid=0)
+            node = SimpleNamespace(name='amber', root=Path(directory), env={}, logs=[], processes=[process],
+                                   down=AsyncMock(side_effect=asyncio.TimeoutError), seats=lambda: [])
+            async def stop(target):
+                stopped.append(target)
+            capture = AsyncMock()
+            with patch.object(runner, 'capture', new=capture), \
+                 patch.object(runner, 'stop', new=stop):
+                with self.assertRaises(asyncio.TimeoutError):
+                    asyncio.run(runner.Node.cleanup(node))
+            capture.assert_not_awaited()
+            self.assertEqual(stopped, [process])
 
     def test_provider_shutdown_bounds_a_stuck_extension_and_kills_its_channel(self):
         with tempfile.TemporaryDirectory(prefix='mfe-provider-proof-') as directory:
@@ -98,7 +166,7 @@ export default api => {
                     provider = rows[0]['pid']
                     child = int((root / 'child.pid').read_text())
                     self.assertEqual(os.getpgid(child), child)
-                    os.kill(provider, signal.SIGTERM)
+                    signal_private(provider, signal.SIGTERM, root=root)
                     launcher.wait(timeout=3)
                     self.assertEqual(launcher.returncode, 1, (root / 'provider.log').read_text())
                     wait_for(lambda: not Path(f'/proc/{child}').exists(), 2)
@@ -176,7 +244,11 @@ export default api => {
                                 fds.append(os.pidfd_open(pid))
                             except ProcessLookupError:
                                 pass
-                        os.kill(controller if target == 'controller' else launcher.pid, sig)
+                        if target == 'controller':
+                            signal_private(controller, sig,
+                                environment={'ST3_MESSAGING_ROOT': str(root)})
+                        else:
+                            launcher.send_signal(sig)
                         launcher.wait(timeout=10)
                         wait_for(lambda: all(not Path(f'/proc/{pid}').exists() for pid in pids), 5)
                         wait_for(lambda: not Path(f'/proc/{guardian}').exists(), 5)

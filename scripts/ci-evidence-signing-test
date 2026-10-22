@@ -243,6 +243,31 @@ with tempfile.TemporaryDirectory() as directory:
     shards = {**needs, 'linux-tests-shard-3': {'result': 'skipped'}}
     assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(shards), GITHUB_EVENT_NAME='pull_request')).returncode == 0, 'merge-only shards may be skipped outside merge groups'
     assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(shards), GITHUB_EVENT_NAME='merge_group')).returncode == 1
+    # A path-sensitive lane of its own (fractal-web) is skipped whenever no web path changed: it is not part of the verdict.
+    web = {**needs, 'fractal-web-execution': {'result': 'skipped'}}
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(web), GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'a skipped fractal-web job does not stop the linux-gate note'
+    assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests'], 'and it is not recorded in the command'
+    # The separate checks (typescript-client, genie-freshness) have their own notes: neither their results nor their gates'
+    # decisions are part of the linux-gate note. A gate of a linux-gate member that skipped still stops it.
+    def gates(**skips):
+        return {f'evidence-gate-{name}': {'result': 'success', 'outputs': {'skip': 'true' if skips.get(name.replace('-', '_')) else 'false'}}
+                for name in ('linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'typescript-client', 'genie-freshness')}
+    members = {**needs, 'isolation-vm': {'result': 'success'}, 'typescript-client': {'result': 'success'}, 'genie-freshness': {'result': 'success'}}
+    separate = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(typescript_client=True)}), GITHUB_EVENT_NAME='merge_group'))
+    recorded = json.loads(out.read_text())
+    assert separate.returncode == 0, ('a separate check\'s gate that skipped does not stop the linux-gate note', separate.stdout)
+    assert recorded['command'] == ['linux-gate', 'aggregate', 'isolation-vm', 'linux-clippy', 'linux-gate', 'linux-tests'], recorded['command']
+    assert 'typescript-client' not in recorded['output']['needs'] and 'genie-freshness' not in recorded['output']['needs']
+    assert 'typescript-client' not in json.dumps(recorded['inputs']) and 'genie-freshness' not in json.dumps(recorded['inputs']), recorded['inputs']
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(genie_freshness=True), 'genie-freshness': {'result': 'skipped'}}),
+                                                  GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'a skipped separate check is not a linux-gate member'
+    for gate_name in ('linux_gate', 'mail_redelivery_canaries', 'isolation_vm'):
+        refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(**{gate_name: True})}), GITHUB_EVENT_NAME='merge_group'))
+        assert refused.returncode == 1 and 'evidence-gate-' + gate_name.replace('_', '-') in refused.stdout, (gate_name, refused.stdout)
+    for member in ('linux-tests', 'isolation-vm', 'mail-redelivery-canaries', 'upgrade-impact'):
+        refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(), member: {'result': 'skipped'}}), GITHUB_EVENT_NAME='merge_group'))
+        assert refused.returncode == 1 and member in refused.stdout and 'did not run' in refused.stdout, (member, refused.stdout)
+    print('passed: a skipped linux-gate member or a skip by its gate never reads as success; the separate checks are not in the linux-gate note')
     missing = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({'linux-tests': {'result': 'success'}})))
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')
@@ -287,6 +312,16 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='{}')).returncode == 1
     print('passed: a step-based job note records each step outcome; a skipped, cancelled or missing step means no note, a failed one a failure')
 
+    # --- STEP_INPUTS: extra named inputs (a shard, a test set) are recorded; they never replace a fixed one
+    outcomes = json.dumps({'driver': 'success'})
+    more = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=outcomes, STEP_INPUTS=json.dumps({'kit_shard': '1', 'kit_shard_count': '2', 'play_set': 'all'})))
+    got = json.loads(out.read_text())
+    assert more.returncode == 0 and got['inputs']['kit_shard'] == '1' and got['inputs']['play_set'] == 'all' and got['inputs']['job'] == 'isolation-vm', got
+    for bad in ('not json', '[]', json.dumps({'job': 'other'}), json.dumps({'Kit': '1'}), json.dumps({'kit_shard': 1}), json.dumps({'kit_shard': ''})):
+        refused = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=outcomes, STEP_INPUTS=bad))
+        assert refused.returncode == 1, (bad, refused.stdout)
+    print('passed: extra step inputs are recorded as named strings; a malformed set or one that replaces a fixed input makes no note')
+
     # --- source_inputs: recorded only when the BASE evidence-verify projects the check's declared inputs
     stub_dir = tmp / 'stub-scripts'
     stub_dir.mkdir()
@@ -322,6 +357,32 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'source_inputs' not in project_run(dict(PROJECT_BASE_SHA=''))[1]['inputs'], 'no base commit, no key'
     print('passed: source_inputs is signed only when the base evidence-verify projects a well-formed key; every other case is an exact-tree note')
 
+    # --- the linux-gate aggregate carries its input key too; its job sets no PROJECT_BASE_SHA, so the base comes from the event payload
+    def aggregate_run(payload, extra=None):
+        event = tmp / 'event.json'
+        event.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        env_ = dict(NEEDS_JSON=json.dumps({'linux-gate': {'result': 'success'}, 'linux-tests': {'result': 'success'}}),
+                    GITHUB_EVENT_NAME='merge_group', GITHUB_EVENT_PATH=str(event), GITHUB_REPOSITORY='example/repo', GITHUB_SHA='d' * 40)
+        env_.update(extra or {})
+        done = subprocess.run([sys.executable, str(stub_dir / 'ci-evidence-signing'), 'aggregate', str(out)], capture_output=True, text=True,
+                              env=dict(BASE, **env_))
+        return done, json.loads(out.read_text()) if done.returncode == 0 else None
+
+    with_verify(f'import json,sys\njson.dump(sys.argv[1:], open({str(seen)!r}, "w"))\nprint(json.dumps({{"source_inputs": {KEY!r}}}))\n')
+    done, facts = aggregate_run({'merge_group': {'base_sha': 'c' * 40}})
+    assert done.returncode == 0 and facts['inputs']['source_inputs'] == KEY, done.stdout + done.stderr
+    assert json.loads(seen.read_text()) == ['--project', '--check', 'linux-gate', '--revision', 'HEAD', '--policy-from', 'c' * 40, '--repository', 'example/repo']
+    aggregate_run({'pull_request': {'base': {'sha': 'e' * 40}}})
+    assert json.loads(seen.read_text())[6] == 'e' * 40, 'a pull request projects with its base'
+    aggregate_run({}, dict(GITHUB_EVENT_NAME='push'))
+    assert json.loads(seen.read_text())[6] == 'd' * 40, 'a push to main projects with the commit itself, as PROJECT_BASE_SHA does'
+    aggregate_run({'merge_group': {'base_sha': 'c' * 40}}, dict(PROJECT_BASE_SHA='f' * 40))
+    assert json.loads(seen.read_text())[6] == 'f' * 40, 'PROJECT_BASE_SHA wins when the step sets it'
+    for payload in ('not json', {'merge_group': {'base_sha': 'not-a-sha'}}, '[]'):
+        done, facts = aggregate_run(payload, dict(GITHUB_SHA=''))
+        assert done.returncode == 0 and 'source_inputs' not in facts['inputs'], (payload, 'an unreadable base is no base: an exact-tree note')
+    print('passed: the aggregate note signs its input key, with the base from PROJECT_BASE_SHA or the event payload, and none when that is unreadable')
+
     # --- a job whose gate said skip makes no note even if its logs and steps look like a success
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='false')).returncode == 0
     gated = helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='true'))
@@ -338,7 +399,52 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('cleanup', env=dict(RUNNER_TEMP=str(runner))).returncode == 0, 'cleanup is safe to repeat'
     print('passed: cleanup overwrites and removes the key, and is safe to run twice')
 
-# --- lint: pushing refs/notes/evidence/* must not start any workflow
+# --- lint: pushing refs/notes/evidence/* (or an evidence tag, refs/tags/evidence/...) must not start any workflow
+EVIDENCE_TAGS = ('evidence/' + 'a' * 40 + '/' + 'b' * 40, 'evidence/x')
+
+
+def glob_regex(pattern):
+    # GitHub filter globs: ** matches anything, * anything but '/', ? one character but '/'.
+    out, i = '', 0
+    while i < len(pattern):
+        if pattern.startswith('**', i):
+            out, i = out + '.*', i + 2
+        elif pattern[i] == '*':
+            out, i = out + '[^/]*', i + 1
+        elif pattern[i] == '?':
+            out, i = out + '[^/]', i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r'\Z')
+
+
+def filter_matches(patterns, name):
+    # In order; a '!' pattern removes a match again; the last pattern that matches decides.
+    matched = False
+    for pattern in patterns:
+        negated = pattern.startswith('!')
+        if glob_regex(pattern[1:] if negated else pattern).match(name):
+            matched = not negated
+    return matched
+
+
+def filter_patterns(block, kind):
+    for index, entry in enumerate(block):
+        if entry.startswith(kind + ':'):
+            rest = entry[len(kind) + 1:].strip()
+            if rest:
+                return json.loads(rest)  # the generator writes flow lists: ["**", "!edge"]
+            items = []
+            for follower in block[index + 1:]:
+                if not follower.startswith('- '):
+                    break
+                items.append(follower[2:].strip().strip('"\''))
+            return items
+    return None
+
+
+assert filter_matches(['**', '!edge'], EVIDENCE_TAGS[0]) and not filter_matches(['**', '!edge', '!evidence/**'], EVIDENCE_TAGS[0])
+assert filter_matches(['v*'], 'v1.2') and not filter_matches(['v*'], 'v1/2') and not filter_matches(['**', '!edge'], 'edge')
 pushes = 0
 for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
     lines = workflow.read_text().splitlines()
@@ -351,9 +457,99 @@ for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
                 block.append(follower.strip())
             filters = [b for b in block if re.match(r'(branches|tags)(-ignore)?:', b)]
             assert filters, f'{workflow.name}: a push trigger without a branches or tags filter would fire on refs/notes pushes'
+            for kind in ('tags', 'tags-ignore'):
+                patterns = filter_patterns(block, kind)
+                if patterns is not None:
+                    for tag in EVIDENCE_TAGS:
+                        fires = filter_matches(patterns, tag) if kind == 'tags' else not filter_matches(patterns, tag)
+                        assert not fires, f'{workflow.name}: pushing the evidence tag {tag} would start this workflow ({kind}: {patterns})'
             pushes += 1
 assert pushes >= 1, 'the lint found no push trigger at all, so it checked nothing'
-print(f'passed: all {pushes} push triggers in the generated workflows are filtered to branches or tags')
+print(f'passed: all {pushes} push triggers in the generated workflows are filtered to branches or tags, and no tag filter fires on an evidence tag')
+
+# --- lint: no checkout fetches the evidence tags. fetch-depth 0 fetches every tag; a full history comes from the shallow checkout
+# plus workspace-ci.ts's fetch, whose negative refspec leaves refs/tags/evidence/* out.
+FETCH_STEP = '- name: Fetch the whole history without evidence tags'
+
+
+def fetch_script(lines, number):
+    """The run block of the fetch step that starts at lines[number]."""
+    indent = len(lines[number]) - len(lines[number].lstrip()) + 2
+    for at in range(number + 1, len(lines)):
+        if lines[at].strip() == 'run: |':
+            body = []
+            for follower in lines[at + 1:]:
+                if follower.strip() and len(follower) - len(follower.lstrip()) <= indent:
+                    break
+                body.append(follower[indent + 2:])
+            return '\n'.join(body).strip() + '\n'
+    raise AssertionError(f'the fetch step at line {number + 1} has no run block')
+
+
+scripts = set()
+for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
+    lines = workflow.read_text().splitlines()
+    for line in lines:
+        depth = re.fullmatch(r'\s*fetch-depth:\s*(.*?)\s*', line)
+        # 0, or an expression that can be 0, fetches every tag and so every evidence record
+        assert depth is None or re.fullmatch(r'[1-9][0-9]*', depth.group(1)), f'{workflow.name}: fetch-depth {depth.group(1)} may fetch every evidence tag'
+    for number, line in enumerate(lines):
+        if line.strip() == FETCH_STEP:
+            assert 'uses: actions/checkout@' in '\n'.join(lines[max(0, number - 8):number]), f'{workflow.name}:{number + 1}: the fetch step must follow its checkout'
+            scripts.add(fetch_script(lines, number))
+assert len(scripts) == 1, f'every full-history fetch must be the one script from workspace-ci.ts, found {len(scripts)}'
+script, = scripts
+assert "'^refs/tags/evidence/*'" in script and '--no-tags' in script and '--refetch' in script and 'fsck --connectivity-only' in script, script
+
+# The script, run for real: a shallow checkout of a merge ref that no branch holds, then the fetch.
+with tempfile.TemporaryDirectory() as directory:
+    tmp = Path(directory)
+    seed, remote, checkout = tmp / 'seed', tmp / 'origin.git', tmp / 'checkout'
+    git(tmp, 'init', '-q', '-b', 'main', str(seed))
+    for index in range(3):
+        (seed / 'f').write_text(f'{index}\n')
+        git(seed, 'add', 'f')
+        git(seed, 'commit', '-q', '-m', f'c{index}')
+    git(seed, 'tag', 'v1.0', 'HEAD~1')
+    git(seed, 'branch', 'other', 'HEAD~2')
+    tested = git(seed, 'rev-parse', 'HEAD')
+    record = git(seed, 'commit-tree', '-p', tested, '-m', 'record', 'HEAD~2^{tree}')
+    git(seed, 'update-ref', 'refs/tags/evidence/' + 'a' * 40 + '/' + record, record)
+    git(seed, 'update-ref', 'refs/pull/1/merge', tested)
+    git(tmp, 'clone', '-q', '--bare', '--mirror', str(seed), str(remote))
+    git(tmp, 'init', '-q', str(checkout))
+    git(checkout, 'remote', 'add', 'origin', remote.as_uri())
+    git(checkout, 'fetch', '-q', '--no-tags', '--depth=1', 'origin', '+refs/pull/1/merge:refs/remotes/pull/1/merge')
+    git(checkout, 'checkout', '-q', '--detach', 'refs/remotes/pull/1/merge')  # what actions/checkout leaves for a pull request
+    assert git(checkout, 'rev-parse', '--is-shallow-repository') == 'true'
+    done = subprocess.run(['bash', '-e', '-c', script], cwd=checkout, capture_output=True, text=True, env=dict(GENV, FETCH_TOKEN='unused'))
+    assert done.returncode == 0, done.stderr
+    assert git(checkout, 'rev-parse', '--is-shallow-repository') == 'false'
+    assert git(checkout, 'rev-list', '--count', 'refs/remotes/pull/1/merge') == '3', 'the tested commit has its whole history'
+    refs = git(checkout, 'for-each-ref', '--format=%(refname)').split()
+    assert {'refs/tags/v1.0', 'refs/remotes/origin/main', 'refs/remotes/origin/other'} <= set(refs), refs
+    assert not [r for r in refs if r.startswith('refs/tags/evidence/')], refs
+    assert subprocess.run(['git', '-C', str(checkout), 'cat-file', '-e', record], capture_output=True, env=GENV).returncode != 0, 'no evidence object either'
+    done = subprocess.run(['bash', '-e', '-c', script], cwd=checkout, capture_output=True, text=True, env=dict(GENV, FETCH_TOKEN='unused'))
+    assert done.returncode == 0, ('a complete repository is fetched again, harmlessly', done.stderr)
+    # A tested commit the remote no longer has (a pull request updated after the checkout) stops the step: the shallow
+    # marker is gone, so a step that went on would leave a repository whose history silently ends at the checked-out commit.
+    broken = tmp / 'broken'
+    git(tmp, 'init', '-q', str(broken))
+    git(broken, 'remote', 'add', 'origin', remote.as_uri())
+    git(broken, 'fetch', '-q', '--no-tags', '--depth=1', 'origin', '+refs/pull/1/merge:refs/remotes/pull/1/merge')
+    git(broken, 'checkout', '-q', '--detach', 'refs/remotes/pull/1/merge')
+    git(remote, 'update-ref', '-d', 'refs/pull/1/merge')
+    for ref in ('refs/heads/main', 'refs/heads/other', 'refs/tags/v1.0', 'refs/tags/evidence/' + 'a' * 40 + '/' + record):
+        git(remote, 'update-ref', '-d', ref)
+    git(remote, 'update-ref', 'refs/heads/main', git(seed, 'rev-parse', 'HEAD~2'))
+    git(remote, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+    git(remote, 'reflog', 'expire', '--expire=now', '--all')
+    git(remote, 'gc', '-q', '--prune=now')
+    assert subprocess.run(['git', '-C', str(remote), 'cat-file', '-e', tested], capture_output=True, env=GENV).returncode != 0
+    done = subprocess.run(['bash', '-e', '-c', script], cwd=broken, capture_output=True, text=True, env=dict(GENV, FETCH_TOKEN='unused'))
+    assert done.returncode != 0, ('the step must fail when the history is incomplete', done.stdout, done.stderr)
+print('passed: no checkout uses fetch-depth 0; the one full-history fetch completes a shallow merge checkout with every branch and tag and no evidence tag, and stops when the tested commit is gone')
 
 # --- lint: every job that reaches the evidence-signing environment does so only for the merge queue and main
 text = (ROOT / '.github/workflows/fleet.yml').read_text()
