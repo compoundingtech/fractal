@@ -12,8 +12,8 @@
 # directories are a scratch directory that is removed afterwards, and no st, GitHub or SSH agent variable reaches them, so
 # nothing they start can read or write this account's st state, harness configuration or credentials, and no PATH entry
 # inside the account's st state (a seat's command recorder) stays. Two things are kept:
-# the account's cargo and rustup homes (the dependency cache) with the saved dev shell environment a build host's cargo reads
-# (DEVSHELL_ENV), and XDG_RUNTIME_DIR with the session bus, because the build admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
+# the account's cargo and rustup homes (the dependency cache), and XDG_RUNTIME_DIR with the session bus, because the build
+# admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
 set -euo pipefail
 if [ "$#" -eq 0 ]; then
   echo "usage: scripts/ci-local STAGE..." >&2
@@ -29,8 +29,23 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/ci-local.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
-cargo_real=${CARGO_REAL:-$HOME/.cargo/bin/cargo}
-devshell_env=${DEVSHELL_ENV:-${XDG_STATE_HOME:-$HOME/.local/state}/devshell/env.sh}
+# The cargo the stages build with is the dev shell's own, handed to the build admission shim as CARGO_REAL: CI_LOCAL_CARGO
+# when set, otherwise the first cargo on PATH outside the account's home that is not the shim itself (the shim exports
+# CARGO_SHIM_DEPTH). A build host's default real cargo may source a saved dev shell environment from another day, whose tools
+# (an older pty) are not the tree's, and the stages would test those.
+cargo_real=${CI_LOCAL_CARGO:-}
+if [ -z "$cargo_real" ]; then
+  IFS=':' read -r -a entries <<< "$PATH"
+  for entry in "${entries[@]}"; do
+    case "$entry" in ''|"$HOME"|"$HOME"/*) continue ;; esac
+    [ -f "$entry/cargo" ] && [ -x "$entry/cargo" ] || continue
+    if ! grep -q -a CARGO_SHIM_DEPTH "$entry/cargo"; then cargo_real="$entry/cargo"; break; fi
+  done
+fi
+if [ -z "$cargo_real" ]; then
+  echo "ci-local: no cargo executable of the dev shell on PATH (run it inside nix develop, or set CI_LOCAL_CARGO)" >&2
+  exit 2
+fi
 while IFS='=' read -r -d '' name _; do
   case "$name" in
     ST_*|ST3_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
@@ -49,8 +64,6 @@ export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_D
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
 touch "$GITHUB_STEP_SUMMARY"
-# A build host whose real cargo reads a saved dev shell environment from the account's state directory is told where it is.
-if [ -r "$devshell_env" ]; then export DEVSHELL_ENV="$devshell_env"; fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
 status=0

@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 RECORD = '''#!/usr/bin/env bash
+# a stand-in for the build admission shim, which exports CARGO_SHIM_DEPTH
 python3 -I -c 'import json, os, sys; print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ)}))' "$@" >> "$CI_LOCAL_TEST_LOG"
 '''
 
@@ -30,8 +31,15 @@ class CiLocal(unittest.TestCase):
         (self.bin / 'cargo').chmod(0o755)
         (self.work / 'scripts/ci-install-built-hooks').write_text(RECORD)
         self.home = root / 'account home'
-        (self.home / '.local/state/devshell').mkdir(parents=True)
-        (self.home / '.local/state/devshell/env.sh').write_text('')
+        (self.home / '.local/bin').mkdir(parents=True)
+        # The dev shell's real cargo: a wrapper script outside the account's home (never run here).
+        self.devshell = root / 'devshell bin'
+        self.devshell.mkdir()
+        (self.devshell / 'cargo').write_text('#!/bin/sh\nexec cargo-wrapped "$@"\n')
+        (self.devshell / 'cargo').chmod(0o755)
+        # The recording stand-in first on PATH is the shim, and a cargo in the account's home: neither is the dev shell's.
+        (self.home / '.local/bin/cargo').write_text('#!/bin/sh\n')
+        (self.home / '.local/bin/cargo').chmod(0o755)
         self.stage_exits = []
 
     def run_local(self, *stages, **extra):
@@ -42,7 +50,7 @@ class CiLocal(unittest.TestCase):
         (self.work / 'scripts/ci-linux').write_text(RECORD + f'n=$(cat {counter}); echo $((n + 1)) > {counter}\n'
                                                     f'codes=({codes}); exit "${{codes[$n]:-0}}"\n')
         recorder = self.home / '.local/state/st3/recorder/bin'
-        env = {'PATH': f'{recorder}:{self.bin}:{os.environ["PATH"]}:{self.home}/.local/state/st3', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
+        env = {'PATH': f'{recorder}:{self.bin}:{self.home}/.local/bin:{self.devshell}:{os.environ["PATH"]}:{self.home}/.local/state/st3', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'XDG_RUNTIME_DIR': '/run/user/test', 'ST_AGENT': 'agent/x', 'ST3_ENDPOINT': 'unix:/x',
                'GH_TOKEN': 'secret', 'GITHUB_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x', 'EVIDENCE_PUSH_TOKEN': 'secret',
                'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'), **extra}
@@ -65,18 +73,24 @@ class CiLocal(unittest.TestCase):
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE'):
                 self.assertNotIn(name, env)
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
+            # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),
-                             (f'{self.home}/.cargo', f'{self.home}/.rustup', f'{self.home}/.cargo/bin/cargo', '/run/user/test'))
-            self.assertEqual(env['DEVSHELL_ENV'], f'{self.home}/.local/state/devshell/env.sh')
+                             (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
         self.assertEqual(list(Path(self.tmp.name).glob('ci-local.*')), [], 'the scratch home is removed afterwards')
 
-    def test_without_a_saved_dev_shell_environment_none_is_named(self):
-        (self.home / '.local/state/devshell/env.sh').unlink()
-        done, calls = self.run_local('mail-redelivery-canaries')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertNotIn('DEVSHELL_ENV', calls[-1]['env'])
+    def test_ci_local_cargo_names_the_cargo_and_without_a_dev_shell_cargo_nothing_runs(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_CARGO='/chosen/cargo')
+        self.assertEqual((done.returncode, calls[-1]['env']['CARGO_REAL']), (0, '/chosen/cargo'), done.stderr)
+        (self.devshell / 'cargo').unlink()
+        self.log.unlink()
+        # The tools the script needs, from directories that hold no cargo.
+        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'touch', 'env', 'python3')}
+        tools = [entry for entry in sorted(tools) if not (Path(entry) / 'cargo').exists()]
+        done, calls = self.run_local('mail-redelivery-canaries', PATH=':'.join([str(self.bin), f'{self.home}/.local/bin', *tools]))
+        self.assertEqual((done.returncode, calls), (2, []), done.stderr)
+        self.assertIn('no cargo executable of the dev shell', done.stderr)
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]

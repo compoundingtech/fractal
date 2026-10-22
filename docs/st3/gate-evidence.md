@@ -1258,9 +1258,12 @@ command is `nix develop -c bash scripts/ci-local STAGE`: the `scripts/ci-linux` 
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st, GitHub, SSH agent, evidence or sekrets
 variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
-configuration or credentials. Kept from the account: the cargo and rustup homes (the dependency cache), the saved dev shell
-environment a build host's cargo reads (`DEVSHELL_ENV`), and `XDG_RUNTIME_DIR` with the session bus, where the build admission
-shim queues: the stage takes an ordinary heavy admission slot, with no priority of its own. The lane in `.st/required-lanes.json`
+configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
+rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
+stage takes an ordinary heavy admission slot, with no priority of its own. The shim is handed the dev shell's own cargo as
+`CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
+default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
+pty first on PATH, which made every boot canary fail on that host (the seat launch passes environment names only). The lane in `.st/required-lanes.json`
 holds both the host and the agent level to its definition (`scripts`, `.st`, `.config/nextest.toml`, the flake), so a tree that
 edits the scripts that decide what the stage runs never skips on a local note; the host and agent levels cover pull requests
 only, and the merge queue runs the stage.
