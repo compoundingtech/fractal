@@ -17,7 +17,7 @@ for test in \
   ci-test-archive-test ci-build-memory-test ci-evidence-source-test check-ci-test-paths ci-queue-watch-test \
   check-main-ci-test ci-perf-cache-test ci-perf-slot-test ci-perf-scope-test \
   ci-cache-audit-test ci-genie-cache-cleanup-test ci-fractal-web-test web-skip-proof-test ci-evidence-observe-test evidence-verify-test evidence-lane-trace-test evidence-gc-test evidence-log-test ci-signed-tree-test ci-evidence-slo-test evidence-keygen-test st-test-test ci-local-test evidence-prepush-test evidence-presign-worker-test evidence-wrap-test ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test \
-  ci-evidence-gate-test evidence-flip-ready-test evidence-sign-hardening-test ci-daily-long-report-test ci-nextest-flaky-test nix-typescript-client-test nix-evidence-job-test ci-nextest-test; do
+  ci-evidence-gate-test evidence-flip-ready-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test ci-nextest-flaky-test nix-typescript-client-test nix-evidence-job-test ci-nextest-test; do
   python3 "scripts/$test"
 done
 python3 scripts/check-sqlite-large-values-test
