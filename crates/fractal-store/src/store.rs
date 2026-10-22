@@ -5414,6 +5414,24 @@ impl Store {
           AND run.status NOT IN ('completed','cancelled','failed')
     )";
 
+    /// The newest claim of `kind` on `subject` in canonical order, never by arrival: members that
+    /// admitted the same claims in another order name the same one.
+    pub fn newest_claim_for_subject_kind(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
+        let connection = self.readers.get();
+        Ok(connection
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h7c545c3d21a9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                    "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+                 FROM claims INDEXED BY claims_subject_kind_accepted_index
+                 WHERE subject=?1 AND kind=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                ),
+                params![subject, kind],
+                claim_from_row,
+            )
+            .optional()?)
+    }
+
     /// Bounded claim history for one subject/kind projection, backed by the composite index.
     pub fn claims_for_subject_kind_at(
         &self,

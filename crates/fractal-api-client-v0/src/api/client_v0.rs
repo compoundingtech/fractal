@@ -49,6 +49,8 @@ mod agents_window_tests;
 #[cfg(test)]
 mod push_tests;
 #[cfg(test)]
+mod pairing_order_tests;
+#[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
 mod conversation_follow_tests;
