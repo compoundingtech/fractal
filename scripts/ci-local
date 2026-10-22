@@ -68,11 +68,19 @@ export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_D
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
 touch "$GITHUB_STEP_SUMMARY"
-# clippy's ratchet compares with the base, as CI compares with the event's base: the base branch's tip unless named.
-if [ -z "${CLIPPY_BASE_SHA:-}" ]; then
-  CLIPPY_BASE_SHA=$(git rev-parse --verify --quiet origin/main || true)
-  export CLIPPY_BASE_SHA
+# clippy's ratchet compares with the base, as CI compares with the event's base: CLIPPY_BASE_SHA when given (scripts/st-test
+# gives the base it just fetched and records it in the note), otherwise main as fetched now, never a local ref that may be old.
+if [[ " $* " == *" clippy "* && -z "${CLIPPY_BASE_SHA:-}" ]]; then
+  if ! git fetch -q --no-tags origin main || ! CLIPPY_BASE_SHA=$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}'); then
+    echo "ci-local: could not fetch main for clippy's base; set CLIPPY_BASE_SHA" >&2
+    exit 2
+  fi
 fi
+if [[ -n "${CLIPPY_BASE_SHA:-}" ]] && ! [[ "$CLIPPY_BASE_SHA" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+  echo "ci-local: CLIPPY_BASE_SHA must be a full commit id" >&2
+  exit 2
+fi
+export CLIPPY_BASE_SHA
 # The tests stage needs what CI's test-build job prepares for it: the provider components the resource-provider tests load,
 # and the previous release the messaging compatibility tests run against.
 if [[ " $* " == *" tests "* ]]; then
