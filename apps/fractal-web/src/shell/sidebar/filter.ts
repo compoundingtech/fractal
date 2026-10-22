@@ -33,6 +33,8 @@ export interface SidebarMatchRow {
   readonly agent: Agent | undefined
   readonly status: AgentStatus
   readonly needsMe: boolean
+  /** st reports an ask-tool question or open attention for this agent; see data/asking.ts. */
+  readonly asking: boolean
 }
 /** Legacy sidebar additionally owns unread working state; matching does not require it. */
 export interface SidebarRow extends SidebarMatchRow {
@@ -43,23 +45,29 @@ export interface SidebarRow extends SidebarMatchRow {
 export type SidebarFacetField = 'repo' | 'state' | 'tool'
 /**
  * Parsed sidebar search. Free text and its lowercase tokens drive matching and highlights; facets
- * never reach highlights. Machine groups AND together while prefixes within a group OR together.
+ * never reach highlights. `is:asking` keeps agents st reports as waiting for an answer. Machine
+ * groups AND together while prefixes within a group OR together.
  */
 export interface SidebarQuery {
   readonly text: string
   readonly tokens: readonly string[]
+  readonly asking: boolean
   readonly facets: readonly { readonly field: SidebarFacetField; readonly value: string }[]
   readonly machines: readonly (readonly string[])[]
 }
-/** Bare fuzzy text, repo:/state:/tool: facets and AND-ed machine:/host: facets of OR-ed lowercase prefixes. */
+/** The Show menu's "Waiting for answer" filter, as a search token. */
+export const askingToken = 'is:asking'
+/** Bare fuzzy text, `is:asking`, repo:/state:/tool: facets and AND-ed machine:/host: facets of OR-ed lowercase prefixes. */
 export const parseSidebarQuery = (query: string): SidebarQuery => {
   const terms: string[] = []
   const facets: { field: SidebarFacetField; value: string }[] = []
   const machines: string[][] = []
+  let asking = false
   for (const token of query.trim().split(/\s+/)) {
     const machine = /^(?:machine|host):(.*)$/i.exec(token)
     const facet = /^(repo|state|tool):(.*)$/i.exec(token)
-    if (machine !== null) {
+    if (token.toLowerCase() === askingToken) asking = true
+    else if (machine !== null) {
       const values = machine[1]!.toLowerCase().split(',').filter((value) => value !== '')
       if (values.length > 0) machines.push(values)
     } else if (facet !== null) {
@@ -67,28 +75,44 @@ export const parseSidebarQuery = (query: string): SidebarQuery => {
     } else if (token !== '') terms.push(token)
   }
   const text = terms.join(' ')
-  return { text, tokens: tokenize(text), facets, machines }
+  return { text, tokens: tokenize(text), asking, facets, machines }
 }
+/** Canonical search text for a parsed query; parsing the result returns the same query. */
+export const printSidebarQuery = ({ text, asking, facets, machines }: SidebarQuery): string =>
+  [...(asking ? [askingToken] : []), ...machines.map((values) => `machine:${values.join(',')}`), ...facets.map(({ field, value }) => `${field}:${value}`), text]
+    .filter((part) => part !== '')
+    .join(' ')
+/** The machine value a row host ID matches against: lowercase, without its host/ namespace. */
+export const sidebarHostValue = (hostId: string): string => hostId.toLowerCase().replace(/^host\//, '')
 /** Row host IDs omit their host/ namespace; query values remain literal shared-contract prefixes. */
 export const matchesSidebarHost = (hostId: string, machines: SidebarQuery['machines']): boolean => {
-  const host = hostId.toLowerCase().replace(/^host\//, '')
+  const host = sidebarHostValue(hostId)
   return machines.every((values) => values.some((value) => host.startsWith(value)))
 }
+/** Show menu filters: every active filter applies (AND); machines OR within one token. */
+export const matchesShow = ({
+  host,
+  asking,
+  parsedQuery,
+}: {
+  readonly host: string
+  readonly asking: boolean
+  readonly parsedQuery: SidebarQuery
+}): boolean => (!parsedQuery.asking || asking) && matchesSidebarHost(host, parsedQuery.machines)
 /** Any active view filter: membership may shrink, so empty folders are hidden and matches revealed. */
 export const isSidebarFiltering = (filters: SidebarFilters, query: SidebarQuery): boolean =>
   query.text !== '' ||
+  query.asking ||
   query.facets.length > 0 ||
   query.machines.length > 0 ||
-  filters.needsMe ||
   filters.hideEnded ||
   filters.hideRetired ||
-  filters.host !== '' ||
   filters.statuses.length > 0
 const facetFact = (row: SidebarMatchRow, field: SidebarFacetField): string =>
   field === 'repo' ? row.agent?.checkout._tag === 'Known' ? row.agent.checkout.value.repository : ''
     : field === 'tool' ? row.agent?.harness ?? ''
       : [row.status, row.agent?.state, row.agent?.status, row.agent?.activity].filter(Boolean).join(' ')
-/** Free text matches displayed agent names and IDs; other facts require explicit facets. */
+/** Matches a sidebar row against visibility, status, Show and contextual search filters. Free text matches displayed agent names and IDs; other facts require explicit facets. */
 export const matchesRow = ({
   row,
   filters,
@@ -99,13 +123,11 @@ export const matchesRow = ({
   readonly query?: SidebarQuery
 }): boolean => {
   if (
-    (filters.needsMe && !row.needsMe) ||
     (filters.hideEnded && (row.status === 'ended' || row.agent?.state === 'done')) ||
     (filters.hideRetired && row.status === 'retired') ||
-    (filters.host !== '' && row.workspace.host !== filters.host) ||
     (filters.statuses.length > 0 && !filters.statuses.includes(row.status))
   ) return false
-  if (!matchesSidebarHost(row.workspace.host, query.machines)) return false
+  if (!matchesShow({ host: row.workspace.host, asking: row.asking, parsedQuery: query })) return false
   if (!query.facets.every(({ field, value }) => value !== '' && facetFact(row, field).toLocaleLowerCase().includes(value))) return false
   return query.tokens.length === 0 ||
     scoreTokens({

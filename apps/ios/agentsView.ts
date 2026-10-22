@@ -1,9 +1,9 @@
-import type { Agent, Mission } from '../../clients/typescript/st3-client';
+import type { Agent, Mission } from '../../clients/typescript/fractal-client';
 import { ago } from './presentation';
-import type { SessionView } from '@smalltalk/st3-views';
+import type { SessionView } from '@fractal/views';
 import { harnessColor, theme } from './theme';
 
-// The Agents tab, drawn the way stui draws it (crates/stui/src/ui/screens.rs agents_list and
+// The Agents tab, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs agents_list and
 // agents_tree, adapt.rs agents): one row per seat, grouped by what it needs, with the sessions
 // st found running but did not start listed last.
 

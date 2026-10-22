@@ -187,7 +187,7 @@ function HighlightProbe() {
 const meta = {
   title: 'Fractal UI/Sidebar tree',
   component: SidebarTree,
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Identity-retained synthetic rows and calibrated negative controls isolate filter rendering and keystroke cost." },
     layout: 'fullscreen',
     docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke and pooled over the phases before and after the controls; a busy-wait control making each filter keystroke wait 4x its paired reference keystroke must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
@@ -205,7 +205,7 @@ type Inputs = { readonly reference: HTMLInputElement; readonly filter: HTMLInput
 // With `busyControl`, each filter keystroke busy-waits `controlRatio` times the reference
 // keystroke just before it, so every filter sample is at least that multiple of its pair
 // and the filter p90 is at least `controlRatio` times the reference p90, whatever the load.
-async function collect(root: HTMLElement, inputs: Inputs, phase: string, busyControl = false) {
+async function collect(root: HTMLElement, inputs: Inputs, phase: string, busyControl = false, count = sampleCount) {
   const before = { reference: read(root, 'referenceSamples').length, filter: read(root, 'filterSamples').length }
   await expect(inputs.reference.value).toBe('')
   await expect(inputs.filter.value).toBe('')
@@ -219,7 +219,7 @@ async function collect(root: HTMLElement, inputs: Inputs, phase: string, busyCon
       throw new Error(`${root.dataset.testid} ${phase} ${input} sample ${index}: input "${inputs[input].value}", committed query "${root.dataset.query}", ${read(root, key).length - before[input]} samples recorded`, { cause: error })
     }
   }
-  for (let index = 0; index < sampleCount; index++) {
+  for (let index = 0; index < count; index++) {
     const toggle = index % 2 === 0
     await userEvent.type(inputs.reference, toggle ? 'r' : '{Backspace}')
     await settle('reference', index)
@@ -234,8 +234,8 @@ async function collect(root: HTMLElement, inputs: Inputs, phase: string, busyCon
 
 // Primary check. Every keystroke renders only painted rows whose keyed DOM row changed
 // (newly mounted or a rebound RAC view), and every rendered item is the retained fixture object.
-async function assertWork(samples: readonly Sample[]) {
-  await expect(samples).toHaveLength(sampleCount)
+async function assertWork(samples: readonly Sample[], count = sampleCount) {
+  await expect(samples).toHaveLength(count)
   for (const [index, sample] of samples.entries()) {
     const filtered = index % 2 === 0
     await expect(sample.value).toBe(filtered ? 'x' : '')
@@ -256,45 +256,64 @@ async function assertRatio(filter: readonly Sample[], reference: readonly Sample
   await expect(p90(filter) / p90(reference)).toBeLessThanOrEqual(ratioBudget)
 }
 
-export const FilterKeystrokeToPaint: Story = {
-  render: () => <main {...stylex.props(styles.matrix)}>{[false, true].flatMap(light => [true, false].map(narrow => <FilterProbe key={`${light}-${narrow}`} light={light} narrow={narrow} />))}</main>,
-  play: async ({ canvasElement }) => {
-    await document.fonts.ready
-    // Allow initial virtualizer measurements to settle outside all samples.
-    for (let index = 0; index < 6; index++) await nextFrame()
-    for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-testid^="filter-probe-"]')) {
-      const inputs: Inputs = { filter: within(root).getByRole('searchbox') as HTMLInputElement, reference: within(root).getByRole('textbox') as HTMLInputElement }
-      await expect(root.dataset.visibleCount).toBe('78')
-      const phase = async (name: string, busyControl = false) => {
-        const sampled = await collect(root, inputs, name, busyControl)
-        root.dataset[`${name}Ratio`] = String(p90(sampled.samples) / p90(sampled.reference))
-        return sampled
-      }
-      const production = await phase('production')
-      await assertWork(production.samples)
-      try {
-        root.dataset.rebuildControl = 'true'
-        const rebuild = await phase('rebuild')
-        await expect(assertWork(rebuild.samples)).rejects.toThrow()
-      } finally {
-        root.dataset.rebuildControl = 'false'
-      }
+async function playFilterProbes(canvasElement: HTMLElement, benchmark: boolean) {
+  await document.fonts.ready
+  // Functional coverage needs a filter/unfilter pair; the benchmark retains
+  // every 30-sample phase and both original negative controls.
+  const count = benchmark ? sampleCount : 2
+  // Allow initial virtualizer measurements to settle outside all samples.
+  for (let index = 0; index < 6; index++) await nextFrame()
+  for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-testid^="filter-probe-"]')) {
+    const inputs: Inputs = { filter: within(root).getByRole('searchbox') as HTMLInputElement, reference: within(root).getByRole('textbox') as HTMLInputElement }
+    await expect(root.dataset.visibleCount).toBe('78')
+    const phase = async (name: string, busyControl = false) => {
+      const sampled = await collect(root, inputs, name, busyControl, count)
+      if (benchmark) root.dataset[`${name}Ratio`] = String(p90(sampled.samples) / p90(sampled.reference))
+      return sampled
+    }
+    const production = await phase('production')
+    await assertWork(production.samples, count)
+    try {
+      root.dataset.rebuildControl = 'true'
+      const rebuild = await phase('rebuild')
+      await expect(assertWork(rebuild.samples, count)).rejects.toThrow()
+    } finally {
+      root.dataset.rebuildControl = 'false'
+    }
+    if (!benchmark) {
+      // The benchmark's busy phase restores retained objects after the rebuild control.
+      // Without that phase, restore identity before asserting normal retained-row work.
+      const reset = await phase('reset')
+      for (const sample of reset.samples) await expect(sample.retainedIdentity).toBe(true)
+    }
+    if (benchmark) {
       try {
         const busy = await phase('busy', true)
         await expect(assertRatio(busy.samples, busy.reference)).rejects.toThrow()
       } finally {
         root.dataset.synchronousCostMs = '0'
       }
-      const restored = await phase('restored')
-      await assertWork(restored.samples)
-      // The ratio pools both unregressed phases (60 pairs, p90 is the 54th). A control
-      // left armed would make half the pool slow and so set the p90.
-      const filter = [...production.samples, ...restored.samples]
-      const reference = [...production.reference, ...restored.reference]
-      root.dataset.pooledRatio = String(p90(filter) / p90(reference))
-      await assertRatio(filter, reference)
     }
-  },
+    const restored = await phase('restored')
+    await assertWork(restored.samples, count)
+    if (!benchmark) continue
+    // The ratio pools both unregressed phases (60 pairs, p90 is the 54th). A control
+    // left armed would make half the pool slow and so set the p90.
+    const filter = [...production.samples, ...restored.samples]
+    const reference = [...production.reference, ...restored.reference]
+    root.dataset.pooledRatio = String(p90(filter) / p90(reference))
+    await assertRatio(filter, reference)
+  }
+}
+
+export const FilterBehavior: Story = {
+  render: () => <main {...stylex.props(styles.matrix)}>{[false, true].flatMap(light => [true, false].map(narrow => <FilterProbe key={`${light}-${narrow}`} light={light} narrow={narrow} />))}</main>,
+  play: async ({ canvasElement }) => playFilterProbes(canvasElement, false),
+}
+
+export const FilterKeystrokeToPaint: Story = {
+  ...FilterBehavior,
+  play: async ({ canvasElement }) => playFilterProbes(canvasElement, true),
 }
 
 const titleText = (row: HTMLElement) => row.querySelector<HTMLElement>('[data-row-column="title-text"]')!
