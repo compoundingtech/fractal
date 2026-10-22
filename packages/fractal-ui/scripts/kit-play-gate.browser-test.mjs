@@ -25,6 +25,8 @@ const iframe = (report, probes = [], navigation) => `<!doctype html><meta charse
       if (!listeners.has(name)) listeners.set(name, [])
       listeners.get(name).push(listener)
       if (name === 'storyErrored') setTimeout(async () => {
+        // Match Storybook's lifecycle: fixture play cannot precede DOM readiness.
+        if (document.readyState === 'loading') await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once: true }))
         const phase = newPhase => emit('storyRenderPhaseChanged', { storyId: id, newPhase })
         phase('playing')
         await new Promise(resolve => setTimeout(resolve, 2))
