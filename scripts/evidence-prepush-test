@@ -67,6 +67,12 @@ class Hook(unittest.TestCase):
         git(tmp, 'init', '-q', '--bare', '-b', 'main', str(tmp / 'origin.git'))
         self.work = tmp / 'work'
         git(tmp, 'clone', '-q', str(tmp / 'origin.git'), str(self.work))
+        # No automatic maintenance: after each push the remote's receive-pack starts a detached `git maintenance run
+        # --auto`, which can still be writing into origin.git while the temporary directory is removed ("Directory not
+        # empty: 'origin.git'"). A commit in the clone does the same there.
+        for repo in (tmp / 'origin.git', self.work):
+            git(repo, 'config', 'maintenance.auto', 'false')
+            git(repo, 'config', 'gc.auto', '0')
         git(self.work, 'checkout', '-q', '-b', 'main')
         (self.work / 'scripts').mkdir(parents=True)
         (self.work / '.st').mkdir()
