@@ -369,6 +369,7 @@ const clippedTouchRect = (control: HTMLElement): DOMRect => {
   }
   for (let ancestor: HTMLElement | null = control; ancestor !== null; ancestor = ancestor.parentElement) {
     const style = getComputedStyle(ancestor), bounds = rect(ancestor)
+    if (style.position === 'fixed' || style.transform !== 'none') throw new Error('Unsupported touch-target geometry')
     if (style.visibility === 'hidden' || style.display === 'none') return new DOMRect()
     if (ancestor !== control) {
       const clipX = /^(hidden|clip|auto|scroll)$/.test(style.overflowX)
@@ -395,7 +396,6 @@ const clippedTouchRect = (control: HTMLElement): DOMRect => {
       intersect(bounds.left + length(left!, bounds.width, 0), bounds.top + length(top!, bounds.height, 0),
         bounds.right - length(right!, bounds.width, 0), bounds.bottom - length(bottom!, bounds.height, 0))
     }
-    if (box.width <= 1 || box.height <= 1) return box
   }
   return box
 }
@@ -464,6 +464,23 @@ const phonePlay: NonNullable<Story['play']> = async context => {
     await expect(assertTouchTargets(designedHost)).rejects.toThrow(/expected true to be false/)
   } finally {
     overlapping.remove()
+  }
+  // Fixed positioning escapes clips; transformed ancestor rects mix viewport and layout coordinates. Fail closed.
+  for (const geometry of ['fixed control', 'fixed ancestor', 'transformed ancestor'] as const) {
+    const outer = document.createElement('div'), clipped = document.createElement('div'), control = document.createElement('button')
+    Object.assign(outer.style, { position: geometry === 'fixed ancestor' ? 'fixed' : 'absolute', left: '0px', top: '0px', transform: geometry === 'transformed ancestor' ? 'scale(2)' : 'none' })
+    Object.assign(clipped.style, { position: 'relative', overflow: 'hidden', width: '1px', height: '1px' })
+    control.type = 'button'
+    control.textContent = geometry
+    Object.assign(control.style, { position: geometry === 'fixed control' ? 'fixed' : 'absolute', left: '0px', top: '0px', width: '44px', height: '44px' })
+    clipped.append(control)
+    outer.append(clipped)
+    overlapRow.append(outer)
+    try {
+      await expect(assertTouchTargets(designedHost)).rejects.toThrow('Unsupported touch-target geometry')
+    } finally {
+      outer.remove()
+    }
   }
 
   const parentSection = context.canvasElement.querySelector<HTMLElement>('[data-host="mission-parent"]')!
