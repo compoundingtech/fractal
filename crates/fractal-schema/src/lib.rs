@@ -4,6 +4,7 @@ pub mod arrangements;
 pub mod custom;
 pub mod accountable;
 pub mod directive_notes;
+pub mod full_value;
 pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
