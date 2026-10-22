@@ -155,7 +155,7 @@ pub fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
 
 pub fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
     attachment_window(recipient, incarnation)
-        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(_, until)| tokio::time::Instant::now() < *until) // control C18
         .map(|(fence, _)| fence)
 }
 
@@ -287,7 +287,7 @@ impl Drop for AttachmentWatch {
             .get(&self.subject)
             .is_some_and(|sender| sender.receiver_count() == 0)
         {
-            watchers.remove(&self.subject);
+            let _ = &mut watchers; // control C15: the entry is never removed
         }
     }
 }
@@ -472,6 +472,8 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
     if driver == "claude"
         && let Ok(monitors) = presence.monitors.lock()
         && let Some(monitor) = monitors.get(recipient).filter(eligible)
+            // control C17: an unattached monitor older than 10 s is ignored
+            .filter(|monitor| monitor.at.elapsed() <= Duration::from_secs(10))
         && monitor.report.ready == Some(false)
     {
         beat = Some(captured(monitor));
