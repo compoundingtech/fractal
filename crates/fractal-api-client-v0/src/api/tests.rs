@@ -1672,3 +1672,86 @@ async fn doctor_fails_and_machines_say_diverged_for_a_diverged_peer() {
         }
     }
 }
+
+/// The per-PR contract for fleet::a_frozen_member_is_not_reported_up: a
+/// listening member whose exchanges stopped and then failed makes the doctor warn that it has
+/// not exchanged for that long; a dial-out member, which may sleep for hours, is named the same
+/// way without a warning. The fleet test freezes a real daemon; here the last exchange is aged.
+#[tokio::test]
+async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
+    use smallclaims::fleet::MemberKey;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    let fleet = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+    state.fleet_id = Some(fleet.into());
+    let own = Arc::new(MemberKey::generate().unwrap().0);
+    state.store.bind_fleet(fleet).unwrap();
+    state.store.pin_fleet_anchor(own.public()).unwrap();
+    state.store.set_member_key(Some(own.clone())).unwrap();
+    state
+        .store
+        .admit_fleet_anchor(fleet, own.public(), "listening")
+        .unwrap();
+    for (name, mode) in [("birch", "listening"), ("cedar", "dial-out")] {
+        let key = MemberKey::generate().unwrap().0;
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: format!("host/{name}"),
+                kind: "fleet.member-admitted".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({
+                    "fleet_id": fleet, "member_key": key.public(), "via": "invite",
+                    "mode": mode, "sponsor": "host/node"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    // Both exchange with this daemon, then cedar's last exchange is aged a day.
+    for peer in ["birch", "cedar"] {
+        let source = smallclaims::store::Store::open_memory(
+            peer,
+            Arc::new(smallclaims::store::runtime::Plain),
+        )
+        .unwrap();
+        let summary = source.export_replication_summary(fleet).unwrap();
+        state
+            .store
+            .receive_replication_exchange(peer, fleet, &summary)
+            .unwrap();
+    }
+    state.store.age_replication_peer_for_test("cedar");
+    let replication = || async {
+        let (status, doctor) = get_request(router(state.clone()), "/v1/doctor").await;
+        assert_eq!(status, StatusCode::OK, "{doctor}");
+        doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "replication")
+            .cloned()
+            .unwrap()
+    };
+    // The dial-out member is away, which is no warning.
+    let check = replication().await;
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("cedar has not exchanged for 1d"), "{check}");
+    assert!(!message.contains("birch has not exchanged"), "{check}");
+    assert_eq!(check["status"], "pass", "{check}");
+    // The listening member stops too and its next attempt fails: it should answer, so its
+    // absence warns.
+    state.store.age_replication_peer_for_test("birch");
+    state
+        .store
+        .record_peer_failure("birch", "down", "exchange timed out")
+        .unwrap();
+    let check = replication().await;
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("birch has not exchanged for 1d"), "{check}");
+    assert!(message.contains("(last attempt: exchange timed out)"), "{check}");
+    assert_eq!(check["status"], "warn", "{check}");
+}
