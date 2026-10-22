@@ -459,7 +459,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 "This member is now {}; it announces the change when its replication worker starts.",
                 file.mode.as_str()
             );
-            refresh_fleet_worker(args.no_service)?;
+            refresh_fleet_services(args.no_service)?;
             Ok(())
         }
         FleetCommand::Transports { command } => {
@@ -648,15 +648,15 @@ async fn save_and_publish_fleet_settings(
             },
         )
         .await
-        .context("fleet.toml saved; endpoint publication did not complete; restart the replication worker to announce the saved settings")?;
+        .context("fleet.toml saved; endpoint publication did not complete; restart st3 daemon and st3 replication-worker to apply saved relay settings and announce the saved endpoints")?;
     Ok(())
 }
 
-fn refresh_fleet_worker(no_service: bool) -> Result<()> {
+fn refresh_fleet_services(no_service: bool) -> Result<()> {
     if !no_service && services_installed()? {
         fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
     } else {
-        println!("Restart st3 replication-worker for the change to take effect.");
+        println!("Restart st3 daemon and st3 replication-worker for the change to take effect.");
         println!(
             "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
         );
@@ -697,7 +697,7 @@ async fn run_fleet_transports(
             file.save(&config.state_dir)?;
             drop(lock);
             println!("Fabric is now preferred; its existing protocol is unchanged.");
-            return refresh_fleet_worker(*no_service);
+            return refresh_fleet_services(*no_service);
         }
         println!("Fabric is already enabled; remove it before changing its protocol.");
         return Ok(());
@@ -807,8 +807,8 @@ async fn run_fleet_transports(
                 None => Err(anyhow::anyhow!("fabric is not installed")),
             };
             drop(lock);
-            // Refresh even when cleanup fails: no worker may keep using the removed carrier.
-            refresh_fleet_worker(no_service)?;
+            // Refresh even when cleanup fails: relay and worker must stop using the carrier.
+            refresh_fleet_services(no_service)?;
             if let Err(error) = result {
                 println!(
                     "Fabric endpoint removed; unexposure still needs cleanup: {error:#}. When Fabric is available, run fabric unexpose {protocol}"
@@ -822,7 +822,7 @@ async fn run_fleet_transports(
         }
     };
     drop(lock);
-    refresh_fleet_worker(no_service)
+    refresh_fleet_services(no_service)
 }
 
 /// Settings for a migrating node: its existing replication port unless one is given.

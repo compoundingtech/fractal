@@ -32,8 +32,11 @@ protocol or exposure. An add without `--prefer` appends a new carrier and leaves
 an existing list unchanged. `st fleet transports remove fabric` keeps the relative
 order of remaining carriers and refuses to remove the last usable transport.
 These are local settings: choose the preference on each member independently.
-Installed services restart automatically; otherwise restart
+Installed services restart automatically; otherwise restart both `st3 daemon` and
 `st3 replication-worker` as instructed, including when using `--no-service`.
+The daemon reloads peer-relay transport settings; the worker reloads replication
+transport settings. Restarting only the worker leaves the running daemon's relay
+preference and enabled transports unchanged.
 
 ## Local adapter membership and leave authority
 
@@ -208,8 +211,9 @@ with `details.reason = "dial-out-owner"` and an explicit no-inbound-route messag
 conversation, terminal, raw attach, workspace and attachment reads, without trying listening
 peers as relays. The member's published mode overrides a configured direct URL. Correct an
 incorrect mode on the owning member with `st fleet mode listening`. This restarts installed
-services; without installed services (or with `--no-service`), restart `st3 replication-worker`
-as the command instructs. The restarted worker enables its listener and publishes the new
+services; without installed services (or with `--no-service`), restart both `st3 daemon`
+and `st3 replication-worker` as the command instructs. The restarted daemon reloads
+relay settings; the restarted worker enables its listener and publishes the new
 mode/endpoints. Other nodes see it after replication and at most five seconds of membership
 caching. Reverse owner-RPC and PTY transport over a dial-out connection
 requires separate transport support.

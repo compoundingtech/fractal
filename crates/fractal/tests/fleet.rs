@@ -3660,7 +3660,8 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
         if prefer_on_add {
             args.push("--prefer");
         }
-        node.st_ok(&args);
+        let output = node.st_ok(&args);
+        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
         assert_eq!(
             configured_file(&node).transports,
             if prefer_on_add {
@@ -3680,7 +3681,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             "refuse",
         )
         .unwrap();
-        node.st_ok(&[
+        let output = node.st_ok(&[
             "fleet",
             "transports",
             "add",
@@ -3690,11 +3691,15 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             "ignored",
             "--no-service",
         ]);
+        if !prefer_on_add {
+            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        }
         let preferred = configured_file(&node);
         assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
         assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
         assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
-        node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+        let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
         assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
     }
 }

@@ -5,7 +5,7 @@
   "schema": {"status": "none", "detail": "Uses the existing ordered fleet.toml transports list; no database schema or migration changes."},
   "rules": {"status": "none", "detail": "No checkpoint rules or coordinated member upgrade changes."},
   "compatibility": {"status": "changed", "detail": "The local fleet.toml transports list filters enabled automatic Tailscale/Fabric routes and determines their order for replication and peer relay. Loopback remains last. Legacy operation without fleet.toml remains Tailscale-first. Explicit config peer URLs and --peer overrides retain highest priority. Adding Fabric without --prefer preserves existing order; --prefer moves new or already enabled Fabric to the front without reconfiguring an existing exposure. Removal preserves remaining order."},
-  "downtime": {"status": "none", "detail": "Transport commands refresh installed services. Without services or with --no-service, restart st3 replication-worker as instructed to apply local settings."},
+  "downtime": {"status": "none", "detail": "Transport commands refresh installed services. Without services or with --no-service, restart both st3 daemon and st3 replication-worker as instructed: the daemon reloads peer-relay settings and the worker reloads replication settings."},
   "manual": {"status": "none", "detail": "No action is required to retain existing ordered settings. To prefer Fabric on a member, run st fleet transports add fabric --prefer; Fabric trust and service grants remain required. Remove explicit peer overrides if automatic preference should choose the carrier."},
   "recovery": {"status": "none", "detail": "No stored-state recovery changes. Transport removal continues to require another usable transport."}
 }

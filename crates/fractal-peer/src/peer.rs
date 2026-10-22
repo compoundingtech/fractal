@@ -2123,6 +2123,44 @@ mod tests {
                 relay.transports,
             );
         }
+        // A daemon restart reconstructs the relay from the saved fleet file. Preference
+        // and removal must affect real next hops, not just the serialized setting.
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        let key = root.path().join("node.key");
+        MemberKey::load_or_create(&key).unwrap();
+        let mut file = smallclaims::fleet::FleetFile {
+            fleet_id: "1f91ca65-7793-48cc-866e-ac15690130e1".into(),
+            node_key_file: key,
+            ..Default::default()
+        };
+        for (policy, expected) in [
+            (vec!["tailscale", "fabric"], vec![tailscale, fabric, loopback]),
+            (vec!["fabric", "tailscale"], vec![fabric, tailscale, loopback]),
+            (vec!["tailscale"], vec![tailscale, loopback]),
+        ] {
+            file.transports = policy.into_iter().map(str::to_owned).collect();
+            file.save(root.path()).unwrap();
+            let restarted = ClientRelay::from_config(&Config {
+                node: "gateway".into(),
+                fleet_id: Some(file.fleet_id.clone()),
+                shared_secret_file: Some(secret.clone()),
+                fleet: smallclaims::fleet::FleetFile::load(root.path()).unwrap(),
+                state_dir: root.path().into(),
+                ..Default::default()
+            }).unwrap().unwrap().with_links(relay.links.as_ref().unwrap().clone());
+            *restarted.membership.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                std::time::Instant::now(),
+                relay.fleet_view(),
+            ));
+            assert_eq!(
+                restarted.next_hops_with_transports("owner", &[], available)
+                    .into_iter().map(|peer| peer.url).collect::<Vec<_>>(),
+                expected,
+            );
+        }
         // Explicit config routes retain their precedence for mixed config/member fleets.
         relay.peers.push(PeerConfig {
             name: "owner".into(),

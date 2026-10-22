@@ -88,8 +88,9 @@ an old explicit route if automatic preference should choose the carrier. Legacy
 machines without `fleet.toml` retain Tailscale-first automatic routing.
 
 Transport commands restart installed services. With `--no-service`, or without
-installed services, restart `st3 replication-worker` as instructed to apply the
-local settings. Fabric trust and service grants are still required.
+installed services, restart both `st3 daemon` and `st3 replication-worker` as
+instructed: the daemon reloads peer-relay settings, and the worker reloads
+replication settings. Fabric trust and service grants are still required.
 
 ### Reconcile Fabric runtime policy
 
