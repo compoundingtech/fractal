@@ -50,13 +50,14 @@ class FakeGitHub:
 
     def __init__(self):
         self.runs, self.jobs, self.logs, self.calls, self.open_prs, self.broken = [], {}, {}, [], [], False
-        self.empty_window = False  # the created= listing answers an empty page whatever runs exist
+        self.empty_window = 0  # the created= listing answers an empty page this many times (True: always)
+        self.short_window = 0  # ... or a page one run short of its total_count
 
-    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None):
+    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None, actor='otter-bot'):
         """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
         of other jobs in the same attempt (an aggregate's members)."""
         if run_id not in self.jobs:
-            self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created)})
+            self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created), 'actor': {'login': actor}})
             self.jobs[run_id] = []
         job_id = run_id * 100 + len(self.jobs[run_id])
         self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt})
@@ -79,8 +80,15 @@ class FakeGitHub:
         elif command[1:3] == ['pr', 'create']:
             return subprocess.CompletedProcess(command, 0, b'https://github.com/org/repo/pull/9\n', b'')
         elif '/workflows/fleet.yml/runs' in path:
-            newest = sorted(self.runs, key=lambda run: run['created_at'], reverse=True)
-            out = [{'workflow_runs': [] if self.empty_window else self.runs}] if '&created=' in path else [{'workflow_runs': newest[:1]}]
+            page = int(path.split('&page=')[1]) if '&page=' in path else 1
+            listed = sorted(self.runs, key=lambda run: run['created_at'], reverse=True)[(page - 1) * 100:page * 100]
+            if self.empty_window:
+                self.empty_window -= 1  # a page answers empty this many times, then the real page
+                listed = []
+            elif self.short_window:
+                self.short_window -= 1  # ... or one run short
+                listed = listed[1:]
+            return subprocess.CompletedProcess(command, 0, json.dumps({'total_count': len(self.runs), 'workflow_runs': listed}).encode(), b'')
         elif path.endswith('/logs'):
             return subprocess.CompletedProcess(command, 0, self.logs[int(path.split('/')[-2])].encode(), b'')
         else:
@@ -258,14 +266,50 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(len(self.gh.calls), 3)
         self.assertIn('HTTP 502', self.err)
 
-    def test_an_empty_run_listing_while_a_run_is_in_the_window_is_unreadable_not_zero_lines(self):
+    def test_an_empty_or_short_run_listing_is_asked_again_then_unreadable_and_a_quiet_window_is_zero_lines(self):
         self.ready_history()
-        self.gh.empty_window = True
+        self.gh.empty_window = 10 ** 6
         code, result, text = self.report()
         self.assertEqual((code, text), (2, ''))
-        self.assertIn('came back empty', self.err)
+        self.assertIn('page 1 of the pull request run listing came back with 0 of the 30 runs it holds', self.err)
+        self.gh.empty_window = 0
+        clean = self.check()
+        self.gh.empty_window, self.gh.short_window = 1, 1  # one empty, one short answer, then the real one: asked again
+        self.assertEqual(self.check(), clean)
+        self.gh.short_window = 10 ** 6
+        self.assertEqual(self.report()[0], 2)
+        self.assertIn('came back with 29 of the 30 runs it holds', self.err)
+        self.gh.short_window = 0
         self.gh.runs = [{'id': 1, 'status': 'completed', 'created_at': stamp(at(40))}]  # quiet: the newest run is older
         self.assertEqual(self.check()['lines'], 0)
+
+    def test_the_listing_is_read_page_by_page_back_to_the_window_and_a_window_past_the_cap_is_unreadable(self):
+        for i in range(230):  # 230 runs over the last 23 hours, then 20 older ones that must not be read
+            self.gh.run(5000 + i, at(23 * i / 230), [decision()], real='success')
+        for i in range(20):
+            self.gh.runs.append({'id': 9000 + i, 'status': 'completed', 'created_at': stamp(at(40 + i))})
+        self.assertEqual(self.check()['lines'], 230)
+        pages = [call[-1] for call in self.gh.calls if '/workflows/fleet.yml/runs' in call[-1]]
+        self.assertEqual([path.split('&page=')[1] for path in pages], ['1', '2', '3'])
+        self.gh.runs = [{'id': i, 'status': 'completed', 'created_at': stamp(at(i / 100))} for i in range(1001)]
+        self.assertEqual(self.report()[0], 2)
+        self.assertIn("more than the listing's 1,000 runs", self.err)
+
+    def test_the_presign_rate_counts_each_head_once_per_account_by_its_best_note(self):
+        # otter-bot: head a pre-signed (host for one check, nothing for another), head b only a CI note, head c none.
+        self.gh.run(1, at(2), [decision(check='typescript-client', trust_level='host', pr_head='a', pr='5')], check='typescript-client')
+        self.gh.run(1, at(2), [decision(outcome='no_note', trust_level='-', pr_head='a', pr='5')])
+        self.gh.run(2, at(3), [decision(trust_level='fleet', pr_head='b', pr='5')])
+        self.gh.run(3, at(4), [decision(outcome='no_note', trust_level='-', pr_head='c', pr='6')])
+        self.gh.run(4, at(4), [decision(outcome='no_note', trust_level='-', pr_head='c', pr='6')])  # a re-run of head c
+        # heron-bot: one agent-signed head; an old one outside the window is not counted.
+        self.gh.run(5, at(1), [decision(trust_level='agent', pr_head='d', pr='8')], actor='heron-bot')
+        self.gh.run(6, at(30), [decision(trust_level='agent', pr_head='e', pr='8')], actor='heron-bot')
+        code, result, _ = self.report()
+        self.assertEqual(code, 0, self.err)
+        self.assertEqual(result['presign'], {
+            'heron-bot': {'heads': 1, 'presigned': 1, 'ci_note': 0, 'no_note': 0, 'presigned_share': 1.0},
+            'otter-bot': {'heads': 3, 'presigned': 1, 'ci_note': 1, 'no_note': 1, 'presigned_share': 0.333}})
 
     def flipped(self, ref='evidence-flip/genie-freshness'):
         return {path: git(self.origin, 'show', f'{ref}:{path}') for path in

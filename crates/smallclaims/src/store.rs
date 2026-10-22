@@ -1266,6 +1266,8 @@ pub struct PeerSyncProgress {
     pub window_received: u64,
     pub graph_compared_at_unix_ms: Option<u128>,
     pub graph_differs_since_unix_ms: Option<u128>,
+    pub claims_compared_at_unix_ms: Option<u128>,
+    pub claims_differ_since_unix_ms: Option<u128>,
     /// The last exchange at which both nodes held the same envelopes and every projection was
     /// settled, so the two projections were comparable.
     pub aligned_comparison: Option<AlignedComparison>,
@@ -1317,6 +1319,16 @@ impl PeerSyncProgress {
             self.graph_differs_since_unix_ms = None;
         } else {
             self.graph_differs_since_unix_ms.get_or_insert(now);
+        }
+    }
+
+    /// Record one comparison of the claims this node retains with the peer's.
+    pub fn compare_claims(&mut self, equal: bool, now: u128) {
+        self.claims_compared_at_unix_ms = Some(now);
+        if equal {
+            self.claims_differ_since_unix_ms = None;
+        } else {
+            self.claims_differ_since_unix_ms.get_or_insert(now);
         }
     }
 
@@ -1457,6 +1469,8 @@ impl PeerSyncProgress {
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
         sync.graph_compared_at_unix_ms = self.graph_compared_at_unix_ms;
         sync.graph_differs_since_unix_ms = self.graph_differs_since_unix_ms;
+        sync.claims_compared_at_unix_ms = self.claims_compared_at_unix_ms;
+        sync.claims_differ_since_unix_ms = self.claims_differ_since_unix_ms;
         sync.diverged = self
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
@@ -6337,6 +6351,7 @@ impl Store {
 
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let signature_requests = self.replication_signature_requests()?;
         Ok(ReplicationExchange {
@@ -6346,8 +6361,8 @@ impl Store {
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 digest: snapshot.inventory.digest.clone(),
                 envelopes: Vec::new(),
@@ -6359,6 +6374,7 @@ impl Store {
             signature_requests,
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary()?),
         })
     }
 
@@ -6408,6 +6424,7 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
+        let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
@@ -6427,8 +6444,8 @@ impl Store {
                 projection_registry_digest: Some(self.runtime.projection_registry_digest()),
                 projection_versions: self.runtime.projection_versions(),
                 authority_digest: snapshot.authority_digest.clone(),
-                graph_digest: snapshot.legacy_graph_digest.clone(),
-                projection_digests: snapshot.projection_digests.clone(),
+                graph_digest: digests.0.clone(),
+                projection_digests: digests.1.clone(),
                 inventory: ReplicationInventory {
                     digest: snapshot.inventory.digest.clone(),
                     envelopes: listed,
@@ -6440,6 +6457,7 @@ impl Store {
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+                claim_ranges: Some(self.claim_range_summary()?),
             });
         }
         // A peer without range digests (an older build, or an explicit full-inventory request)
@@ -6479,8 +6497,8 @@ impl Store {
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
-            graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            graph_digest: digests.0.clone(),
+            projection_digests: digests.1.clone(),
             inventory: ReplicationInventory {
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
@@ -6500,6 +6518,7 @@ impl Store {
             signature_requests: Vec::new(),
             signatures: Vec::new(),
             build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
+            claim_ranges: Some(self.claim_range_summary()?),
         })
     }
 
@@ -6846,12 +6865,24 @@ impl Store {
             self.observe_first_sync(relay, snapshot.inventory.envelopes.len() as u64)
                 .map_err(internal)?;
         }
+        // Claims are compared only with a peer that speaks the same claim-range protocol, and
+        // only while both range indexes cover every retained claim.
+        let claims_equal = match input.claim_ranges.as_ref() {
+            Some(remote) if remote.version == CLAIM_RANGE_VERSION => {
+                let local = self.claim_range_summary().map_err(internal)?;
+                local.retained.zip(remote.retained.as_ref()).map(|(local, remote)| local == *remote)
+            }
+            _ => None,
+        };
         let now = now_ms();
         let mut sync = self
             .replication_sync
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
+        if let Some(equal) = claims_equal {
+            progress.compare_claims(equal, now);
+        }
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
             local_inventory_generation: snapshot.inventory_generation,
@@ -7272,6 +7303,29 @@ impl Store {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
     }
 
+    /// The graph and projection digests an exchange carries. While this node's projection is
+    /// not settled (a deferred catch-up, committed batches not yet sealed into envelopes, or
+    /// replicated claims waiting for a build that knows their kinds), its tables can differ
+    /// from a settled peer's at the same inventory with no divergence at all. It then sends
+    /// neither, which a peer reads as nothing to compare this time.
+    fn exported_digests(
+        &self,
+        snapshot: &ReplicationSnapshot,
+    ) -> Result<(String, BTreeMap<String, String>)> {
+        let waiting: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE state='unknown')",
+            [],
+            |row| row.get(0),
+        )?;
+        if self.replication_projection_deferred() || snapshot.unsealed || waiting {
+            return Ok((String::new(), BTreeMap::new()));
+        }
+        Ok((
+            snapshot.legacy_graph_digest.clone(),
+            snapshot.projection_digests.clone(),
+        ))
+    }
+
     pub fn projection_contention_generation(&self) -> u64 {
         self.projection_contention_generation.load(Ordering::Acquire)
     }
@@ -7655,8 +7709,12 @@ impl Store {
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target;
-                    if replayed || chunked {
+                    if replayed {
                         self.runtime.forget_views();
+                    } else if chunked {
+                        // Only more of the admitted claims projected: published lists keep
+                        // serving what readers had until they refold once the backlog is in.
+                        self.runtime.projection_advanced(through >= target);
                     }
                     if through < target {
                         between();

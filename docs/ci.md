@@ -1153,11 +1153,11 @@ machine type differ by about 2x, and the 1.6 to 2.1 s replication-exchange p99s 
 all came from the slower ones.
 
 At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
-"still being prepared", or a window's resync before its first snapshot. Today the store withdraws
-every list once per chunk while it projects a replication backlog, so these come in bursts of a
-few seconds ([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)). The report keeps
-them apart from failed requests, under `unavailable` with the seconds they spanned, and the step
-summary shows them. They fail nothing until the store fix lands and turns `AVAILABILITY_GATED` on.
+"still being prepared", or a window's resync before its first snapshot. The store keeps serving
+each list while it projects a replication backlog in chunks and refolds it once the backlog is in
+([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)), so none is expected. The
+report keeps them apart from failed requests, under `unavailable` with the seconds they spanned,
+the step summary shows them, and any fails the run (`AVAILABILITY_GATED`).
 Generated usage history contains cumulative response rollups for long-lived standing sessions
 with stable attribution, so this scenario exercises many observations per series and period
 baselines and totals rather than an empty report or one series per observation.
