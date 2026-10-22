@@ -50,6 +50,7 @@ class FakeGitHub:
 
     def __init__(self):
         self.runs, self.jobs, self.logs, self.calls, self.open_prs, self.broken = [], {}, {}, [], [], False
+        self.empty_window = False  # the created= listing answers an empty page whatever runs exist
 
     def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None):
         """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
@@ -78,7 +79,8 @@ class FakeGitHub:
         elif command[1:3] == ['pr', 'create']:
             return subprocess.CompletedProcess(command, 0, b'https://github.com/org/repo/pull/9\n', b'')
         elif '/workflows/fleet.yml/runs' in path:
-            out = [{'workflow_runs': self.runs}]
+            newest = sorted(self.runs, key=lambda run: run['created_at'], reverse=True)
+            out = [{'workflow_runs': [] if self.empty_window else self.runs}] if '&created=' in path else [{'workflow_runs': newest[:1]}]
         elif path.endswith('/logs'):
             return subprocess.CompletedProcess(command, 0, self.logs[int(path.split('/')[-2])].encode(), b'')
         else:
@@ -255,6 +257,15 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((code, text), (2, ''))
         self.assertEqual(len(self.gh.calls), 3)
         self.assertIn('HTTP 502', self.err)
+
+    def test_an_empty_run_listing_while_a_run_is_in_the_window_is_unreadable_not_zero_lines(self):
+        self.ready_history()
+        self.gh.empty_window = True
+        code, result, text = self.report()
+        self.assertEqual((code, text), (2, ''))
+        self.assertIn('came back empty', self.err)
+        self.gh.runs = [{'id': 1, 'status': 'completed', 'created_at': stamp(at(40))}]  # quiet: the newest run is older
+        self.assertEqual(self.check()['lines'], 0)
 
     def flipped(self, ref='evidence-flip/genie-freshness'):
         return {path: git(self.origin, 'show', f'{ref}:{path}') for path in

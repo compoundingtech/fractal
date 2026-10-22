@@ -955,6 +955,9 @@ group base), never from the change under test, and says per check what a note mu
                 "bind_inputs": {"flake_lock_sha256": "flake.lock"}}}}}}
 ```
 
+`enforce: true` means a covering signed note lets CI skip this job; it never fails or blocks a pull request that has no
+note, that pull request just runs the job and CI signs it.
+
 `enforce` is the per-check switch for skipping and is **off unless it says `true`** (absent means
 false; any other value is an error). With it off the gate still looks the note up and verifies it, and
 prints `outcome=satisfied` with `decision=run` and a reason starting `shadow:`, so the proof that a
@@ -1120,7 +1123,7 @@ its clippy stage ratchets against a base, so it is not ready until the policy re
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
 
 It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
-and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
+and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (an empty run listing while the newest pull request run falls in the window counts as unreadable, not as zero lines). Enforced checks are reported too.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
 temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
 moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and

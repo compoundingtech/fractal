@@ -123,6 +123,11 @@ def collect(github, checks, since, until):
     the conclusion of the check's own job in the same attempt."""
     runs = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100'
                         f'&created={iso(since)}..{iso(until)}', 'workflow_runs')
+    if not runs:
+        # The created= filter has answered an empty page while runs existed (2026-10-22 15:00Z), which read as zero lines.
+        newest = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=1', 'workflow_runs')[:1]
+        if newest and (parse_time(newest[0].get('created_at')) or since) >= since:
+            raise Unreadable(f'the run listing for {iso(since)}..{iso(until)} came back empty, but run {newest[0].get("id")} is in it')
     finished = [run for run in runs if run.get('status') == 'completed']  # a run still going is counted next time
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         job_lists = list(pool.map(
