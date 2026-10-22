@@ -1,8 +1,10 @@
 // Node/Bun-only entrypoint. Browser and React Native clients never import Node built-ins.
 import { execFile } from 'node:child_process';
 import { request } from 'node:http';
+import { connect } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { FractalClient } from './Client.generated.ts';
 
@@ -116,11 +118,18 @@ export const createFabricTransport = async (value, { program = 'fabric' } = {}) 
     const fetchImpl = async (input, init = {}) => {
         const path = requestPath(input);
         const signal = init.signal ?? undefined;
+        const upload = init.body == null ? undefined : new Response(init.body);
         signal?.throwIfAborted();
         const socketPath = await endpoint.dial({ program, signal });
         signal?.throwIfAborted();
         return new Promise((resolve, reject) => {
-            const headers = Object.fromEntries(new Headers(init.headers));
+            const outgoingHeaders = new Headers(init.headers);
+            if (upload) {
+                for (const [name, value] of upload.headers) {
+                    if (!outgoingHeaders.has(name)) outgoingHeaders.set(name, value);
+                }
+            }
+            const headers = Object.fromEntries(outgoingHeaders);
             const pending = request({ socketPath, path, method: init.method ?? 'GET', headers, signal }, response => {
                 const resultHeaders = new Headers();
                 for (let index = 0; index < response.rawHeaders.length; index += 2) {
@@ -130,7 +139,11 @@ export const createFabricTransport = async (value, { program = 'fabric' } = {}) 
                 resolve(new Response(body, { status: response.statusCode, statusText: response.statusMessage, headers: resultHeaders }));
             });
             pending.on('error', reject);
-            pending.end(init.body);
+            if (upload?.body) {
+                pipeline(Readable.fromWeb(upload.body), pending).catch(reject);
+            } else {
+                pending.end();
+            }
         });
     };
     const socket = (url, protocols, headers) => {
@@ -163,7 +176,11 @@ export const createFabricTransport = async (value, { program = 'fabric' } = {}) 
             return { WebSocket, socketPath };
         })().then(({ WebSocket, socketPath }) => {
             if (closed) return;
-            connection = new WebSocket(`ws+unix://${socketPath}:${path}`, protocols, { headers, handshakeTimeout: 10000 });
+            connection = new WebSocket(`ws://fabric.local${path}`, protocols, {
+                headers,
+                handshakeTimeout: 10000,
+                createConnection: () => connect({ path: socketPath }),
+            });
             connection.on('open', () => { if (!closed) surface.onopen?.(); });
             connection.on('message', data => { if (!closed) surface.onmessage?.({ data: data.toString() }); });
             connection.on('close', (code, reason) => {

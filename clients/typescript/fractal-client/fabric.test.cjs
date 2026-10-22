@@ -78,13 +78,29 @@ test('trusted names resolve case-insensitively and ambiguity/refusal fail closed
 
 test('fake Fabric carries authenticated HTTP and every client WebSocket stream', { timeout: 10000 }, async t => {
     const socket = path.join(root, 'client.sock');
-    const envelope = value => ({ api_version: 'st3.client.v0', value });
+    const snapshot = { id: 'snapshot/test', host_id: 'host/test', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-09-20T00:00:00Z' };
+    const envelope = value => ({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot, value });
     const requests = [];
+    const uploadBytes = Buffer.from([0, 137, 80, 78, 71, 255, 13, 10]);
+    const uploads = [];
     const server = http.createServer((request, response) => {
         requests.push(request);
         assert.equal(request.headers.authorization, 'Bearer paired-token');
         assert.equal(request.headers['x-st3-person'], undefined);
         response.setHeader('content-type', 'application/json');
+        if (request.url === '/v1/client/blobs') {
+            assert.equal(request.method, 'POST');
+            assert.equal(request.headers['content-type'], 'image/png');
+            const chunks = [];
+            request.on('data', chunk => chunks.push(chunk));
+            request.on('end', () => {
+                const bytes = Buffer.concat(chunks);
+                assert.deepEqual(bytes, uploadBytes);
+                uploads.push(bytes);
+                response.end(JSON.stringify(envelope({ blob: 'blob/test', media_type: 'image/png', sha256: 'a'.repeat(64), size: bytes.length })));
+            });
+            return;
+        }
         response.end(JSON.stringify(envelope({ capabilities: [] })));
     });
     const sockets = new WebSocketServer({ noServer: true });
@@ -111,6 +127,15 @@ test('fake Fabric carries authenticated HTTP and every client WebSocket stream',
     const fabric = fixture('roundtrip', [{ node: 'node-a', name: 'Box' }], socket);
     const client = await native.createFabricClient({ endpoint: 'fabric://BOX/st3-client-v0', program: fabric.program, credential: () => 'paired-token' });
     assert.deepEqual((await client.capabilities()).value, { capabilities: [] });
+    for (const body of [
+        new Blob([uploadBytes], { type: 'image/png' }),
+        Uint8Array.from(uploadBytes).buffer,
+        Uint8Array.from(uploadBytes),
+    ]) {
+        const uploaded = await client.uploadBlob(body, 'image/png');
+        assert.equal(uploaded.value.size, uploadBytes.length);
+    }
+    assert.equal(uploads.length, 3);
     const httpOnly = path.join(root, 'http-only');
     fs.mkdirSync(path.join(httpOnly, 'node_modules/ws'), { recursive: true });
     fs.writeFileSync(path.join(httpOnly, 'node_modules/ws/package.json'), '{"type":"module","exports":"./index.js"}');
@@ -135,6 +160,6 @@ test('fake Fabric carries authenticated HTTP and every client WebSocket stream',
     const terminal = await client.terminalStream('terminal/test', { streamCapability: 'cap', onScreen: received });
     await terminalFrame;
     terminal.close();
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 5);
     assert.equal(upgraded.length, 3);
 });
