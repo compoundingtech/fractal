@@ -1313,14 +1313,17 @@ class CommittedPolicy(unittest.TestCase):
             # lint the scenario privacy lane runs.
             'apps/ios/package.json', 'docs/st3/client-v0/fixtures', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
             'scripts/check-public-repo'])}
+        # Both run on linux-test-build's archive of the same tree and are members of the linux-gate aggregate, whose list
+        # covers what its members read; sharing it gives the three one key (docs: The skip policy).
+        declared['isolation-vm'] = declared['mail-redelivery-canaries'] = declared['linux-gate']
         for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
-        self.assertEqual(self.rules('linux-gate')['sample_one_in'], 5)
-        self.assertEqual(self.rules('fractal-web')['sample_one_in'], 5)
+        for check in ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries', 'fractal-web'):
+            self.assertEqual(self.rules(check)['sample_one_in'], 5, check)
 
     def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
         # The detector decides whether the lane runs at all; a path it matches that the key left out would let a change to it reuse a
