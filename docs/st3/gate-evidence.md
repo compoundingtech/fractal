@@ -1024,6 +1024,30 @@ real job; the published notes' shadow verification (`evidence-shadow v1`) was `o
 sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
 `enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
 
+### When a check is ready to flip (`scripts/evidence-flip-ready`)
+
+The trigger for turning a further check on is read from the gate's own decision lines, once the base pins the evidence log key
+(the log view, "The evidence log"). `scripts/evidence-flip-ready` reads the `evidence-decision v1` line of every `evidence-gate-<check>`
+job of the `Workspace CI` pull request runs created in the last 24 hours (job logs through `gh api`, cached by job id) and, per check in
+the policy at origin/main, says `ready` when all of these hold, and otherwise lists `why_not`:
+
+- 24 hours of fresh published log: no line in the window says `log=stale`, `absent`, `unsigned` or `-` (the base did not pin the
+  key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
+- at least 30 lines with `outcome=satisfied` and `log=ok`;
+- no `log=missing`;
+- no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
+  created, or after it;
+- no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
+  job the gate skipped is evidence neither way.
+
+It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
+run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
+`--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
+temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
+moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and
+opens a pull request whose body carries the trigger. An edit it cannot make mechanically stops that proposal before anything is pushed;
+`--dry-run` prints the diff instead. The pull request is reviewed and queued like any other.
+
 ### Requiring a signed note (`require`, shadow only so far)
 
 `require` is a second per-check switch in `.st/evidence-skip-policy.json`, separate from `enforce`: `off` (the default, also when absent),
