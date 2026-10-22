@@ -395,7 +395,12 @@ impl PtyRuntime {
             .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
         let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
         let unit = crate::scope_unit("st3", &scope_identity);
+        // An existing or unreadable ownership record may describe an earlier
+        // entered producer. Refusing its replay is not a never-started witness.
+        let previously_entered = *producer_entered;
+        *producer_entered = true;
         let mut producer = self.prepare_producer(id, operation, &unit)?;
+        *producer_entered = previously_entered;
         if crate::isolation_mode() == crate::Isolation::Scope {
             // The session's record removes itself once its harness exits, so st keeps the name
             // of the scope to end what the harness leaves behind.

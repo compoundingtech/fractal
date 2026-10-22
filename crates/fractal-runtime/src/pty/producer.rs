@@ -170,6 +170,14 @@ mod tests {
         runtime.acknowledge_launcher(&mut ownership, false).unwrap();
         drop(lock);
         // A missing scope and free spawn lock cannot close a crash-before-ack.
+        let error = runtime.spawn_checked(
+            id, &Launch::Argv(vec!["true".into()]), root.path(),
+            &BTreeMap::from([("ST3_START_OPERATION".into(), operation.clone())]),
+            None, &BTreeMap::from([("st3.start-operation".into(), operation.clone())]),
+            None, &|| Ok(()),
+        ).unwrap_err();
+        assert!(error.downcast_ref::<crate::StartRejected>().is_none(),
+            "refusing ambiguous ownership replay is not a native rejection witness");
         assert!(!runtime.start_operation_closed(id, &operation).unwrap());
         assert!(!runtime.start_operation_closed(id, "other-operation").unwrap());
         let record = runtime.producer_directory(id, &operation).join("owner.json");
