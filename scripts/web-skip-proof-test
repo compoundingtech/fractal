@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory() as scratch:
         shutil.copy(root / path, repo / path)
     base = commit(repo, "base", {
         "packages/fractal-ui/src/Kit.tsx": "kit\n", "apps/fractal-web/src/App.tsx": "app\n",
-        "apps/fractal-web/src/changelog/seen.ts": "seen\n", "crates/st3/src/lib.rs": "rust\n",
+        "apps/fractal-web/src/changelog/seen.ts": "seen\n", "crates/fractal/src/lib.rs": "rust\n",
         "pnpm-lock.yaml": "lock\n", "package.json": "{}\n",
     })
     at_base = decisions(repo, base, base)
@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory() as scratch:
         assert line["decision"] == "run" and line["reason"] == "no-record" and line["proof"] == "none", line
         assert len(line["key"]) == 40 and len(line["inputs_sha256"]) == 64, line
 
-    rust = commit(repo, "rust only", {"crates/st3/src/lib.rs": "rust 2\n"})
+    rust = commit(repo, "rust only", {"crates/fractal/src/lib.rs": "rust 2\n"})
     assert {name: line["key"] for name, line in decisions(repo, base, rust).items()} == {name: line["key"] for name, line in at_base.items()}
     app = commit(repo, "app only", {"apps/fractal-web/src/App.tsx": "app 2\n"})
     after_app = decisions(repo, base, app)
@@ -67,8 +67,8 @@ with tempfile.TemporaryDirectory() as scratch:
     assert all(after_kit[name]["key"] != after_app[name]["key"] for name in after_kit)
     print("passed: input keys hold across changes outside a check's inputs and move with changes inside them")
 
-    claims = dict(line.split("\t") for line in run(repo, "--base", base, "claims", "crates/st3/src/lib.rs", "apps/fractal-web/src/App.tsx", "pnpm-lock.yaml").splitlines())
-    assert claims == {"crates/st3/src/lib.rs": "not-mine", "apps/fractal-web/src/App.tsx": "owned:fractal-web", "pnpm-lock.yaml": "owned:fractal-web,fractal-web-kit"}, claims
+    claims = dict(line.split("\t") for line in run(repo, "--base", base, "claims", "crates/fractal/src/lib.rs", "apps/fractal-web/src/App.tsx", "pnpm-lock.yaml").splitlines())
+    assert claims == {"crates/fractal/src/lib.rs": "not-mine", "apps/fractal-web/src/App.tsx": "owned:fractal-web", "pnpm-lock.yaml": "owned:fractal-web,fractal-web-kit"}, claims
     kit_inputs = run(repo, "--base", base, "inputs", "fractal-web-kit").split()
     assert "packages/fractal-ui" in kit_inputs and "pnpm-lock.yaml" in kit_inputs and "apps/fractal-web" not in kit_inputs, kit_inputs
     assert not any(path.startswith("packages/fractal-ui/") for path in kit_inputs), "a declared directory stands for its files"
@@ -93,3 +93,17 @@ with tempfile.TemporaryDirectory() as scratch:
     assert lines["fractal-web-kit"]["decision"] == "skip" and lines["fractal-web-kit"]["proof"] == "b" * 40 and lines["fractal-web-kit"]["reason"] == "match", lines
     assert lines["fractal-web"]["decision"] == "run" and lines["fractal-web"]["reason"] == "no-record", lines
     print("passed: a declared check skips only on the verifier's signed record; an undeclared one runs")
+
+    # --fetch brings the head tree's records and each keyed check's input-indexed records from origin, as tags or notes, and nothing else.
+    clone = Path(scratch) / "clone"
+    subprocess.run(["git", "clone", "-q", "--no-tags", str(repo), str(clone)], check=True, capture_output=True, env=clean)
+    tree = git(repo, "rev-parse", f"{declared}^{{tree}}")
+    wanted = [f"refs/tags/evidence/{tree}/{declared}", f"refs/notes/evidence/{tree}/{base}", f"refs/tags/evidence/input/fractal-web-kit/{'a' * 40}/{rust}"]
+    for ref, target in zip(wanted, (declared, base, rust)):
+        git(repo, "update-ref", ref, target)
+    git(repo, "update-ref", f"refs/tags/evidence/{'c' * 40}/{base}", base)  # another tree's record
+    git(repo, "update-ref", "refs/tags/v1", base)
+    run(clone, "--fetch", "--base", declared, "--head", declared)
+    fetched = git(clone, "for-each-ref", "--format=%(refname)", "refs/tags/", "refs/notes/").split()
+    assert sorted(fetched) == sorted(wanted), fetched
+    print("passed: --fetch brings this tree's records and the keyed input records, as tags or notes, and no other ref")

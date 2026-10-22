@@ -100,7 +100,7 @@ fn admitted_rows(store: &Store) -> Vec<String> {
                 COALESCE(batch_id,''), COALESCE(validation_error,''), ''
          FROM replica_envelopes WHERE writer='birch' ORDER BY writer, sequence, envelope_hash",
     ] {
-        let mut statement = connection.prepare(query).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc890695a5fb2 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ query).unwrap();
         let columns = statement.column_count();
         rows.extend(
             statement
@@ -190,20 +190,20 @@ fn legacy_validate_and_admit_envelope_tx(
         let previous_state = transaction
             .prepare_cached("SELECT state FROM replica_records WHERE record_ref=?1")
             .map_err(internal)?
-            .query_row([&record_ref], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h251cf196ca8f owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ [&record_ref], |row| row.get::<_, String>(0))
             .optional()
             .map_err(internal)?;
         if valid {
             transaction
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
+                    /* sqlite-large-value: allow-for-now lv-h467546f5abc5 owner=smallclaims::store::prepared_envelope_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
                 )
                 .map_err(internal)?
-                .execute(params![hash, bytes, bytes.len() as u64])
+                .execute(/* sqlite-large-value: allow-for-now lv-h3f00eae39626 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![hash, bytes, bytes.len() as u64])
                 .map_err(internal)?;
             transaction
                 .prepare_cached(
-                    "INSERT INTO replica_records(
+                    /* sqlite-large-value: allow-for-now lv-h2e4257ac0054 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          subject_hint, kind_hint, updated_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, 'blob', ?8)
@@ -215,7 +215,7 @@ fn legacy_validate_and_admit_envelope_tx(
                         updated_at_unix_ms=excluded.updated_at_unix_ms",
                 )
                 .map_err(internal)?
-                .execute(params![
+                .execute(/* sqlite-large-value: allow-for-now lv-he50b4185610a owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![
                         record_ref,
                         envelope.writer,
                         envelope.sequence,
@@ -232,7 +232,7 @@ fn legacy_validate_and_admit_envelope_tx(
             degraded = true;
             transaction
                 .prepare_cached(
-                    "INSERT INTO replica_records(
+                    /* sqlite-large-value: allow-for-now lv-h3bda83416645 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'invalid', ?7, 'blob',
@@ -242,7 +242,7 @@ fn legacy_validate_and_admit_envelope_tx(
                         error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms",
                 )
                 .map_err(internal)?
-                .execute(params![
+                .execute(/* sqlite-large-value: allow-for-now lv-hc8afba984753 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![
                         record_ref,
                         envelope.writer,
                         envelope.sequence,
@@ -268,11 +268,11 @@ fn legacy_validate_and_admit_envelope_tx(
         .map_or_else(|| next_batch_rowid(transaction).map_err(internal), Ok)?;
     transaction
         .prepare_cached(
-            "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
+            /* sqlite-large-value: allow-for-now lv-h77d7b285efb4 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .map_err(internal)?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h9d21056b828a owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![
                 batch.id,
                 batch.origin,
                 batch.replica_sequence,
@@ -295,7 +295,7 @@ fn legacy_validate_and_admit_envelope_tx(
         let previous_state = transaction
             .prepare_cached("SELECT state FROM replica_records WHERE record_ref=?1")
             .map_err(internal)?
-            .query_row([&record_ref], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h5047e43e1ca2 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ [&record_ref], |row| row.get::<_, String>(0))
             .optional()
             .map_err(internal)?;
         let started = std::time::Instant::now();
@@ -312,11 +312,11 @@ fn legacy_validate_and_admit_envelope_tx(
                 } else {
                     transaction
                     .prepare_cached(
-                        "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                        /* sqlite-large-value: allow-for-now lv-hefa396f113ae owner=smallclaims::store::prepared_envelope_tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     )
                     .map_err(internal)?
-                    .execute(params![
+                    .execute(/* sqlite-large-value: allow-for-now lv-hb2db0d1b6b32 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![
                         claim.id,
                         claim.batch_id,
                         claim.subject,
@@ -335,7 +335,7 @@ fn legacy_validate_and_admit_envelope_tx(
                 }
                 transaction
                     .prepare_cached(
-                        "INSERT INTO replica_records(
+                        /* sqlite-large-value: allow-for-now lv-h5b54e53d110c owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                              record_ref, writer, sequence, envelope_hash, position, raw, state,
                              claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
@@ -347,7 +347,7 @@ fn legacy_validate_and_admit_envelope_tx(
                             updated_at_unix_ms=excluded.updated_at_unix_ms",
                     )
                     .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
+                    .execute(/* sqlite-large-value: allow-for-now lv-he0f1a9ba8d67 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
                     .map_err(internal)?;
                 outcome.valid += 1;
                 outcome.changed |= inserted != 0 || previous_state.as_deref() != Some("valid");
@@ -369,7 +369,7 @@ fn legacy_validate_and_admit_envelope_tx(
                 };
                 transaction
                     .prepare_cached(
-                        "INSERT INTO replica_records(
+                        /* sqlite-large-value: allow-for-now lv-h28ce9ec17c3e owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                              record_ref, writer, sequence, envelope_hash, position, raw, state,
                              claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unknown', ?7, ?8, ?9, ?10, ?11, ?12)
@@ -379,7 +379,7 @@ fn legacy_validate_and_admit_envelope_tx(
                             updated_at_unix_ms=excluded.updated_at_unix_ms",
                     )
                     .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error_code, error_message, now])
+                    .execute(/* sqlite-large-value: allow-for-now lv-he7da7c216d5d owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error_code, error_message, now])
                     .map_err(internal)?;
                 outcome.unknown += 1;
             }
@@ -387,7 +387,7 @@ fn legacy_validate_and_admit_envelope_tx(
                 degraded = true;
                 transaction
                     .prepare_cached(
-                        "INSERT INTO replica_records(
+                        /* sqlite-large-value: allow-for-now lv-hd29771f298b0 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                              record_ref, writer, sequence, envelope_hash, position, raw, state,
                              claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'invalid', ?7, ?8, ?9, ?10, ?11, ?12)
@@ -396,7 +396,7 @@ fn legacy_validate_and_admit_envelope_tx(
                             updated_at_unix_ms=excluded.updated_at_unix_ms",
                     )
                     .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error.code, error.message, now])
+                    .execute(/* sqlite-large-value: allow-for-now lv-h1fe09bdc7663 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error.code, error.message, now])
                     .map_err(internal)?;
                 outcome.invalid += 1;
             }
@@ -404,11 +404,11 @@ fn legacy_validate_and_admit_envelope_tx(
     }
     transaction
         .prepare_cached(
-            "UPDATE replica_envelopes SET receipt_state=?4, validation_error=NULL, batch_id=?5
+            /* sqlite-large-value: allow-for-now lv-h999edd954b96 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state=?4, validation_error=NULL, batch_id=?5
              WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
         )
         .map_err(internal)?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h12c052f5eba9 owner=smallclaims::store::prepared_envelope_tests TODO=trace-statement-and-value-representation */ params![
             envelope.writer,
             envelope.sequence,
             envelope.hash,
@@ -569,7 +569,7 @@ fn an_envelope_received_again_after_its_preparation_is_admitted_by_that_receipt(
             let transaction = writer.transaction().unwrap();
             transaction
                 .execute(
-                    "DELETE FROM replica_envelopes
+                    /* sqlite-large-value: allow-for-now lv-hf044b4ead875 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelopes
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                     params![envelope.writer, envelope.sequence, envelope.hash],
                 )
@@ -683,7 +683,7 @@ fn admission_keeps_a_record_repaired_before_it() {
         let transaction = writer.transaction().unwrap();
         transaction
             .execute(
-                "INSERT INTO replica_records(
+                /* sqlite-large-value: allow-for-now lv-hfc3f88eaf9a9 owner=smallclaims::store::prepared_envelope_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                      record_ref, writer, sequence, envelope_hash, position, raw, state,
                      error_code, error_message, updated_at_unix_ms
                  ) VALUES (?1, ?2, ?3, ?4, 0, x'', 'repaired', 'claim-hash-mismatch', 'repaired by hand', '0')",
@@ -1029,7 +1029,7 @@ fn a_classification_that_reads_the_store_sees_the_store_under_the_writer() {
                     let mut writer = target.connection.write();
                     let transaction = writer.transaction().unwrap();
                     transaction
-                        .execute("INSERT INTO meta(key, value) VALUES ('gate', 'open')", [])
+                        .execute(/* sqlite-large-value: allow-for-now lv-h475b9c435b3b owner=smallclaims::store::prepared_envelope_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('gate', 'open')", [])
                         .unwrap();
                     transaction.commit().unwrap();
                 }

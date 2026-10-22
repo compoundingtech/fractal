@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
-run="mission-run/$ST_MISSION_RUN"
-mission="$(env -u ST_AGENT st3 missions show "$run" --json)"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+run="mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}"
+mission="$(env -u FRACTAL_AGENT -u ST_AGENT st3 missions show "$run" --json)"
 
 completed_steps=(
   process-before-restart
@@ -34,7 +37,8 @@ for step in "${completed_steps[@]}"; do
 done
 
 while read -r name kind state_name; do
-  subject="resource/mission-run/$ST_MISSION_RUN/$name"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  subject="resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$name"
   status="$(st3 subject show "$subject" --json)"
   jq -e --arg kind "$kind" --arg state "$state_name" \
     '.status.subjects[0].actual | (.fields // .)
