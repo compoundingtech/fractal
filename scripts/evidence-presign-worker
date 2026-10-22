@@ -308,12 +308,21 @@ def run(st_test, repo, checks, kind, rules, log):
             CHILD = None
             if scratch:
                 shutil.rmtree(scratch, ignore_errors=True)
+    return summary_rows(Path(log).read_text(errors='replace')), reason, round(now() - started), peak
+
+
+def summary_rows(output):
+    """The per-check results of st-test's own final summary: the rows after its last `st-test: tree` line. The log also holds the
+    output of the pull request's tests, which could print a line shaped like a row; nothing before that header is read."""
+    lines = output.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith('st-test: tree ')]
     rows = {}
-    for line in Path(log).read_text(errors='replace').splitlines():
+    for line in lines[starts[-1] + 1:] if starts else []:
         match = ROW.match(line)
-        if match:
-            rows[match[1]] = match[2]
-    return rows, reason, round(now() - started), peak
+        if not match:
+            break
+        rows[match[1]] = match[2]
+    return rows
 
 
 def tick(args):

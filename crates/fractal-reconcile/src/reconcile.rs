@@ -9861,7 +9861,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if view.status == "ready" && view.agentless {
                         let reason = awaited_run(run, &step, view)?
                             .map(|after| format!("waiting for `{after}` to complete"));
-                        changed |= self.store.set_step_state(
+                        changed |= self.store.set_step_state_unless_terminal(
                             &view.subject,
                             "working",
                             reason.as_deref(),
@@ -13955,7 +13955,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         step: &RuntimeStep<'_>,
     ) -> Result<bool> {
         if view.agentless {
-            return self.store.set_step_state(
+            return self.store.set_step_state_unless_terminal(
                 &view.subject,
                 "failed",
                 Some("the active execution timeout expired"),
@@ -18445,6 +18445,7 @@ pub mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
+    mod terminal_step_guard;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};

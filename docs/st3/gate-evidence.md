@@ -1406,7 +1406,11 @@ or past 20 GB of scratch; the light class starts below 15% and stops the same wa
 in `~/.cache/evidence-presign-target`, so a head does not start cold (a cold target costs about 10 minutes and 19 GB of writes). It is
 never pinned: the host's scratch sweep may reclaim it when it has been idle for two hours and disk runs short, and the worker removes it
 itself before a run once it passes 25 GB. Every tick that does not start for load or disk appends a line to `skips.jsonl`. `~/.config/evidence-presign/limits.json` overrides these numbers (agreed with operations) and
-`~/.config/evidence-presign/off` stops every tick. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
+`~/.config/evidence-presign/off` stops every tick. Both services run in `builds.slice`, with every other build on the host (operations' terms). The units' environment is minimal on purpose: they run pull request code with the
+host's signing key within reach, so they carry no secret beyond that key and the git credential the notes push uses, and
+`~/.config/evidence-presign/env` holds settings only (`EVIDENCE_PRESIGN_*`), never a token. The authors file lists only our own account.
+The heavy class's kept target is shared between heads; that is accepted for our own authors' code (the same trust as a seat's warm
+checkout), and it is one reason the authors file must stay that short. A check's result is read only from st-test's final summary. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
 (pull request, head, tree, class, first seen ready, start, seconds, per-check result, peak IO pressure, outcome `worker_signed`,
 `worker_signed_lane_edit`, `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
 window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
