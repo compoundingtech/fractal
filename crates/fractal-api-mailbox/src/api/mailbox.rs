@@ -1440,6 +1440,10 @@ mod tests {
         let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-wakes";
         let (title, delivery) = attachment_seat(&state, subject);
+        // A proof window far longer than next()'s 15 s wait (MAILBOX_RECHECK / 2). With the
+        // default 10 s window the deadline re-evaluation could stand in for the wake under test,
+        // so a missing wake would only make a frame late. Do not shorten it.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
         let mut stream =
             controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
         delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
@@ -1552,6 +1556,10 @@ mod tests {
         let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-rebind";
         let (title, delivery) = attachment_seat(&state, subject);
+        // A proof window far longer than next()'s 15 s wait (MAILBOX_RECHECK / 2). With the
+        // default 10 s window the deadline re-evaluation could stand in for the wake under test,
+        // so a missing wake would only make a frame late. Do not shorten it.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
         let mut stream =
             controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
         delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
