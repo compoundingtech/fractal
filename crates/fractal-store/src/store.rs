@@ -176,6 +176,7 @@ pub use smallclaims::store::{
     configure_projection_writer, drop_digest, excused_writers, first_verifications, newest_due_cut,
     newest_seals, stable_checkpoints, valid_fleet_node_name, verify_checkpoint_manifest,
 };
+use smallclaims::windows::holds;
 
 
 pub mod accounts;
@@ -9007,6 +9008,7 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
+    holds::rebuilt(claim_ids.len());
     clear_quarantined_claims_tx(transaction, "projection:planning")?;
     for id in claim_ids {
         let claim = claim_by_id_tx(transaction, &id)?
@@ -14343,6 +14345,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         )
         .collect::<BTreeSet<_>>();
     let claims = claims_in_replay_order_tx(transaction, &subjects, &generations, None)?;
+    holds::rebuilt(claims.len());
     for run in runs {
         for table in [
             "step_runs",
@@ -14439,6 +14442,7 @@ fn rebuild_base_aggregate_tx(
         &BTreeSet::new(),
         Some(&[kind]),
     )?;
+    holds::rebuilt(claims.len());
     for claim in &claims {
         project_claim_isolated_tx(transaction, "projection:base", claim, || {
             match claim.kind.as_str() {
@@ -14999,12 +15003,16 @@ pub fn try_project_simple_replication_tx(
         reconcile_carried_step_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "claim-project"))?;
     }
-    // Missions first, since a rebuilt run reads the revision it runs.
+    // Missions first, since a rebuilt run reads the revision it runs. Each rebuild is a stage of
+    // a staged projection lend, so its hold says which kind of rebuild took its time.
     let (trees, bases): (Vec<_>, Vec<_>) = dirty
         .iter()
         .partition(|aggregate| matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)));
     for aggregate in bases {
-        rebuild_base_aggregate_tx(transaction, aggregate).map_err(|error| {
+        holds::stage("rebuild-base", || {
+            rebuild_base_aggregate_tx(transaction, aggregate)
+        })
+        .map_err(|error| {
             let subject = match aggregate {
                 Aggregate::Desired(subject)
                 | Aggregate::Document(subject)
@@ -15018,8 +15026,14 @@ pub fn try_project_simple_replication_tx(
     }
     for aggregate in trees {
         let (rebuilt, root) = match aggregate {
-            Aggregate::RunTree(root) => (rebuild_run_tree_tx(transaction, root), root),
-            Aggregate::RunPart(top) => (rebuild_run_part_tx(transaction, top), top),
+            Aggregate::RunTree(root) => (
+                holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+                root,
+            ),
+            Aggregate::RunPart(top) => (
+                holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
+                top,
+            ),
             _ => continue,
         };
         rebuilt.map_err(|error| {
@@ -15029,7 +15043,7 @@ pub fn try_project_simple_replication_tx(
         })?;
     }
     if rebuild_planning {
-        rebuild_planning_tx(transaction)
+        holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?;
     }
     owned_sets::project_tx(transaction)
