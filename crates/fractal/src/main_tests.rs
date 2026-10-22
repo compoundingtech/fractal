@@ -1682,6 +1682,11 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_attachment_admissions: AdmissionBucket {
+                binding: Some(("incarnation".into(), 4, "token".into())),
+                tokens: 0,
+                refilled_at_ms: 1_234,
+            },
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1693,6 +1698,13 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert_eq!(back.loop_state.delivery_episode, 2);
     assert_eq!(back.loop_state.claude_attachment_phase, "blocked");
     assert_eq!(back.loop_state.claude_attachment_episode, 3);
+    // An empty admission bucket survives re-exec: a re-exec grants no fresh burst.
+    let admissions = &back.loop_state.claude_attachment_admissions;
+    assert_eq!(
+        admissions.binding,
+        Some(("incarnation".into(), 4, "token".into()))
+    );
+    assert_eq!((admissions.tokens, admissions.refilled_at_ms), (0, 1_234));
     assert_eq!(
         back.loop_state.published_timeline,
         resume.loop_state.published_timeline
