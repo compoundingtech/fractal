@@ -40,6 +40,30 @@ test('missing and empty cpuinfo files explicitly report unknown', async () => {
   }
 })
 
+test('lane EXIT shell trap preserves success and failure when CPU metadata cannot be written', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kit-runner-trap-test-'))
+  try {
+    const source = await readFile(new URL('../../../scripts/ci-fractal-web', import.meta.url), 'utf8')
+    const trap = source.match(/^trap 'status=\$\?[\s\S]*?' EXIT$/m)?.[0]
+    assert.ok(trap, 'Exercise the production EXIT trap, not a copied implementation')
+    const scripts = join(directory, 'packages/fractal-ui/scripts')
+    await mkdir(scripts, { recursive: true })
+    await writeFile(join(scripts, 'kit-runner-cpu.mjs'), 'process.stdout.write("{partial"); process.exit(1)\n')
+    for (const status of [0, 3]) {
+      const receipt = join(directory, `receipt-${status}`)
+      const run = spawnSync('bash', ['-c', `set -euo pipefail\nkit_receipt_dir="$RECEIPT"\n${trap}\nexit ${status}`], {
+        cwd: directory, encoding: 'utf8', env: { ...process.env, RECEIPT: receipt },
+      })
+      assert.equal(run.status, status, run.stderr)
+      assert.match(run.stderr, /runner CPU metadata unavailable/)
+      await assert.rejects(readFile(join(receipt, 'runner-cpu.json')), { code: 'ENOENT' })
+      assert.match(await readFile(join(receipt, 'lane-seconds'), 'utf8'), /^\d+\n$/)
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('cost summary shows each shard model and a sorted distinct CPU class set', () => {
   const table = costTable([
     { shardIndex: 0, runnerCpu: { modelName: 'AMD EPYC 9V74', cpuClass: 'epyc-9v74' } },
