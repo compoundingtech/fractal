@@ -5,11 +5,21 @@ GitHub release is published. A release is also published once a day when `main` 
 last one (see [Daily releases](#daily-releases)). A rolling `edge` pre-release follows every green
 `main` commit (see [Edge releases](#edge-releases)). Each release contains:
 
-- `smalltalk-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, linked for glibc 2.35 or newer (Ubuntu 22.04+).
-- `smalltalk-aarch64-apple-darwin.tar.gz`: Apple Silicon, macOS 15 or newer. The executables are
+- `fractal-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, linked for glibc 2.35 or newer (Ubuntu 22.04+).
+- `fractal-aarch64-apple-darwin.tar.gz`: Apple Silicon, macOS 15 or newer. The executables are
   ad-hoc signed, not Developer ID signed or notarized; macOS may require approval to open them.
 - One `.sha256` checksum per archive, combined `SHA256SUMS`, and `RELEASE.json` with the exact
   source commit, target, Rust compiler version, and PTY runtime revision.
+
+Until **2026-11-01**, each target also ships a `smalltalk-<target>.tar.gz` compatibility
+archive and checksum. Its root directory keeps the historical `smalltalk-<target>`
+name, while the canonical archive uses `fractal-<target>`; all files, modes and links
+otherwise match, and publication verifies both layouts. This bridge is
+`arn:lmig:smalltalk:2026-10-20-release-artifact-aliases` in [#3032](https://github.com/compoundingtech/smalltalk/issues/3032).
+Old installers and release consumers can keep their asset names during this window.
+The current download installer prefers `fractal-*` and falls back to `smalltalk-*`
+only on HTTP 404 (for retained tags); checksum or other download failures fail closed.
+The byte-pinned v0.3.17 compatibility baseline and installer fixture are unchanged.
 
 Each archive has `bin/st3`, `bin/fractal` and `bin/st` (relative symlinks to `st3`), `bin/pty`, plus `install.sh`, `install-macos.py`, `BUILD.json`, and this guide. Native builds pin Rust1.97.0 in `scripts/release-rust-version`; the workflow and local builder use that same version. PTY is built from the exact
 `flake.lock` runtime revision; this is distinct from the `pty-core` library dependency. Linux builds link against glibc 2.35 with pinned Zig 0.15.2, so optional newer
@@ -50,7 +60,7 @@ sh install.sh --edge --no-run
 An extracted archive can also be installed with `./install.sh --bin-dir
 "$HOME/.local/bin"`; add `--quiet` to suppress installer notices. The archive's
 command payload is `st3`, the relative `fractal` and `st` links, and `pty`. The source migration
-tool remains available as the separate `st3-migrate` Cargo package.
+tool remains available as the separate `fractal-migrate` Cargo package.
 
 `fractal` opens the same terminal interface; `fractal tui` opens it explicitly, and
 `fractal web` opens the web interface. Other arguments behave like `st`. Release and
@@ -130,8 +140,8 @@ to catch package breakage early.
 
 The st3 Nix check uses nextest to give each test its own process, including CPU-budget and
 delivery-presence fixtures. Python, Node, and the Linux process utilities are declared test inputs;
-the st3 messaging compatibility binary is pinned by the `messaging-baseline` input in `flake.lock`
-and supplied through `ST3_MESSAGING_COMPAT_BIN` by the check’s `preCheck` inside the sandbox.
+the st3 messaging compatibility binary is the published release archive pinned by
+`.github/messaging-compat-baseline.json` and supplied through `ST3_MESSAGING_COMPAT_BIN` by the check’s `preCheck` inside the sandbox.
 The native runtime suite and documentation tests remain covered.
 
 ## Edge releases
@@ -139,8 +149,8 @@ The native runtime suite and documentation tests remain covered.
 After a `main` run of **Smalltalk tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `smalltalk-release` artifact, re-checks the
-checksums and the source recorded in each archive, then replaces the assets (both archives, their `.sha256`
-files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
+checksums and the source recorded in each archive, then replaces the assets (both target archives and
+their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
 source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 

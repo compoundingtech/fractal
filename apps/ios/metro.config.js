@@ -9,7 +9,8 @@ const resolve = config.resolver.resolveRequest;
 const messageSocket = path.join(path.dirname(require.resolve('expo/package.json')), 'src/async-require/messageSocket.native.ts');
 config.resolver.resolveRequest = (context, name, platform) => {
   const result = resolve ? resolve(context, name, platform) : context.resolveRequest(context, name, platform);
-  if (process.env.ST3_FABRIC_OFFLINE_DEBUG === '1' && platform === 'ios' && result.type === 'sourceFile' && result.filePath === messageSocket) return { type: 'empty' };
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  if ((process.env.FRACTAL_FABRIC_OFFLINE_DEBUG ?? process.env.ST3_FABRIC_OFFLINE_DEBUG) === '1' && platform === 'ios' && result.type === 'sourceFile' && result.filePath === messageSocket) return { type: 'empty' };
   return result;
 };
 module.exports = config;
