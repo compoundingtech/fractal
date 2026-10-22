@@ -42,6 +42,8 @@ production_build() (
 
 
 kit_receipt_dir=${KIT_RECEIPT_DIRECTORY:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/kit-play-receipts}
+# Retain the whole lane duration even when it fails before a strict-play receipt exists.
+trap 'mkdir -p "$kit_receipt_dir"; echo "$SECONDS" > "$kit_receipt_dir/lane-seconds"' EXIT
 
 kit_storybook() (
   # The module graph proves every bundled repository file is a declared kit input. The build's
@@ -129,6 +131,7 @@ stream_kit() {
   case "${KIT_INPUTS:-true}" in
     true)
       lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
+      lane "UI kit timing contracts" node --test packages/fractal-ui/scripts/kit-play-timings.node-test.mjs
       ;;
     false)
       printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"

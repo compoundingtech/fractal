@@ -47,6 +47,7 @@ import {
   extraMergeTestRunsOn,
   workspacePreparationSteps,
   testArchiveConsumerSetup,
+  nextestFlakyUpload,
 } from './workspace-ci.ts'
 
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
@@ -60,6 +61,7 @@ const linuxStageJob = ({
   before = [],
   extraLogs = '',
   runsOn = supportingStageRunsOn,
+  flakyArtifact = false,
 }: {
   name: string
   stage: string
@@ -69,6 +71,8 @@ const linuxStageJob = ({
   before?: readonly unknown[]
   extraLogs?: string
   runsOn?: unknown
+  /** A test lane: publish nextest's flaky-test count as an artifact name, for `st slo`'s flakes. */
+  flakyArtifact?: boolean
 }) => ({
   name,
   ...afterPickRunner,
@@ -84,7 +88,11 @@ const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
-    nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
+    {
+      ...nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
+      ...(flakyArtifact ? { id: 'nextest' } : {}),
+    },
+    ...(flakyArtifact ? [nextestFlakyUpload(name)] : []),
     {
       name: 'Save Nix outputs to the local Nix cache',
       if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`,
@@ -466,6 +474,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests': {
       ...linuxStageJob({
         name: 'linux-tests',
+        flakyArtifact: true,
         stage: 'tests',
         setup: testArchiveConsumerSetup,
         runsOn: primaryTestRunsOn,
@@ -481,6 +490,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests-shard-2': {
       ...linuxStageJob({
         name: 'linux-tests-shard-2',
+        flakyArtifact: true,
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
@@ -493,6 +503,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests-shard-3': {
       ...linuxStageJob({
         name: 'linux-tests-shard-3', stage: 'tests', setup: testArchiveConsumerSetup,
+        flakyArtifact: true,
         runsOn: extraMergeTestRunsOn,
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:3/4', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
@@ -503,6 +514,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests-shard-4': {
       ...linuxStageJob({
         name: 'linux-tests-shard-4', stage: 'tests', setup: testArchiveConsumerSetup,
+        flakyArtifact: true,
         runsOn: extraMergeTestRunsOn,
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:4/4', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
@@ -638,17 +650,20 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"`,
         },
-        // The stage jobs' signed notes, written as packs by each stage's own signing steps.
+        // The stage jobs' signed notes, written as packs by each stage's own signing steps. Collected and published
+        // whenever the key is configured, whether or not the aggregate signed: a stage note stands on its own (its
+        // producer refuses when its own gate skipped, and only notes that verify are published), and an aggregate
+        // that refused simply leaves no linux-gate note among them.
         {
           name: 'Collect the stage notes',
-          if: "${{ steps.sign.outcome == 'success' }}",
+          if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           uses: 'actions/download-artifact@v4',
           with: { pattern: 'evidence-note-*', path: '${{ runner.temp }}/evidence-notes/stages', 'merge-multiple': true },
         },
         {
           name: 'Publish the notes that verify',
-          if: "${{ steps.sign.outcome == 'success' }}",
+          if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
@@ -660,7 +675,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
         // is fail-soft like every other step of this job.
         {
           name: 'Shadow-verify the published notes',
-          if: "${{ always() && steps.sign.outcome == 'success' }}",
+          if: "${{ always() && steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
 [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
@@ -686,8 +701,8 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
         ...evidenceStepSteps('isolation-vm', ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'], ['kvm', 'driver', 'vmtest', 'sekrets-driver', 'sekrets-test']),
       ],
     },
-    // Not yet a required check: the ruleset gains `fractal-web` after both PR and merge-group
-    // runs have emitted it successfully.
+    // `fractal-web` is a required check (.github/repo-settings.json): it must report on every PR
+    // and merge-group run, so the gate job always runs and fails closed.
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
   }),

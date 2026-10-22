@@ -163,7 +163,8 @@ max_growth_mb_per_day = 300
 # one percentile of a duration, the objective `NAME/pPERCENTILE`; a name may declare several. A
 # `[[count]]` is the most events an hour, the objective `NAME`. `path` names the series that feeds
 # it, `ci/NAME`. They are objectives in `st slo` only, not in the request-latency read or `st
-# doctor`, and nothing feeds their series yet, so each shows no-data.
+# doctor`. Workspace CI's runs, read by the repository observer that reads
+# main_performance_failures and held in memory, feed them; other members show no-data.
 
 [[duration]]
 name = "merge-latency"

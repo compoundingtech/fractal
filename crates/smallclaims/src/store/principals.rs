@@ -505,6 +505,12 @@ pub struct SignatureStateFault {
     pub detail: String,
 }
 
+// The primary-key order otherwise lets SQLite choose a scan of every ordinary claim.
+// Sort the sparse alert set after reading the existing threshold index instead.
+fn signature_alerts_query(connection: &Connection) -> rusqlite::Result<rusqlite::CachedStatement<'_>> {
+    connection.prepare_cached("SELECT claim_id,candidates FROM claim_signature_counts INDEXED BY claim_signature_counts_alert_index WHERE candidates>=64 ORDER BY claim_id")
+}
+
 impl Store {
     pub fn signature_candidate_count(&self, claim_id: &str) -> Result<u64> {
         Ok(self
@@ -554,7 +560,7 @@ impl Store {
             let sample=connection.prepare_cached("SELECT claim_id FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1 ORDER BY claim_id LIMIT 20")?.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             faults.push(SignatureStateFault {code:"signature-judgment-incomplete".into(),subject:format!("host/{}",self.origin),detail:format!("{pending} claims have pending bounded candidate judgment; first {} claim ids: {sample:?}; serving model is {}; candidate authority remains Held until affected pages reconcile",sample.len(),if migration.serving_legacy { "legacy (P0 exposed)" } else { "candidate" })});
         }
-        let alerts=connection.prepare_cached("SELECT claim_id,candidates FROM claim_signature_counts WHERE candidates>=64 ORDER BY claim_id")?
+        let alerts=signature_alerts_query(&connection)?
             .query_map([],|row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         for (claim_id, count) in alerts {
             let writers=connection.prepare_cached("SELECT writer,COUNT(*) FROM claim_signature_sources WHERE claim_id=?1 GROUP BY writer ORDER BY writer")?
@@ -2006,5 +2012,45 @@ pub(crate) fn envelope_signature(
         legacy::stored_signature(connection, claim_id)
     } else {
         stored_signature(connection, claim_id)
+    }
+}
+
+#[cfg(test)]
+mod signature_alert_tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    #[test]
+    fn signature_alerts_read_only_the_threshold_index_and_keep_claim_order() {
+        let store = Store::open_memory("studio", Arc::new(runtime::Plain)).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            // The common population must not be visited when finding two exceptional claims.
+            for i in 0..10_000 {
+                tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES (?1,63)",
+                    [format!("ordinary/{i:05}")]).unwrap();
+            }
+            tx.execute("INSERT INTO claim_signature_counts(claim_id,candidates) VALUES ('a-alert',65),('z-alert',64)", []).unwrap();
+            tx.commit().unwrap();
+        }
+        {
+            let connection = store.readers.get();
+            let mut statement = signature_alerts_query(&connection).unwrap();
+            let alerts = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(alerts, vec![("a-alert".into(),65),("z-alert".into(),64)]);
+            assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+            assert!(statement.get_status(StatementStatus::VmStep) < 100,
+                "ordinary below-threshold rows must not contribute query work");
+        }
+        let faults = store.signature_state_faults().unwrap().into_iter()
+            .filter(|fault| fault.code == "signature-candidate-count")
+            .map(|fault| (fault.subject, fault.detail)).collect::<Vec<_>>();
+        assert_eq!(faults.len(), 2);
+        assert_eq!(faults[0].0, "claim/a-alert");
+        assert!(faults[0].1.starts_with("65 distinct candidates retained;"));
+        assert_eq!(faults[1].0, "claim/z-alert");
+        assert!(faults[1].1.starts_with("64 distinct candidates retained;"));
     }
 }

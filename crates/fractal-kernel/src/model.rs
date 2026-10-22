@@ -2279,6 +2279,12 @@ impl MessageView {
 pub struct MessageSendReceipt {
     #[serde(flatten)]
     pub message: MessageView,
+    #[serde(default)]
+    pub requested_recipient: String,
+    #[serde(default)]
+    pub recipient: String,
+    #[serde(default)]
+    pub recipient_identity: String,
     /// This daemon's accepted delivery kind. Absent on pre-silent daemons: tags alone
     /// cannot confirm that an older daemon honors silent delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]

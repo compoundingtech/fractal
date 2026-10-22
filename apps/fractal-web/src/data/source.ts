@@ -96,6 +96,28 @@ export type SeatLifecycle =
   | { readonly _tag: 'Bounded' }
   | { readonly _tag: 'Unknown' }
 
+/** Native child observations are not independently fileable seats and carry no activity/usage facts. */
+export interface AgentSubagent {
+  readonly id: string
+  readonly driver: string
+  readonly description?: string
+  readonly session_id?: string
+  readonly started_at?: string
+  readonly subagent_type?: string
+  readonly work_id?: string
+  readonly lease_expires_at: string
+}
+
+/** Retained native work identity; the title is optional and never synthesized from a goal. */
+export interface AgentWork {
+  readonly id: string
+  readonly missionId: string
+  readonly runId: string
+  readonly path: string
+  readonly title?: string
+  readonly state: string
+}
+
 /** One agent session as the fleet projection lists it, keyed by `ref` with its terminal ref beside it. */
 export interface Agent {
   readonly ref: string
@@ -124,7 +146,11 @@ export interface Agent {
   readonly lastActivityAt: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
+  readonly subagents?: readonly AgentSubagent[]
   readonly mission?: string
+  readonly currentWork?: readonly AgentWork[]
+  /** The server's bounded upcoming window, not the complete queue. */
+  readonly upcomingWork?: readonly AgentWork[]
 }
 
 /** The fleet projection: every host the gateway knows and the agents running on them. */

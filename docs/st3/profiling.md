@@ -172,7 +172,13 @@ also says where its hold went: `stages` gives the time in each of `begin` (BEGIN
 `chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
 `health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
 and log sinks, which run under the writer) and `release` (giving the connection back, with the
-commit observers it runs). `unattributed_ms` is the rest: the handoff between the writer thread
+commit observers it runs). Inside `incremental`, rebuilding an aggregate a late claim reached is
+its own stage: `rebuild-base` (a desired subject, document or mission), `rebuild-tree` (a whole
+run tree), `rebuild-part` (one part of a tree) or `rebuild-planning` (every planning session).
+Stages never overlap: a rebuild's time is not also in `incremental`, so the stages and
+`unattributed_ms` add up to `held_ms`. `rebuilt` counts, by the stage that ran them, the
+aggregates rebuilt and the claims they replayed. A full replay's own rebuilds count under
+`replay`. `unattributed_ms` is the rest: the handoff between the writer thread
 and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
 `begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
 not by itself show that their marks are placed right. `open_reads` lists up to eight read
@@ -255,9 +261,57 @@ hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci
 series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
 time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
 workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
-nextest passed only on a retry and merge groups ejected from the queue, none an hour). Nothing
-feeds these series yet, so each lists as `no-data` with its target; they are not in the
-request-latency read, its gauges or `st doctor`.
+nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
+not in the request-latency read, its gauges or `st doctor`.
+
+Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
+`main_performance_failures` also reads, with the same token, conditional cache and five-minute
+cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
+completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
+the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
+the member that runs that observer has them; every other member, and that one until its first
+read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
+fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
+first observer that read them; another repository's observer does not read them and logs a warning.
+If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
+workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
+reading as an idle day. Only run-level timestamps and, for `flakes`, artifact names are read, no
+jobs and no logs:
+
+- `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
+  `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
+  a rerun restarts `run_started_at` and reruns only some jobs. A run whose jobs were all skipped, such as a draft's, counts as a fast sample.
+- `merge-latency/p50` and `/p95`: each successful merge group run (head branch
+  `gh-readonly-queue/...`), from its `created_at`, when the group entered the queue, to its
+  `updated_at`, when it went green. This is a proxy for entering the queue until merging: the wait
+  before GitHub creates the group's run and the merge after it are not counted, and a pull request
+  whose group is rebuilt after an ejection counts once per green group, not from its first entry.
+- `flakes`: merge group runs that concluded `failure`, an ejected group, plus the tests nextest
+  passed only on a retry, in the runs that finished in the last hour. Workspace CI's four test lanes
+  name their count in an artifact, `nextest-flaky-<lane>-<N>` (none for 0, see `docs/ci.md`). Each
+  run that finished in the last hour, pull request or merge group, has its artifacts listed once
+  (`GET .../actions/runs/ID/artifacts?per_page=100`, the same token and actions read), at most 20
+  runs a poll, newest first, so a restart cannot burst; the rest are listed on the next polls. The
+  counts stay in the daemon's memory with the runs, kept only while a run is in the hour; a failed
+  listing is tried again on a later poll. Pull request runs are listed only when they succeeded, so
+  a failed pull request run's flaky tests are not counted. A run not listed yet adds no flaky test.
+  About one listing per Workspace CI run, a few hundred a day.
+
+A duration's samples are the runs that finished in the last day; its value is the nearest-rank
+percentile, and `LEFT` is how much of the `100 - percentile` share allowed over its target the
+day has not spent. The count is over the last hour, and with `max_per_hour = 0` one ejected group
+or one flaky test spends it all. A window without a sample, or without a finished pull request or
+merge group run for the count, is `no-data`.
+
+A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
+objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
+`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
+subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
+agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
+fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
+that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
+before the observer has read any runs, neither opens nor ends one. The other objectives open no
+fault.
 
 `st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
@@ -995,8 +1049,8 @@ This is an explicit synthetic sizing probe, not an observed production unread di
 
 ## Browser perceived-UX traces
 
-The browser exports `service.name=webfractal-web` to the same-origin OTLP relay. Dogfood pages
-record **100%** of budget roots and SDK detail.
+The browser exports `service.name=fractal-web` to the explicitly configured
+`VITE_OTLP_TRACES_URL` endpoint. Dogfood pages record **100%** of budget roots and SDK detail.
 No local storage, transcript content, resource identifiers, credentials, or free-form error
 details enter production spans. The existing 200-span `SpanRing` is the dependency-free local
 assertion surface; adding the separate otelite package is unnecessary for these lifecycle tests.

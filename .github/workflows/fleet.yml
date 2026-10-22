@@ -831,7 +831,7 @@ jobs:
           from urllib.parse import quote
           from urllib.request import Request, urlopen
 
-          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries"}
+          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries", "fractal-web"}
 
 
           def decision(jobs, ref_status, ref, sha):
@@ -1783,6 +1783,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -1973,6 +1983,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-2-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2163,6 +2183,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-3-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2353,6 +2383,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-4-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -3254,7 +3294,7 @@ jobs:
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"
       - name: Collect the stage notes
-        if: ${{ steps.sign.outcome == 'success' }}
+        if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -3262,7 +3302,7 @@ jobs:
           path: "${{ runner.temp }}/evidence-notes/stages"
           merge-multiple: true
       - name: Publish the notes that verify
-        if: ${{ steps.sign.outcome == 'success' }}
+        if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
@@ -3271,7 +3311,7 @@ jobs:
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
             --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
-        if: ${{ always() && steps.sign.outcome == 'success' }}
+        if: ${{ always() && steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
@@ -3696,6 +3736,8 @@ jobs:
               "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
               "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
               "apps/fractal-web/src/state/persistence.ts",
+              # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+              "apps/fractal-web/src/telemetry/inputPaint.ts",
               "apps/fractal-web/src/telemetry/measurement/counters.ts",
               "apps/fractal-web/src/telemetry/measurement/developer.ts",
               "apps/fractal-web/src/telemetry/measurement/engine.ts",
@@ -3971,7 +4013,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
-          path: "${{ runner.temp }}/kit-play-receipts/receipt.json"
+          path: "${{ runner.temp }}/kit-play-receipts/"
           if-no-files-found: ignore
       - if: always()
         continue-on-error: true
@@ -4103,14 +4145,20 @@ jobs:
 
           PY
       - uses: actions/checkout@v4
-        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'"
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v4
-        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        id: cost-receipts
+        continue-on-error: true
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'"
         with:
           pattern: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*"
           path: "${{ runner.temp }}/kit-play-receipts"
+      - name: Publish web lane costs as a public check annotation
+        continue-on-error: true
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && steps.cost-receipts.outcome == 'success'"
+        run: node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"
       - name: Require every kit shard and exact full-index coverage
         if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
         run: node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" 2

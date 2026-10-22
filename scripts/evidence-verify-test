@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 import re
+import runpy
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -498,6 +499,13 @@ class Verifier(unittest.TestCase):
 OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
+# The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
+ENFORCED = ('typescript-client',)
+# The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries'})
+HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries'})
+
+
 def policy_text(**overrides):
     doc = {'version': 1, 'checks': {'unit': {
         'trust_levels': ['machine'],
@@ -636,6 +644,30 @@ class SkipPolicy(unittest.TestCase):
         self.wrapper(seconds=5)
         code, result = self.f.verify(self.tree, rules=self.rules(self.host_policy()))
         self.assertEqual((code, result['trust_level'], result['events']), (0, 'machine', None))
+
+    def test_check_level_events_limit_what_any_note_may_skip_and_a_level_only_narrows_them(self):
+        self.wrapper()
+        code, result = self.f.verify(self.tree, rules=self.rules(policy_text(events=['pull_request'])))
+        self.assertEqual((code, result['events']), (0, ['pull_request']))  # the fleet signer is limited too, not only a host key
+        code, result = self.f.verify(self.tree, rules=self.rules())
+        self.assertEqual((code, result['events']), (0, None))  # no events key: every event the gate allows
+        # A host level that covers pull requests only, under a check that allows only the merge queue, covers nothing.
+        doc = json.loads(self.host_policy())
+        self.host_note(seconds=1)
+        for check_events, expected in ((['merge_group'], []), (['pull_request', 'merge_group'], ['pull_request']), (None, ['pull_request'])):
+            if check_events is None:
+                doc['checks']['unit'].pop('events', None)
+            else:
+                doc['checks']['unit']['events'] = check_events
+            code, result = self.f.verify(self.tree, rules=self.rules(json.dumps(doc)))
+            self.assertEqual((code, result['trust_level'], result['events']), (0, 'host', expected), check_events)
+
+    def test_check_level_events_are_validated_strictly(self):
+        for bad in ([], ['push'], ['pull_request', 'pull_request'], 'pull_request', 0, {'pull_request': 1}):
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as raised:
+                self.rules(policy_text(events=bad))
+            self.assertEqual(raised.exception.reason, 'error')
+        self.assertEqual(self.rules(policy_text(events=['merge_group', 'pull_request']))['events'], ['merge_group', 'pull_request'])
 
     def test_a_host_note_with_the_ordinary_command_or_missing_its_inputs_is_refused(self):
         self.host_note(command=('make', 'test'))
@@ -1152,6 +1184,22 @@ class LaneDefinitions(unittest.TestCase):
                     inputs={'lane_definition_sha256': digest}, seconds=4)
         self.assertEqual(self.agent_cli(changed_tree, base)[1]['reason'], 'definition_changed')
 
+    def test_the_log_view_keeps_the_lane_check_of_a_level_held_to_its_lane(self):
+        # With --log-keys the decision goes through the log's shadow wrapper; the agent level must still reach its base lane.
+        agent = self.f.key('agent', 'agent/seat-one')
+        base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy()})
+        digest = evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', base + '^{tree}'),
+                                                 self.f.git('rev-parse', base + '^{tree}'), self.rules())['sha256']
+        commit, tree = self.files({'src/code.rs': 'agent change, log view on\n'})
+        self.f.note(commit, tree, agent, 'agent/seat-one', runner='wrapper', command=('make', 'test'),
+                    inputs={'lane_definition_sha256': digest}, seconds=1)
+        log_keys = self.f.root / 'log-keys'
+        log_keys.write_text('')
+        code, out, _ = self.f.cli('--tree', tree, '--check', 'unit', '--keys', str(self.f.root / 'allowed-signers'),
+                                  '--policy-from', base, '--repository', 'org/repo', '--log-keys', str(log_keys))
+        result = json.loads(out)
+        self.assertEqual((code, result['trust_level'], result['log']), (0, 'agent', 'absent'), result)
+
     def test_lane_binding_applies_to_its_level_only_and_needs_a_lane_at_the_base(self):
         agent = self.f.key('agent', 'agent/seat-one')
         base, _ = self.files({'.st/evidence-skip-policy.json': self.agent_policy()})
@@ -1234,7 +1282,7 @@ class CommittedPolicy(unittest.TestCase):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'isolation-vm': 'off', 'genie-freshness': 'shadow',
-                                 'mail-redelivery-canaries': 'off'})
+                                 'mail-redelivery-canaries': 'off', 'fractal-web': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -1251,14 +1299,45 @@ class CommittedPolicy(unittest.TestCase):
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
             'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
-            'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
-        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+            'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client']), 'fractal-web': sorted([
+            # The web lane detector's paths (scripts/ci-fractal-web-changes, PATTERNS and KIT_PATTERNS, as files that exist)...
+            '.buckconfig', '.buckconfig.genie.ts', '.buckroot', '.github/repo-settings.json', '.github/repo-settings.json.genie.ts',
+            '.github/workflows/cache-audit.ts', '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+            '.github/workflows/main-upkeep.yml', '.github/workflows/main-upkeep.yml.genie.ts', '.github/workflows/workspace-ci.ts',
+            'BUCK', 'BUCK.genie.ts', 'apps/fractal-web', 'buck2', 'clients/typescript/fractal-client', 'clients/typescript/fractal-scenarios',
+            'clients/typescript/fractal-views', 'docs/st3/client-v0/schemas', 'fixtures', 'flake.lock', 'flake.nix', 'megarepo.kdl',
+            'megarepo.lock', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-ui',
+            'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'scripts/ci-fractal-web', 'scripts/ci-fractal-web-changes',
+            'scripts/ci-fractal-web-gate', 'scripts/ci-fractal-web-kit-graph', 'scripts/ci-fractal-web-licenses',
+            'scripts/ci-fractal-web-licenses-test', 'scripts/ci-fractal-web-test', 'scripts/ci-typescript-client', 'scripts/ci-web-shell',
+            'scripts/ci-web-shell-inputs.jq', 'scripts/ci-web-shell-test',
+            # ...plus what the lane reads that the detector does not name: a workspace member's manifest (the frozen install), the
+            # client fixtures an SDK unit test opens, the source-input list the web shell hook publishes, and the public-repository
+            # lint the scenario privacy lane runs.
+            'apps/ios/package.json', 'docs/st3/client-v0/fixtures', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
+            'scripts/check-public-repo'])}
+        # Both run on linux-test-build's archive of the same tree and are members of the linux-gate aggregate, whose list
+        # covers what its members read; sharing it gives the three one key (docs: The skip policy).
+        declared['isolation-vm'] = declared['mail-redelivery-canaries'] = declared['linux-gate']
+        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
-        self.assertEqual(self.rules('linux-gate')['sample_one_in'], 5)
+        for check in ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries', 'fractal-web'):
+            self.assertEqual(self.rules(check)['sample_one_in'], 5, check)
+
+    def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
+        # The detector decides whether the lane runs at all; a path it matches that the key left out would let a change to it reuse a
+        # pass. Its patterns are compiled with its own semantics and run over every tracked file.
+        detector = runpy.run_path(str(ROOT / 'scripts/ci-fractal-web-changes'))
+        tracked = [p for p in subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z'], capture_output=True, text=True, check=True).stdout.split('\0') if p]
+        declared = self.rules('fractal-web')['inputs']
+        matched = detector['relevant_paths'](tracked)
+        self.assertGreater(len(matched), 100)
+        outside = [p for p in matched if not any(p == d or p.startswith(d + '/') for d in declared)]
+        self.assertEqual(outside, [], 'a path the fractal-web detector matches is not a declared input of the fractal-web check')
 
     def test_every_compile_time_include_of_the_rust_sources_is_inside_the_declared_inputs_of_linux_gate(self):
         # The declared list comes from a textual scan, which cannot see paths built at run time but CAN enumerate the
@@ -1296,11 +1375,15 @@ class CommittedPolicy(unittest.TestCase):
                 found.append(str(source.relative_to(ROOT)))
         self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
 
-    def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
+    def test_the_host_level_is_admitted_for_exactly_the_locally_signable_checks_wrapper_kind_and_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # Nothing enforces anywhere: every check, not only the host ones, keeps enforce false until the flip PR.
+        # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
+        # every other check keeps enforce false until its own flip PR.
         self.assertEqual({check: entry.get('enforce', False) for check, entry in policy['checks'].items()},
-                         {check: False for check in policy['checks']})
+                         {check: check in ENFORCED for check in policy['checks']})
+        for check in ENFORCED:
+            self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
+            self.assertGreaterEqual(policy['checks'][check].get('sample_one_in', 1), 2, f'{check}: an enforced check keeps a comparison sample')
         with_host = {}
         for check, entry in policy['checks'].items():
             for kind, rule in entry['kinds'].items():
@@ -1311,18 +1394,20 @@ class CommittedPolicy(unittest.TestCase):
             for kind, rule in entry['kinds'].items():
                 if 'agent' in (rule.get('trust_levels') or []):
                     self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
-        self.assertEqual(sorted(with_host), [('genie-freshness', 'wrapper'), ('typescript-client', 'wrapper')])
+        self.assertEqual(sorted(with_host), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
         for (check, kind), rule in with_host.items():
             self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent'], check)
-            override = rule['by_level']['host']
-            self.assertFalse(override.get('lane', False), check)  # a host note is not held to the lane (cooperative machine trust)
-            # The agent level: the host's rule exactly, plus the lane binding, and nowhere else.
+            override = dict(rule['by_level']['host'])
+            # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
+            # to the lane as well (Factory, 2026-10-22), so a tree that edits its own lane never skips on a local note.
+            self.assertIs(override.pop('lane', False), check in HOST_LANE_BOUND, check)
+            # The agent level: the host's rule exactly, with the lane binding.
             agent = dict(rule['by_level']['agent'])
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
             self.assertEqual(override['events'], ['pull_request'], check)
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
-            self.assertEqual(policy['checks'][check].get('enforce', False), False, check)
+            self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
             self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
         # The commands are the ones scripts/st-test records, so a local note can match.
@@ -1340,13 +1425,19 @@ class CommittedPolicy(unittest.TestCase):
             rules = self.rules(check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
-            self.assertIs(rules['enforce'], False, check)  # skipping is off until the policy says otherwise
+            self.assertIs(rules['enforce'], check in ENFORCED, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
             self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
                                                    '.github/workflows/fleet.yml', check])
             self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
+        # fractal-web: the fleet signer only, shadow, and its shard notes only (see the next tests).
+        web = self.rules('fractal-web')
+        self.assertEqual(web['trust_levels'], ('fleet',))
+        self.assertIsNone(web['max_age_s'])
+        self.assertIs(web['enforce'], False)
+        self.assertNotIn('fractal-web', ENFORCED)
 
     def test_the_wrapper_rules_match_what_the_note_jobs_record(self):
         gate = self.rules('linux-gate')['kinds']['wrapper']
@@ -1354,6 +1445,9 @@ class CommittedPolicy(unittest.TestCase):
         jobs = gate['command'][2:]
         self.assertEqual(jobs, sorted(jobs))  # the aggregate lists its needed jobs sorted
         self.assertIn('linux-gate', jobs)
+        # The separate checks have their own notes; the aggregate does not record them (ci-evidence-signing SEPARATE_CHECKS).
+        self.assertNotIn('genie-freshness', jobs)
+        self.assertNotIn('typescript-client', jobs)
         common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
         self.assertEqual(gate['required_inputs'], common)
         self.assertEqual(gate['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
@@ -1380,10 +1474,20 @@ class CommittedPolicy(unittest.TestCase):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
-            # No weaker signer is admitted, except the host level for exactly two checks (see the test for the host level).
-            host_checks = ('genie-freshness', 'typescript-client')
-            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in host_checks else None, check)
+            # No weaker signer is admitted, except the host level for the locally signable checks (see the test for the host level).
+            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in HOST_CHECKS else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
+        # fractal-web lists only its shard notes: the observer's record is of the always-emitted fractal-web job, which passes
+        # without running the lane when no web path changed against that run's base, so it is no evidence that the lane ran.
+        web = self.rules('fractal-web')
+        self.assertEqual(sorted(web['kinds']), ['wrapper'])
+        self.assertIsNone(web['kinds']['wrapper']['trust_levels'])
+        self.assertEqual(web['kinds']['wrapper']['by_level'], {})
+        self.assertEqual(web['kinds']['wrapper']['command'], ['bash', 'scripts/ci-fractal-web'])
+        self.assertEqual(web['kinds']['wrapper']['required_inputs'], sorted([
+            'attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256',
+            'app_test_set', 'kit_play_set', 'kit_shard', 'kit_shard_count']))
+        self.assertEqual(web['kinds']['wrapper']['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
 
 
 class InputKeyed(unittest.TestCase):
@@ -1638,12 +1742,14 @@ class PartialClone(InputKeyed):
     brings the commit's whole history (about 3.4 s each on a runner; 34 of them took a verify past the gate's 30 s)."""
 
     def clone(self):
+        # Both clones get init_repo()'s settings at creation (`clone -c`), so neither starts git's detached maintenance.
+        quiet = ('-c', 'gc.auto=0', '-c', 'maintenance.auto=false')
         server = self.f.root / 'server.git'
-        run('git', 'clone', '-q', '--bare', '--mirror', str(self.f.repo), str(server))
+        run('git', 'clone', '-q', *quiet, '--bare', '--mirror', str(self.f.repo), str(server))
         run('git', '-C', str(server), 'config', 'uploadpack.allowFilter', 'true')
         run('git', '-C', str(server), 'config', 'uploadpack.allowAnySHA1InWant', 'true')
         client = self.f.root / 'client'
-        run('git', 'clone', '-q', '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
+        run('git', 'clone', '-q', *quiet, '--filter=blob:none', '--single-branch', '--branch', 'main', f'file://{server}', str(client))
         return client
 
     def lazy_fetches(self, action):
@@ -1679,6 +1785,122 @@ class PartialClone(InputKeyed):
         self.assertEqual((result['record'], result['match'], fetches), (record, 'inputs', 0), result)
         projected, fetches = self.lazy_fetches(lambda: evidence_verify.project(str(client), old_tree, tuple(self.PATHS)))
         self.assertEqual((projected, fetches), (self.key(old_tree), 0), 'an old tree whose blobs the clone lacks projects to the same key')
+
+
+class EvidenceLogView(unittest.TestCase):
+    """The evidence log's shadow view of a decision: absent, unsigned, stale, missing, unlogged_pass or ok. It never changes the
+    verdict. A pass counts only once the log lists it; a record the log lists that is not here is an alarm."""
+
+    def setUp(self):
+        self.f = Fixture(layout='tag')
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.commit, self.tree = self.f.commit('content\n')
+        self.log_key = self.f.key('log-key')
+        self.log_keys = self.f.root / 'log-keys'
+        self.log_keys.write_text(f'log/evidence namespaces="git" {self.log_key.with_suffix(".pub").read_text()}')
+
+    def log(self, records, at=None, key=None, gc_after=None, principal_ok=True):
+        """A log head listing `records` (record id, exit code) for this tree's check unit, signed by `key`."""
+        lines = [f'record {r} unit {code} machine/ci1 {NOW.isoformat()}' for r, code in records]
+        if gc_after is not None:
+            lines.insert(gc_after, f'gc {NOW.isoformat()} {"f" * 64}')
+        blob = self.f.git('hash-object', '-w', '--stdin', stdin=''.join(f'{l}\n' for l in lines).encode())
+        inner = self.f.git('mktree', stdin=f'100644 blob {blob}\t{self.tree}\n'.encode())
+        middle = self.f.git('mktree', stdin=f'040000 tree {inner}\t{self.tree[:2]}\n'.encode())
+        root = self.f.git('mktree', stdin=f'040000 tree {middle}\ttrees\n'.encode())
+        stamp = (at or NOW).isoformat()
+        head = self.f.git('-c', 'gpg.format=ssh', '-c', f'user.signingKey={key or self.log_key}', 'commit-tree', '-S', root,
+                          '-m', f'evidence-log v1 as_of={stamp} added={len(records)} gc=0 missing=0')
+        self.f.git('update-ref', 'refs/evidence-log/main', head)
+        return head
+
+    def view(self, **options):
+        return self.f.verify(self.tree, log_keys=str(self.log_keys), now=NOW + timedelta(seconds=30), **options)
+
+    def test_a_logged_pass_is_ok_and_the_verdict_is_the_same_with_or_without_the_view(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        head = self.log([(passed, 0)])
+        code, result = self.view()
+        self.assertEqual((code, result['record'], result['log'], result['log_head'], result['log_missing']), (0, passed, 'ok', head, 0), result)
+        plain = self.f.verify(self.tree, now=NOW + timedelta(seconds=30))[1]
+        self.assertEqual({k: v for k, v in result.items() if not k.startswith('log')}, plain)
+
+    def test_a_pass_the_log_does_not_list_would_not_count(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.log([])
+        code, result = self.view()
+        self.assertEqual((code, result['satisfied'], result['log']), (0, True, 'unlogged_pass'), 'shadow: still satisfied today')
+        self.assertTrue(passed)
+
+    def test_a_logged_failure_that_was_deleted_is_missing_and_an_older_pass_still_decides_today(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=-600)
+        failed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-60)
+        self.log([(passed, 0), (failed, 1)])
+        self.f.git('update-ref', '-d', self.f.ref_of[failed])  # the attack: the newer failure is deleted
+        code, result = self.view()
+        self.assertEqual((code, result['record'], result['log'], result['log_missing']), (0, passed, 'missing', 1), result)
+
+    def test_what_came_before_a_gc_line_is_not_missing(self):
+        gone = 'a' * 40
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.log([(gone, 1), (passed, 0)], gc_after=1)
+        self.assertEqual(self.view()[1]['log'], 'ok')
+
+    def test_a_head_that_is_absent_unsigned_by_the_log_key_or_stale_says_so(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.assertEqual(self.view()[1]['log'], 'absent')
+        self.log([(passed, 0)], key=self.f.key('not-the-log-key'))
+        self.assertEqual(self.view()[1]['log'], 'unsigned')
+        self.log([(passed, 0)], at=NOW - timedelta(minutes=11))
+        code, result = self.view()
+        self.assertEqual((code, result['satisfied'], result['log'], result['log_age_s']), (0, True, 'stale', 690))
+        self.log([(passed, 0)], at=NOW + timedelta(minutes=5))
+        self.assertEqual(self.view()[1]['log'], 'stale', 'a head from the future is not fresh either')
+
+    def test_a_refused_verdict_carries_the_view_too(self):
+        failed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1)
+        self.log([(failed, 1)])
+        code, result = self.view()
+        self.assertEqual((code, result['reason'], result['log']), (1, 'check_failed', 'ok'), result)
+
+    def test_the_cli_reads_the_log_key_from_the_base_and_without_one_adds_nothing(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.log([(passed, 0)], at=datetime.now(timezone.utc))
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'keys')
+        base = self.f.git('rev-parse', 'HEAD')
+        code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base, '--log-keys-from', base)
+        self.assertEqual((code, 'log' in json.loads(out)), (0, False), 'no .st/evidence-log-key at the base: no view')
+        (self.f.repo / '.st/evidence-log-key').write_text(self.log_keys.read_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'pin the log key')
+        base = self.f.git('rev-parse', 'HEAD')
+        code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base, '--log-keys-from', base)
+        self.assertEqual((code, json.loads(out)['log']), (0, 'ok'), out)
+
+    def test_a_log_written_by_evidence_log_reads_as_ok(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'keys')
+        self.f.git('branch', '-q', '-M', 'main')
+        remote = self.f.root / 'remote.git'
+        run('git', 'init', '-q', '--bare', str(remote))
+        self.f.git('push', '-q', str(remote), 'main:main', f'{self.f.ref_of[passed]}:{self.f.ref_of[passed]}')
+        host = self.f.root / 'host.git'
+        run('git', 'init', '-q', '--bare', str(host))
+        run('git', '-C', str(host), 'remote', 'add', 'origin', str(remote))
+        signer = json.dumps(['ssh-keygen', '-q', '-Y', 'sign', '-n', 'git', '-f', str(self.log_key)])
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/evidence-log'), 'pull', '--repo', str(host), '--signer', signer,
+                               '--log-keys', str(self.log_keys), '--publish'], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.f.git('fetch', '-q', str(remote), '+refs/evidence-log/main:refs/evidence-log/main')
+        code, result = self.f.verify(self.tree, log_keys=str(self.log_keys), now=datetime.now(timezone.utc))
+        self.assertEqual((code, result['log'], result['log_missing']), (0, 'ok', 0), result)
 
 
 class Sha256Repository(unittest.TestCase):

@@ -1071,6 +1071,8 @@ enum MissionViewCommand {
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
+    /// Change a mission's canonical ID without replacing its runs or revision history.
+    RenameId(IdentityRenameArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
     /// Legacy: use `st apply FILE`; publish authored KDL after checking exec gates.
     ///
@@ -2528,11 +2530,60 @@ enum AgentsCommand {
     Resume(AgentResumeArgs),
     /// Change only a seat's human label, without restarting its harness.
     Rename(AgentRenameArgs),
+    /// Change a seat's canonical ID, preserving its immutable identity and harness.
+    RenameId(IdentityRenameArgs),
     /// Show one seat's current claim and its queued mission runs in order, or move a run.
     /// The show form is also available as `st missions queued AGENT`.
     Queue(AgentQueueArgs),
     /// Inspect, set, or release a Codex/OpenCode delivery hold; the provider keeps running.
     Hold(AgentHoldArgs),
+}
+
+#[derive(Args)]
+struct IdentityRenameArgs {
+    /// Complete current or historical ID.
+    from: String,
+    /// New full ID; historical names cannot be reused.
+    to: String,
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: String,
+    #[arg(long = "if-naming-revision")]
+    expected_naming_revision: Option<String>,
+    #[arg(long = "if-declaration")]
+    expected_declaration: Option<String>,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    idempotency_key: Option<String>,
+}
+
+async fn run_identity_rename(
+    endpoint: &Endpoint,
+    args: IdentityRenameArgs,
+    agent: bool,
+    json_output: bool,
+) -> Result<()> {
+    let request = fractal_client::RenameRequest {
+        from: args.from,
+        to: args.to,
+        actor: args.actor,
+        reason: args.reason,
+        expected_naming_revision: args.expected_naming_revision,
+        expected_declaration: args.expected_declaration,
+        idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+    };
+    let client = generated_client(endpoint, None)?;
+    let receipt = if agent {
+        client.agent_rename_id(&request).await?
+    } else {
+        client.mission_rename_id(&request).await?
+    };
+    if json_output {
+        return print_value(&serde_json::to_value(&receipt)?, true);
+    }
+    println!("{} -> {} ({})", receipt.from, receipt.canonical_id, receipt.applied);
+    println!("{} at frontier {}", receipt.replication.state, receipt.replication.frontier);
+    Ok(())
 }
 
 #[derive(Args)]
@@ -5262,6 +5313,7 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
+            MissionViewCommand::RenameId(args) => Some(args.actor.as_str()),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
             MissionViewCommand::ReportTo(args) => Some(args.actor.as_str()),
@@ -5302,6 +5354,7 @@ fn guard_mutating_cli_actor(
             AgentsCommand::Rename(args) => Some(args.actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("a harness rename needs explicit --as {own}")
             })?),
+            AgentsCommand::RenameId(args) => Some(args.actor.as_str()),
             AgentsCommand::Queue(args) => match &args.command {
                 Some(AgentQueueCommand::Move(args)) => Some(args.actor.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("a harness queue move needs explicit --as {own}; it cannot use the configured person")
@@ -6080,7 +6133,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
-            move || fractal_daemon::api::slo_rows(&store),
+            move || {
+                let rows = fractal_daemon::api::slo_rows(&store)?;
+                fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                Ok(rows)
+            },
         )));
     }
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
@@ -6240,10 +6297,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::api::serve_reserved_unix_with_ready(
             local_reserved,
             router(state.clone()),
-            true,
+            Some(state.store.clone()),
             ready
         ),
-        fractal_daemon::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), false, ready),
+        fractal_daemon::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), None, ready),
     )?;
     telemetry.shutdown();
     Ok(())

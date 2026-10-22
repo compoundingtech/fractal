@@ -581,6 +581,7 @@ impl Daemon {
     async fn serve(&mut self) {
         let socket = self.socket();
         let state = self.state.clone();
+        let (listening, ready) = tokio::sync::oneshot::channel();
         self.server = Some(tokio::spawn(async move {
             // Provider lifecycle is simulated here; discovery must use the same fixture.
             let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
@@ -593,20 +594,26 @@ impl Daemon {
                     next.run(request).await
                 },
             ));
-            fractal_daemon::api::serve_unix(&socket, router).await
+            fractal_daemon::api::serve_unix_with_ready(&socket, router, move || {
+                let _ = listening.send(());
+            })
+            .await
         }));
-        let mut last_error = None;
-        for _ in 0..200 {
-            // bind creates the socket path before listen can accept a request. Probe the
-            // public protocol rather than treating the path's existence as readiness.
-            match self.client(PERSON).capabilities().await {
-                Ok(_) => return,
-                Err(ClientError::Unreachable(error)) => last_error = Some(error),
-                Err(error) => panic!("isolated daemon readiness failed: {error}"),
+        // Building the router comes before the socket exists, and on a loaded runner it can take
+        // longer than a fixed number of probes allowed: wait for the listener itself. A server
+        // that ends before listening fails with its own error; the bound only names a hang.
+        match tokio::time::timeout(Duration::from_secs(120), ready).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                let ended = self.server.take().unwrap().await;
+                panic!("isolated daemon ended before it listened: {ended:?}");
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            Err(_) => panic!("isolated daemon did not listen within 120 s"),
         }
-        panic!("isolated daemon did not listen: {last_error:?}");
+        // Listening is not yet answering: one probe of the public protocol confirms it.
+        if let Err(error) = self.client(PERSON).capabilities().await {
+            panic!("isolated daemon readiness failed: {error}");
+        }
     }
 
     /// End the listener and its router, reopen the on-disk store, and make fresh daemon state.
@@ -2686,6 +2693,44 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
     assert_eq!(receipts[0].body["fields"]["outcome"], "seeded");
     assert_eq!(receipts[0].body["fields"]["session_id"], session);
     assert!(daemon.store().claims_for(WORKER, Some("harness.session-file")).unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(
+        &format!(
+            "version 2\nagent \"example-rename/worker\" {{ host {:?}; workspace {:?}; command \"true\" }}\nmission \"example-rename-work\" state=\"ready\" {{ goal \"Preserve identity.\"; step \"work\" {{ assigned-to \"agent/example-rename/worker\" }} }}",
+            NODE,
+            daemon.root.path().display().to_string(),
+        ),
+        "coverage-rename-declarations",
+    );
+    for (family, from, to, kind) in [
+        ("agents", "agent/example-rename/worker", "agent/example-renamed/worker", "agent.renamed"),
+        ("missions", "mission/example-rename-work", "mission/example-renamed-work", "mission.renamed"),
+    ] {
+        let key = format!("coverage-{family}-rename");
+        let arguments = [
+            family, "rename-id", from, to, "--as", "person/robin",
+            "--reason", "Clarify responsibility", "--idempotency-key", &key,
+        ];
+        let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
+        assert_eq!(receipt["identity"], from);
+        assert_eq!(receipt["canonical_id"], to);
+        assert_eq!(receipt["applied"], "renamed");
+        let claims = daemon.store().claims_for(from, None).unwrap();
+        assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
+        let index = daemon.store().index().unwrap();
+        daemon.restart().await;
+        let replay = cli_value(daemon.cli("person/robin", &arguments).await);
+        assert_eq!(replay["claim_id"], receipt["claim_id"]);
+        assert_eq!(replay["canonical_id"], to);
+        assert_eq!(daemon.store().index().unwrap(), index);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
