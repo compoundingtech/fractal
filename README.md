@@ -43,6 +43,12 @@ The existing `st` and `st3` names and display strings remain unchanged. Their
 sunset is 60 days after the first release shipping `fractal`; the release date
 and resulting sunset date will be recorded when that release ships.
 
+Shell scripts and coding-agent hooks accept `FRACTAL_*` environment variables
+before their corresponding `ST_*` or `ST3_*` names. An explicitly empty new value
+masks the old value. Conflicting identity aliases report the variable names,
+not their values, and select neither identity. Writers keep both names equal
+during the compatibility window.
+
 **[Get started](docs/getting-started.md)** covers first-run questions, the Fractal Assistant,
 installation choices and background services. Each person currently runs their own
 fleet; start with one machine and add others when you need them.

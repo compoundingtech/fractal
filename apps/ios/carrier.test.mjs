@@ -161,6 +161,45 @@ assert.equal(routeLabel({ kind: 'none', fellBack: false, why: '' }), 'Not connec
   state.waits.at(-1).resolve(); await again;
 }
 
+// ---- A foreground that returns inside the memory of a failure is not left failed: fabric is tried again when
+// ---- the memory ends, with no further foreground change (a pulled-down notification, or a quick look at the app switcher).
+{
+  const { carrier, state, flush } = harness();
+  carrier.foreground(true);
+  carrier.configure(true, one);
+  await flush();
+  state.waits.at(-1).resolve(); // the dial budget runs out
+  await flush();
+  assert.equal(carrier.snapshot.phase, 'failed');
+  carrier.foreground(false); await flush();
+  state.clock += REMEMBER_FAILURE_MS - 5000;
+  carrier.foreground(true); await flush();
+  assert.equal(state.dials.length, 1, 'no second wait inside the memory');
+  assert.equal(carrier.snapshot.phase, 'failed');
+  const retryWait = state.waits.at(-1);
+  assert.equal(retryWait.ms, 5000, 'it tries again when the memory of the failure ends');
+  state.clock += 5000;
+  retryWait.resolve(); await flush();
+  assert.equal(state.dials.length, 2, 'fabric is dialed again with no further foreground change');
+  state.dials[1].resolve({ url: 'http://127.0.0.1:50400' }); await flush();
+  assert.equal(carrier.snapshot.phase, 'ready');
+  // Leaving the foreground again cancels that try as it does any other.
+}
+{
+  const { carrier, state, flush } = harness();
+  carrier.foreground(true);
+  carrier.configure(true, one);
+  await flush();
+  state.waits.at(-1).resolve(); await flush();
+  carrier.foreground(false); await flush();
+  carrier.foreground(true); await flush();
+  const retryWait = state.waits.at(-1);
+  carrier.foreground(false); await flush();
+  state.clock += REMEMBER_FAILURE_MS;
+  retryWait.resolve(); await flush();
+  assert.equal(state.dials.length, 1, 'a try that was cancelled by leaving the foreground does not dial');
+}
+
 // ---- A failed fabric is tried again by itself, so a phone that fell back to a saved route it cannot reach
 // ---- does not stay there until it is killed (Nathan, 2026-10-13: "reconnecting over and over ... killed it, it connected").
 {

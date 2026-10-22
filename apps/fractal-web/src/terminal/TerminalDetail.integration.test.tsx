@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { St3Client } from '@smalltalk/st3-client'
-import { Agent, decodeUnknownSync, type TerminalScreen } from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import { Agent, decodeUnknownSync, type TerminalScreen } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -172,7 +172,7 @@ describe('terminal detail input', () => {
       }
       let granted = true
       const terminalInput = gatewayTerminalInput({
-        connect: (fetchImpl) => new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl }),
         transport,
         snapshot: () => reads.shift()?.promise ?? Promise.resolve('snapshot/next'),
         liveScreen: (subject) => {

@@ -128,6 +128,7 @@ impl Backend for GuardBackend {
         _status: &str,
         _error: &str,
         _carrier: Option<crate::replication::ReplicationCarrier>,
+        _failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
         Ok(())
     }

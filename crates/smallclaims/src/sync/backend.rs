@@ -103,6 +103,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// Publish host-local worker progress without adding replicated claims.
@@ -282,10 +283,10 @@ where
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
         if self
-            .store()
-            .record_peer_failure_via(peer, status, error, carrier)?
+            .store().record_peer_failure_via(peer, status, error, carrier, failure)?
         {
             self.store()
                 .record_transport_observation(peer, status, Some(error), None)?;

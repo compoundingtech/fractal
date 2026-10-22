@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
 vi.mock('@stylexjs/stylex', () => ({
