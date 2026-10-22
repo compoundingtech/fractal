@@ -305,6 +305,12 @@ def run(st_test, repo, checks, kind, rules, log):
                     stop(CHILD)
                     break
         finally:
+            # Whatever the run left behind in its process group (a test's stray background process) is ended now, before the log is
+            # read: nothing may write to the log after st-test's summary.
+            try:
+                os.killpg(CHILD.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
             CHILD = None
             if scratch:
                 shutil.rmtree(scratch, ignore_errors=True)

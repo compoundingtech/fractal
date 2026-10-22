@@ -33,6 +33,10 @@ with open(os.environ['STUB_LOG'], 'a') as log:
     log.write(json.dumps({'head': head, 'argv': argv, 'tmpdir': os.environ.get('TMPDIR'),
                           'target': os.environ.get('CARGO_TARGET_DIR')}) + '\\n')
 time.sleep(float(os.environ.get('STUB_SLEEP', '0')))
+if os.environ.get('STUB_LEFTOVER'):
+    # A test's stray background process, still in the run's process group when st-test exits.
+    stray = subprocess.Popen(['sleep', '60'])
+    open(os.environ['STUB_LEFTOVER'], 'w').write(str(stray.pid))
 results = json.loads(os.environ.get('STUB_RESULTS', '{}'))
 # What a pull request's own test output could print: rows shaped like st-test's, before its summary.
 for name in checks:
@@ -259,6 +263,18 @@ class Worker(unittest.TestCase):
         report = json.loads(subprocess.run([sys.executable, str(WORKER), 'summary'], capture_output=True, text=True,
                                            env=dict(CLEAN, EVIDENCE_PRESIGN_STATE=str(self.state))).stdout)['classes']['heavy']
         self.assertEqual((report['not_started'], report['stopped']['free disk']), ({'disk': 1, 'busy': 0}, 1))
+
+    def test_what_the_run_leaves_behind_in_its_process_group_is_ended_before_the_log_is_read(self):
+        self.pr(1)
+        leftover = Path(self.tmp.name) / 'leftover'
+        done = self.tick(STUB_LEFTOVER=str(leftover))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        pid = int(leftover.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and Path(f'/proc/{pid}').exists() and 'Z' not in Path(f'/proc/{pid}/stat').read_text().split()[2]:
+            time.sleep(0.1)
+        alive = Path(f'/proc/{pid}').exists() and Path(f'/proc/{pid}/stat').read_text().split()[2] != 'Z'
+        self.assertFalse(alive, 'the stray process outlived the run')
 
     def test_a_dry_run_says_what_it_would_run_and_runs_nothing(self):
         head = self.pr(1)

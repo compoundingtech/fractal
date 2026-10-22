@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The pre-sign worker ends whatever a run left in its process group (a test's stray background process) as soon as st-test exits, before it reads the run's log, so nothing can write to the log after st-test's summary.",
+  "replay": {"status": "none", "detail": "No record or signature format changes."},
+  "schema": {"status": "none", "detail": "None."},
+  "rules": {"status": "none", "detail": "None: the worker's bookkeeping only."},
+  "compatibility": {"status": "none", "detail": "None."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the pull request."}
+}
