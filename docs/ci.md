@@ -757,6 +757,9 @@ reload before DOMContentLoaded. History API changes do not request another docum
 Receipts record both the initial Storybook URL and the final evidence URL; empty
 records or missing/duplicate completions cannot pass. This detects accidental
 navigation, not an application deliberately forging evidence.
+Play-driven component transitions use local React state: Storybook's `updateArgs`
+starts another story render, which emits another completion and accessibility report.
+SyncLine's transition demo keeps its full play assertions without updating story args.
 
 The gate takes three options. Pull requests run the per-commit set (`KIT_PLAY_SET=commit`)
 with a11y off and a 100-second budget; merge groups (observed and signed by Evidence
