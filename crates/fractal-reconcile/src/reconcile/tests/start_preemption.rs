@@ -18,6 +18,7 @@ use super::*;
     verification_hidden: AtomicBool,
     provenance_error: AtomicBool,
     ending_unverified: AtomicBool,
+    closed_operation: std::sync::OnceLock<String>,
 }
 
     impl RuntimeControl for BarrierRuntime {
@@ -74,7 +75,10 @@ use super::*;
         self.start_guarded(member, &|| Ok(()))
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
-        if member.runtime_id == "example.worker" || member.runtime_id.starts_with("example.held") {
+        if member.runtime_id == "example.worker"
+            || member.runtime_id == "example-worker"
+            || member.runtime_id.starts_with("example.held")
+        {
             self.operations.lock().unwrap().insert(
                 member.runtime_id.clone(),
                 member.tags[start_jobs::OPERATION_TAG].clone(),
@@ -125,6 +129,11 @@ use super::*;
         Ok(self.operations.lock().unwrap().get(id).cloned())
     }
     fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+        if self.closed_operation.get().is_some()
+            && self.closed_operation.get() == member.tags.get(start_jobs::OPERATION_TAG)
+        {
+            return Ok(true);
+        }
         // The held fixture has no detached producer or work scope after its
         // exact operation-owned runtime has exited. A running row is no proof.
         let ended = self.inner.ptys.lock().unwrap().iter().any(|observation| {
@@ -273,6 +282,7 @@ use super::*;
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        closed_operation: std::sync::OnceLock::new(),
     });
     let reconciler = Arc::new(Reconciler::new(
         store.clone(),
@@ -614,6 +624,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        closed_operation: std::sync::OnceLock::new(),
     });
     let notify = Arc::new(Notify::new());
     let reconciler = Arc::new(
@@ -1260,6 +1271,74 @@ async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
             .unwrap()
             .is_none()
     );
+}
+
+    #[tokio::test]
+async fn revoked_pidless_pty_requires_operation_fenced_producer_closure() {
+    for different_operation in [false, true] {
+        let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
+        let subject = "agent/example-worker";
+        apply_source(
+            &store,
+            "version 2\nagent \"example-worker\" { workspace \"/tmp\"; command \"true\" }",
+            "pidless-revoked-start",
+        );
+        assert!(launch(&reconciler, subject));
+        tokio::time::timeout(Duration::from_secs(30), entered.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let operation = store.runtime_start_for(subject).unwrap().unwrap();
+        reconciler.revoke_start(subject).unwrap();
+        {
+            let mut rows = runtime.inner.ptys.lock().unwrap();
+            rows[0].status = "vanished".into();
+            rows[0].incarnation_id = None;
+        }
+        if different_operation {
+            runtime.operations.lock().unwrap().insert(
+                "example-worker".into(),
+                "older-start-operation".into(),
+            );
+        }
+        // Neither a terminal row nor an unrelated operation tag is closure proof.
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(!store.runtime_start_for(subject).unwrap().unwrap().cleanup_verified);
+        assert!(!launch(&reconciler, subject));
+        release.0.send(()).unwrap();
+        workers_done(&reconciler).await;
+        reconciler.reconcile_start_jobs().unwrap();
+        let retained = store.runtime_start_for(subject).unwrap().unwrap();
+        assert!(retained.finished);
+        assert!(!retained.cleanup_verified);
+        assert!(retained.result.as_ref().unwrap()["closure_proof"].is_null());
+        assert!(!launch(&reconciler, subject));
+        assert!(store.observations_for(subject, "harness.diagnostic").unwrap().iter()
+            .any(|claim| claim.body["fields"]["code"] == "start-revocation-unverified"));
+
+        // Even positive closure cannot retire a non-terminal incarnation-less row.
+        runtime.closed_operation.set(operation.id.clone()).unwrap();
+        runtime.inner.ptys.lock().unwrap()[0].status = "running".into();
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(subject).unwrap().is_some());
+        assert!(store.observations_for(subject, "harness.diagnostic").unwrap().iter()
+            .any(|claim| claim.body["fields"]["reason"].as_str()
+                .is_some_and(|reason| reason.contains("not terminal"))));
+
+        runtime.inner.ptys.lock().unwrap()[0].status = "vanished".into();
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(subject).unwrap().is_none());
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+        assert!(runtime.inner.stops.lock().unwrap().is_empty());
+        let result: String = store.readers.get().query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id],
+            |row| row.get(0),
+        ).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_proof"]["verification"], "producer-closed");
+        assert_eq!(runtime.inner.ptys.lock().unwrap().len(), 1);
+    }
 }
 
     #[tokio::test]

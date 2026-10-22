@@ -553,7 +553,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             exec_observation = self.runtime.observe_exec(&member.runtime_id)?;
             exec_observation.as_ref()
         };
-        let Some(observation) = observation else {
+        // A retained terminal registry row without an incarnation is not evidence
+        // about this operation: it may belong to an older launch. As with an
+        // absent row, only operation-fenced producer/work-scope closure can retire it.
+        let terminal_without_incarnation = observation.is_some_and(|observation| {
+            observation.incarnation_id.is_none()
+                && matches!(observation.status.as_str(), "exited" | "stopped" | "vanished")
+        });
+        if observation.is_none() || terminal_without_incarnation {
             // An error from an entered backend does not prove its detached producer closed.
             if operation.finished
                 && (operation
@@ -575,8 +582,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]))?;
             }
             return Ok(());
-        };
+        }
+        let observation = observation.expect("observed runtime required after absence cleanup");
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
+                ("severity".into(), Value::String("error".into())),
+                ("code".into(), Value::String("start-revocation-unverified".into())),
+                ("reason".into(), Value::String("the revoked runtime has no incarnation and is not terminal; producer closure cannot retire a potentially live runtime".into())),
+            ]))?;
             return Ok(());
         };
         let exec_provenance;
