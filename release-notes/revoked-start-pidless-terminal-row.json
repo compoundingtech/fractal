@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Revoked runtime starts no longer hold a seat forever behind a terminal PTY row without a PID: retirement requires positive closure proof for the revoked operation's producer and work scopes, even when the retained row belongs to an older operation",
+  "summary": "New Linux-scope runtime starts retain operation-owned producer closure evidence so revoked starts can retire behind a terminal PTY row without a PID, including a row from an older operation; legacy starts without this evidence remain held",
   "replay": {"status": "none", "detail": "No graph replay; reconciliation rechecks retained revoked starts."},
   "schema": {"status": "none", "detail": "No database schema change or registry row deletion. New Linux-scope launches persist versioned operation-owned launcher, publication and scope evidence in local runtime state."},
   "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
