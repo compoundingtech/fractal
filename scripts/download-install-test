@@ -12,11 +12,12 @@ repo = Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory() as d:
     root = Path(d)
     tools = root / 'tools'; tools.mkdir()
-    payload = root / 'smalltalk-x86_64-unknown-linux-gnu'; (payload / 'bin').mkdir(parents=True)
+    payload = root / 'fractal-x86_64-unknown-linux-gnu'; (payload / 'bin').mkdir(parents=True)
     for name in ['st3', 'pty']:
         p = payload / 'bin' / name
         p.write_text('#!/bin/sh\nprintf "' + name + '-fixture\\n"\n'); p.chmod(0o755)
     (payload / 'bin/st').symlink_to('st3')
+    (payload / 'bin/fractal').symlink_to('st3')
     shutil.copy(repo / 'scripts/install-release', payload / 'install.sh')
     archive = root / (payload.name + '.tar.gz')
     with tarfile.open(archive, 'w:gz') as t: t.add(payload, arcname=payload.name)
@@ -27,11 +28,18 @@ with tempfile.TemporaryDirectory() as d:
     curl.write_text('''#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> "$RECEIPTS"
-url= out=
+url= out= status=false
 while [ "$#" -gt 0 ]; do
- case "$1" in --output) out=$2;shift 2;; https://*) url=$1;shift;; *) shift;; esac
+ case "$1" in --output) out=$2;shift 2;; --write-out) status=true;shift 2;; https://*) url=$1;shift;; *) shift;; esac
 done
-cp "$FIXTURES/${url##*/}" "$out"
+if "$status"; then
+    if [ "${DOWNLOAD_STATUS:-}" ]; then printf '%s' "$DOWNLOAD_STATUS"; exit 0; fi
+    if [ ! -f "$FIXTURES/${url##*/}" ]; then printf '404'; exit 0; fi
+    cp "$FIXTURES/${url##*/}" "$out"
+    printf '200'
+else
+    cp "$FIXTURES/${url##*/}" "$out"
+fi
 '''); curl.chmod(0o755)
     uname = tools / 'uname'
     uname.write_text('#!/bin/sh\ncase "$1" in -s) echo "${PLATFORM:-Linux}";; -m) echo "${ARCH:-x86_64}";; esac\n'); uname.chmod(0o755)
@@ -44,11 +52,29 @@ cp "$FIXTURES/${url##*/}" "$out"
     assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
     installed = root / 'home/.local/bin'
     assert (installed / 'st').readlink() == Path('st3')
-    assert sorted(p.name for p in installed.iterdir()) == ['pty', 'st', 'st3']
+    assert (installed / 'fractal').readlink() == Path('st3')
+    assert sorted(p.name for p in installed.iterdir()) == ['fractal', 'pty', 'st', 'st3']
     result = install('--tag', 'v0.3.18')
     assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
+    (installed / 'fractal').unlink()
+    (installed / 'fractal').write_text('foreign command')
+    result = install('--no-run')
+    assert result.returncode == 0 and result.stdout == '', result
+    assert 'leaving fractal unchanged:' in result.stderr, result
+    assert (installed / 'fractal').read_text() == 'foreign command'
+    assert (installed / 'st').readlink() == Path('st3')
+    (installed / 'fractal').unlink()
+    foreign_path = root / 'foreign-path'
+    foreign_path.mkdir()
+    (foreign_path / 'fractal').write_text('foreign PATH command')
+    result = install('--no-run', extra={'PATH': str(foreign_path) + ':' + env['PATH']})
+    assert result.returncode == 0 and 'PATH contains a foreign command' in result.stderr, result
+    assert not (installed / 'fractal').exists() and not (installed / 'fractal').is_symlink()
+    assert (foreign_path / 'fractal').read_text() == 'foreign PATH command'
     requests = (root / 'requests').read_text()
     assert '/latest/download/' in requests and '/download/v0.3.18/' in requests
+    assert '/latest/download/fractal-x86_64-unknown-linux-gnu.tar.gz' in requests
+    assert 'smalltalk-x86_64-unknown-linux-gnu.tar.gz' not in requests
     result = install('--edge', '--no-run')
     assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
     assert (root / 'requests').read_text().count('/download/edge/') == 2
@@ -62,6 +88,9 @@ cp "$FIXTURES/${url##*/}" "$out"
     checksum.write_text(correct.replace(archive.name, 'other.tar.gz'))
     result = install('--no-run')
     assert result.returncode != 0 and 'invalid archive checksum' in result.stderr, result
+    # An HTTP failure must not select a potentially stale legacy asset.
+    result = install('--no-run', extra={'DOWNLOAD_STATUS': '503'})
+    assert result.returncode != 0 and 'HTTP 503' in result.stderr, result
     result = install('--no-run', extra={'ARCH': 'aarch64'})
     assert result.returncode != 0 and 'supported platforms' in result.stderr, result
     result = install('--tag', '../other')
@@ -75,6 +104,14 @@ cp "$FIXTURES/${url##*/}" "$out"
                               text=True, capture_output=True, timeout=10)
     assert rejected.returncode == 2 and 'unknown option: --quiet' in rejected.stderr, rejected
     shutil.copy(published, payload_installer); payload_installer.chmod(0o755)
+    # Retained releases use both the old asset name and the old package root.
+    payload.rename(root / 'smalltalk-x86_64-unknown-linux-gnu')
+    payload = root / 'smalltalk-x86_64-unknown-linux-gnu'
+    payload_installer = payload / 'install.sh'
+    archive.unlink()
+    checksum.unlink()
+    archive = root / (payload.name + '.tar.gz')
+    checksum = Path(str(archive) + '.sha256')
     for name in ['stui', 'st3-migrate']: shutil.copy(payload / 'bin/st3', payload / 'bin' / name)
     with tarfile.open(archive, 'w:gz') as t: t.add(payload, arcname=payload.name)
     checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
@@ -82,4 +119,5 @@ cp "$FIXTURES/${url##*/}" "$out"
     result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
     assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
     assert sorted(p.name for p in legacy_bin.iterdir()) == ['pty', 'st', 'st3', 'st3-migrate', 'stui']
+    assert '/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz' in (root / 'requests').read_text()
 print('Download installer integrity, quiet install, launch and platform controls passed')

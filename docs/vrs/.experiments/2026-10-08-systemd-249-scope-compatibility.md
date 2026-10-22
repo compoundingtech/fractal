@@ -10,8 +10,8 @@ source proof, not a real VM or release installation proof.
 ## Source and runtime boundary
 
 Isolation source: `c73ee1ef53891662322034bb0df0ee933424787c`.
-The probe compiled the production isolation modules from both `st-runtime` and
-`st-drivers`; executable resolution and bounded subprocess helpers came from
+The probe compiled the production isolation modules from both `fractal-runtime` and
+`fractal-drivers`; executable resolution and bounded subprocess helpers came from
 production runtime code. It called the public mode and scope wrappers, then
 executed real `systemd-run`, rather than a command stand-in.
 

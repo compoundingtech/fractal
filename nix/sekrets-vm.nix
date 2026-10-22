@@ -134,7 +134,8 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("sshd.service")
     machine.wait_for_unit("default.target", "ada")
-    machine.copy_from_host(os.environ["ST_SEKRETS_BINARY"], "/usr/local/libexec/st-sekrets")
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    machine.copy_from_host((os.environ["FRACTAL_SEKRETS_BINARY"] if "FRACTAL_SEKRETS_BINARY" in os.environ else os.environ["ST_SEKRETS_BINARY"]), "/usr/local/libexec/st-sekrets")
     machine.succeed(
         "chown root:root /usr/local/libexec/st-sekrets && chmod 0755 /usr/local/libexec/st-sekrets"
         " && mkdir -p /usr/local/bin && ln -sf /usr/local/libexec/st-sekrets /usr/local/bin/st"
@@ -297,6 +298,14 @@ pkgs.testers.runNixOSTest {
         )
     )
     machine.wait_for_file("/run/user/1000/st3.sock")
+    # The socket file appears while the daemon is still starting ("the API is not ready"), so the
+    # file is not readiness. Ready means a daemon API read answers: `st clients` is read-only and
+    # fails until then.
+    machine.wait_until_succeeds(
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i /root/.ssh/id_ed25519 "
+        f"ada@localhost {shlex.quote(f'{st} clients')} >/dev/null 2>&1",
+        timeout=120,
+    )
     assert "can now use the profiles granted to them" in login("ada", f"{st} sekrets enable")
     login(
         "ada",
@@ -330,7 +339,7 @@ pkgs.testers.runNixOSTest {
             "--setenv=PATH=/run/current-system/sw/bin "
             "-- pty run -d --force --id seat-web --cwd /srv/people/ada/web "
             "--tag st3.scope-unit=st3-seat-web.scope --tag st3.subject=agent/fleet/fixture-example/web "
-            "--env ST_AGENT=agent/fleet/fixture-example/web --env XDG_RUNTIME_DIR=/run/user/1000 "
+            "--env FRACTAL_AGENT=agent/fleet/fixture-example/web --env ST_AGENT=agent/fleet/fixture-example/web --env XDG_RUNTIME_DIR=/run/user/1000 "
             "--env PATH=/run/current-system/sw/bin:/usr/local/bin "
             f"-- sh -c {shlex.quote('{ ' + seat + '; } > /srv/people/ada/seat.out 2>&1; echo done >> /srv/people/ada/seat.out; sleep 600')}"
         )
