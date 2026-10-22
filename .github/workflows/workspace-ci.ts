@@ -976,12 +976,14 @@ export const fractalWebJobs = {
       {
         uses: 'actions/download-artifact@v4',
         id: 'cost-receipts',
+        'continue-on-error': true,
         if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'",
         // Include older attempts only from this exact run/head, for rerun-failed-jobs.
         with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
       },
       {
         name: 'Publish web lane costs as a public check annotation',
+        'continue-on-error': true,
         if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && steps.cost-receipts.outcome == 'success'",
         run: 'node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"',
       },
