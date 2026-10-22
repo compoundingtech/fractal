@@ -1437,7 +1437,7 @@ mod tests {
     #[tokio::test]
     async fn attachment_is_pushed_only_after_the_driver_offers_it_and_without_a_tick() {
         let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
+        let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-wakes";
         let (title, delivery) = attachment_seat(&state, subject);
         let mut stream =
@@ -1482,7 +1482,7 @@ mod tests {
     #[tokio::test]
     async fn a_silent_channel_is_pushed_unattached_at_its_deadline() {
         let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
+        let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-deadline";
         let window = Duration::from_secs(1);
         delivery_presence::shorten_window(subject, window);
@@ -1514,7 +1514,7 @@ mod tests {
     async fn a_stale_title_binding_is_evaluated_once_then_fenced() {
         use std::sync::atomic::Ordering::SeqCst;
         let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
+        let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-stale-title";
         delivery_presence::shorten_window(subject, Duration::from_millis(300));
         let (title, delivery) = attachment_seat(&state, subject);
@@ -1549,7 +1549,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_rebind_reaches_the_title_stream_without_a_tick() {
         let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
+        let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-rebind";
         let (title, delivery) = attachment_seat(&state, subject);
         let mut stream =
@@ -1579,7 +1579,7 @@ mod tests {
     #[tokio::test]
     async fn the_pushed_value_is_what_the_poll_answers() {
         let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::state(root.path());
+        let state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-push-oracle";
         let (title, mut delivery) = attachment_seat(&state, subject);
         let peer = NativeDeliveryPeer {
