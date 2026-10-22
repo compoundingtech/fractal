@@ -17228,6 +17228,7 @@ impl NativeMailbox {
         self.subscription
             .as_ref()
             .and_then(fractal_daemon::mailbox::Subscription::attachment)
+            .filter(|_| false) // control C01: the driver ignores the pushed value
     }
     fn accept(&mut self, frame: Option<fractal_daemon::mailbox::Frame>, runtime_id: &str) -> Result<()> {
         match frame {
