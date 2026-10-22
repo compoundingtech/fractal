@@ -10,7 +10,8 @@
 #
 # The stages start daemons and harnesses, so they run with a home of their own: HOME and the XDG state, config, data and cache
 # directories are a scratch directory that is removed afterwards, and no st, GitHub or SSH agent variable reaches them, so
-# nothing they start can read or write this account's st state, harness configuration or credentials. Two things are kept:
+# nothing they start can read or write this account's st state, harness configuration or credentials, and no PATH entry
+# inside the account's st state (a seat's command recorder) stays. Two things are kept:
 # the account's cargo and rustup homes (the dependency cache) with the saved dev shell environment a build host's cargo reads
 # (DEVSHELL_ENV), and XDG_RUNTIME_DIR with the session bus, because the build admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
 set -euo pipefail
@@ -35,6 +36,14 @@ while IFS='=' read -r -d '' name _; do
     ST_*|ST3_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)
+# A seat's PATH can start with directories inside the account's st state (a command recorder); those leave it too.
+st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
+kept=()
+IFS=':' read -r -a entries <<< "$PATH"
+for entry in "${entries[@]}"; do
+  case "$entry" in "$st_state"|"$st_state"/*) ;; *) kept+=("$entry") ;; esac
+done
+PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
