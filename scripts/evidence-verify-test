@@ -1492,6 +1492,8 @@ class CommittedPolicy(unittest.TestCase):
         # Its shard inputs are values, not just present: every shard a success, and one shard on a pull request.
         self.assertEqual(web['kinds']['wrapper']['shard_inputs'],
                          {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
+        # A note made without kit plays covers only a run whose own change detection says the kit did not change either.
+        self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
 
 
 class ValueRules(unittest.TestCase):

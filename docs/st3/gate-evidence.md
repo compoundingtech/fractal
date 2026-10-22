@@ -1107,9 +1107,12 @@ The fractal-web note's per-shard results come from the matrix's single result, w
 succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test` holds every shard count in the workflow to the
 matrix's own condition and length.
 
-fractal-web's policy checks `shard_inputs` now. Its `input_order` arrives with the gate change that passes the run's `kit_inputs`,
-since without it no fractal-web note could cover any run. `scripts/evidence-flip-ready` does not propose fractal-web's flip until both are in
-the policy.
+fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifier through the gate:
+- `evidence-gate-fractal-web` needs `fractal-web-changes` and sets `RUN_INPUTS` to `{"kit_inputs": "<its kit-inputs output>"}`.
+- The gate passes each value as `--run-input` once the base's verifier takes that flag.
+- A malformed `RUN_INPUTS` is dropped, so no note covers the run.
+
+`scripts/evidence-flip-ready` does not propose fractal-web's flip until both keys are in the policy.
 
 `app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
 main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a
