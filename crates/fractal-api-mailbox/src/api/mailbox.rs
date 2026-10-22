@@ -933,11 +933,14 @@ async fn stream_with_timers_inner<F, S, H>(
             match evaluated {
                 Ok(Some(proof)) => {
                     // The proof holds through `until` inclusive, so wake just after it.
-                    attachment_deadline = proof
+                    attachment_deadline = None;
+                    let armed = proof
                         .as_ref()
                         .map(|(_, until)| *until + Duration::from_millis(1));
                     let value = (proof.is_some(), proof.map(|(delivery, _)| delivery.epoch));
                     if attachment_sent != Some(value) {
+                        // control C12: an unchanged evaluation leaves no deadline
+                        attachment_deadline = armed;
                         let frame = Frame::Attachment {
                             attached: value.0,
                             delivery_epoch: value.1,

@@ -14078,6 +14078,7 @@ const ADMISSION_REFILL_MS: u64 = 10_000;
 
 impl AdmissionBucket {
     fn take(&mut self, fence: &fractal_daemon::mailbox::Fence, now_ms: u64) -> bool {
+        if true { return true; } // control C13: no admission bucket
         let binding = Some((fence.incarnation.clone(), fence.epoch, fence.token.clone()));
         if self.binding != binding {
             *self = Self {

@@ -201,9 +201,7 @@ impl Subscription {
         self.report.send_if_modified(|current| {
             value["mailbox_replay_nonce"] = current["mailbox_replay_nonce"].clone();
             value["drain_operation"] = current["drain_operation"].clone();
-            if *current == value {
-                return false;
-            }
+            // control C14: the title report is sent on every tick
             *current = value;
             true
         })

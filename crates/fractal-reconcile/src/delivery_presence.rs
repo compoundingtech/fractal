@@ -246,7 +246,7 @@ fn notify(recipient: &str) {
     if let Ok(watchers) = presence().watchers.lock()
         && let Some(sender) = watchers.get(recipient)
     {
-        sender.send_modify(|generation| *generation = generation.wrapping_add(1));
+        let _ = sender; // control C02: presence never wakes watchers
     }
 }
 
