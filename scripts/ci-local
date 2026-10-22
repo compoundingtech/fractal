@@ -66,10 +66,16 @@ mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 touch "$GITHUB_STEP_SUMMARY"
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
+# A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless
+# CI_TEST_THREADS says otherwise (CI's runners use 8 on a machine of their own), at low CPU and IO priority.
+export CI_TEST_THREADS=${CI_TEST_THREADS:-6}
+low=()
+if command -v ionice >/dev/null 2>&1; then low+=(ionice -c 3); fi
+if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
 status=0
 for stage in "$@"; do
   code=0
-  bash scripts/ci-linux "$stage" || code=$?
+  "${low[@]}" bash scripts/ci-linux "$stage" || code=$?
   echo "ci-local: $stage exit $code"
   if [ "$status" -eq 0 ]; then status=$code; fi
 done

@@ -78,6 +78,7 @@ class CiLocal(unittest.TestCase):
                              (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
+        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
         self.assertEqual(list(Path(self.tmp.name).glob('ci-local.*')), [], 'the scratch home is removed afterwards')
 
     def test_ci_local_cargo_names_the_cargo_and_without_a_dev_shell_cargo_nothing_runs(self):
@@ -99,6 +100,18 @@ class CiLocal(unittest.TestCase):
         self.assertEqual([call['argv'] for call in calls][2:], [['mail-redelivery-canaries']] * 3)
         self.assertIn('ci-local: mail-redelivery-canaries exit 3', done.stdout)
         self.assertIn('ci-local: mail-redelivery-canaries exit 5', done.stdout)
+
+    def test_the_test_threads_can_be_named_and_the_stages_run_at_low_priority(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CI_TEST_THREADS='2')
+        self.assertEqual((done.returncode, calls[-1]['env']['CI_TEST_THREADS']), (0, '2'), done.stderr)
+        # The stage stub reports its own niceness: ten above the caller's (19 at most).
+        (self.work / 'scripts/ci-linux').write_text('#!/usr/bin/env bash\npython3 -I -c "import os; print(os.nice(0))" > "$CI_LOCAL_TEST_LOG.nice"\n')
+        done = subprocess.run(['bash', 'scripts/ci-local', 'mail-redelivery-canaries'], cwd=self.work, capture_output=True, text=True,
+                              env={'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home),
+                                   'CI_LOCAL_TEST_LOG': str(self.log), 'TMPDIR': self.tmp.name})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        if shutil.which('nice'):
+            self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
     def test_a_failed_hook_install_runs_no_stage(self):
         (self.work / 'scripts/ci-install-built-hooks').write_text('exit 9\n')

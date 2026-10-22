@@ -1260,7 +1260,9 @@ and cache directories are a scratch directory that is removed afterwards, and no
 variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
-stage takes an ordinary heavy admission slot, with no priority of its own. The shim is handed the dev shell's own cargo as
+stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
+shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+`ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
 `CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
 default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
 pty first on PATH, which made every boot canary fail on that host (the seat launch passes environment names only). The lane in `.st/required-lanes.json`
