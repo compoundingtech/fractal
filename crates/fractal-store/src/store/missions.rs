@@ -1,4 +1,93 @@
 use super::*;
+use super::identities;
+
+/// Mission tables and revision hashes always address the original, bare identity.
+/// Unknown names remain usable by declaration/planning readers before publication.
+pub fn mission_storage_id(connection: &Connection, id: &str) -> Result<String, St3Error> {
+    let subject = if id.starts_with("mission/") {
+        id.to_owned()
+    } else {
+        format!("mission/{id}")
+    };
+    let identity = identities::resolve_reference_conn(connection, &subject)?;
+    Ok(identity.strip_prefix("mission/").unwrap_or(&identity).to_owned())
+}
+
+pub fn mission_public_id(connection: &Connection, id: &str) -> Result<String, St3Error> {
+    let subject = if id.starts_with("mission/") {
+        id.to_owned()
+    } else {
+        format!("mission/{id}")
+    };
+    let identity = identities::resolve_reference_conn(connection, &subject)?;
+    connection.query_row(
+        "SELECT canonical_id FROM identity_heads WHERE identity=?1",
+        [&identity], |row| row.get(0),
+    ).optional().map_err(internal).map(|canonical| canonical.unwrap_or(subject))
+}
+
+/// Normalize newly authored declarations only; existing signed revisions are never rewritten.
+pub fn normalize_intent_missions(
+    connection: &Connection,
+    intent: &mut NormalizedIntent,
+) -> Result<(), St3Error> {
+    let mut missions = BTreeMap::new();
+    let mut revisions = BTreeMap::new();
+    for (key, mut mission) in std::mem::take(&mut intent.missions) {
+        let physical = mission_storage_id(connection, &mission.subject)?;
+        let normalized_key = if key.starts_with("mission/") {
+            format!("mission/{physical}")
+        } else {
+            physical.clone()
+        };
+        if mission.id != physical || mission.subject != format!("mission/{physical}") {
+            let authored_revision = mission.revision.clone();
+            mission.id = physical.clone();
+            mission.subject = format!("mission/{physical}");
+            mission.revision.clear();
+            // This is the parser's exact revision algorithm, over the normalized spec.
+            mission.revision = hex::encode(Sha256::digest(
+                serde_json::to_vec(&mission).map_err(internal)?,
+            ));
+            revisions.insert((physical.clone(), authored_revision), mission.revision.clone());
+        }
+        if let Some(provenance) = intent.mission_provenance.remove(&key) {
+            intent.mission_provenance.insert(normalized_key.clone(), provenance);
+        }
+        if missions.insert(normalized_key, mission).is_some() {
+            return Err(St3Error::new("identity-occupied", "multiple declarations address the same mission identity"));
+        }
+    }
+    intent.missions = missions;
+    let normalize_reference = |reference: &mut String, revision: Option<&mut String>| -> Result<(), St3Error> {
+        let physical = mission_storage_id(connection, reference)?;
+        if let Some(revision) = revision
+            && let Some(normalized) = revisions.get(&(physical.clone(), revision.clone()))
+        {
+            revision.clone_from(normalized);
+        }
+        *reference = if reference.starts_with("mission/") {
+            format!("mission/{physical}")
+        } else {
+            physical
+        };
+        Ok(())
+    };
+    for declaration in intent.mission_runs.values_mut() {
+        if let Some(creation) = &mut declaration.creation {
+            normalize_reference(&mut creation.mission, Some(&mut creation.revision))?;
+        }
+        for revision in declaration.revisions.values_mut() {
+            normalize_reference(&mut revision.mission, Some(&mut revision.revision))?;
+        }
+    }
+    for declaration in intent.planning_sessions.values_mut() {
+        if let Some(creation) = &mut declaration.creation {
+            normalize_reference(&mut creation.mission, None)?;
+        }
+    }
+    Ok(())
+}
 
 impl Store {
     pub fn mission_spec(
@@ -8,26 +97,25 @@ impl Store {
     ) -> Result<Option<MissionSpec>> {
         smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
         let connection = self.readers.get();
-        let body = if let Some(revision) = revision {
-            connection
-                .query_row(
-                    "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-                    params![mission_id, revision],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-        } else {
-            connection
-                .query_row(
-                    "SELECT r.body FROM mission_definitions d JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision WHERE d.mission_id=?1",
-                    [mission_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-        };
-        body.map(|body| serde_json::from_str(&body))
-            .transpose()
-            .map_err(Into::into)
+        let mission_id = mission_id.strip_prefix("mission/").unwrap_or(mission_id);
+        let (body, identity, blocked): (Option<String>, String, Option<String>) = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h9d524e52ffa5 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+                 SELECT COALESCE((SELECT identity FROM identity_names WHERE name='mission/'||?1),'mission/'||?1) AS identity
+             )
+             SELECT r.body, requested.identity, COALESCE(h.unavailable,
+                 (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                  FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
+                  AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
+             FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
+             LEFT JOIN mission_definitions d ON d.mission_id=substr(requested.identity,9)
+             LEFT JOIN mission_revisions r ON r.mission_id=substr(requested.identity,9)
+                 AND r.revision=COALESCE(?2,d.revision)",
+            params![mission_id, revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if let Some(reason) = blocked {
+            return Err(identities::unavailable(&identity, &reason).into());
+        }
+        body.map(|body| serde_json::from_str(&body)).transpose().map_err(Into::into)
     }
 
     /// Name steps for display in one read: each step's mission, run, path, title, first goal,
@@ -48,23 +136,39 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!(
-            "SELECT r.body, c.accepted_at_unix_ms FROM mission_definitions d
-             JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision
-             JOIN claims c ON c.id=d.claim_id WHERE d.mission_id IN ({placeholders})"
-        );
-        let bare = ids.iter().map(|id| id.trim_start_matches("mission/"));
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h46c9764351d0 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?;
+        let bare: Vec<_> = ids.iter().map(|id| id.strip_prefix("mission/").unwrap_or(id)).collect();
+        let mut statement = connection.prepare(
+            /* sqlite-large-value: allow-for-now lv-h90ef29d765f7 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ "WITH requested AS (
+                 SELECT DISTINCT COALESCE(names.identity,'mission/'||input.value) AS identity
+                 FROM json_each(?1) input LEFT JOIN identity_names names ON names.name='mission/'||input.value
+             )
+             SELECT r.body, c.accepted_at_unix_ms, requested.identity, COALESCE(h.unavailable,
+                 (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                  FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
+                  AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)))
+             FROM requested LEFT JOIN identity_heads h ON h.identity=requested.identity
+             LEFT JOIN mission_definitions d ON d.mission_id=substr(requested.identity,9)
+             LEFT JOIN mission_revisions r ON r.mission_id=d.mission_id AND r.revision=d.revision
+             LEFT JOIN claims c ON c.id=d.claim_id"
+        )?;
         statement
-            .query_map(rusqlite::params_from_iter(bare), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            .query_map([serde_json::to_string(&bare)?], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
             })?
-            .map(|row| {
-                let (body, accepted) = row?;
-                Ok(MissionDefinitionView {
-                    mission: serde_json::from_str(&body)?,
-                    updated_at_unix_ms: accepted.parse()?,
+            .filter_map(|row| {
+                let (body, accepted, identity, blocked) = match row {
+                    Ok(row) => row,
+                    Err(error) => return Some(Err(error.into())),
+                };
+                if let Some(reason) = blocked {
+                    return Some(Err(identities::unavailable(&identity, &reason).into()));
+                }
+                body.map(|body| {
+                    Ok(MissionDefinitionView {
+                        mission: serde_json::from_str(&body)?,
+                        updated_at_unix_ms: accepted.context("mission definition has no publication time")?.parse()?,
+                    })
                 })
             })
             .collect()
@@ -86,10 +190,22 @@ impl Store {
         occurrence_subject: Option<&str>,
         latest_ref: Option<(&str, &str)>,
     ) -> Result<MissionRunView, St3Error> {
-        let mission_id = request
-            .mission
-            .strip_prefix("mission/")
-            .unwrap_or(&request.mission);
+        let mission_identity = mission_storage_id(&self.readers.get(), &request.mission)?;
+        let mission_id = mission_identity.as_str();
+        // Normalize only the name, not the run key, revision or generation. Retrying
+        // through a historical or current spelling hashes the same physical request.
+        let physical_request_mission = if request.mission.starts_with("mission/") {
+            format!("mission/{mission_id}")
+        } else {
+            mission_id.to_owned()
+        };
+        let request = if physical_request_mission == request.mission {
+            std::borrow::Cow::Borrowed(request)
+        } else {
+            let mut normalized = request.clone();
+            normalized.mission = physical_request_mission;
+            std::borrow::Cow::Owned(normalized)
+        };
         if child.is_none() && mission_id.starts_with("__st3/") {
             return Err(St3Error::new(
                 "internal-mission",
@@ -99,7 +215,7 @@ impl Store {
         owned_sets::guard_mission_start(&self.readers.get(), mission_id)?;
         let mission = self
             .mission_spec(mission_id, request.revision.as_deref())
-            .map_err(internal)?
+            .map_err(smallclaims::error::typed)?
             .ok_or_else(|| {
                 St3Error::new(
                     "missing-mission",
@@ -165,6 +281,9 @@ impl Store {
         }
         let transaction = connection.transaction().map_err(internal)?;
         owned_sets::guard_mission_start(&transaction, mission_id)?;
+        // Recheck naming availability under the writer lock; a conflicting replicated
+        // rename must not admit a new run between the read and transaction.
+        mission_storage_id(&transaction, mission_id)?;
         if let Some((resource, discovery)) = latest_ref
             && let Some(reason) = stale_ref_request_tx(&transaction, resource, discovery).map_err(internal)? {
             return Err(St3Error::new("stale-ref-head", reason));
@@ -286,6 +405,12 @@ impl Store {
         let parents = crate::mission::parent_step_index(&mission);
         for (step, selector, constraints) in flat {
             let (assignee, available_to, agentless) = interpolate_selector(&selector, &variables)?;
+            let storage_party = |party: String| {
+                identities::resolve_reference_conn(&transaction, &party)
+            };
+            let assignee = assignee.map(storage_party).transpose()?;
+            let available_to = available_to.into_iter().map(storage_party)
+                .collect::<Result<Vec<_>, _>>()?;
             let step_subject = format!("step-run/{generation_id}/{}", step.path);
             let mut step_variables = variables.clone();
             step_variables.insert("ST_STEP".into(), step.path.clone());
@@ -552,6 +677,8 @@ impl Store {
         declared_agents: &BTreeSet<String>,
     ) -> Result<MissionResponse, St3Error> {
         let connection = self.readers.get();
+        let normalized_intent = identities::normalize_intent(&connection, intent)?;
+        let intent = normalized_intent.as_ref();
         let current_index = current_index(&connection).map_err(internal)?;
         let store_index = selected_index(current_index, at_index)?;
         let mut changes = Vec::new();
@@ -1591,6 +1718,7 @@ pub fn mission_revision_spec_tx(
     mission: &str,
     revision: &str,
 ) -> Result<Option<MissionSpec>, St3Error> {
+    let mission = mission_storage_id(connection, mission)?;
     connection
         .query_row(
             "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",

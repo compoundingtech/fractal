@@ -564,6 +564,7 @@ jobs:
       CI_TEST_PARTITION: "hash:1/2"
       CI_TEST_THREADS: "8"
       ST_TEST_SCALE: full
+      CI_TEST_LANE: daily
       CI_CACHE_DEV_SHELL: default
     steps:
       - name: Require the shared test producer to succeed
@@ -733,6 +734,7 @@ jobs:
       CI_TEST_PARTITION: "hash:2/2"
       CI_TEST_THREADS: "8"
       ST_TEST_SCALE: full
+      CI_TEST_LANE: daily
       CI_CACHE_DEV_SHELL: default
     steps:
       - name: Require the shared test producer to succeed

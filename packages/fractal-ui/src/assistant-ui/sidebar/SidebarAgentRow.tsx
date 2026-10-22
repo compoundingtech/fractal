@@ -167,25 +167,48 @@ export interface AgentRowActionsProps extends SidebarClock {
   readonly onDetailsPress?: () => void
   readonly onMenuOpenChange?: (isOpen: boolean) => void
 }
+// A 320px Agents sheet, the 340px details surface and its two 8px viewport gutters.
+const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
+const subscribeDetailsLayout = (onChange: () => void) => {
+  const media = window.matchMedia(compactDetailsQuery)
+  media.addEventListener('change', onChange)
+  return () => media.removeEventListener('change', onChange)
+}
+const compactDetailsLayout = () => window.matchMedia(compactDetailsQuery).matches
 /**
  * The row's action menu (`[data-agent-menu]`) and its keyboard-reachable reported-details dialog. Shared by every sidebar
  * row so the actions stay one implementation; hosts own only the trigger's placement and visibility.
  */
 export function AgentRowActions({ row, now, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange }: AgentRowActionsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
+  const compactDetails = React.useSyncExternalStore(subscribeDetailsLayout, compactDetailsLayout, () => false) || narrow
   const menuItemStyle = narrow ? styles.menuItemFocusNarrow : styles.menuItemFocus
-  const detailsTrigger = React.useRef<HTMLButtonElement>(null)
+  // Open from the real menu action: a synthetic click on the hidden trigger changes RAC's input modality and defers dialog focus.
+  const [detailsOpen, setDetailsOpen] = React.useState(false)
   const title = sidebarRowTitle(row)
   const ownerId = row.parentRef?.replace(/^agent\//, '') ?? row.id
   const canOpen = actions?.select !== undefined || onOpen !== undefined
-  const trigger = <VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden>
+  const trigger = <VisuallyHidden isFocusable><Button aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden>
   return <>
-    <DialogTrigger>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover triggerRef={anchorRef} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} now={now} /></Dialog></Popover></DialogTrigger>
+    <DialogTrigger isOpen={detailsOpen} onOpenChange={open => {
+      setDetailsOpen(open)
+      // The menu item unmounts, so RAC falls back to its tree row. Restore the persistent trigger without stealing a newer focus.
+      if (!open) requestAnimationFrame(() => {
+        const trigger = menuTriggerRef.current
+        const active = trigger?.ownerDocument.activeElement
+        if (active === trigger?.ownerDocument.body || active === anchorRef.current || active === anchorRef.current?.closest('[role="row"]')) trigger?.focus()
+      })
+    }}>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover
+      triggerRef={compactDetails ? menuTriggerRef : anchorRef}
+      placement={compactDetails ? 'bottom end' : 'right'}
+      shouldFlip containerPadding={8}
+      {...stylex.props(styles.hovercard, compactDetails && styles.detailsCompact)}
+    ><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} now={now} /></Dialog></Popover></DialogTrigger>
     <MenuTrigger onOpenChange={onMenuOpenChange}><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={state => stylex.props(menuButtonStyle(state), narrow && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}
-      <MenuItem id="reported-details" onAction={() => { requestAnimationFrame(() => detailsTrigger.current?.click()) }} style={menuItemStyle}>Reported agent details</MenuItem>
+      <MenuItem id="reported-details" onAction={() => { onDetailsPress?.(); setDetailsOpen(true) }} style={menuItemStyle}>Reported agent details</MenuItem>
       {actions?.details !== undefined && <MenuItem id="details" onAction={() => actions.details?.(row.ref)} style={menuItemStyle}>Agent details</MenuItem>}
       {actions?.declaration !== undefined && row.subagent === undefined && <MenuItem id="declaration" onAction={() => actions.declaration?.(row.ref)} style={menuItemStyle}>View KDL</MenuItem>}
       {actions?.declaration !== undefined && row.mission !== undefined && <MenuItem id="mission-declaration" onAction={() => actions.declaration?.(row.mission!)} style={menuItemStyle}>View mission definition</MenuItem>}
@@ -308,6 +331,7 @@ const styles = stylex.create({
   hasChildren: { paddingInlineEnd: g.icon },
   trailingSignals: { gridColumn: '5', gridRow: '1', display: 'inline-flex', alignItems: 'center', justifyContent: 'end', gap: s.xs, width: `var(--sidebar-signal-track, ${g.status})`, marginInlineStart: s.xs, minWidth: g.status },
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, width: g.specimenAside, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', maxHeight: g.commandMaxHeight, overflowY: 'auto', boxShadow: elevation.popover, zIndex: 30 },
+  detailsCompact: { maxWidth: 'calc(100vw - 16px)' },
   details: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', columnGap: s.md, rowGap: s.sm, margin: s.zero, overflowWrap: 'anywhere' },
   card: { display: 'flex', flexDirection: 'column', gap: s.md, width: g.specimenAside, maxWidth: '100%', boxSizing: 'border-box', overflowWrap: 'anywhere' },
   cardTitle: { fontSize: t.uiSize, lineHeight: t.uiLeading },

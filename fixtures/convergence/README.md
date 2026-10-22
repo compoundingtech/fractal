@@ -51,6 +51,33 @@ RNG stream, so v4's never-trim characterization `[5]` does not apply to it: with
 seed 1597 has no checkpoint trim and the other 16 fixed seeds trim, including seed 5. After merging
 main, regenerate v5 the same way; do not hand-edit the snapshot.
 
+`claims-v6.json` captures the merged identity-rename registry, including the durable
+`agent.renamed` and `mission.renamed` facts and their naming-chain fields.
+Regenerate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v6.json`.
+The simulation selects v6 and records that filename in its audit summary; prior
+corpus versions stay fixed for comparisons.
+
+Mission publications use the owning `Store::apply_as` declaration path. Unlike ordinary
+claims, `mission.published` carries a canonical top-level `MissionSpec` with its identity
+and content-hashed revision; wrapping random schema fields in `ClaimInput` produces a
+body the mission projector cannot read. The generator still draws that kind and all its
+fields from the snapshot, then publishes a valid mission without additional RNG draws.
+The focused publication regression checks its canonical body and replication to the oracle.
+This input bug also exists in main's generic publication generator; it is not a rename
+dispatch bug. In CI run 39562565916, the seed-34 failure details explicitly identify
+`claim_kind: mission.published`, not `mission.renamed`. The rename kinds remain in v6.
+
+With v6 and canonical mission publication inputs, the measured never-trim set is `[34]`.
+All 17 fixed seeds converged; seeds 1, 2, 3, 5, 8, 13, 17, 21, 55, 89, 144, 233, 377,
+610, 987 and 1597 trimmed, while seed 34 did not (16/17 trim coverage). The scoped
+2026-10-21 run used
+`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
+through the heavy gate and pinned Nix environment. It passed the canonical-publication
+regression and all convergence oracles; its only two failures were the old v5 trim
+assertions for seeds 34 and 1597. Characterization follows those measured outcomes,
+not an RNG prediction; the exact per-seed equality and majority coverage checks remain.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation
