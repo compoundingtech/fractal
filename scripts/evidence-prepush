@@ -16,6 +16,8 @@ machine we trust (cooperative trust, known defect 22); it is not something the b
     group) and the hook exits 0; `git push` itself gets the same Ctrl-C from the terminal, so the push ends there.
   * ST_SKIP_EVIDENCE=1 means "do not wait": the push goes at once and the same signing runs in the background, as it does after
     the agent wait; a CI run that starts before a note is there runs that check in full.
+  * ST_EVIDENCE_LOCAL=off means no local signing work at all (for a seat or unit where local builds are fenced): the hook says so
+    in one line and the push goes; `git push --no-verify` skips the hook entirely.
   * ST_EVIDENCE_TIME_LIMIT=SECONDS bounds the signing run (default 1200, must be a positive integer); past it the run
     is stopped (TERM, then KILL of the whole process group), that is printed, and the push goes. ST_EVIDENCE_STATUS_TIMEOUT
     bounds the "is it covered" question (default 60 s).
@@ -193,6 +195,8 @@ def hook(argv):
         receipt(tree, pushed, name)
         return 0
 
+    if os.environ.get('ST_EVIDENCE_LOCAL') == 'off':
+        return outcome('local_off', 'ST_EVIDENCE_LOCAL=off: no local signing work for this push; the pull request\'s checks run in CI')
     hurry = os.environ.get('ST_SKIP_EVIDENCE') == '1'  # "do not wait": the push goes at once and the signing runs in the background
     script = Path(__file__).resolve().parent / 'st-test'
     if not script.exists():

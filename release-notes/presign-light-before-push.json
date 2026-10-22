@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "ST_SKIP_EVIDENCE=1 no longer skips signing: the push still goes at once and the checks are signed in the background. st-test runs typescript-client before genie-freshness, and exits 4 (new) when nothing failed but a check was not signed because the tree edits that check's lane; it no longer runs that check's command. The hook, st-test and the wrapper all come from origin/main, so they change together."
+    "detail": "ST_SKIP_EVIDENCE=1 no longer skips signing: the push still goes at once and the checks are signed in the background. A seat or unit that set it because local builds are fenced must set ST_EVIDENCE_LOCAL=off (new: no local signing work at all, one printed line) or push with git push --no-verify. st-test runs typescript-client before genie-freshness, and exits 4 (new) when nothing failed but a check was not signed because the tree edits that check's lane; it no longer runs that check's command. The hook, st-test and the wrapper all come from origin/main, so they change together."
   },
   "downtime": {
     "status": "none",
