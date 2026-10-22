@@ -76,7 +76,7 @@ use super::*;
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         if member.runtime_id == "example.worker"
-            || member.runtime_id == "example-worker"
+            || member.runtime_id == "example-worker.main"
             || member.runtime_id.starts_with("example.held")
         {
             self.operations.lock().unwrap().insert(
@@ -1277,10 +1277,10 @@ async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
 async fn revoked_pidless_pty_requires_operation_fenced_producer_closure() {
     for different_operation in [false, true] {
         let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
-        let subject = "agent/example-worker";
+        let subject = "agent/example-worker/main";
         apply_source(
             &store,
-            "version 2\nagent \"example-worker\" { workspace \"/tmp\"; command \"true\" }",
+            "version 2\nagent \"example-worker/main\" { workspace \"/tmp\"; command \"true\" }",
             "pidless-revoked-start",
         );
         assert!(launch(&reconciler, subject));
@@ -1297,7 +1297,7 @@ async fn revoked_pidless_pty_requires_operation_fenced_producer_closure() {
         }
         if different_operation {
             runtime.operations.lock().unwrap().insert(
-                "example-worker".into(),
+                "example-worker.main".into(),
                 "older-start-operation".into(),
             );
         }
