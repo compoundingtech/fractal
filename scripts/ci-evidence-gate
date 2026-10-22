@@ -46,6 +46,8 @@ PROTECTED = (
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
     # What an agent-level note is held to (by_level "lane": true reads it from the base).
     '.st/required-lanes.json',
+    # The evidence log's key: which log heads the verifier reads at all.
+    '.st/evidence-log-key',
 )
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point

@@ -235,8 +235,13 @@ The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input ke
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
 through `st sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
-log key list is `~/.config/evidence-log/log-keys` until main pins `.st/evidence-log-key`, and a pull never extends a
-head that list does not sign. The signer starts without the caller's loader variables.
+log key list is main's `.st/evidence-log-key` (`~/.config/evidence-log/log-keys` on a host whose main has none), and a
+pull never extends a head that list does not sign. The signer starts without the caller's loader variables.
+
+**The log key's custody (interim).** The pinned key (principal `log/evidence`) is a plain file on the log host, readable by
+any process running as the account that runs the timer, until a `st sekrets` profile holds it. The log is shadow only
+until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
+replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
 
 Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
 checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
