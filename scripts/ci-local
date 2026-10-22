@@ -48,7 +48,7 @@ if [ -z "$cargo_real" ]; then
 fi
 while IFS='=' read -r -d '' name _; do
   case "$name" in
-    ST_*|ST3_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
+    ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)
 # A seat's PATH can start with directories inside the account's st state (a command recorder); those leave it too.

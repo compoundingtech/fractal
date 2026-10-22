@@ -891,7 +891,7 @@ jobs:
           from urllib.parse import quote
           from urllib.request import Request, urlopen
 
-          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries"}
+          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries", "fractal-web"}
 
 
           def decision(jobs, ref_status, ref, sha):
