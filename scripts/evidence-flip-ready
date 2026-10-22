@@ -118,16 +118,34 @@ def fields_of(text):
     return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
 
 
+def pr_runs(github, since, until, tries=3):
+    """The window's pull request runs. The created= filter sometimes answers an empty or short listing while the runs exist
+    (2026-10-22: the same request gave 201, 201, then 0), which would read as missing lines; so a listing shorter than its own
+    total_count, or empty while the newest pull request run falls in the window, is asked again, then unreadable."""
+    path = f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100&created={iso(since)}..{iso(until)}'
+    why = ''
+    for attempt in range(tries):
+        pages = json.loads(github.gh('api', '--paginate', '--slurp', path))
+        runs = [run for page in pages for run in page.get('workflow_runs', [])]
+        total = max((page.get('total_count') or 0 for page in pages), default=0)
+        if runs and len(runs) >= total:
+            return runs
+        if runs:
+            why = f'the run listing for {iso(since)}..{iso(until)} returned {len(runs)} of its {total} runs'
+        else:
+            newest = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=1', 'workflow_runs')[:1]
+            if not newest or (parse_time(newest[0].get('created_at')) or since) < since:
+                return []  # a quiet window
+            why = f'the run listing for {iso(since)}..{iso(until)} came back empty, but run {newest[0].get("id")} is in it'
+        if attempt < tries - 1:
+            time.sleep(2 ** attempt)
+    raise Unreadable(why)
+
+
 def collect(github, checks, since, until):
     """One row per gate job that printed a line for a known check: the run, its creation time, the line's fields and
     the conclusion of the check's own job in the same attempt."""
-    runs = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100'
-                        f'&created={iso(since)}..{iso(until)}', 'workflow_runs')
-    if not runs:
-        # The created= filter has answered an empty page while runs existed (2026-10-22 15:00Z), which read as zero lines.
-        newest = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=1', 'workflow_runs')[:1]
-        if newest and (parse_time(newest[0].get('created_at')) or since) >= since:
-            raise Unreadable(f'the run listing for {iso(since)}..{iso(until)} came back empty, but run {newest[0].get("id")} is in it')
+    runs = pr_runs(github, since, until)
     finished = [run for run in runs if run.get('status') == 'completed']  # a run still going is counted next time
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         job_lists = list(pool.map(
@@ -150,6 +168,7 @@ def collect(github, checks, since, until):
             fields = fields_of(text)
             if fields.get('check') == check:
                 rows.append({'check': check, 'run': run['id'], 'created_at': parse_time(run.get('created_at')),
+                             'actor': ((run.get('actor') or {}).get('login') or '-'),
                              'fields': fields, 'real': conclusion, 'members_red': members_red})
     return rows
 
@@ -195,6 +214,29 @@ def evaluate(rows, enforce, now):
         why.append(f'{len(hidden)} runs with a hidden red')
     result.update(ready=not why, why_not=why)
     return result
+
+
+def presign_rates(rows, now):
+    """Per account that started the runs: how many distinct pull request heads in the window had a pre-signed (host or agent)
+    note for some check, how many only an earlier CI run's note, and how many no note at all."""
+    start = now - datetime.timedelta(seconds=WINDOW_S)
+    heads = {}
+    for row in rows:
+        if not row['created_at'] or not start <= row['created_at'] <= now:
+            continue
+        fields = row['fields']
+        key = (row['actor'], fields.get('pr', '-'), fields.get('pr_head') if fields.get('pr_head', '-') != '-' else fields.get('head', '-'))
+        level = fields.get('trust_level') if fields.get('outcome') in ('satisfied', 'degraded') else None
+        rank = 2 if level in ('host', 'agent') else 1 if level == 'fleet' else 0
+        heads[key] = max(heads.get(key, 0), rank)
+    rates = {}
+    for (actor, _, _), rank in heads.items():
+        counts = rates.setdefault(actor, {'heads': 0, 'presigned': 0, 'ci_note': 0, 'no_note': 0})
+        counts['heads'] += 1
+        counts[('no_note', 'ci_note', 'presigned')[rank]] += 1
+    for counts in rates.values():
+        counts['presigned_share'] = round(counts['presigned'] / counts['heads'], 3)
+    return dict(sorted(rates.items()))
 
 
 def clippy_base_pinned(entry):
@@ -393,7 +435,7 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         return 2
     report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
         check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry)
-        for check, entry in policy.items()}}
+        for check, entry in policy.items()}, 'presign': presign_rates(rows, now)}
     print(json.dumps(report, indent=2))
     if args.propose:
         return propose(report, root, github, runner, args.dry_run, now.date().isoformat())
