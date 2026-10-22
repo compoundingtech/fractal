@@ -2,7 +2,7 @@
 # Source: BUCK.genie.ts
 
 # Projected from pnpm-lock.yaml for the Buck importers in lock.ts.
-# Store fingerprint: sha256:06db3a24c893b2ca762fd509a72f4b217c3f5d2756c0721520ef6de535589fd8
+# Store fingerprint: sha256:8a8e32cefe7dbac18490c00dbc7255a498ecef1faf52855faa073659c0b23b66
 
 load("@rules//buck2/dependencies:defs.bzl", "pnpm_package", "pnpm_platform_gated_packages")
 
@@ -37,6 +37,16 @@ pnpm_package(
     },
 )
 
+pnpm_package(
+    name = "package_ws_8_22_0_04f6920ca49f",
+    package_name = "ws",
+    url = "https://registry.npmjs.org/ws/-/ws-8.22.0.tgz",
+    sha256 = "ca9b3798b2e11ce8fac6713f50ef0501aa12b09b330623c1dc409dff94e7abc8",
+    size_bytes = 35094,
+    bins = {
+    },
+)
+
 load("@rules//buck2/dependencies:defs.bzl", "pnpm_directory_package", "pnpm_platform_configurations", "pnpm_store_entry", "pnpm_store_scc", "pnpm_store_view")
 
 pnpm_platform_configurations()
@@ -67,16 +77,28 @@ pnpm_store_entry(
     visibility = ["PUBLIC"],
 )
 
+pnpm_store_entry(
+    name = "entry_ws_8_22_0_04f6920ca49f",
+    package = ":package_ws_8_22_0_04f6920ca49f",
+    store_key = "ws@8.22.0",
+    runtime = ":assemble-store.ts",
+    dependencies = {
+    },
+    visibility = ["PUBLIC"],
+)
+
 pnpm_store_view(
     name = "view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
         "effect": "effect@4.0.0",
         "typescript": "typescript@6.0.3",
+        "ws": "ws@8.22.0",
     },
     closure = {
         "effect@4.0.0": ":entry_effect_4_0_0_c059cf710fc3",
         "typescript@6.0.3": ":entry_typescript_6_0_3_e500ed061b70",
+        "ws@8.22.0": ":entry_ws_8_22_0_04f6920ca49f",
     },
     bins = {
         "tsc": "typescript@6.0.3\tbin/tsc",
@@ -95,10 +117,12 @@ pnpm_store_view(
     direct = {
         "effect": "effect@4.0.0",
         "typescript": "typescript@6.0.3",
+        "ws": "ws@8.22.0",
     },
     closure = {
         "effect@4.0.0": ":entry_effect_4_0_0_c059cf710fc3",
         "typescript@6.0.3": ":entry_typescript_6_0_3_e500ed061b70",
+        "ws@8.22.0": ":entry_ws_8_22_0_04f6920ca49f",
     },
     bins = {
         "tsc": "typescript@6.0.3\tbin/tsc",
@@ -117,10 +141,12 @@ pnpm_store_view(
     direct = {
         "effect": "effect@4.0.0",
         "typescript": "typescript@6.0.3",
+        "ws": "ws@8.22.0",
     },
     closure = {
         "effect@4.0.0": ":entry_effect_4_0_0_c059cf710fc3",
         "typescript@6.0.3": ":entry_typescript_6_0_3_e500ed061b70",
+        "ws@8.22.0": ":entry_ws_8_22_0_04f6920ca49f",
     },
     bins = {
         "tsc": "typescript@6.0.3\tbin/tsc",

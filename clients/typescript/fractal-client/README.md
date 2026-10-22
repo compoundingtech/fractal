@@ -69,7 +69,7 @@ parser, it does not fall back to peer-name lookup for a syntactically valid but
 invalid-curve key. Such a target fails closed at the Fabric dial; use an ordinary
 unique trusted name or a valid NodeID instead.
 
-Install the optional `ws` peer dependency for native WebSocket streams. The
+Keep the optional `ws` dependency installed for native WebSocket streams. The
 `@fractal/client` browser/phone entry point does not import Node modules or `ws`;
 those runtimes continue to use the existing authenticated HTTP(S) transport.
 `program` can select an explicit Fabric executable for isolated installations.
