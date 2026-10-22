@@ -76,6 +76,22 @@ class Policy(unittest.TestCase):
                 self.assertEqual(value['tag'], 'v0.3.17')
                 baseline.validate(value, path)
 
+    def test_historical_url_exception_rejects_changed_source_or_checksum(self):
+        with patch.object(baseline, 'repository', return_value='compoundingtech/fractal'):
+            for path in baseline.BASELINES:
+                original = json.loads((ROOT / path).read_text())
+                changed_source = copy.deepcopy(original)
+                changed_source['commit'] = '0' * 40
+                with self.subTest(path=path, changed='commit'):
+                    with self.assertRaisesRegex(baseline.BaselineError, 'tagged archive URL'):
+                        baseline.validate(changed_source, path)
+                for target in baseline.TARGETS:
+                    changed_checksum = copy.deepcopy(original)
+                    changed_checksum['bundles'][target]['sha256'] = '0' * 64
+                    with self.subTest(path=path, changed=target):
+                        with self.assertRaisesRegex(baseline.BaselineError, 'tagged archive URL'):
+                            baseline.validate(changed_checksum, path)
+
     def test_historical_url_exception_does_not_accept_new_tags_or_other_repositories(self):
         with patch.object(baseline, 'repository', return_value='compoundingtech/fractal'):
             for tag, repository in [('v0.3.18', 'compoundingtech/smalltalk'),
