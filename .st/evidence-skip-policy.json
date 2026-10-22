@@ -50,7 +50,6 @@
           "command": [
             "linux-gate",
             "aggregate",
-            "genie-freshness",
             "isolation-vm",
             "linux-clippy",
             "linux-fleet-compat",
@@ -61,7 +60,6 @@
             "linux-tests-shard-3",
             "linux-tests-shard-4",
             "mail-redelivery-canaries",
-            "typescript-client",
             "upgrade-impact"
           ],
           "required_inputs": [

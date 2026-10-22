@@ -3294,7 +3294,7 @@ jobs:
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"
       - name: Collect the stage notes
-        if: ${{ steps.sign.outcome == 'success' }}
+        if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -3302,7 +3302,7 @@ jobs:
           path: "${{ runner.temp }}/evidence-notes/stages"
           merge-multiple: true
       - name: Publish the notes that verify
-        if: ${{ steps.sign.outcome == 'success' }}
+        if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
@@ -3311,7 +3311,7 @@ jobs:
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
             --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
-        if: ${{ always() && steps.sign.outcome == 'success' }}
+        if: ${{ always() && steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
