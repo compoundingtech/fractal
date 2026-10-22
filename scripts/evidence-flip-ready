@@ -118,28 +118,33 @@ def fields_of(text):
     return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
 
 
-def pr_runs(github, since, until, tries=3):
-    """The window's pull request runs. The created= filter sometimes answers an empty or short listing while the runs exist
-    (2026-10-22: the same request gave 201, 201, then 0), which would read as missing lines; so a listing shorter than its own
-    total_count, or empty while the newest pull request run falls in the window, is asked again, then unreadable."""
-    path = f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100&created={iso(since)}..{iso(until)}'
-    why = ''
-    for attempt in range(tries):
-        pages = json.loads(github.gh('api', '--paginate', '--slurp', path))
-        runs = [run for page in pages for run in page.get('workflow_runs', [])]
-        total = max((page.get('total_count') or 0 for page in pages), default=0)
-        if runs and len(runs) >= total:
-            return runs
-        if runs:
-            why = f'the run listing for {iso(since)}..{iso(until)} returned {len(runs)} of its {total} runs'
+def pr_runs(github, since, until, tries=4):
+    """The window's pull request runs, newest first, page by page until a page reaches back before the window. The created=
+    filter is not used: it answers an empty listing for about one request in four (2026-10-22: 205, 205, 0, ... for the
+    same request), which would read as missing lines. A page that is empty or short of what the listing's total says it
+    holds is asked again, then the run is unreadable; so is a window of more than the listing's 1,000 runs."""
+    runs, page = {}, 1
+    while True:
+        path = f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100&page={page}'
+        for attempt in range(tries):
+            out = json.loads(github.gh('api', path))
+            batch, total = out.get('workflow_runs') or [], min(out.get('total_count') or 0, 1000)
+            expected = max(1 if page == 1 else 0, min(100, total - (page - 1) * 100))  # a repository with no runs is not real
+            if len(batch) >= expected:
+                break
+            if attempt < tries - 1:
+                time.sleep(2 ** attempt)
         else:
-            newest = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=1', 'workflow_runs')[:1]
-            if not newest or (parse_time(newest[0].get('created_at')) or since) < since:
-                return []  # a quiet window
-            why = f'the run listing for {iso(since)}..{iso(until)} came back empty, but run {newest[0].get("id")} is in it'
-        if attempt < tries - 1:
-            time.sleep(2 ** attempt)
-    raise Unreadable(why)
+            raise Unreadable(f'page {page} of the pull request run listing came back with {len(batch)} of the {expected} runs it holds')
+        times = [parse_time(run.get('created_at')) for run in batch]
+        for run, created in zip(batch, times):
+            if created and since <= created <= until:
+                runs[run['id']] = run  # a run that arrived while paging shifts the pages: the same run can come twice
+        if len(batch) < 100 or any(created and created < since for created in times):
+            return list(runs.values())
+        if page * 100 >= 1000:
+            raise Unreadable(f'more than the listing\'s 1,000 runs since {iso(since)}')
+        page += 1
 
 
 def collect(github, checks, since, until):
