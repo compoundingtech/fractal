@@ -501,6 +501,9 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
 ENFORCED = ('typescript-client',)
+# The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries'})
+HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries'})
 
 
 def policy_text(**overrides):
@@ -1372,7 +1375,7 @@ class CommittedPolicy(unittest.TestCase):
                 found.append(str(source.relative_to(ROOT)))
         self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
 
-    def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
+    def test_the_host_level_is_admitted_for_exactly_the_locally_signable_checks_wrapper_kind_and_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
         # every other check keeps enforce false until its own flip PR.
@@ -1391,12 +1394,14 @@ class CommittedPolicy(unittest.TestCase):
             for kind, rule in entry['kinds'].items():
                 if 'agent' in (rule.get('trust_levels') or []):
                     self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
-        self.assertEqual(sorted(with_host), [('genie-freshness', 'wrapper'), ('typescript-client', 'wrapper')])
+        self.assertEqual(sorted(with_host), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
         for (check, kind), rule in with_host.items():
             self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent'], check)
-            override = rule['by_level']['host']
-            self.assertFalse(override.get('lane', False), check)  # a host note is not held to the lane (cooperative machine trust)
-            # The agent level: the host's rule exactly, plus the lane binding, and nowhere else.
+            override = dict(rule['by_level']['host'])
+            # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
+            # to the lane as well (Factory, 2026-10-22), so a tree that edits its own lane never skips on a local note.
+            self.assertIs(override.pop('lane', False), check in HOST_LANE_BOUND, check)
+            # The agent level: the host's rule exactly, with the lane binding.
             agent = dict(rule['by_level']['agent'])
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
@@ -1440,6 +1445,9 @@ class CommittedPolicy(unittest.TestCase):
         jobs = gate['command'][2:]
         self.assertEqual(jobs, sorted(jobs))  # the aggregate lists its needed jobs sorted
         self.assertIn('linux-gate', jobs)
+        # The separate checks have their own notes; the aggregate does not record them (ci-evidence-signing SEPARATE_CHECKS).
+        self.assertNotIn('genie-freshness', jobs)
+        self.assertNotIn('typescript-client', jobs)
         common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
         self.assertEqual(gate['required_inputs'], common)
         self.assertEqual(gate['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
@@ -1466,9 +1474,8 @@ class CommittedPolicy(unittest.TestCase):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
-            # No weaker signer is admitted, except the host level for exactly two checks (see the test for the host level).
-            host_checks = ('genie-freshness', 'typescript-client')
-            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in host_checks else None, check)
+            # No weaker signer is admitted, except the host level for the locally signable checks (see the test for the host level).
+            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in HOST_CHECKS else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
         # fractal-web lists only its shard notes: the observer's record is of the always-emitted fractal-web job, which passes
         # without running the lane when no web path changed against that run's base, so it is no evidence that the lane ran.

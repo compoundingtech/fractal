@@ -212,6 +212,11 @@ def event_base_sha():
     return sha if isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha) else ''
 
 
+# Required checks with their own notes that the aggregate note job waits for only to publish those notes: their
+# results are not in the linux-gate note and their gates' decisions do not stop it (docs/st3/gate-evidence.md).
+SEPARATE_CHECKS = ('genie-freshness', 'typescript-client')
+
+
 def aggregate(path):
     """What an aggregate job honestly knows: which jobs it needed, what each reported, its verdict.
 
@@ -221,16 +226,19 @@ def aggregate(path):
     # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
     # Neither is a job of the path-sensitive fractal-web lane: it is its own lane with its own notes, and it is
     # skipped whenever a change touches no web path, which must not stop the linux-gate verdict being recorded.
+    # Nor are the separate checks (SEPARATE_CHECKS): the note job waits for them only to publish their own notes.
     results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())
-               if not name.startswith(('evidence-gate-', 'fractal-web-'))}
+               if not name.startswith(('evidence-gate-', 'fractal-web-')) and name not in SEPARATE_CHECKS}
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
     # An evidence gate that decided to skip says so in its output, set only by its marker step. Required
     # checks whose gate skipped still end in success with their steps skipped, so their own result
-    # cannot show it: this output can. No note then, whatever the other results say.
+    # cannot show it: this output can. No note then, whatever the other results say. Every gate counts except
+    # those of the separate checks, which decide nothing this note records: a gate added later counts by default.
     taken = sorted(name for name, entry in needs.items()
-                   if name.startswith('evidence-gate-') and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
+                   if name.startswith('evidence-gate-') and name.removeprefix('evidence-gate-') not in SEPARATE_CHECKS
+                   and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
     if taken:
         raise Refused(f'not recording: the evidence gate skipped work in this run ({", ".join(taken)}), so it did not test this tree itself')
     # A needed job that did not run (skipped by the evidence gate, or for any other reason) means this

@@ -453,6 +453,15 @@ class StTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['genie-freshness', 'typescript-client'])
 
+    def test_a_heavy_check_runs_only_when_named_or_with_all(self):
+        # The pre-push hook runs st-test with no --check: a check that builds the whole workspace must not start on every push.
+        for args, names in (([], ['genie-freshness', 'typescript-client']),
+                            (['--all'], ['genie-freshness', 'typescript-client', 'mail-redelivery-canaries']),
+                            (['--check', 'mail-redelivery-canaries'], ['mail-redelivery-canaries'])):
+            done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)
+
 
 if __name__ == '__main__':
     unittest.main()
