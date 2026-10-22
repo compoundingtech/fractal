@@ -4,10 +4,10 @@
  * Cold mounting and switching agents follow through the real SDK and live source
  * (scripted gateway, real socket commands). Nothing here mocks the data hooks.
  */
-import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@smalltalk/st3-client'
+import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@fractal/client'
 import { webcrypto } from 'node:crypto'
 import { setTimeout as yieldIo } from 'node:timers/promises'
-import * as Native from '@smalltalk/st3-client/schema'
+import * as Native from '@fractal/client/schema'
 import { flushSync } from 'react-dom'
 import type { ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -382,7 +382,8 @@ describe('ConversationPane conversation demand', () => {
     flushSync(() => button.click())
     const panel = container.querySelector('aside[aria-label="Tool detail"]')!
     expect(panel.textContent).toContain('export const rows = []')
-    expect(panel.parentElement).toBe(workspace.parentElement)
+    // The workspace now sits inside the stable Changes split; tool detail stays outside it.
+    expect(panel.parentElement).toBe(workspace.closest('[data-testid="live-agent-workspace"]'))
     expect(workspace.contains(panel)).toBe(false)
     flushSync(() => (panel.querySelector('button[aria-label="Close tool detail"]') as HTMLButtonElement).click())
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
@@ -439,7 +440,7 @@ describe('ConversationPane conversation demand', () => {
     expect(container.innerHTML).not.toContain('Unknown')
     expect(container.querySelector('[data-testid="sync-line"]')).toBeNull()
     const recovery = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="transcript-unavailable"] button')]
-      .filter(button => button.textContent === 'Try again')
+      .filter(button => button.textContent === 'Retry')
     expect(recovery).toHaveLength(1)
     expect(recovery[0]!.disabled).toBe(false)
     flushSync(() => recovery[0]!.click())

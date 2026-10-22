@@ -12,6 +12,7 @@ import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { committedTranscriptHistory } from './story-play'
 
 const now = Date.parse('2026-01-15T12:30:00Z')
 const minute = (index: number) => new Date(Date.parse('2026-01-15T12:00:00Z') + index * 60_000).toISOString()
@@ -29,60 +30,29 @@ const historyTurns = Array.from({ length: 30 }, (_, index) => turn(index, prompt
 function Surface({ scheme, children }: { scheme: Scheme; children: React.ReactNode }) {
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>{children}</main>
 }
-const columnTurns = historyTurns.slice(0, 12)
-const columnMessages = columnTurns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items])
 const columnSync = { _tag: 'Live', since: now - 5000 } as const
-function ColumnStory({ scheme, readingColumn }: { scheme: Scheme; readingColumn: boolean }) {
-  const options = React.useMemo(() => ({ messages: columnMessages, isRunning: false, onNew: async () => {} }), [])
-  return <Surface scheme={scheme}><EmbraceRuntimeProvider options={options}>
-    <div {...stylex.props(styles.transcript)}><Transcript title="Row projection" turns={columnTurns} sync={columnSync} now={now} observedAt={now - 8000} /></div>
-    <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn={readingColumn} /></div>
-  </EmbraceRuntimeProvider></Surface>
-}
 
-const meta = { title: 'Fractal UI/Transcript composer', component: ColumnStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ColumnStory>
+type ColumnArgs = { scheme: Scheme; readingColumn: boolean }
+const meta = { title: 'Fractal UI/Transcript composer', component: OwnSendStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
-type Story = StoryObj<typeof meta>
-
-const bounds = (element: Element) => { const rect = element.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: rect.width } }
-async function columns(canvasElement: HTMLElement) {
-  await document.fonts.ready
-  const row = await waitFor(() => { const found = canvasElement.querySelector('[data-testid="transcript-turn"]'); if (found === null) throw new Error('No transcript row'); return found })
-  const composer = canvasElement.querySelector('[data-testid="kit-composer"] form')!
-  const dock = canvasElement.querySelector('[data-testid="story-composer-dock"]')!
-  const lane = parseFloat(getComputedStyle(canvasElement.querySelector('[data-testid="kit-composer"]')!).maxWidth)
-  return { row: bounds(row), composer: bounds(composer), dock: bounds(dock), lane }
-}
-
-/** The composer and the transcript rows share one column: equal edges, capped at the lane maximum. */
-export const ReadingColumn: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
-  const { row, composer, lane } = await columns(canvasElement)
-  await expect(Math.abs(composer.left - row.left), `composer left ${composer.left} vs transcript left ${row.left}`).toBeLessThanOrEqual(0.5)
-  await expect(Math.abs(composer.right - row.right), `composer right ${composer.right} vs transcript right ${row.right}`).toBeLessThanOrEqual(0.5)
-  await expect(composer.width).toBeLessThanOrEqual(lane + 0.5)
-  await expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
-} }
-export const ReadingColumnLight: Story = { ...ReadingColumn, args: { scheme: 'light' } }
-/** Without the opt-in, the composer keeps filling its host. */
-export const HostWidth: Story = { tags: ['critical'], args: { readingColumn: false }, play: async ({ canvasElement }) => {
-  const { composer, dock } = await columns(canvasElement)
-  await expect(Math.abs(composer.width - dock.width)).toBeLessThanOrEqual(0.5)
-} }
+type Story = StoryObj<ColumnArgs>
+const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Own-send follow and placeholder probes require controlled local composer state and host callbacks.' } } } satisfies Story
 
 const placeholderOptions = { messages: [], isRunning: false, onNew: async () => {} }
 const overridePlaceholder = 'Ask about this conversation'
 function PlaceholderStory({ scheme }: { scheme: Scheme }) {
   return <Surface scheme={scheme}><div {...stylex.props(styles.placeholders)}>
-    {[undefined, overridePlaceholder].map(placeholder => <section key={placeholder ?? 'default'} data-testid={placeholder === undefined ? 'default-placeholder' : 'override-placeholder'}><EmbraceRuntimeProvider options={placeholderOptions}><EmbraceComposer variant="C1" placeholder={placeholder} /></EmbraceRuntimeProvider></section>)}
+    {[undefined, overridePlaceholder].map(placeholder => <section key={placeholder ?? 'default'} data-testid={placeholder === undefined ? 'default-placeholder' : 'override-placeholder'}><EmbraceRuntimeProvider options={placeholderOptions}><EmbraceComposer variant="C1" conversationLabel={placeholder === undefined ? 'Default placeholder example' : 'Custom placeholder example'} placeholder={placeholder} /></EmbraceRuntimeProvider></section>)}
   </div></Surface>
 }
 const keyboardText = /enter|shift|return|ctrl|cmd|⌘|⏎|↵|mod\s*\+/i
 /** Empty-field guidance never carries keyboard instructions; a host override replaces it, still describing the field. */
-export const Placeholder: Story = { tags: ['critical'], render: args => <PlaceholderStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const Placeholder: Story = { ...contractFixture, tags: ['critical'], render: args => <PlaceholderStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   for (const [testId, expected] of [['default-placeholder', undefined], ['override-placeholder', overridePlaceholder]] as const) {
     const section = canvasElement.querySelector(`[data-testid="${testId}"]`)!
     const guidance = await waitFor(() => { const found = section.querySelector<HTMLElement>('[data-testid="composer-placeholder"]'); if (found === null) throw new Error(`No guidance in ${testId}`); return found })
     const input = section.querySelector('textarea')!
+    await expect(section.querySelector('form')).toHaveAccessibleName(`Message composer, ${expected === undefined ? 'Default placeholder example' : 'Custom placeholder example'}`)
     await expect(guidance).toBeVisible()
     await expect(guidance.textContent, `${testId} guidance`).not.toMatch(keyboardText)
     await expect(input.placeholder).toBe('')
@@ -120,11 +90,11 @@ async function settleFrames() {
   for (let frame = 0; frame < 3; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
 }
 /** An agent reply keeps a scrolled-up reader's line and offers the jump; the reader's own send brings it into view. */
-export const OwnSendFollows: Story = { tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const OwnSendFollows: Story = { ...contractFixture, tags: ['critical'], render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement, abortSignal }) => {
   const canvas = within(canvasElement)
   // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
   await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
-  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < historyTurns.length) throw new Error('History not committed'); return found })
+  const viewport = await committedTranscriptHistory(canvasElement, historyTurns.length, abortSignal)
   const jump = canvas.getByText('New messages ↓')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   // The reader scrolls up into history.

@@ -1,14 +1,14 @@
 # Small client TUI
 
-A minimal Rust client assembled from `st3-client`, `st3-feed` and
-`st3-conversation-ui` with its optional ratatui drawing. It imports no stui or daemon code.
+A minimal Rust client assembled from `fractal-client`, `fractal-feed` and
+`fractal-conversation-ui` with its optional ratatui drawing. It imports no stui or daemon code.
 
 Read [Build your own client](../../docs/clients/build-your-own.md) for setup, the package map,
 transport/authentication choices and extension points.
 
 ```sh
-cargo run --locked -p st3-client-tui -- person/avery [SOCKET]
-cargo test --locked -p st3-client-tui
+cargo run --locked -p fractal-client-tui -- person/avery [SOCKET]
+cargo test --locked -p fractal-client-tui
 ```
 
 Replace the invented person with one in your fleet. Omit `[SOCKET]` to use normal st discovery.
