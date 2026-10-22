@@ -18,9 +18,9 @@ verifiers accept both predicate types:
 permanent signed-history decoder exception named in
 [#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
 attestations are never rewritten. All other predicate URIs are rejected.
-The Rust observers and `scripts/evidence-sign` still write
-`https://smalltalk.dev/evidence/gate/v1`. The signer switches only in a later
-release, after this dual-URI verifier release is on main. Its fields are:
+The Rust observers and `scripts/evidence-sign` write
+`https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers
+also accept records produced by older signers. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
@@ -1000,11 +1000,29 @@ A kind's rule may also name `by_level`: for one signer level (the first part of 
 host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
-`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only.
 A level's rule may also say `"lane": true` (default false): that level's notes are then held to the lane of the check in
 `.st/required-lanes.json` at the same accepted base as the policy, exactly as `--lanes-from` holds any note: the tree must not change
 the lane's definition paths (`definition_changed`) and the note must carry that base's `lane_definition_sha256` (`wrong_definition`); a base
 without a lane for the check refuses such a note (`no_lane`). Other levels are unaffected. The `agent` level (below) uses it.
+
+A check may also name `events` itself (optional; the same two values). It limits the runs ANY note for that check may skip, whoever signed it,
+and a signer level's own `events` can only narrow it further (the verifier reports the intersection, which may be empty: then nothing skips).
+Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
+tree: `"enforce": true, "events": ["pull_request"]`.
+
+### Which checks skip today
+
+| Check | `enforce` | `events` | `sample_one_in` | Since |
+| --- | --- | --- | --- | --- |
+| `typescript-client` | true | `pull_request` | 5 | this change |
+| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |
+
+`typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
+trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
+real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
+sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
+`enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
 
 ### Requiring a signed note (`require`, shadow only so far)
 
@@ -1091,6 +1109,21 @@ credentials, and the event fields reach the script only as environment variables
 that rewrites the script, the verifier, the policy and the lane file and shows that none of it runs and the base's rules decide. Forks and drafts are
 `skipped`. With no check requiring a note the job is a no-op that fetches nothing. A new `pull_request_target` workflow does not run for the pull
 request that adds it (the base does not have it yet), so its first runs are the next pull requests after it lands.
+
+### SLO counters (`scripts/ci-evidence-slo`)
+
+`scripts/ci-evidence-slo --repository OWNER/NAME [--hours 24 | --since T --until T] [--max-logs N] [--json]` reads the finished `Workspace CI` runs of an
+interval (GitHub's read API only; nothing is written or started) and, for every `evidence-gate-<check>` job, the one fixed step the gate ended with. Per check
+and event (`pull_request`, `merge_group`, `push`) it reports:
+
+- `decisions`: gate jobs that completed with an outcome, the DENOMINATOR of every rate (a gate job that failed or was cancelled before printing an outcome is `gate_incomplete`, not a decision);
+- `satisfied`: an existing trusted note covered the run, split into `skipped` (the gate took the skip: `enforce` true) and `shadow` (it would have), and `satisfied_by_producer`, the same count by `kind/trust_level` of the note
+  read from the gate's decision line (`unread` for jobs beyond `--max-logs`, the log budget, which only bounds the producer and reason split, never the outcome counts);
+- `produced_not_verified`: a note exists and is NOT usable, `rejected` (refused: bad signature, untrusted signer, failed check ...) plus `degraded` (only an unsigned degraded record), with the reasons. TARGET ZERO;
+- `no_note` and `unavailable`: nothing usable was found, or the verifier or notes could not be obtained (the check ran as before).
+
+Runs still in progress are not counted (their gate jobs may not have finished) and an API that cannot be read exits 1 instead of printing zeros. The counters measure the gate in
+shadow today (`skipped` is 0 while every `enforce` is false); they are the numbers the flip decisions in the proof table read.
 
 ### Which tree a pull request run asks about
 

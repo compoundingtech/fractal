@@ -1,11 +1,11 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useLocale } from 'react-aria'
-import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
+import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Rect, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
 import { Icon } from '../composition/Icons'
-import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { useTouchLayout } from './useTouchLayout'
 
 export interface SidebarTreeItem<T> {
   readonly id: Key
@@ -86,6 +86,16 @@ interface MeasuredRow { readonly width: number; readonly height: number; readonl
 class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
   private rowContent: unknown
   private readonly measured = new WeakMap<object, MeasuredRow>()
+  override getLayoutInfo(key: Key) {
+    const info = super.getLayoutInfo(key)
+    if (info !== null || this.virtualizer?.collection.getItem(key) == null) return info
+    // A stale wider requested rect can have more area without covering newly expanded rows.
+    // Upstream: https://github.com/adobe/react-spectrum/issues/10129
+    // Remove this fallback when upstream fixes missing-key layout after resize.
+    const contentSize = this.getContentSize()
+    this.getVisibleLayoutInfos(new Rect(0, 0, contentSize.width, contentSize.height))
+    return super.getLayoutInfo(key)
+  }
   override getDropTargetLayoutInfo(target: Parameters<ListLayout<unknown>['getDropTargetLayoutInfo']>[0]) {
     const info = super.getDropTargetLayoutInfo(target)
     info.zIndex = 2
@@ -141,20 +151,6 @@ const copyCheckboxFieldSlots: React.ContextType<typeof CheckboxFieldContext> = {
  * Touch layouts keep this gutter and these edges; only the hit area changes (see `disclosurePlacement`).
  */
 const depthIndent = (depth: number) => `calc(${s.lg} * ${depth})`
-/** A coarse primary pointer with no fine one: the composer's touch query. */
-const touchPointerQuery = '(pointer: coarse) and (not (any-pointer: fine))'
-const subscribeTouchPointer = (onChange: () => void) => {
-  const media = window.matchMedia(touchPointerQuery)
-  media.addEventListener('change', onChange)
-  return () => media.removeEventListener('change', onChange)
-}
-const touchPointer = () => window.matchMedia(touchPointerQuery).matches
-/** Touch layout: a narrow host or a coarse primary pointer. */
-function useTouchLayout() {
-  const narrow = React.useContext(NarrowLayoutContext)
-  const coarse = React.useSyncExternalStore(subscribeTouchPointer, touchPointer, () => false)
-  return narrow || coarse
-}
 
 /**
  * The touch disclosure for a `trailing` parent, rendered by the host in its own trailing column when `renderRow` gets
@@ -286,6 +282,9 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       return row === undefined || row.estimated || row.rect.y >= scroll ? [] : [{ item, height: row.rect.height, offset: 0 }]
     })
     if (props.stickyAncestors === false) candidates = []
+    // A pinned ancestor is usually unmounted, so no row observer sees its content change in place
+    // (a bound row's live data). Its bank copy does, and corrects the cached height its pin uses.
+    for (const pin of candidates) measurementCandidates.set(pin.item.id, pin.item)
     const budget = height * 0.4
     let pins: Pin<T>[] = candidates
     // Retain deepest rows. The breadcrumb uses the real upper row's measured height.
@@ -434,7 +433,8 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       for (const entry of entries) {
         const id = (entry.target as HTMLElement).dataset.measureKey
         const item = snapshot.measurements.find(item => String(item.id) === id)
-        if (item === undefined || layout.virtualizer === null) continue
+        // As with mounted rows, a hidden tree reports zero; the last measurement stands.
+        if (item === undefined || layout.virtualizer === null || entry.contentRect.height <= 0) continue
         const size = layout.getContentSize().copy()
         size.width = entry.contentRect.width
         size.height = entry.contentRect.height

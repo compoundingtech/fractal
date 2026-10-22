@@ -73,6 +73,7 @@ def main(argv):
         result = json.loads(done.stderr.decode()[done.stderr.decode().index('{'):])
         record = result['record']
         body = statement(record)
+        assert body['predicateType'] == 'https://compounding.tech/fractal/evidence/gate/v1'
         check = body['predicate']['observed']['checks']['linux-gate']
         assert git(repo, 'for-each-ref', '--format=%(objectname)', result['ref']) == record
         assert body['subject'][0] == {'name': git(repo, 'rev-parse', 'HEAD'), 'digest': {'gitTree': git(repo, 'rev-parse', 'HEAD^{tree}')}}

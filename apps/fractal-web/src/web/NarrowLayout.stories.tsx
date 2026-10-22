@@ -367,3 +367,130 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   await assertPhoneTabRow(canvasElement)
 }) }
 export const TerminalToggleLight: Story = { ...TerminalToggle, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The light responsive workspace over deterministic terminal feeds checks phone terminal controls and focus return.' } }, args: { ...TerminalToggle.args, scheme: 'light' } }
+
+// AgentRowActions' compact-details query: phone widths and touch-only devices anchor Reported agent details to the row's menu trigger.
+const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
+// The selected agent starts in view even at 320 × 568; below-fold rows may be virtualized out.
+const detailsRow = /^WorkbenchShell,/
+const tap = (target: Element) => userEvent.pointer([{ keys: '[TouchA>]', target }, { keys: '[/TouchA]', target }])
+const nextFrame = () => {
+  const { promise, resolve } = Promise.withResolvers<number>()
+  requestAnimationFrame(resolve)
+  return promise
+}
+type Press = 'touch' | 'mouse' | 'keyboard'
+const press = async (target: HTMLElement, via: Press) => {
+  if (via === 'touch') return tap(target)
+  if (via === 'mouse') return userEvent.click(target)
+  target.focus()
+  await userEvent.keyboard('{Enter}')
+}
+/** Menu trigger → Reported agent details; resolves once the details dialog owns focus and keeps it across frames. */
+const openReportedDetails = async (row: HTMLElement, via: Press) => {
+  // Let queued virtualizer scroll work run before checking whether the row accepts a press.
+  await nextFrame()
+  await nextFrame()
+  const trigger = within(row).getByRole('button', { name: /^Actions for / })
+  const title = trigger.getAttribute('aria-label')!.replace(/^Actions for /, '')
+  // RAC disables pointer events while its virtualizer settles the selected row into view.
+  await waitFor(() => {
+    expect(getComputedStyle(trigger).pointerEvents).not.toBe('none')
+    const box = trigger.getBoundingClientRect()
+    expect(trigger.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2))).toBe(true)
+  })
+  await press(trigger, via)
+  const menu = await waitFor(() => within(document.body).getByRole('menu', { name: `Actions for ${title}` }))
+  await press(within(menu).getByRole('menuitem', { name: 'Reported agent details' }), via)
+  const dialog = await waitFor(() => within(document.body).getByRole('dialog', { name: `Reported details for ${title}` }))
+  await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
+  await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
+  // Nothing pulls focus back out between overlays: Escape must reach this dialog.
+  await nextFrame()
+  await nextFrame()
+  await expect(dialog.contains(document.activeElement)).toBe(true)
+  return { trigger, dialog, popover: dialog.parentElement! }
+}
+/** Popover and dialog fully inside the viewport, no horizontal overflow in the popover, its dialog or the page. */
+const expectInsideViewport = (popover: HTMLElement, dialog: HTMLElement) => waitFor(() => {
+  const width = document.documentElement.clientWidth
+  for (const box of [popover.getBoundingClientRect(), dialog.getBoundingClientRect()]) {
+    expect(box.width).toBeGreaterThan(0)
+    expect(box.left).toBeGreaterThanOrEqual(-0.5)
+    expect(box.top).toBeGreaterThanOrEqual(-0.5)
+    expect(box.right).toBeLessThanOrEqual(width + 0.5)
+    expect(box.bottom).toBeLessThanOrEqual(window.innerHeight + 0.5)
+  }
+  expect(popover.scrollWidth).toBeLessThanOrEqual(popover.clientWidth)
+  expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth)
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+})
+/** Bottom end on the menu trigger (flipped above when there is no room), at most the viewport less two 8px gutters. */
+const expectCompact = (popover: HTMLElement, trigger: HTMLElement) => waitFor(() => {
+  const box = popover.getBoundingClientRect()
+  const anchor = trigger.getBoundingClientRect()
+  const width = document.documentElement.clientWidth
+  const placement = popover.getAttribute('data-placement')
+  expect(placement).toMatch(/^(bottom|top)$/)
+  if (placement === 'bottom') expect(box.top).toBeGreaterThanOrEqual(anchor.bottom - 0.5)
+  else expect(box.bottom).toBeLessThanOrEqual(anchor.top + 0.5)
+  expect(box.width).toBeLessThanOrEqual(width - 16 + 0.5)
+  expect(box.left).toBeGreaterThanOrEqual(8 - 0.5)
+  expect(box.right).toBeLessThanOrEqual(width - 8 + 0.5)
+  // End-aligned with the trigger unless the start gutter pushes it inward.
+  expect(Math.abs(box.right - Math.max(anchor.right, 8 + box.width))).toBeLessThanOrEqual(1)
+})
+/** Desktop keeps details to the right of the painted row, overlapping it vertically. */
+const expectRightOfRow = (popover: HTMLElement, row: Element) => waitFor(() => {
+  const box = popover.getBoundingClientRect()
+  const anchor = row.getBoundingClientRect()
+  expect(popover.getAttribute('data-placement')).toBe('right')
+  expect(box.left).toBeGreaterThanOrEqual(anchor.right - 0.5)
+  expect(box.top).toBeLessThan(anchor.bottom)
+  expect(box.bottom).toBeGreaterThan(anchor.top)
+})
+const closeWithEscape = async (dialog: HTMLElement, trigger: HTMLElement) => {
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(dialog.isConnected).toBe(false))
+  await waitFor(() => expect(trigger).toHaveFocus())
+}
+
+/**
+ * The shared row menu's Reported agent details from the real roster. Below 900 px the row sits in the real phone
+ * Agents drawer (320 px, less at narrower widths): details open bottom end on the row's menu trigger, fit the viewport
+ * less 8 px gutters, own focus, and Escape closes only the details, returning focus to the menu trigger with the
+ * drawer still open. Wider windows keep details to the right of the docked sidebar row.
+ */
+export const AgentRowDetails: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'The real workspace over the existing deterministic fixture roster places one fixed row in the phone Agents drawer and the docked sidebar to verify details placement, viewport bounds, focus ownership and Escape focus return.' } },
+  play: async ({ canvasElement }) => {
+  const { canvas, narrow, header } = await workspace(canvasElement)
+  if (!narrow) {
+    const row = await within(canvas.getByRole('complementary', { name: 'Agents' })).findByRole('row', { name: detailsRow })
+    const painted = row.querySelector('[data-milestone-row]')!
+    const compact = window.matchMedia(compactDetailsQuery).matches
+    for (const via of ['mouse', 'keyboard'] as const) {
+      const { trigger, dialog, popover } = await openReportedDetails(row, via)
+      await expectInsideViewport(popover, dialog)
+      await (compact ? expectCompact(popover, trigger) : expectRightOfRow(popover, painted))
+      await closeWithEscape(dialog, trigger)
+    }
+    await userEvent.unhover(row)
+    return
+  }
+  await tap(header.getByRole('button', { name: 'Expand sidebar' }))
+  const agents = await canvas.findByRole('dialog', { name: 'Agents' })
+  await waitFor(() => expect(agents.contains(document.activeElement)).toBe(true))
+  // The drawer keeps its strip of thread: 320 px, or the viewport less 40 px when narrower.
+  await expect(Math.abs(agents.getBoundingClientRect().width - Math.min(320, document.documentElement.clientWidth - 40))).toBeLessThanOrEqual(1)
+  for (const via of ['touch', 'keyboard'] as const) {
+    const row = await within(agents).findByRole('row', { name: detailsRow })
+    const { trigger, dialog, popover } = await openReportedDetails(row, via)
+    // Inside the drawer's modal DOM, so its focus containment and inert boundary include the details.
+    await expect(agents.contains(dialog)).toBe(true)
+    await expectInsideViewport(popover, dialog)
+    await expectCompact(popover, trigger)
+    await closeWithEscape(dialog, trigger)
+    await expect(canvas.getByRole('dialog', { name: 'Agents' })).toBe(agents)
+  }
+} }
+export const AgentRowDetailsLight: Story = { ...AgentRowDetails, args: { scheme: 'light' } }

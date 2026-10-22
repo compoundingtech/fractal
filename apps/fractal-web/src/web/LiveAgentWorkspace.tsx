@@ -1,5 +1,5 @@
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
-import { sidebarRow, sidebarSubagentRow, subagentRowId } from './sidebarRow.ts'
+import { sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
@@ -11,7 +11,7 @@ import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal, usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
@@ -65,16 +65,19 @@ const LiveSidebarAgentRow = React.memo((props: {
   readonly actions: SidebarActions
 }) => {
   const feed = useAgent(props.agentRef)
+  const source = useDataSource()
+  const missionAtom = React.useMemo(() => sidebarMissionFeedsAtom(source), [source])
+  const mission = useAtomValue(missionAtom)
   const connection = useConnection()
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const frozenAt = React.useContext(RosterFrozenAt)
   const item = React.useMemo(() => {
     if (agent === undefined) return undefined
-    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe })
+    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission })
     const child = agent.subagents?.find(child => child.id === props.childId)
     return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
-  }, [agent, stale, props.needsMe, props.childId])
+  }, [agent, stale, props.needsMe, props.childId, mission])
   const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
   return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
 })
@@ -83,7 +86,8 @@ LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 const LiveSidebarTreeView = React.memo((props: {
   readonly binding: SidebarFoldersBinding
   readonly tree: SidebarFoldersBinding['tree']
-  readonly accessibleNames: ReadonlyMap<string, string>
+  readonly agents: readonly Agent[]
+  readonly stale: boolean
   readonly needsYou: ReadonlySet<string>
   readonly current: string
   readonly query: string
@@ -91,11 +95,30 @@ const LiveSidebarTreeView = React.memo((props: {
   readonly select: (ref: string) => void
   readonly actions: SidebarActions
 }) => {
+  const source = useDataSource()
+  const previousAccessibleNames = React.useRef<ReadonlyMap<string, string>>(new Map())
+  const namesAtom = React.useMemo(() => {
+    const mission = sidebarMissionFeedsAtom(source)
+    return Atom.make(get => {
+      const observation = props.agents.some(agent => (agent.currentWork?.length ?? 0) > 0 || agent.mission !== undefined)
+        ? get(mission)
+        : undefined
+      const next = new Map(props.agents.flatMap(agent => [
+        [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale: props.stale, needsMe: props.needsYou.has(agent.ref), ...observation }))] as const,
+        ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale: props.stale }))] as const),
+      ]))
+      const previous = previousAccessibleNames.current
+      if (previous.size === next.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
+      previousAccessibleNames.current = next
+      return next
+    })
+  }, [source, props.agents, props.stale, props.needsYou])
+  const accessibleNames = useAtomValue(namesAtom)
   const renderAgent = React.useCallback((node: Extract<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>, touchDisclosure?: React.ReactNode) =>
     <LiveSidebarAgentRow agentRef={node.parent ?? node.subject} childId={node.childId} active={node.parent === undefined && props.current === node.subject} needsMe={node.parent === undefined && props.needsYou.has(node.subject)} openRef={node.parent === undefined ? node.subject : undefined} touchDisclosure={touchDisclosure} select={props.select} actions={props.actions} />, [props.current, props.needsYou, props.select, props.actions])
   const renderFolderSignal = React.useCallback((folder: Exclude<SidebarFoldersBinding['tree'][number], { readonly _tag: 'Agent' }>) =>
     <FolderAttentionSignal folder={folder} refs={props.needsYou} />, [props.needsYou])
-  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={props.accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
+  return <SidebarQueryContext.Provider value={props.query}><AgentFolders {...props.binding} tree={props.tree} accessibleNames={accessibleNames} selectedId={props.current} revealKey={props.revealKey} onSelect={props.select} renderFolderSignal={renderFolderSignal} renderAgent={renderAgent} /></SidebarQueryContext.Provider>
 })
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
@@ -214,6 +237,7 @@ const initialAgentFromUrl = () => {
 export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
+  usePortalContainerRegistration(getContainer)
   return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
 }
 
@@ -387,17 +411,6 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
-  const previousAccessibleNames = React.useRef<ReadonlyMap<string, string> | undefined>(undefined)
-  const accessibleNames = React.useMemo(() => {
-    const next = new Map(agents.flatMap(agent => [
-      [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale, needsMe: needsYou.has(agent.ref) }))] as const,
-      ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale }))] as const),
-    ]))
-    const previous = previousAccessibleNames.current
-    if (previous !== undefined && next.size === previous.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
-    previousAccessibleNames.current = next
-    return next
-  }, [agents, stale, needsYou])
   const selectLatest = React.useRef(select)
   selectLatest.current = select
   const selectAgent = React.useCallback((ref: string) => {
@@ -477,7 +490,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         </div>
       </> : null}
       <RosterFrozenAt.Provider value={frozenAt}>
-        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} accessibleNames={accessibleNames} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} actions={sidebarActions} />
+        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} agents={agents} stale={stale} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} actions={sidebarActions} />
       </RosterFrozenAt.Provider>
     </nav>
     {fleet._tag === 'Observed' ? <RosterDecodeNotice decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
@@ -555,7 +568,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
   </NarrowLayoutContext.Provider>)
 }

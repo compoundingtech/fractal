@@ -135,6 +135,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
     "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
     "apps/fractal-web/src/state/persistence.ts",
+    # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+    "apps/fractal-web/src/telemetry/inputPaint.ts",
     "apps/fractal-web/src/telemetry/measurement/counters.ts",
     "apps/fractal-web/src/telemetry/measurement/developer.ts",
     "apps/fractal-web/src/telemetry/measurement/engine.ts",

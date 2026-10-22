@@ -1,7 +1,7 @@
 import { spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal } from '../taste/PortalContainer'
 import { displayedTabKey, paneKey, paneKind, type WorkbenchLayout, type WorkbenchPane, type TabGroupLayout } from './workbench-model'
 import { readStoredActiveTab } from './workbench-state'
 
@@ -91,11 +91,9 @@ export function usePaneLayer(layout: WorkbenchLayout, workspaceId: string, focus
 
 /** Layout owns only empty slots. React owns each pane once, under this stable portal layer. */
 export function PaneLayer({ visible, canClose, render }: { visible: readonly PanePlacement[]; canClose: (group: TabGroupLayout) => boolean; render: (pane: WorkbenchPane) => React.ReactNode }) {
-  return visible.map(({ mount, group }) => createPortal(
-    <PaneCloseContext.Provider value={paneKind(mount.pane) === 'diff' && canClose(group) ? mount.close : undefined}><PaneHeaderContext.Provider value={mount.headerElement}>{render(mount.pane)}</PaneHeaderContext.Provider></PaneCloseContext.Provider>,
-    mount.element,
-    String(mount.id),
-  ))
+  return visible.map(({ mount, group }) => <RegisteredPortal key={String(mount.id)} container={mount.element}>
+    <PaneCloseContext.Provider value={paneKind(mount.pane) === 'diff' && canClose(group) ? mount.close : undefined}><PaneHeaderContext.Provider value={mount.headerElement}>{render(mount.pane)}</PaneHeaderContext.Provider></PaneCloseContext.Provider>
+  </RegisteredPortal>)
 }
 
 export const PaneSlotsProvider = PaneSlotsContext.Provider
@@ -130,7 +128,7 @@ export function PaneSlot({ pane, path, onClose }: { pane: WorkbenchPane; path: s
 /** Pane content contributes status and controls to its group's header row; the row's height never changes. */
 export function PaneHeaderAccessory({ children, inlineFallback = false }: { children: React.ReactNode; inlineFallback?: boolean }) {
   const host = React.useContext(PaneHeaderContext)
-  return host === undefined ? (inlineFallback ? children : null) : createPortal(children, host)
+  return host === undefined ? (inlineFallback ? children : null) : <RegisteredPortal container={host}>{children}</RegisteredPortal>
 }
 
 /** A host that owns its own header row (outside Workbench) supplies the element pane accessories portal into. */

@@ -477,6 +477,10 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        // Replication admission/import, repair and pruning can dirty preparation
+        // without running APPEND (or can do so after its last claim projector).
+        // The native connection signal makes the no-work boundary SQL-free.
+        resources::flush_preparation(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -753,6 +757,10 @@ mod schema_install_tests {
         assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap(), "the earlier committed initial chunk must survive");
         for name in [
             "resource_observations",
+            "local_resource_preparation",
+            "local_resource_preparation_claims",
+            "local_resource_preparation_pending",
+            "local_resource_preparation_dirty",
             "custom_registrations",
             "local_custom_dirty",
         ] {
@@ -792,6 +800,10 @@ mod schema_install_tests {
         );
         for name in [
             "resource_observations",
+            "local_resource_preparation",
+            "local_resource_preparation_claims",
+            "local_resource_preparation_pending",
+            "local_resource_preparation_dirty",
             "custom_registrations",
             "local_custom_dirty",
         ] {

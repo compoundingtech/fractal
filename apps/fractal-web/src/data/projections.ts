@@ -93,6 +93,11 @@ const lifecycleOf = (row: DecodedAgent): Agent['lifecycle'] => {
   }
 }
 
+const workFromLabel = (work: NonNullable<DecodedAgent['current_work']>[number]): NonNullable<Agent['currentWork']>[number] => ({
+  id: work.id, missionId: work.mission_id, runId: work.mission_run_id,
+  path: work.path, title: Option.getOrUndefined(work.title), state: leafText(work.state),
+})
+
 const agentFromRow = (row: DecodedAgent): Agent => {
   const driver = Option.getOrUndefined(row.driver)
   const harness = harnesses.find((candidate) => candidate === driver)
@@ -128,6 +133,8 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     ask: fromOption(row.ask),
     ...(suspendedAt === undefined ? {} : { statusSince: DateTime.toEpochMillis(suspendedAt) }),
     ...(mission === undefined ? {} : { mission }),
+    currentWork: row.current_work?.map(workFromLabel),
+    upcomingWork: row.upcoming_work?.map(workFromLabel),
     ...(row.subagents === undefined ? {} : { subagents: row.subagents.map(child => ({
       id: child.id, driver: child.driver,
       description: Option.getOrUndefined(child.description),
@@ -266,6 +273,14 @@ const sameSubagents = (a: Agent['subagents'], b: Agent['subagents']): boolean =>
       child.lease_expires_at === other.lease_expires_at
   }))
 
+// oxlint-disable-next-line overeng/named-args -- Retained work projection comparator.
+const sameWork = (a: Agent['currentWork'], b: Agent['currentWork']): boolean =>
+  a === b || (a !== undefined && b !== undefined && a.length === b.length && a.every((work, index) => {
+    const other = b[index]!
+    return work.id === other.id && work.missionId === other.missionId && work.runId === other.runId &&
+      work.path === other.path && work.title === other.title && work.state === other.state
+  }))
+
 // oxlint-disable-next-line overeng/named-args -- Retained Agent projection comparator; fixed positional Equivalence shape.
 const sameAgent = (a: Agent, b: Agent): boolean =>
   a.ref === b.ref &&
@@ -291,6 +306,8 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   sameKnown(a.ask, b.ask) &&
   a.statusSince === b.statusSince &&
   a.mission === b.mission &&
+  sameWork(a.currentWork, b.currentWork) &&
+  sameWork(a.upcomingWork, b.upcomingWork) &&
   sameSubagents(a.subagents, b.subagents) &&
   a.connected === b.connected
 

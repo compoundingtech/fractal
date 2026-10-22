@@ -1783,6 +1783,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -1973,6 +1983,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-2-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2163,6 +2183,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-3-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -2353,6 +2383,16 @@ jobs:
       - name: Run nextest
         shell: bash
         run: nix develop -c bash scripts/ci-linux tests
+        id: nextest
+      - name: Name the flaky test count
+        if: ${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: "nextest-flaky-linux-tests-shard-4-${{ steps.nextest.outputs.flaky }}"
+          path: "${{ runner.temp }}/nextest-flaky.txt"
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Save Nix outputs to the local Nix cache
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
@@ -3701,6 +3741,8 @@ jobs:
               "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
               "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
               "apps/fractal-web/src/state/persistence.ts",
+              # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+              "apps/fractal-web/src/telemetry/inputPaint.ts",
               "apps/fractal-web/src/telemetry/measurement/counters.ts",
               "apps/fractal-web/src/telemetry/measurement/developer.ts",
               "apps/fractal-web/src/telemetry/measurement/engine.ts",

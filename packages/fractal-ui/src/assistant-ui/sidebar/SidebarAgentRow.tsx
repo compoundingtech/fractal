@@ -55,8 +55,20 @@ function usageText(usage: Extract<Row['usage'], { _tag: 'Known' }>): string {
   return `${usage.usd === undefined ? '' : `$${usage.usd} / `}${usage.tokens} tokens; ${usageScopeLabel(usage.scope).toLowerCase()}`
 }
 export const sidebarRowTitle = (row: Row): string => row.title
-/** Name for a focusable tree row whose host cannot attach a description (RAC TreeItem drops aria-describedby): the visible title first (label-in-name), then the status. */
-export const sidebarRowAccessibleName = (row: Row): string => `${row.title}, ${row.statusLabel}`
+/** Concise label-in-name for the tree host, which cannot attach a row description. */
+export const sidebarRowAccessibleName = (row: Row): string => {
+  const parts = [row.title, row.statusLabel]
+  if (row.missionContext?._tag === 'Mission') {
+    const { slug, progress, step } = row.missionContext
+    parts.push(`Mission ${slug}`)
+    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    if (step._tag === 'Step') parts.push(`Step ${step.name}`)
+    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    if (row.missionInfo !== undefined && row.missionInfo._tag !== 'Live') parts.push('mission info may be out of date')
+  }
+  if (row.missionContext?._tag === 'Unavailable') parts.push('mission info unavailable')
+  return parts.join(', ')
+}
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */
 export function sidebarRowDescription(row: Row, reportedStatusOnly = false): string {
   const parts: string[] = [row.title]
@@ -76,6 +88,13 @@ export function sidebarRowDescription(row: Row, reportedStatusOnly = false): str
   if (row.pullRequest !== undefined) parts.push(`Pull request: #${row.pullRequest.number}, ${row.pullRequest.title}, ${row.pullRequest.state}, ${row.pullRequest.ref}`)
   if (row.terminal !== undefined) parts.push(`Terminal: ${row.terminal}`)
   if (row.mission !== undefined) parts.push(`Mission: ${row.mission}`)
+  if (row.missionContext?._tag === 'Mission') {
+    const { progress, step, queued } = row.missionContext
+    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    if (step._tag === 'Step') parts.push(`Step: ${step.name}`)
+    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.slug).join(', ')}`)
+  }
   if (row.childrenKnown !== false) parts.push(`Subagents: ${row.children.length}`)
   parts.push(`ID: ${row.ref}`)
   return `${parts.join('. ')}.`
@@ -101,6 +120,12 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
     {row.pullRequest !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Pull request</dt><dd {...stylex.props(styles.detailValue)}>#{row.pullRequest.number}: {row.pullRequest.title}; {row.pullRequest.state}; {row.pullRequest.ref}</dd></>}
     {row.terminal !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Terminal</dt><dd {...stylex.props(styles.detailValue)}>{row.terminal}</dd></>}
     {row.mission !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Mission</dt><dd {...stylex.props(styles.detailValue)}>{row.mission}</dd></>}
+    {row.missionContext?._tag === 'Mission' && <>
+      {row.missionContext.progress._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Steps</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.progress.done} of {row.missionContext.progress.total}</dd></>}
+      {row.missionContext.step._tag === 'Step' && <><dt {...stylex.props(styles.detailLabel)}>Step</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.name}</dd></>}
+      {row.missionContext.step._tag === 'Waiting' && <><dt {...stylex.props(styles.detailLabel)}>Waiting for you</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.handle === undefined ? '' : `${row.missionContext.step.handle} `}{row.missionContext.step.question}</dd></>}
+      {row.missionContext.queued.length > 0 && <><dt {...stylex.props(styles.detailLabel)}>Queued missions</dt><dd {...stylex.props(styles.detailValue)}><ul>{row.missionContext.queued.map(mission => <li key={mission.id}>{mission.slug}</li>)}</ul></dd></>}
+    </>}
     {row.subagent !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Subagent ID</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.id}</dd>
       {row.subagent.subagent_type !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Kind</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.subagent_type}</dd></>}
       {row.subagent.work_id !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Work</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.work_id}</dd></>}
@@ -146,25 +171,48 @@ export interface AgentRowActionsProps extends SidebarClock {
   readonly onDetailsPress?: () => void
   readonly onMenuOpenChange?: (isOpen: boolean) => void
 }
+// A 320px Agents sheet, the 340px details surface and its two 8px viewport gutters.
+const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
+const subscribeDetailsLayout = (onChange: () => void) => {
+  const media = window.matchMedia(compactDetailsQuery)
+  media.addEventListener('change', onChange)
+  return () => media.removeEventListener('change', onChange)
+}
+const compactDetailsLayout = () => window.matchMedia(compactDetailsQuery).matches
 /**
  * The row's action menu (`[data-agent-menu]`) and its keyboard-reachable reported-details dialog. Shared by every sidebar
  * row so the actions stay one implementation; hosts own only the trigger's placement and visibility.
  */
 export function AgentRowActions({ row, now, reportedStatusOnly = false, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange }: AgentRowActionsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
+  const compactDetails = React.useSyncExternalStore(subscribeDetailsLayout, compactDetailsLayout, () => false) || narrow
   const menuItemStyle = narrow ? styles.menuItemFocusNarrow : styles.menuItemFocus
-  const detailsTrigger = React.useRef<HTMLButtonElement>(null)
+  // Open from the real menu action: a synthetic click on the hidden trigger changes RAC's input modality and defers dialog focus.
+  const [detailsOpen, setDetailsOpen] = React.useState(false)
   const title = sidebarRowTitle(row)
   const ownerId = row.parentRef?.replace(/^agent\//, '') ?? row.id
   const canOpen = actions?.select !== undefined || onOpen !== undefined
-  const trigger = <VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton, narrow && styles.detailsTouchTarget)}><Icon name="message" /></Button></VisuallyHidden>
+  const trigger = <VisuallyHidden isFocusable><Button aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton, narrow && styles.detailsTouchTarget)}><Icon name="message" /></Button></VisuallyHidden>
   return <>
-    <DialogTrigger>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover triggerRef={anchorRef} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} reportedStatusOnly={reportedStatusOnly} now={now} /></Dialog></Popover></DialogTrigger>
+    <DialogTrigger isOpen={detailsOpen} onOpenChange={open => {
+      setDetailsOpen(open)
+      // The menu item unmounts, so RAC falls back to its tree row. Restore the persistent trigger without stealing a newer focus.
+      if (!open) requestAnimationFrame(() => {
+        const trigger = menuTriggerRef.current
+        const active = trigger?.ownerDocument.activeElement
+        if (active === trigger?.ownerDocument.body || active === anchorRef.current || active === anchorRef.current?.closest('[role="row"]')) trigger?.focus()
+      })
+    }}>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover
+      triggerRef={compactDetails ? menuTriggerRef : anchorRef}
+      placement={compactDetails ? 'bottom end' : 'right'}
+      shouldFlip containerPadding={8}
+      {...stylex.props(styles.hovercard, compactDetails && styles.detailsCompact)}
+    ><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} reportedStatusOnly={reportedStatusOnly} now={now} /></Dialog></Popover></DialogTrigger>
     <MenuTrigger onOpenChange={onMenuOpenChange}><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={state => stylex.props(menuButtonStyle(state), narrow && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}
-      <MenuItem id="reported-details" onAction={() => { requestAnimationFrame(() => detailsTrigger.current?.click()) }} style={menuItemStyle}>Reported agent details</MenuItem>
+      <MenuItem id="reported-details" onAction={() => { onDetailsPress?.(); setDetailsOpen(true) }} style={menuItemStyle}>Reported agent details</MenuItem>
       {actions?.details !== undefined && <MenuItem id="details" onAction={() => actions.details?.(row.ref)} style={menuItemStyle}>Agent details</MenuItem>}
       {actions?.declaration !== undefined && row.subagent === undefined && <MenuItem id="declaration" onAction={() => actions.declaration?.(row.ref)} style={menuItemStyle}>View KDL</MenuItem>}
       {actions?.declaration !== undefined && row.mission !== undefined && <MenuItem id="mission-declaration" onAction={() => actions.declaration?.(row.mission!)} style={menuItemStyle}>View mission definition</MenuItem>}
@@ -291,6 +339,7 @@ const styles = stylex.create({
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, width: g.specimenAside, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', maxHeight: g.commandMaxHeight, overflowY: 'auto', boxShadow: elevation.popover, zIndex: 30 },
   // The informational tooltip never owns the divider underneath; explicit details popovers remain interactive.
   passiveHovercard: { pointerEvents: 'none' },
+  detailsCompact: { maxWidth: 'calc(100vw - 16px)' },
   details: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', columnGap: s.md, rowGap: s.sm, margin: s.zero, overflowWrap: 'anywhere' },
   card: { display: 'flex', flexDirection: 'column', gap: s.md, width: g.specimenAside, maxWidth: '100%', boxSizing: 'border-box', overflowWrap: 'anywhere' },
   cardTitle: { fontSize: t.uiSize, lineHeight: t.uiLeading },

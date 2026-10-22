@@ -325,10 +325,10 @@ fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: 
     let counts = targets.count.iter().map(|target| {
         let max = target.max_per_hour;
         let goal = format!("Goal: at most {max} an hour{}.", if max == 0 { ", so one spends the whole allowance" } else { "" });
-        let counted = source.and_then(|ci| ci.ejected_groups(&target.path, now_unix_ms.saturating_sub(HOUR_MS), now_unix_ms));
-        let Some((ejected, groups)) = counted.filter(|(_, groups)| *groups > 0) else {
+        let counted = source.and_then(|ci| ci.flakes(&target.path, now_unix_ms.saturating_sub(HOUR_MS), now_unix_ms));
+        let Some(flakes) = counted.filter(|flakes| flakes.runs > 0) else {
             let (current, why) = match (source, counted) {
-                (Some(_), Some(_)) => ("no samples", "No merge group finished in the last hour".to_owned()),
+                (Some(_), Some(_)) => ("no samples", "No merge group or pull request run of Workspace CI finished in the last hour".to_owned()),
                 (Some(_), None) => ("no source yet", unobserved(&target.path)),
                 (None, _) => ("not observed", unobserved(&target.path)),
             };
@@ -339,20 +339,25 @@ fn ci(targets: &crate::slo::Targets, source: Option<&WorkspaceCi>, now_unix_ms: 
                 "explain": format!("{}. {goal} {why}, so there is nothing to count.", target.about),
             });
         };
-        let met = ejected <= max;
+        let count = flakes.count();
+        let met = count <= max;
         let remaining = if max == 0 {
             if met { 100.0 } else { 0.0 }
         } else {
-            clamp_percent(100.0 * (1.0 - ejected as f64 / max as f64))
+            clamp_percent(100.0 * (1.0 - count as f64 / max as f64))
+        };
+        let ejected = match flakes.groups {
+            0 => "no merge group finished".to_owned(),
+            groups => format!("{} of {} {} ejected (their Workspace CI run failed)", flakes.ejected, plural(groups, "merge group"), if groups == 1 { "was" } else { "were" }),
         };
         json!({
             "id": target.name, "kind": "objective", "about": target.about,
-            "target": format!("≤ {max} an hour"), "current": format!("{ejected} in the last hour"),
+            "target": format!("≤ {max} an hour"), "current": format!("{count} in the last hour"),
             "window": "1h", "remaining_percent": remaining,
             "status": if met { "met" } else { "missed" },
             "explain": format!(
-                "{}. {goal} In the last hour {ejected} of {} were ejected: their Workspace CI run failed. Tests nextest passed only on a retry are not counted yet. {}",
-                target.about, plural(groups, "merge group"),
+                "{}. {goal} In the last hour {ejected}, and the test lanes of {} of {} had {} (tests nextest passed only on a retry): {count} in all. A pull request run is read only when it succeeded; merge group runs are read whatever their result. {}",
+                target.about, flakes.listed, plural(flakes.runs, "finished run"), plural(flakes.flaky_tests, "flaky test"),
                 if met { "The goal is met." } else { "The goal is missed in the last hour." },
             ),
         })
@@ -664,9 +669,18 @@ mod tests {
     }
 
     fn ci_rows(runs: &[Value]) -> Vec<Value> {
+        ci_rows_flaky(runs, &[])
+    }
+
+    /// The rows from `runs`, of which those named in `flaky` had their artifacts listed.
+    fn ci_rows_flaky(runs: &[Value], flaky: &[(u64, u64)]) -> Vec<Value> {
         let runs = runs
             .iter()
             .map(|run| crate::resource::github_workflows::WorkspaceRun::from_run("acme/garden", run).expect("a fixture run"))
+            .map(|mut run| {
+                run.flaky = flaky.iter().find(|(id, _)| *id == run.run_id).map(|(_, tests)| *tests);
+                run
+            })
             .collect();
         let source = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: unix_ms(NOW), runs };
         ci(crate::slo::targets(), Some(&source), unix_ms(NOW))
@@ -742,7 +756,7 @@ mod tests {
             (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64(), flakes["window"].as_str()),
             (Some("met"), Some("0 in the last hour"), Some(100.0), Some("1h"))
         );
-        assert!(flakes["explain"].as_str().unwrap().contains("nextest passed only on a retry are not counted yet"));
+        assert!(flakes["explain"].as_str().unwrap().contains("the test lanes of 0 of 1 finished run had 0 flaky tests"), "{}", flakes["explain"]);
         // One ejected group in the hour spends the whole allowance; one before the hour does not count.
         let rows = ci_rows(&[green.clone(), ci_run(2, "merge_group", "failure", 4.0, 50.0), ci_run(3, "merge_group", "failure", 4.0, 61.0)]);
         let flakes = by_id(&rows, "flakes");
@@ -754,6 +768,34 @@ mod tests {
         // No merge group in the hour is nothing to count.
         let rows = ci_rows(&[ci_run(3, "merge_group", "failure", 4.0, 61.0)]);
         assert_eq!((by_id(&rows, "flakes")["status"].as_str(), by_id(&rows, "flakes")["current"].as_str()), (Some("no-data"), Some("no samples")));
+    }
+
+    #[test]
+    fn flakes_add_tests_nextest_passed_only_on_a_retry() {
+        // A green pull request run alone in the hour is a sample; its flaky tests spend the allowance.
+        let pull = ci_run(1, "pull_request", "success", 9.0, 10.0);
+        let rows = ci_rows_flaky(std::slice::from_ref(&pull), &[(1, 2)]);
+        let flakes = by_id(&rows, "flakes");
+        assert_eq!(
+            (flakes["status"].as_str(), flakes["current"].as_str(), flakes["remaining_percent"].as_f64()),
+            (Some("missed"), Some("2 in the last hour"), Some(0.0))
+        );
+        let explain = flakes["explain"].as_str().unwrap();
+        assert!(explain.contains("no merge group finished, and the test lanes of 1 of 1 finished run had 2 flaky tests (tests nextest passed only on a retry): 2 in all"), "{explain}");
+        assert!(explain.contains("A pull request run is read only when it succeeded"), "{explain}");
+        // Ejected groups and flaky tests add up; a run before the hour counts neither.
+        let runs = [pull.clone(), ci_run(2, "merge_group", "failure", 6.0, 20.0), ci_run(3, "merge_group", "success", 6.0, 30.0),
+            ci_run(4, "merge_group", "success", 6.0, 70.0)];
+        let rows = ci_rows_flaky(&runs, &[(1, 2), (2, 0), (3, 1), (4, 6)]);
+        let flakes = by_id(&rows, "flakes");
+        assert_eq!((flakes["status"].as_str(), flakes["current"].as_str()), (Some("missed"), Some("4 in the last hour")));
+        let explain = flakes["explain"].as_str().unwrap();
+        assert!(explain.contains("1 of 2 merge groups were ejected (their Workspace CI run failed), and the test lanes of 3 of 3 finished runs had 3 flaky tests"), "{explain}");
+        // A run whose artifacts are not listed yet adds no flaky test, and its group still counts.
+        let rows = ci_rows_flaky(&runs[2..], &[]);
+        let flakes = by_id(&rows, "flakes");
+        assert_eq!((flakes["status"].as_str(), flakes["current"].as_str()), (Some("met"), Some("0 in the last hour")));
+        assert!(flakes["explain"].as_str().unwrap().contains("0 of 1 merge group was ejected"));
     }
 
     #[test]
