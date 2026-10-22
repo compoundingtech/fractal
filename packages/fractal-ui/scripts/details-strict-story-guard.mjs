@@ -1,4 +1,5 @@
 // dt10 strict lifecycle: only the two exact resource 404s are tolerated.
+// The document token guards against accidental navigation, not an app forging evidence.
 export async function strictStoryGuard(page, base) {
   const errors = [], records = [], ignored = []
   let storyDocument, recordIndex
