@@ -44,12 +44,36 @@ PROTECTED = (
     'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
     # What decides who may have a head tree used: the author list and the rule that reads it.
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
+    # What an agent-level note is held to (by_level "lane": true reads it from the base).
+    '.st/required-lanes.json',
+    # The evidence log's key: which log heads the verifier reads at all.
+    '.st/evidence-log-key',
 )
 
-NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
+# Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
+# may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
+# merge tree, as before head trees existed. 24 is about 8 hours of main at 3 merges an hour and covered 99% of pull request runs
+# (2026-10-17 to 2026-10-19: median 2, 99th percentile 22).
+HEAD_TREE_MAX_BEHIND = 24
+
+NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
+TAGS = 'refs/tags/evidence'  # and, protected by a ruleset, under refs/tags/evidence/<tree>/ (docs/st3/gate-evidence.md, "Records as tags")
+
+
+def record_refspecs(tree):
+    """One tree's records in both namespaces: two refspecs, one fetch."""
+    return [f'+{TAGS}/{tree}/*:{TAGS}/{tree}/*', f'+{NOTES}/{tree}/*:{NOTES}/{tree}/*']
+
+
+def input_refspecs(check, key):
+    """The records indexed under this check and input key, in both namespaces."""
+    return [f'+{TAGS}/input/{check}/{key}/*:{TAGS}/input/{check}/{key}/*',
+            f'+refs/notes/evidence-input/{check}/{key}/*:refs/notes/evidence-input/{check}/{key}/*']
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
 KEYS = '.st/evidence-keys'
+LOG_KEY = '.st/evidence-log-key'
+LOG_REF = 'refs/evidence-log/main'
 POLICY = '.st/evidence-skip-policy.json'
 MISSING = ('no_record', 'stale_tree', 'wrong_check')
 UNAVAILABLE = ('error', 'no_policy')
@@ -93,7 +117,7 @@ def decide(context, outcome, result, tree):
         (not sampled(context, result, tree), 'sampled: the real job runs anyway, to compare it with the note'),
         (result.get('enforce') is True, 'shadow: the note would cover this check, but the skip policy has not turned skipping on for it'),
         (result.get('events') is None or context['event'] in result['events'],
-         'the policy does not let this signer level cover this event (a host key covers pull requests only)'),
+         'the policy does not let this note cover this event (the check\'s events, or a signer level that covers pull requests only)'),
         (result.get('satisfied') is True, 'verifier did not report satisfied'),
         (result.get('policy') is True, 'the skip policy was not applied'),
         (result.get('tier') == 'full', 'tier is not full'),
@@ -158,7 +182,13 @@ def observe(context, revision='HEAD'):
         return 'unavailable', None, 'could not fetch the accepted base', None
     # --no-filter: choose_tree may have made this a partial clone (history without blobs); the notes' blobs must arrive in this one fetch,
     # not one lazy round trip each when the verifier reads them (that took more than the verifier's 30 seconds on a runner).
-    context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', NOTES).returncode == 0 else 'failed'
+    # Only the records of the tree being asked about (a prefix of one tree), never the whole namespace.
+    tree = run('git', 'rev-parse', '--verify', '--quiet', f'{revision}^{{tree}}')
+    tree_id = tree.stdout.decode().strip() if tree.returncode == 0 else ''
+    if OID.match(tree_id):
+        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)).returncode == 0 else 'failed'
+    else:
+        context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
         shown = run('git', 'show', f'{base}:{path}')
         context[name] = hashlib.sha256(shown.stdout).hexdigest()[:16] if shown.returncode == 0 else 'none'
@@ -177,9 +207,16 @@ def observe(context, revision='HEAD'):
             empty = os.path.join(scratch, 'empty-keys')
             open(empty, 'w').close()
             keys = ['--keys', empty]
+        # The evidence log's shadow view (docs/st3/gate-evidence.md, "The evidence log"), once the base pins the log key and its
+        # verifier reads it: one ref, one commit deep. It is reported on the decision line and changes no decision.
+        log = []
+        if b'--log-keys-from' in script.stdout and run('git', 'cat-file', '-e', f'{base}:{LOG_KEY}').returncode == 0:
+            fetched = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{LOG_REF}:{LOG_REF}')
+            context['log_fetch'] = 'ok' if fetched.returncode == 0 else 'failed'
+            log = ['--log-keys-from', base]
         fetch_input_notes(path, base, check, repository, revision)
         done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check,
-                   '--policy-from', base, '--repository', repository, *keys, timeout=VERIFIER_TIMEOUT)
+                   '--policy-from', base, '--repository', repository, *keys, *log, timeout=VERIFIER_TIMEOUT)
     try:
         result = json.loads(done.stdout)
     except ValueError:  # includes output that is not valid UTF-8
@@ -199,8 +236,7 @@ def fetch_input_notes(verifier, base, check, repository, revision='HEAD'):
     except (ValueError, AttributeError, subprocess.TimeoutExpired, OSError):
         return
     if isinstance(key, str) and OID.match(key):
-        prefix = f'refs/notes/evidence-input/{check}/{key}'
-        run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'{prefix}/*:{prefix}/*')
+        run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *input_refspecs(check, key))
 
 
 def field(value):
@@ -220,7 +256,10 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('attempts', result.get('attempts')), ('enforce', result.get('enforce')), ('match', result.get('match')),
         ('source_inputs', result.get('source_inputs')), ('tree', tree), ('tree_of', context.get('tree_of')),
         ('pr_head', context.get('pr_head')), ('merge_tree', context.get('merge_tree')), ('head_tree', context.get('head_tree')),
+        ('behind', context.get('behind')),
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
+        ('log', result.get('log')), ('log_head', result.get('log_head')), ('log_age_s', result.get('log_age_s')),
+        ('log_missing', result.get('log_missing')), ('log_fetch', context.get('log_fetch')),
         ('head', context['head']),
         ('base', context['base']), ('event', context['event']), ('pr', context['pr']),
         ('repo', context['repository']), ('run', context['run']), ('attempt', context['attempt']),
@@ -319,6 +358,12 @@ def choose_tree(context):
             raise Fallback(f'authors: {str(error)[:120]}')
         branch_point = git_out('merge-base', base, head)
         current = git_out('rev-parse', '--verify', '-q', 'HEAD^1', check=False) if checked_out != head else base
+        behind = git_out('rev-list', '--count', '--first-parent', f'{branch_point}..{current or base}')
+        if not behind.isdigit():
+            raise Fallback('could not count how far the branch is behind')
+        context['behind'] = int(behind)
+        if int(behind) > HEAD_TREE_MAX_BEHIND:
+            raise Fallback(f'the branch is {behind} commits behind main, more than {HEAD_TREE_MAX_BEHIND}')
         changed = []
         for first, second in ((branch_point, head), (branch_point, base), (branch_point, current or base)):
             diff = run('git', 'diff', '--no-renames', '--name-only', '-z', first, second)

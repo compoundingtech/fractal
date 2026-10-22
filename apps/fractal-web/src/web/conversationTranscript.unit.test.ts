@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
 

@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "007ec567fd41c038e22dc1f331d52f3e2357762b5d7b32644d70b3debd8beb52",
+  "lockfileSha256": "1a9fec9924680f6604d2a84f81fdfc14ee9101f61bd9316c6ebaacca163ae90c",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -400,6 +400,21 @@
       "license": "MIT"
     },
     {
+      "name": "@effect/opentelemetry",
+      "version": "4.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@effect/platform-node",
+      "version": "4.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@effect/platform-node-shared",
+      "version": "4.0.0",
+      "license": "MIT"
+    },
+    {
       "name": "@effect/vitest",
       "version": "4.0.0",
       "license": "MIT"
@@ -630,6 +645,11 @@
       "license": "MIT"
     },
     {
+      "name": "@expo/image-utils",
+      "version": "0.11.6",
+      "license": "MIT"
+    },
+    {
       "name": "@expo/inline-modules",
       "version": "0.1.7",
       "license": "MIT"
@@ -687,6 +707,11 @@
     {
       "name": "@expo/require-utils",
       "version": "57.0.5",
+      "license": "MIT"
+    },
+    {
+      "name": "@expo/require-utils",
+      "version": "57.0.6",
       "license": "MIT"
     },
     {
@@ -818,6 +843,21 @@
       "name": "@napi-rs/wasm-runtime",
       "version": "1.2.5",
       "license": "MIT"
+    },
+    {
+      "name": "@noble/hashes",
+      "version": "2.4.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@opentelemetry/api",
+      "version": "1.9.1",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "@opentelemetry/semantic-conventions",
+      "version": "1.43.0",
+      "license": "Apache-2.0"
     },
     {
       "name": "@oxc-parser/binding-android-arm-eabi",
@@ -1028,6 +1068,11 @@
       "name": "@oxc-resolver/binding-win32-x64-msvc",
       "version": "11.21.2",
       "license": "MIT"
+    },
+    {
+      "name": "@playwright/test",
+      "version": "1.64.0",
+      "license": "Apache-2.0"
     },
     {
       "name": "@radix-ui/number",
@@ -1433,6 +1478,31 @@
       "name": "@react-types/shared",
       "version": "3.36.1",
       "license": "Apache-2.0"
+    },
+    {
+      "name": "@redis/bloom",
+      "version": "6.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@redis/client",
+      "version": "6.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@redis/json",
+      "version": "6.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@redis/search",
+      "version": "6.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@redis/time-series",
+      "version": "6.3.0",
+      "license": "MIT"
     },
     {
       "name": "@rolldown/binding-android-arm-eabi",
@@ -1905,6 +1975,11 @@
       "license": "MIT"
     },
     {
+      "name": "@types/ws",
+      "version": "8.18.2",
+      "license": "MIT"
+    },
+    {
       "name": "@types/yargs",
       "version": "17.0.35",
       "license": "MIT"
@@ -1940,6 +2015,11 @@
       "license": "MIT"
     },
     {
+      "name": "@vitest/mocker",
+      "version": "5.0.3",
+      "license": "MIT"
+    },
+    {
       "name": "@vitest/pretty-format",
       "version": "3.2.4",
       "license": "MIT"
@@ -1967,6 +2047,11 @@
     {
       "name": "@vitest/spy",
       "version": "4.1.9",
+      "license": "MIT"
+    },
+    {
+      "name": "@vitest/spy",
+      "version": "5.0.3",
       "license": "MIT"
     },
     {
@@ -2157,6 +2242,11 @@
     {
       "name": "babel-preset-expo",
       "version": "57.0.13",
+      "license": "MIT"
+    },
+    {
+      "name": "badgin",
+      "version": "1.2.3",
       "license": "MIT"
     },
     {
@@ -2695,6 +2785,11 @@
       "license": "MIT"
     },
     {
+      "name": "expo-application",
+      "version": "57.0.3",
+      "license": "MIT"
+    },
+    {
       "name": "expo-asset",
       "version": "57.0.18",
       "license": "MIT"
@@ -2711,7 +2806,7 @@
     },
     {
       "name": "expo-constants",
-      "version": "57.0.20",
+      "version": "57.0.21",
       "license": "MIT"
     },
     {
@@ -2757,6 +2852,11 @@
     {
       "name": "expo-modules-jsi",
       "version": "57.1.1",
+      "license": "MIT"
+    },
+    {
+      "name": "expo-notifications",
+      "version": "57.0.22",
       "license": "MIT"
     },
     {
@@ -4005,6 +4105,16 @@
       "license": "MIT"
     },
     {
+      "name": "playwright",
+      "version": "1.64.0",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "playwright-core",
+      "version": "1.64.0",
+      "license": "Apache-2.0"
+    },
+    {
       "name": "plist",
       "version": "3.1.1",
       "license": "MIT"
@@ -4012,6 +4122,11 @@
     {
       "name": "pngjs",
       "version": "3.4.0",
+      "license": "MIT"
+    },
+    {
+      "name": "postcss",
+      "version": "8.5.26",
       "license": "MIT"
     },
     {
@@ -4192,6 +4307,11 @@
     {
       "name": "redent",
       "version": "3.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "redis",
+      "version": "6.3.0",
       "license": "MIT"
     },
     {
@@ -4605,6 +4725,11 @@
       "license": "MIT"
     },
     {
+      "name": "tinybench",
+      "version": "6.2.2",
+      "license": "MIT"
+    },
+    {
       "name": "tinyexec",
       "version": "1.3.1",
       "license": "MIT"
@@ -4710,6 +4835,11 @@
       "license": "Apache-2.0"
     },
     {
+      "name": "undici",
+      "version": "8.11.2",
+      "license": "MIT"
+    },
+    {
       "name": "undici-types",
       "version": "7.16.0",
       "license": "MIT"
@@ -4777,6 +4907,11 @@
     {
       "name": "unplugin",
       "version": "2.3.11",
+      "license": "MIT"
+    },
+    {
+      "name": "unplugin",
+      "version": "3.3.0",
       "license": "MIT"
     },
     {
@@ -4870,6 +5005,11 @@
       "license": "MIT"
     },
     {
+      "name": "vitest",
+      "version": "5.0.3",
+      "license": "MIT"
+    },
+    {
       "name": "vlq",
       "version": "1.0.1",
       "license": "MIT"
@@ -4937,6 +5077,11 @@
     {
       "name": "why-is-node-running",
       "version": "2.3.0",
+      "license": "MIT"
+    },
+    {
+      "name": "why-is-node-running",
+      "version": "3.2.1",
       "license": "MIT"
     },
     {

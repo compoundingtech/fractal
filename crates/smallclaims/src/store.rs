@@ -80,6 +80,7 @@ pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 mod document_pages;
+pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
@@ -765,7 +766,7 @@ pub const SCHEMA: &str = core_schema!("", "");
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
+pub use fractal_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -788,8 +789,9 @@ pub struct Store {
     /// it instead of building their own.
     pub replication_snapshot_build: Mutex<()>,
     pub replication_sync: Mutex<BTreeMap<String, PeerSyncProgress>>,
-    /// Whether a comparison that finds a difference keeps what a reproduction needs. Off unless
-    /// the daemon's divergence check is on, so exchanges cost nothing more by default.
+    /// Whether exchanges compare projections with a peer at all, keeping what a reproduction
+    /// needs when they differ. Off unless the daemon's divergence check is on: a default
+    /// install never compares, reports no divergence, and settles sync on claims alone.
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
@@ -993,6 +995,7 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h742f43e31780 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired::schema()).map_err(Into::into)
         })?;
+        claim_ranges::install(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1ef8ba031b42 owner=smallclaims::store TODO=trace-statement-and-value-representation */ writer_heads::SCHEMA).map_err(Into::into)
         })?;
@@ -1458,7 +1461,7 @@ impl PeerSyncProgress {
             .graph_differs_since_unix_ms
             .zip(self.graph_compared_at_unix_ms)
             .is_some_and(|(since, compared)| {
-                compared.saturating_sub(since) >= REPLICATION_DIVERGED_AFTER_MS
+                compared.saturating_sub(since) >= replication_settle_intervals_ms().1
             });
         Some(sync)
     }
@@ -3825,7 +3828,7 @@ fn next_batch_rowid(transaction: &Connection) -> Result<i64> {
         |row| row.get(0),
     )?;
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-he34560861a22 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
+        /* sqlite-large-value: allow-for-now lv-h98644aa0fd08 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('batch_rowid_high_water',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [rowid.to_string()],
     )?;
     Ok(rowid)
@@ -4172,6 +4175,53 @@ pub fn peer_up(last_success_at: Option<u128>, failed_since: bool, now: u128) -> 
 /// them, and a catching-up peer defers projection for up to `CATCH_UP_PROJECTION_INTERVAL_MS`,
 /// so a shorter difference can still settle by itself.
 pub const REPLICATION_DIVERGED_AFTER_MS: u128 = 2 * CATCH_UP_PROJECTION_INTERVAL_MS as u128;
+
+/// The catch-up projection interval and the divergence window in force, in milliseconds:
+/// `CATCH_UP_PROJECTION_INTERVAL_MS` and `REPLICATION_DIVERGED_AFTER_MS`, unless
+/// `ST3_WORKER_INTERVAL_MS` caps worker timers (tests of several nodes on one machine). The
+/// window stays twice the catch-up interval under any cap, so a catching-up peer's deferred
+/// projection still settles before the pair counts as diverged.
+pub fn replication_settle_intervals_ms() -> (u64, u128) {
+    replication_settle_intervals_for(crate::sync::worker_timer_cap())
+}
+
+fn replication_settle_intervals_for(cap: Option<std::time::Duration>) -> (u64, u128) {
+    let catch_up = crate::sync::capped(
+        std::time::Duration::from_millis(CATCH_UP_PROJECTION_INTERVAL_MS),
+        cap,
+    );
+    // At least a millisecond, so a zero cap still leaves the window longer than the deferral.
+    let catch_up = u64::try_from(catch_up.as_millis()).unwrap_or(u64::MAX).max(1);
+    (catch_up, 2 * u128::from(catch_up))
+}
+
+#[cfg(test)]
+mod settle_interval_tests {
+    use super::*;
+
+    #[test]
+    fn unset_the_intervals_are_the_thirty_and_sixty_second_defaults() {
+        assert_eq!(replication_settle_intervals_for(None), (30_000, 60_000));
+        assert_eq!(
+            replication_settle_intervals_for(None),
+            (CATCH_UP_PROJECTION_INTERVAL_MS, REPLICATION_DIVERGED_AFTER_MS)
+        );
+        if std::env::var_os("ST3_WORKER_INTERVAL_MS").is_none() {
+            assert_eq!(replication_settle_intervals_ms(), (30_000, 60_000));
+        }
+    }
+
+    #[test]
+    fn under_any_cap_divergence_waits_twice_the_catch_up_deferral() {
+        for cap_ms in [0, 1, 300, 29_999, 30_000, 30_001, 120_000] {
+            let cap = std::time::Duration::from_millis(cap_ms);
+            let (catch_up, diverged) = replication_settle_intervals_for(Some(cap));
+            assert_eq!(catch_up, cap_ms.clamp(1, CATCH_UP_PROJECTION_INTERVAL_MS), "cap {cap_ms}");
+            assert_eq!(diverged, 2 * u128::from(catch_up), "cap {cap_ms}");
+            assert!(diverged > u128::from(catch_up), "cap {cap_ms}");
+        }
+    }
+}
 
 /// Sequences per compact inventory range. A range digest lets two peers skip every range they
 /// already share, so an exchange lists only the identities in ranges that differ.
@@ -5753,6 +5803,46 @@ impl Store {
         document_pages::read(self, name, prefix, history, after, limit)
     }
 
+    /// One version of a document, as `list_documents_page` lists it: `hash`, or the name's
+    /// latest version without one.
+    pub fn document_version(&self, name: &str, hash: Option<&str>) -> Result<Option<DocumentVersion>> {
+        let Some(hash) = hash else {
+            return Ok(self.list_documents_page(Some(name), None, false, None, 1)?.pop());
+        };
+        let connection = self.readers.get();
+        connection
+            .query_row(
+                "SELECT d.name, d.hash, b.size, d.created_index,
+                        d.hash=(SELECT n.hash FROM documents n
+                    WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1),
+                        d.binding_claim_id, c.accepted_at_unix_ms, c.actor, c.origin
+                 FROM documents d JOIN blobs b ON b.hash=d.hash
+                 JOIN claims c ON c.id=d.binding_claim_id
+                 WHERE d.name=?1 AND d.hash=?2",
+                params![name, hash],
+                |row| {
+                    Ok(DocumentVersion {
+                        name: row.get(0)?,
+                        hash: row.get(1)?,
+                        size: row.get(2)?,
+                        created_index: row.get(3)?,
+                        latest: row.get::<_, i64>(4)? != 0,
+                        binding_claim_id: row.get(5)?,
+                        created_at_unix_ms: row.get::<_, String>(6)?.parse().map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        owner: row.get::<_, Option<String>>(7)?.or(row.get(8)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn claim_by_id(&self, id: &str) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         connection
@@ -6051,7 +6141,7 @@ impl Store {
                 .load(Ordering::Acquire)
                 .min(missing - 1);
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hb4d97131e1c7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid',?1)",
+                /* sqlite-large-value: allow-for-now lv-h3cc85704f207 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [through.to_string()],
             )?;
             transaction.commit()?;
@@ -6095,7 +6185,7 @@ impl Store {
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if self.seal_prepared_tx(&transaction, &prepared)? {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h8ea276cf2ab7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid', ?1)",
+                    /* sqlite-large-value: allow-for-now lv-h0497b81f01fb owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     [prepared.through.to_string()],
                 )?;
                 transaction.commit()?;
@@ -6465,6 +6555,9 @@ impl Store {
                 ..if same {
                     ReplicationInventory {
                         digest: snapshot.inventory.digest.clone(),
+                        // Equality is only true for this snapshot. Keep range proofs so a
+                        // concurrent write cannot turn this answer into a full-inventory query.
+                        buckets: snapshot.buckets.clone(),
                         ..Default::default()
                     }
                 } else {
@@ -6688,22 +6781,22 @@ impl Store {
                     )
                     .map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h0d87f9048268 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h53cc4b4e8c5e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_digests:{relay}"),
                         serde_json::to_string(&input.projection_digests).map_err(internal)?],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hccba8721529c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h7b01d2bde73b owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_versions:{relay}"),
                         serde_json::to_string(&input.projection_versions).map_err(internal)?],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h4d225ce0999e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h7821b58b8774 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_registry:{relay}"),
                         input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest)],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hd6af5bf00958 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h5e1e6fd8e43d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_inventory:{relay}"), input.inventory.digest],
                 ).map_err(internal)?;
                 // A response to our own dial proves the outbound grants now permit it.
@@ -6719,7 +6812,7 @@ impl Store {
         // Only a response to our own dial is carrier evidence for a locally initiated
         // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
         if asks {
-            self.record_replication_exchange_transport(relay, true, received_at, carrier);
+            self.record_replication_exchange_transport(relay, true, received_at, carrier, None);
         }
         drop(timing);
         self.replication_timers
@@ -6737,12 +6830,17 @@ impl Store {
             &snapshot.buckets,
             &input.inventory,
         );
-        // Each graph projects the envelopes its node holds, so the digests are comparable only
-        // while both nodes hold the same ones, and only once this node has projected them all:
-        // nothing new arrived that still waits for admission, and no projection is deferred.
+        // Comparing projections with a peer is only the optional divergence diagnostic: off
+        // unless the daemon's divergence check is on, so a default install never compares, and
+        // nothing about sync waits on it.
+        let compare = self
+            .divergence_capture
+            .load(std::sync::atomic::Ordering::Relaxed);
         let incompatible_versions = projection_digest::incompatible_versions(
             &self.runtime.projection_versions(), &input.projection_versions);
-        let (local_graph, remote_graph) = if input.projection_digests.is_empty() {
+        let (local_graph, remote_graph) = if !compare {
+            (String::new(), String::new())
+        } else if input.projection_digests.is_empty() {
             (
                 snapshot.legacy_graph_digest.clone(),
                 input.graph_digest.clone(),
@@ -6768,14 +6866,20 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        let graph_equal = (same_registry
+        // Both nodes hold the same envelopes and this node has admitted and projected them all:
+        // nothing new arrived that still waits for admission, and no projection is deferred.
+        let settled = same_registry
             && !waiting
             && !input.inventory.digest.is_empty()
             && input.inventory.digest == snapshot.inventory.digest
-            && (!input.projection_digests.is_empty() || !input.graph_digest.is_empty())
             && received == 0
             && signatures == 0
-            && !self.replication_projection_deferred())
+            && !self.replication_projection_deferred();
+        // Each graph projects the envelopes its node holds, so the digests are comparable only
+        // once settled, and only when the peer sent them.
+        let graph_equal = (compare
+            && settled
+            && (!input.projection_digests.is_empty() || !input.graph_digest.is_empty()))
         .then(|| remote_graph == local_graph);
         if !same_registry
             && input.inventory.digest == snapshot.inventory.digest
@@ -6806,7 +6910,7 @@ impl Store {
         }
         // A first sync ends at the first exchange where both nodes hold the same envelopes and
         // this node has admitted and projected them all; it settles on claims alone.
-        if graph_equal.is_some() {
+        if settled {
             self.observe_first_sync(relay, snapshot.inventory.envelopes.len() as u64)
                 .map_err(internal)?;
         }
@@ -6825,8 +6929,9 @@ impl Store {
         if difference.is_some() {
             progress.measured_inventory_envelopes = snapshot.inventory.envelopes.len() as u64;
         }
-        if !same_registry || waiting {
-            // Retire a comparison from before a rolling upgrade or a newly waiting claim.
+        if !compare || !same_registry || waiting {
+            // Retire a comparison from before the check was turned off, a rolling upgrade or a
+            // newly waiting claim.
             progress.graph_compared_at_unix_ms = None;
             progress.graph_differs_since_unix_ms = None;
             progress.aligned_comparison = None;
@@ -7223,7 +7328,7 @@ impl Store {
             self.last_replication_projection_unix_ms
                 .load(Ordering::Acquire),
         );
-        if since < CATCH_UP_PROJECTION_INTERVAL_MS && self.replication_catching_up() {
+        if since < replication_settle_intervals_ms().0 && self.replication_catching_up() {
             self.defer_replication_projection();
             return Ok(None);
         }
@@ -7841,11 +7946,12 @@ impl Store {
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<bool> {
         let failed_at = now_ms();
         let changed = self.record_peer_failure(peer, status, error)?;
         if let Some(carrier) = carrier {
-            self.record_replication_exchange_transport(peer, false, failed_at, carrier);
+            self.record_replication_exchange_transport(peer, false, failed_at, carrier, failure);
         }
         Ok(changed)
     }
@@ -8165,7 +8271,8 @@ impl Store {
             .any(|progress| progress.view(now).is_some_and(|sync| sync.catching_up))
     }
 
-    /// Keep what a reproduction needs when a comparison finds a difference. Off by default.
+    /// Compare projections with peers, keeping what a reproduction needs when they differ: the
+    /// optional divergence diagnostic. Off by default.
     pub fn capture_divergences(&self, on: bool) {
         self.divergence_capture
             .store(on, std::sync::atomic::Ordering::Relaxed);
@@ -8222,6 +8329,7 @@ impl Store {
         success: bool,
         at_unix_ms: u128,
         carrier: crate::replication::ReplicationCarrier,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) {
         let mut peers = self
             .replication_sync
@@ -8237,9 +8345,13 @@ impl Store {
             .as_ref()
             .is_none_or(|previous| previous.at_unix_ms <= at_unix_ms)
         {
-            *record = Some(crate::replication::ReplicationExchangeTransport::new(
+            let mut transport = crate::replication::ReplicationExchangeTransport::new(
                 at_unix_ms, carrier,
-            ));
+            );
+            if !success {
+                transport.failure = failure.cloned();
+            }
+            *record = Some(transport);
         }
     }
 
@@ -8391,6 +8503,9 @@ impl Store {
         let snapshot = self.sealed_replication_snapshot()?;
         let connection = self.readers.get();
         let registry_digest = self.runtime.projection_registry_digest();
+        let compare = self
+            .divergence_capture
+            .load(std::sync::atomic::Ordering::Relaxed);
         // Projection caches include committed local batches before their envelopes are sealed.
         // Equal sealed inventories cannot diagnose those pending writes as peer divergence.
         let unsealed_local: bool = connection.query_row(
@@ -8567,7 +8682,7 @@ impl Store {
                     && !unsealed_local
                     && same_registry
                     && waiting_claims == 0;
-                if inventory_aligned && live_settled {
+                if compare && inventory_aligned && live_settled {
                     status.differing_tables = projection_digest::differing(
                         &projection_digest::comparable(&snapshot.projection_digests, &incompatible),
                         &projection_digest::comparable(&status.projection_digests, &incompatible),
@@ -8590,7 +8705,10 @@ impl Store {
             let held = aligned_before
                 .clone()
                 .filter(|held| held.differing_tables.is_empty());
-            let reason = if waiting_claims != 0 {
+            // Without the divergence check nothing is compared, so nothing waits to be.
+            let reason = if !compare {
+                None
+            } else if waiting_claims != 0 {
                 Some(format!(
                     "{waiting_claims} replicated claims wait for a build that knows their kinds"
                 ))
@@ -8637,7 +8755,7 @@ impl Store {
                 None
             };
             status.projection_comparison_waiting = reason.is_some();
-            if !status.projection_digests.is_empty() && reason.is_none() {
+            if compare && !status.projection_digests.is_empty() && reason.is_none() {
                 let compared = if inventory_aligned {
                     Some((status.differing_tables.is_empty(), now))
                 } else {
@@ -9652,6 +9770,7 @@ mod aligned_comparison_tests {
     fn a_pair_without_a_recent_aligned_exchange_names_why_it_waits() {
         let source = node("alder");
         let target = node("birch");
+        target.capture_divergences(true);
         let mut summary = source.export_replication_summary(FLEET).unwrap();
         let aligned_inventory = summary.inventory.digest.clone();
         summary.inventory.digest = "older inventory".into();

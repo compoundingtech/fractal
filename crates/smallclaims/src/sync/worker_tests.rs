@@ -114,6 +114,77 @@ fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
     Store::open(path, origin, Arc::new(Plain))
 }
 
+#[tokio::test(start_paused = true)]
+async fn overload_poll_exhaustion_retains_authenticated_response_details() {
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[7; 32]);
+    let signing = auth.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route(EXCHANGE_PATH, post(move |request: Bytes| {
+        let auth = signing.clone();
+        async move {
+            let body = serde_json::to_vec(&PeerResponse::new(
+                "cedar", 0, serde_json::json!({
+                    "code": "replication-overloaded", "retry_after_ms": 5000,
+                    "message": "private backend prose is not diagnostic metadata"
+                }),
+            )).unwrap();
+            let headers = auth.response_headers_for(
+                EXCHANGE_PATH, "cedar", &body, &FleetAuth::body_digest(&request),
+            ).unwrap();
+            let mut response = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+            response.headers_mut().extend(headers);
+            response
+        }
+    }));
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    // Keep paused time from advancing ahead of real socket work.
+    let awake = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let local = Arc::new(plain_memory("birch").unwrap());
+    local.bind_fleet(fleet_id).unwrap();
+    let backend = Local(local.clone());
+    let query = local.export_replication_summary(fleet_id).unwrap();
+    let poller = tokio::spawn(async move {
+        post_signed(
+            &replication_http_client(), &backend,
+            &PeerConfig { name: "cedar".into(), url: format!("http://{address}") },
+            "birch", &auth, &FleetContext::legacy(BTreeSet::from(["cedar".into()])),
+            &query, false,
+        ).await
+    });
+    let started = std::time::Instant::now();
+    loop {
+        let overloaded = local.replication_status(true, Some(fleet_id), &["cedar".into()])
+            .unwrap().peers[0].worker.as_ref()
+            .is_some_and(|worker| worker.phase == "overload");
+        if overloaded {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "signed overload was not observed");
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(EXCHANGE_POLL_BUDGET).await;
+    let error = poller.await.unwrap().unwrap_err();
+    server.abort();
+    awake.abort();
+    let _ = server.await;
+    let _ = awake.await;
+    assert!(error.is::<PeerOverloaded>());
+    let failure = ReplicationExchangeFailure::from_error(
+        &error, ReplicationFailurePhase::Verify, Duration::from_secs(300), None,
+    );
+    assert_eq!(failure.code, "replication-overloaded");
+    assert_eq!(failure.phase, ReplicationFailurePhase::ResponseBody);
+    assert_eq!(failure.http_status, Some(503));
+    assert_eq!(failure.elapsed_ms, 300_000);
+    assert!(!failure.cause.contains("private"));
+}
+
 /// Different checkpoint lineages leave payloadless ranges that can never settle through
 /// envelope transport. Both live writers already have a shared range, so a summary alone
 /// cannot prove either of their later gaps. The live ranges are listed ahead of the payloadless
@@ -987,8 +1058,8 @@ fn member_context(
     FleetContext::member(store, own, bootstrap, config_peers, legacy)
 }
 
-#[test]
-fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
+#[tokio::test]
+async fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
     let root = tempfile::tempdir().unwrap();
     let state_dir = root.path();
     let file = FleetFile {
@@ -1008,7 +1079,8 @@ fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
             code: "member-left".into(),
             message: "the previous birch incarnation left".into(),
         },
-    );
+    )
+    .await;
     assert!(worker.is_removed(), "the old worker still stops syncing");
     assert_eq!(FleetFile::load(state_dir).unwrap().unwrap(), file);
     assert!(!crate::fleet::RemovalNotice::path(state_dir).exists());
@@ -1020,8 +1092,8 @@ fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
     );
 }
 
-#[test]
-fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
+#[tokio::test]
+async fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
     let root = tempfile::tempdir().unwrap();
     let state_dir = root.path();
     let file = FleetFile {
@@ -1039,7 +1111,8 @@ fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
             code: "member-left".into(),
             message: "birch left the fleet".into(),
         },
-    );
+    )
+    .await;
     let notice = crate::fleet::RemovalNotice::load(state_dir).unwrap();
     assert_eq!(notice.reported_by, "alder");
     assert_eq!(notice.code, "member-left");
@@ -1047,6 +1120,60 @@ fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
     assert!(notice.learned_at_unix_ms > 0);
     assert!(
         FleetFile::load(state_dir)
+            .unwrap()
+            .unwrap()
+            .removed
+            .is_some()
+    );
+}
+
+/// Endpoint publication holds the settings lock across a request to the daemon. A refusal that
+/// arrives meanwhile waits for the lock without stopping the runtime that request needs, so the
+/// lock is released and the removal is written.
+#[test]
+fn a_refusal_waits_for_the_settings_lock_without_blocking_the_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path().to_path_buf();
+    let file = FleetFile {
+        fleet_id: "3b241101-e2bb-4255-8caf-4136c566a962".into(),
+        ..FleetFile::default()
+    };
+    file.save(&state_dir).unwrap();
+    let (finished, done) = std::sync::mpsc::channel();
+    let directory = state_dir.clone();
+    // A runtime with one thread: the refusal and the request holding the lock share it.
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let own = MemberKey::load_or_create(&file.node_key_path(&directory)).unwrap();
+            let store = plain_memory("birch").unwrap();
+            let mut worker = FleetContext::member(&store, &own, &[], &[], false);
+            worker.state_dir = Some(directory.clone());
+            let lock = FleetFile::lock_settings(&directory).unwrap();
+            let publication = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                drop(lock);
+            });
+            worker
+                .mark_removed(
+                    "alder",
+                    &RemovedFromFleet {
+                        code: "member-removed".into(),
+                        message: "birch was removed".into(),
+                    },
+                )
+                .await;
+            publication.await.unwrap();
+        });
+        finished.send(()).unwrap();
+    });
+    done.recv_timeout(Duration::from_secs(30))
+        .expect("the refusal blocked the runtime that holds the settings lock");
+    assert!(
+        FleetFile::load(&state_dir)
             .unwrap()
             .unwrap()
             .removed
@@ -1201,6 +1328,10 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
         unsigned.to_string().contains("member-signature-required"),
         "{unsigned:#}"
     );
+    let failure = unsigned.downcast_ref::<ReplicationExchangeFailure>().unwrap();
+    assert_eq!(failure.code, "member-signature-required");
+    assert_eq!(failure.phase, ReplicationFailurePhase::Verify);
+    assert_eq!(failure.http_status, Some(401));
 
     // a removes b; b's next exchange gets a signed refusal that names its key.
     fleet_claim(
@@ -1811,7 +1942,9 @@ async fn a_durable_confirmer_fences_competing_push_and_pull_exports_even_with_a_
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("selected member"), "{error:#}");
+    // The listener answers a typed 500: its free-form refusal prose is withheld from the dialer
+    // (retained exchange failures), so the state checks below carry what the refusal was.
+    assert!(error.to_string().contains("replication-peer-rejected"), "{error:#}");
     assert!(
         c.fleet_view()
             .unwrap()
@@ -2052,7 +2185,9 @@ async fn dial_out_pull_cannot_pin_leave_and_a_listening_confirmer_can_finish() {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("no listener"), "{error:#}");
+    // The listener answers a typed 500: its free-form refusal prose is withheld from the dialer
+    // (retained exchange failures), so the state checks below carry what the refusal was.
+    assert!(error.to_string().contains("replication-peer-rejected"), "{error:#}");
     assert!(
         fixture.leaving_fleet.leave.lock().await.confirmer.is_none(),
         "a dial-out pull must not strand the durable selector"
@@ -3394,6 +3529,9 @@ mod retry_tests {
                         .unwrap()
                         .contains("that member's Fabric grants")
                 );
+                let detail = failed.failure.as_ref().expect("retained Fabric refusal detail");
+                assert_eq!(detail.phase, ReplicationFailurePhase::Dial);
+                assert!(!detail.cause.contains("that member's Fabric grants"));
                 // No hot loop: one probe per attempt, and attempts no closer together than the
                 // backoff's shortest jitter allows. A slow runner only makes fewer attempts.
                 tokio::time::sleep(Duration::from_millis(600)).await;
@@ -3967,9 +4105,9 @@ impl Backend for SlowExport {
         status: &str,
         error: &str,
         carrier: Option<crate::replication::ReplicationCarrier>,
+        failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> Result<()> {
-        self.local
-            .record_failure(peer, status, error, carrier)
+        self.local.record_failure(peer, status, error, carrier, failure)
             .await
     }
 }
