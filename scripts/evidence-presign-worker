@@ -21,8 +21,10 @@ for the tree, whatever the result (a failure is recorded as a note and CI runs t
 A run stopped for load is not a result: that tree waits DEFER seconds and is tried again.
 
 Load (the heavy class; operations' numbers for this host): start only after IO pressure (some avg60) stayed under 8% for 10
-minutes with no admitted heavy build active and at least 136 GiB free; stop the run (TERM, then KILL of its process group) when
-avg60 passes 15%, available memory falls under 16 GiB or its /dev/shm scratch passes 20 GB. The light class starts below 15% and
+minutes with no admitted heavy build active and at least 140 GiB free (it clears nothing to make room); stop the run (TERM, then
+KILL of its process group) when avg60 passes 15%, available memory falls under 16 GiB, free disk under 136 GiB or its /dev/shm
+scratch passes 20 GB. The heavy class keeps its cargo target in ~/.cache/evidence-presign-target, which the host's sweep may
+reclaim when idle, and removes it itself before a run once it passes 25 GB. The light class starts below 15% and
 stops the same way. ~/.config/evidence-presign/off stops every tick before it does anything.
 
 Report: one JSON line per attempt in ~/.local/state/evidence-presign/attempts.jsonl (pr, head, tree, class, ready_at, started_at,
@@ -55,12 +57,18 @@ LIMITS = {
     'start_io60': 15.0,        # light: start only under this
     'stop_io60': 15.0,         # every run: stop above this
     'stop_mem_gib': 16.0,      # every run: stop when available memory falls under this
-    'min_free_gib': 136.0,     # heavy: never start with less free disk where the clone lives
+    'min_free_gib': 140.0,     # heavy: never start with less free disk where the clone lives
+    'stop_free_gib': 136.0,    # every run: stop when free disk falls under this
+    'target_max_gb': 25.0,     # heavy: the kept cargo target is removed before a run when it has grown past this
     'shm_max_gb': 20.0,        # heavy: stop when the run's /dev/shm scratch passes this
     'sample': 30,              # seconds between load samples
     'defer': 1800,             # a tree stopped for load waits this long before it is tried again
     'time_limit': 7200,        # st-test --time-limit, per check
 }
+# The heavy class's cargo target, kept between runs so a head does not start cold (about ten minutes and 19 GB of writes). It is
+# under ~/.cache/*-target, which the host's scratch sweep reclaims when it has been idle two hours and disk runs short: a busy
+# worker keeps it warm, a quiet one starts cold. Never pinned (no .keep), and never larger than target_max_gb.
+TARGET = Path(os.environ.get('EVIDENCE_PRESIGN_TARGET') or Path.home() / '.cache/evidence-presign-target')
 QUERY = '''query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
   pullRequests(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes {
     number isDraft headRefOid baseRefName updatedAt author { login } headRepository { nameWithOwner } } } } }'''
@@ -270,9 +278,7 @@ def run(st_test, repo, checks, kind, rules, log):
         if Path('/dev/shm').is_dir():
             scratch = Path(tempfile.mkdtemp(prefix='evidence-presign-', dir='/dev/shm'))
             env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch))
-        target = read_json(CONFIG / 'config.json', {}).get('cargo_target_dir')
-        if target:
-            env['CARGO_TARGET_DIR'] = os.path.expanduser(target)
+        env['CARGO_TARGET_DIR'] = str(TARGET)
     command = [sys.executable, '-I', str(st_test), '--base', f'origin/{BASE}', '--push', 'origin',
                '--time-limit', str(rules['time_limit']), *[arg for name in checks for arg in ('--check', name)]]
     started, peak, reason = now(), io60(), None
@@ -293,6 +299,8 @@ def run(st_test, repo, checks, kind, rules, log):
                     reason = f'memory {mem_gib():.1f} GiB'
                 elif scratch and du_gb(scratch) > rules['shm_max_gb']:
                     reason = f'/dev/shm scratch {du_gb(scratch):.1f} GB'
+                elif free_gib(repo) < rules['stop_free_gib']:
+                    reason = f'free disk {free_gib(repo):.0f} GiB'
                 if reason:
                     stop(CHILD)
                     break
@@ -354,16 +362,22 @@ def tick(args):
             if args.dry_run:
                 print(json.dumps({'pr': pr['number'], 'head': pr['headRefOid'], 'tree': tree, 'checks': missing}))
                 return 0
+            def not_starting(reason, message):
+                say(message)
+                append(STATE / 'skips.jsonl', {'time': stamp(), 'class': args.kind, 'pr': pr['number'], 'head': pr['headRefOid'],
+                                               'reason': reason})
+                return 0
             if args.kind == 'heavy':
                 if free_gib(repo) < rules['min_free_gib']:
-                    say(f'{free_gib(repo):.0f} GiB free, under {rules["min_free_gib"]:.0f}: not starting')
-                    return 0
+                    # It clears nothing to make room: the host's own sweep decides what goes.
+                    return not_starting('disk', f'{free_gib(repo):.0f} GiB free, under {rules["min_free_gib"]:.0f}: not starting')
                 if not wait_calm(rules):
-                    say('the host did not stay calm long enough: not starting this tick')
-                    return 0
+                    return not_starting('busy', 'the host did not stay calm long enough: not starting this tick')
+                if TARGET.exists() and du_gb(TARGET) > rules['target_max_gb']:
+                    say(f'the kept target is {du_gb(TARGET):.1f} GB, over {rules["target_max_gb"]:.0f}: removing it; this run starts cold')
+                    shutil.rmtree(TARGET, ignore_errors=True)
             elif io60() >= rules['start_io60']:
-                say(f'IO pressure {io60():.1f}% is over {rules["start_io60"]}%: not starting this tick')
-                return 0
+                return not_starting('busy', f'IO pressure {io60():.1f}% is over {rules["start_io60"]}%: not starting this tick')
             log = STATE / 'logs' / f'{time.strftime("%Y%m%dT%H%M%S")}-{pr["number"]}-{args.kind}.log'
             log.parent.mkdir(parents=True, exist_ok=True)
             started = now()
@@ -403,6 +417,10 @@ def summary(args):
     attempts = []
     if (STATE / 'attempts.jsonl').exists():
         attempts = [json.loads(line) for line in (STATE / 'attempts.jsonl').read_text().splitlines() if line.strip()]
+    skips = []
+    if (STATE / 'skips.jsonl').exists():
+        skips = [k for k in (json.loads(line) for line in (STATE / 'skips.jsonl').read_text().splitlines() if line.strip())
+                 if seconds_of(k['time']) >= since]
     report = {'hours': args.hours, 'classes': {}}
     for kind in ('light', 'heavy'):
         done, ready = read_json(STATE / f'done-{kind}.json', {}), read_json(STATE / f'ready-{kind}.json', {})
@@ -421,6 +439,8 @@ def summary(args):
             'runs': len(runs), 'outcomes': {o: sum(1 for a in runs if a['outcome'] == o) for o in sorted({a['outcome'] for a in runs})},
             'median_run_s': round(statistics.median([a['seconds'] for a in runs])) if runs else None,
             'io60_peak_max': max((a['io60_peak'] for a in runs), default=None),
+            'not_started': {reason: sum(1 for k in skips if k['class'] == kind and k['reason'] == reason) for reason in ('disk', 'busy')},
+            'stopped': {why: sum(1 for a in runs if a.get('stopped', '').startswith(why)) for why in ('io60', 'memory', 'free disk', '/dev/shm')},
         }
     print(json.dumps(report, indent=1, sort_keys=True))
     return 0

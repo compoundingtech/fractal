@@ -1387,13 +1387,17 @@ run for that tree before, runs `st-test --check NAME... --push origin` on it, re
 class (a lock; a tick still running skips the next). The light class is st-test's default checks; the heavy class is what `--all` adds. A
 failure or a lane-edit refusal is a result, recorded and not retried for that tree (CI runs the check); a run stopped for load is not, and
 that head waits 30 minutes before it is tried again. Load, for the heavy class: it starts only after IO pressure (some avg60) stayed under
-8% for 10 minutes with no admitted heavy build active and at least 136 GiB free, runs with `TMPDIR` on `/dev/shm`, and is stopped (TERM,
-then KILL of its process group) above 15% avg60, under 16 GiB available memory or past 20 GB of scratch; the light class starts below 15%
-and stops the same way. `~/.config/evidence-presign/limits.json` overrides these numbers (agreed with operations) and
+8% for 10 minutes with no admitted heavy build active and at least 140 GiB free (it clears nothing to make room), runs with `TMPDIR` on
+`/dev/shm`, and is stopped (TERM, then KILL of its process group) above 15% avg60, under 16 GiB available memory, under 136 GiB free disk
+or past 20 GB of scratch; the light class starts below 15% and stops the same way. The heavy class keeps its cargo target between runs
+in `~/.cache/evidence-presign-target`, so a head does not start cold (a cold target costs about 10 minutes and 19 GB of writes). It is
+never pinned: the host's scratch sweep may reclaim it when it has been idle for two hours and disk runs short, and the worker removes it
+itself before a run once it passes 25 GB. Every tick that does not start for load or disk appends a line to `skips.jsonl`. `~/.config/evidence-presign/limits.json` overrides these numbers (agreed with operations) and
 `~/.config/evidence-presign/off` stops every tick. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
 (pull request, head, tree, class, first seen ready, start, seconds, per-check result, peak IO pressure, outcome `worker_signed`,
 `worker_signed_lane_edit`, `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
-window, how many had every check covered, the median and worst wait from first seen ready to covered, and the runs and their outcomes.
+window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
+how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
 
 ### When the gate says skip
 

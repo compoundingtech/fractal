@@ -78,6 +78,7 @@ class Worker(unittest.TestCase):
         self.log = tmp / 'stub.log'
         self.prs = []
         self.covered = {}
+        self.target = tmp / 'cache' / 'evidence-presign-target'
 
     def set_pressure(self, avg60):
         self.pressure.write_text(f'some avg10=0.00 avg60={avg60:.2f} avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n')
@@ -100,7 +101,7 @@ class Worker(unittest.TestCase):
                            EVIDENCE_PRESIGN_GH=str(self.gh), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
                            EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
                            EVIDENCE_PRESIGN_ADMISSION=str(self.admission), STUB_LOG=str(self.log),
-                           STUB_COVERED=json.dumps(self.covered), **env)
+                           EVIDENCE_PRESIGN_TARGET=str(self.target), STUB_COVERED=json.dumps(self.covered), **env)
         return subprocess.run([sys.executable, str(WORKER), 'tick', '--class', kind, '--repo', str(self.state / 'repo'),
                                '--repository', 'example/repo', *extra], capture_output=True, text=True, env=environment, timeout=120)
 
@@ -175,14 +176,14 @@ class Worker(unittest.TestCase):
         done = self.tick()
         self.assertEqual((done.returncode, self.runs()), (0, []), done.stderr)
 
-    def test_the_heavy_class_runs_the_all_extras_with_scratch_on_dev_shm_and_the_configured_target(self):
+    def test_the_heavy_class_runs_the_all_extras_with_scratch_on_dev_shm_and_the_kept_target(self):
         self.pr(1)
-        (self.config / 'config.json').write_text(json.dumps({'cargo_target_dir': str(Path(self.tmp.name) / 'target')}))
         done = self.tick('heavy')
         self.assertEqual(done.returncode, 0, done.stderr)
         run, = self.runs()
         self.assertEqual(self.checks_of(run), ['linux-gate', 'mail-redelivery-canaries'])
-        self.assertEqual(run['target'], str(Path(self.tmp.name) / 'target'))
+        self.assertEqual(run['target'], str(self.target))
+        self.assertFalse((self.target / '.keep').exists())
         if Path('/dev/shm').is_dir():
             self.assertTrue(run['tmpdir'].startswith('/dev/shm/evidence-presign-'))
             self.assertFalse(Path(run['tmpdir']).exists(), 'the scratch is removed afterwards')
@@ -226,6 +227,33 @@ class Worker(unittest.TestCase):
         self.set_pressure(2.0)
         self.tick('heavy')
         self.assertEqual(len(self.runs()), 1, 'a deferred head waits before it is tried again')
+
+    def test_a_kept_target_past_its_size_limit_is_removed_before_the_run(self):
+        self.pr(1)
+        self.target.mkdir(parents=True)
+        (self.target / 'big').write_bytes(b'x' * 2_000_000)
+        (self.config / 'limits.json').write_text(json.dumps({'calm_seconds': 0, 'sample': 1, 'min_free_gib': 0, 'target_max_gb': 0.001}))
+        done = self.tick('heavy')
+        self.assertIn('over 0: removing it; this run starts cold', done.stderr)
+        self.assertFalse((self.target / 'big').exists())
+        self.assertEqual(len(self.runs()), 1)
+
+    def test_heavy_never_starts_under_the_disk_floor_and_a_run_stops_under_the_stop_line(self):
+        self.pr(1)
+        (self.config / 'limits.json').write_text(json.dumps({'calm_seconds': 0, 'sample': 1, 'min_free_gib': 10 ** 9}))
+        done = self.tick('heavy')
+        self.assertIn('not starting', done.stderr)
+        self.assertEqual(self.runs(), [])
+        skip, = [json.loads(line) for line in (self.state / 'skips.jsonl').read_text().splitlines()]
+        self.assertEqual((skip['class'], skip['reason'], skip['pr']), ('heavy', 'disk', 1))
+        (self.config / 'limits.json').write_text(json.dumps({'calm_seconds': 0, 'sample': 1, 'min_free_gib': 0, 'stop_free_gib': 10 ** 9}))
+        done = self.tick('heavy', STUB_SLEEP='10')
+        attempt, = self.attempts()
+        self.assertEqual(attempt['outcome'], 'deferred')
+        self.assertTrue(attempt['stopped'].startswith('free disk'), attempt)
+        report = json.loads(subprocess.run([sys.executable, str(WORKER), 'summary'], capture_output=True, text=True,
+                                           env=dict(CLEAN, EVIDENCE_PRESIGN_STATE=str(self.state))).stdout)['classes']['heavy']
+        self.assertEqual((report['not_started'], report['stopped']['free disk']), ({'disk': 1, 'busy': 0}, 1))
 
     def test_a_dry_run_says_what_it_would_run_and_runs_nothing(self):
         head = self.pr(1)
