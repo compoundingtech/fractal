@@ -95,7 +95,8 @@
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "clippy_base_sha"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
@@ -122,7 +123,8 @@
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "clippy_base_sha"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"

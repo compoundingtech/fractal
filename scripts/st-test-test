@@ -209,6 +209,24 @@ class StTest(unittest.TestCase):
         statement, = self.statements()
         self.assertNotIn('lane_definition_sha256', statement['predicate']['observed']['inputs'])
 
+    def test_a_check_that_depends_on_the_base_is_given_the_fetched_base_and_records_it(self):
+        self.commit('b.txt', 'two')
+        seen = self.home / 'clippy-base'
+        base = git(self.work, 'rev-parse', 'origin/main')
+        with mock.patch.object(st_test, 'BASE_BOUND', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'printf %s "$CLIPPY_BASE_SHA" > {seen}'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text(), base)
+        statement, = self.statements()
+        self.assertEqual(statement['predicate']['observed']['inputs']['clippy_base_sha'], base)
+        # A check that does not depend on the base records no base and is given none.
+        self.commit('b.txt', 'three')
+        code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'printf %s "${{CLIPPY_BASE_SHA-unset}}" > {seen}'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text(), 'unset')
+        self.assertFalse([s for s in self.statements() if 'clippy_base_sha' in s['predicate']['observed']['inputs']
+                          and s['subject'][0]['digest']['gitTree'] == git(self.work, 'rev-parse', 'HEAD^{tree}')])
+
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
         (self.work / 'stray.txt').write_text('untracked')

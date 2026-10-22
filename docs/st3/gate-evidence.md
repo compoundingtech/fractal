@@ -1408,7 +1408,10 @@ wait. Their local command is
 `nix develop -c bash scripts/ci-local STAGE...`; `linux-gate`'s runs the four stages a `linux-gate` skip covers, `tests clippy
 fleet-compat mail-redelivery-canaries` (the test build with them, after preparing what CI's test-build job does for the tests: the
 provider components the resource-provider tests load and the previous release the messaging compatibility tests run against; `upgrade-impact` is not skipped and runs in CI), with clippy's
-ratchet compared with the base branch's tip (`CLIPPY_BASE_SHA`, as CI compares with the event's base). Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
+ratchet compared with the base (as CI compares with the event's base): st-test gives the stage the base commit it has just
+fetched (`CLIPPY_BASE_SHA`) and records it in the note as the input `clippy_base_sha`, which a host or agent `linux-gate` note must
+carry; run by hand, `ci-local` fetches main itself and never trusts a local ref, and refuses when it cannot. Every other input
+`evidence-wrap --input NAME=VALUE` adds is recorded the same way; it refuses the names it sets itself. Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
