@@ -8,3 +8,4 @@ record 56abb6f06c2e2aea59dbaa97e29528804a142734 linux-fleet-compat 0 fleet/ci 20
 record 57073fc053248ba06693f583702964b6368c1c4c genie-freshness 0 fleet/ci 2026-10-22T00:18:23Z
 record 73f0621b7f6981121e43a5b15b4aacfecf38c77b fractal-web 1 fleet/ci 2026-10-22T00:22:40Z
 record f3002a9d2a467d1c0550c717f011baef26d87d27 isolation-vm 0 fleet/ci 2026-10-22T00:30:45Z
+record 847ec8ede2ab4ea74c614ee917bf237edc2fe951 typescript-client 0 host/forge 2026-10-22T19:25:10Z
