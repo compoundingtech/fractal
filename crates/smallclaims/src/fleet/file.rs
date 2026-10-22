@@ -178,9 +178,16 @@ impl FleetFile {
             if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
                 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
             {
-                fs::write(
-                    Path::new(&directory).join("contended"),
-                    std::process::id().to_string(),
+                // One line per contender: the replication worker's own endpoint publication
+                // also waits here while the refusal writer is paused.
+                use std::io::Write as _;
+                writeln!(
+                    fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(Path::new(&directory).join("contended"))?,
+                    "{}",
+                    std::process::id()
                 )?;
             }
         }

@@ -23,17 +23,48 @@ pub fn phase_spans_enabled() -> bool {
     EXPORT_ENABLED.load(Ordering::Relaxed)
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Origin(OriginLabel);
 
-static TASK_ORIGINS: [&str; 11] = [
+static TASK_ORIGINS: &[&str] = &[
     "other", "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
     "task coordination-counts-catch-up", "task account-limits-catch-up",
     "task enforce-account-limits", "task trim-local-observations", "task mailbox-wake-dispatch",
     "task reconcile-pass", "task reconcile-deadline",
+    "reconcile", "reconcile.timer", "reconcile.gate_poll",
+    "published_list.agents", "published_list.missions", "published_list.work",
+    "publication.attention", "publication.summary", "publication.advance_evidence",
+    "replication.activate", "replication.retry_projection", "replication.export",
+    "replication.receive", "replication.exchange", "replication.outbound",
+    "startup.open_store", "startup.judge_claims", "startup.validate_replication_backlog",
+    "startup.apply_replication_repairs", "startup.settle_runs",
+    "startup.project_replication_backlog", "startup.warmup", "startup.isolation",
+    "account_limits.enforce", "account_limits.catch_up", "maintenance.checkpoint",
+    "maintenance.envelope_payloads", "maintenance.event_payloads",
+    "maintenance.coordination_counts", "maintenance.stop_deferral_history",
+    "maintenance.response_expiry", "maintenance.wal_checkpoint",
+    "observations.trim", "observations.trim_usage_responses", "observations.database_size",
+    "observations.release_free_pages",
+    "observations.export", "operations.repair_drift", "recorder.receipts",
+    "mailbox.wake_dispatch", "mailbox.own_post", "mailbox.write", "mailbox.subscription",
+    "message_body.reconcile", "seat.snapshot_transfer",
+    "runtime.start", "sekrets.import", "changes.discover", "changes.sync",
+    "account_limits.ready", "allocator.trim", "config.reload_policies",
+    "github.auth", "github.request", "maintenance.malloc_relief",
+    "maintenance.response_expiry_clock", "maintenance.response_expiry_deadline",
+    "peer.raw_lease", "profile.runtime_lag", "publication.evidence",
+    "publication.evidence_ready", "reconcile.supervise", "replication.connectivity",
+    "replication.dial_peer", "replication.fabric_exposure", "replication.fabric_presence",
+    "replication.fleet_view", "replication.peer_failure", "replication.publish_endpoints",
+    "replication.settings", "replication.tailnet", "replication.worker",
+    "slo.export", "slo.history", "terminal.socket", "terminal.tunnel",
+    "terminal.view_dispatch", "terminal.view_watch", "tile.endpoint", "tile.endpoints",
+    "writer.batch.setup", "writer.batch.job", "writer.batch.commit",
+    "task replication-projection-retry", "startup validate-replication-backlog",
+    "startup apply-replication-repairs", "startup project-replication-backlog",
 ];
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum OriginLabel {
     // One pointer into the bounded table keeps queued jobs compact without allocating task labels.
     Static(&'static &'static str),
@@ -49,11 +80,17 @@ impl Origin {
             OriginLabel::Route(label) => KeyValue::new(key, label.to_string()),
         }
     }
+
+    pub(super) fn label(&self) -> &str {
+        match &self.0 {
+            OriginLabel::Static(label) => label,
+            OriginLabel::Route(label) => label,
+        }
+    }
 }
 
 /// `route` must come from the router's normalized MatchedPath, never the request URI.
 pub fn route_origin(method: &str, route: &str) -> Option<Origin> {
-    if !phase_spans_enabled() { return None; }
     if !matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "CONNECT" | "TRACE") {
         return Some(Origin::other());
     }
@@ -72,12 +109,11 @@ thread_local! {
 pub struct OriginScope(Option<Origin>);
 
 pub fn enter_origin(origin: Option<Origin>) -> Option<OriginScope> {
-    if !phase_spans_enabled() { return None; }
     Some(OriginScope(ORIGIN.with(|slot| slot.replace(origin))))
 }
 
 pub(crate) fn enter_task_origin(label: &'static str) -> Option<OriginScope> {
-    if !phase_spans_enabled() || ORIGIN.with(|slot| slot.borrow().is_some())
+    if ORIGIN.with(|slot| slot.borrow().is_some())
         || REQUEST.with(|slot| slot.borrow().as_ref().is_some_and(|request| request.origin.is_some())) {
         return None;
     }
@@ -85,7 +121,6 @@ pub(crate) fn enter_task_origin(label: &'static str) -> Option<OriginScope> {
 }
 
 pub(crate) fn current_origin() -> Option<Origin> {
-    if !phase_spans_enabled() { return None; }
     Some(ORIGIN.with(|slot| slot.borrow().clone())
         .or_else(|| REQUEST.with(|slot| slot.borrow().as_ref().and_then(|request| request.origin.clone())))
         .unwrap_or_else(Origin::other))
@@ -99,6 +134,7 @@ impl Drop for OriginScope {
 
 pub(super) struct Writer {
     holder: std::sync::Mutex<Option<Origin>>,
+    current_hold: std::sync::Mutex<Option<(Origin, std::time::Instant)>>,
     checkpoint: std::sync::Mutex<Checkpoint>,
 }
 
@@ -123,11 +159,16 @@ impl Checkpoint {
 static WRITERS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<Writer>>>> =
     LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+static WRITER_OBSERVATIONS: std::sync::Mutex<Vec<std::sync::Weak<Writer>>> =
+    std::sync::Mutex::new(Vec::new());
+static HOLD_ORIGINS: LazyLock<std::sync::Mutex<std::collections::HashSet<Origin>>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::from([Origin::other()])));
+
 impl Writer {
     pub(super) fn new(connection: &rusqlite::Connection) -> Option<Arc<Self>> {
-        if !phase_spans_enabled() { return None; }
         let writer = Arc::new(Self {
             holder: std::sync::Mutex::new(None),
+            current_hold: std::sync::Mutex::new(None),
             checkpoint: std::sync::Mutex::new(Checkpoint::default()),
         });
         if let Some(path) = connection.path().filter(|path| !path.is_empty()) {
@@ -135,6 +176,9 @@ impl Writer {
             writers.retain(|_, writer| writer.strong_count() > 0);
             writers.insert(path.to_owned(), Arc::downgrade(&writer));
         }
+        let mut observations = WRITER_OBSERVATIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        observations.retain(|writer| writer.strong_count() > 0);
+        observations.push(Arc::downgrade(&writer));
         Some(writer)
     }
 
@@ -143,7 +187,11 @@ impl Writer {
     }
 
     pub(super) fn holding(&self, origin: Option<Origin>) -> Holding<'_> {
-        self.set_holder(origin);
+        let origin = origin.unwrap_or_else(Origin::other);
+        HOLD_ORIGINS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(origin.clone());
+        *self.current_hold.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((origin.clone(), std::time::Instant::now()));
+        self.set_holder(Some(origin));
         Holding(self)
     }
 
@@ -161,6 +209,10 @@ pub(super) struct Holding<'a>(&'a Writer);
 impl Drop for Holding<'_> {
     fn drop(&mut self) {
         *self.0.holder.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        if let Some((origin, started)) = self.0.current_hold.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            METRICS.hold.record(started.elapsed().as_secs_f64(), &writer_attributes(&origin));
+        }
     }
 }
 
@@ -269,22 +321,62 @@ static READ: LazyLock<[KeyValue; 2]> = LazyLock::new(|| {
         KeyValue::new("db.operation.name", "read"),
     ]
 });
-static CHECKPOINT: LazyLock<[KeyValue; 2]> = LazyLock::new(|| {
+/// Bounded physical checkpoint operations.
+#[derive(Clone, Copy)]
+pub enum CheckpointOperation {
+    Truncate,
+    Passive,
+}
+
+/// Bounded outcomes shared by backup checkpoints and the idle-WAL worker.
+#[derive(Clone, Copy)]
+pub enum CheckpointOutcome {
+    Recycled,
+    Empty,
+    Deferred,
+    Error,
+}
+
+impl CheckpointOutcome {
+    pub fn from_report(report: Option<&super::WalCheckpointReport>) -> Self {
+        match report {
+            None => Self::Error,
+            Some(report) if report.frames == 0 => Self::Empty,
+            Some(report) if report.recycled => Self::Recycled,
+            Some(_) => Self::Deferred,
+        }
+    }
+}
+
+fn checkpoint_attributes(operation: CheckpointOperation, outcome: CheckpointOutcome) -> [KeyValue; 3] {
     [
         KeyValue::new("db.system.name", "sqlite"),
-        KeyValue::new("db.operation.name", "checkpoint.truncate"),
+        KeyValue::new("db.operation.name", match operation {
+            CheckpointOperation::Truncate => "checkpoint.truncate",
+            CheckpointOperation::Passive => "checkpoint.passive",
+        }),
+        KeyValue::new("st.db.wal.checkpoint.outcome", match outcome {
+            CheckpointOutcome::Recycled => "recycled",
+            CheckpointOutcome::Empty => "empty",
+            CheckpointOutcome::Deferred => "deferred",
+            CheckpointOutcome::Error => "error",
+        }),
     ]
-});
+}
 
 pub(super) struct Instruments {
     operation: Histogram<f64>,
     pub queue: Histogram<f64>,
+    hold: Histogram<f64>,
     pub batch_size: Histogram<u64>,
     pub commit: Histogram<f64>,
     pub batch: Histogram<f64>,
     read_wait: Histogram<f64>,
     pub readers_opened: Counter<u64>,
     checkpoint: Histogram<f64>,
+    pub worker_wait: Histogram<f64>,
+    pub abandoned_callback_starts: Counter<u64>,
+    deferred: Counter<u64>,
 }
 
 fn duration(meter: &Meter, name: &'static str) -> Histogram<f64> {
@@ -297,12 +389,28 @@ fn duration(meter: &Meter, name: &'static str) -> Histogram<f64> {
         .build()
 }
 
+fn writer_duration(meter: &Meter, name: &'static str) -> Histogram<f64> {
+    meter.f64_histogram(name).with_unit("s").with_boundaries(vec![
+        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 15., 30.,
+        60., 120., 300., 600.,
+    ]).build()
+}
+
+fn writer_attributes(origin: &Origin) -> [KeyValue; 2] {
+    [KeyValue::new("db.system.name", "sqlite"), origin.attribute("st.db.writer.origin")]
+}
+
+pub(super) fn queued(wait: Duration, origin: Option<&Origin>) {
+    METRICS.queue.record(wait.as_secs_f64(), &writer_attributes(&origin.cloned().unwrap_or_else(Origin::other)));
+}
+
 impl Instruments {
     fn new(meter: &Meter) -> Self {
         register_gauges(meter);
         Self {
             operation: duration(meter, "db.client.operation.duration"),
-            queue: duration(meter, "st.db.writer.queue.duration"),
+            queue: writer_duration(meter, "st.db.writer.queue.duration"),
+            hold: writer_duration(meter, "st.db.writer.hold"),
             batch_size: meter
                 .u64_histogram("st.db.writer.batch.size")
                 .with_unit("{job}")
@@ -316,6 +424,10 @@ impl Instruments {
                 .with_unit("{connection}")
                 .build(),
             checkpoint: duration(meter, "st.db.wal.checkpoint.duration"),
+            worker_wait: duration(meter, "st.write_workers.queue.wait"),
+            abandoned_callback_starts: meter.u64_counter("st.write_workers.abandoned_callback_starts").with_unit("{job}").build(),
+            deferred: meter.u64_counter("st.db.wal.checkpoint.deferred")
+                .with_unit("{attempt}").build(),
         }
     }
 }
@@ -349,11 +461,9 @@ pub(super) fn read_waited(wait: Duration) {
         .record(wait.as_secs_f64(), READ.as_slice());
 }
 
-/// Record the explicit backup checkpoint, including failed attempts.
-pub fn checkpoint_finished(elapsed: Duration) {
-    METRICS
-        .checkpoint
-        .record(elapsed.as_secs_f64(), CHECKPOINT.as_slice());
+/// Record one checkpoint attempt, including failed attempts.
+pub fn checkpoint_finished(elapsed: Duration, operation: CheckpointOperation, outcome: CheckpointOutcome) {
+    METRICS.checkpoint.record(elapsed.as_secs_f64(), &checkpoint_attributes(operation, outcome));
 }
 
 /// Shared only across blocking sections belonging to one request. Writes allocate nothing.
@@ -396,9 +506,27 @@ struct PoolObservation {
     counts: std::sync::Weak<super::ReaderCounts>,
     idle: std::sync::Weak<std::sync::Mutex<Vec<super::ReadConnection>>>,
     wal: Option<std::path::PathBuf>,
+    id: u64,
+    lag: u64,
+    deferred_since: Option<std::time::Instant>,
 }
 
 static POOLS: std::sync::Mutex<Vec<PoolObservation>> = std::sync::Mutex::new(Vec::new());
+
+static WORKER_QUEUES: std::sync::Mutex<Vec<std::sync::Weak<super::writer_admission::WorkerQueue>>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(super) fn register_worker_queue(queue: &Arc<super::writer_admission::WorkerQueue>) {
+    let mut queues = WORKER_QUEUES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    queues.retain(|queue| queue.strong_count() > 0);
+    queues.push(Arc::downgrade(queue));
+}
+
+fn worker_queue_sample() -> (u64, f64) {
+    let queues = WORKER_QUEUES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    queues.iter().filter_map(std::sync::Weak::upgrade).map(|queue| queue.sample())
+        .fold((0, 0.0_f64), |(depth, busy), (count, age)| (depth + count, busy.max(age)))
+}
 
 pub(super) fn register_pool(pool: &super::ReadPool) {
     let wal = (!pool.shared_memory).then(|| {
@@ -414,10 +542,80 @@ pub(super) fn register_pool(pool: &super::ReadPool) {
         counts: Arc::downgrade(&pool.counts),
         idle: Arc::downgrade(&pool.idle),
         wal,
+        id: pool.diagnostic_id,
+        lag: 0,
+        deferred_since: None,
     });
 }
 
+/// Called once for every physical checkpoint attempt. Errors leave the last known lag and
+/// deferral start intact; they are not evidence that a pinned WAL recovered.
+pub fn wal_checkpoint_observed(pool: &super::ReadPool, report: Option<&super::WalCheckpointReport>) {
+    let Some(report) = report else { return };
+    let deferred = report.frames > 0 && !report.recycled;
+    if deferred {
+        METRICS.deferred.add(1, SQLITE.as_slice());
+    }
+    let mut pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(state) = pools.iter_mut().find(|state| state.id == pool.diagnostic_id) {
+        state.lag = u64::try_from(report.frames.saturating_sub(report.backfilled)).unwrap_or(0);
+        if deferred {
+            state.deferred_since.get_or_insert_with(std::time::Instant::now);
+        } else {
+            state.deferred_since = None;
+        }
+    }
+}
+
 fn register_gauges(meter: &Meter) {
+    meter.u64_observable_gauge("st.write_workers.queue.depth")
+        .with_unit("{job}")
+        .with_callback(|observer| observer.observe(worker_queue_sample().0, &[]))
+        .build();
+    meter.f64_observable_gauge("st.write_workers.queue.busy_age")
+        .with_unit("s")
+        .with_callback(|observer| observer.observe(worker_queue_sample().1, &[]))
+        .build();
+    meter.f64_observable_gauge("st.db.read.loan.oldest_age").with_unit("s")
+        .with_callback(|observer| {
+            for (origin, age) in super::read_lifetime::oldest_loans() {
+                observer.observe(age.as_secs_f64(), &[
+                    KeyValue::new("db.system.name", "sqlite"), origin.attribute("origin"),
+                ]);
+            }
+        }).build();
+    meter.u64_observable_gauge("st.db.wal.checkpoint.lag").with_unit("{frame}")
+        .with_callback(|observer| {
+            let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            observer.observe(pools.iter().filter(|pool| pool.counts.strong_count() > 0)
+                .map(|pool| pool.lag).sum(), SQLITE.as_slice());
+        }).build();
+    meter.f64_observable_gauge("st.db.wal.checkpoint.deferred_age").with_unit("s")
+        .with_callback(|observer| {
+            let pools = POOLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let age = pools.iter().filter(|pool| pool.counts.strong_count() > 0)
+                .filter_map(|pool| pool.deferred_since).map(|since| since.elapsed())
+                .max().unwrap_or_default();
+            observer.observe(age.as_secs_f64(), SQLITE.as_slice());
+        }).build();
+    meter.f64_observable_gauge("st.db.writer.current_hold")
+        .with_unit("s")
+        .with_callback(|observer| {
+            let origins = HOLD_ORIGINS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let writers = WRITER_OBSERVATIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Emit zero for previously seen origins too, so a finished hold cannot leave a stale gauge.
+            for origin in origins.iter() {
+                let mut elapsed: f64 = 0.;
+                for writer in writers.iter().filter_map(std::sync::Weak::upgrade) {
+                    let hold = writer.current_hold.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some((held_origin, started)) = &*hold && held_origin == origin {
+                        elapsed = elapsed.max(started.elapsed().as_secs_f64());
+                    }
+                }
+                observer.observe(elapsed, &writer_attributes(origin));
+            }
+        })
+        .build();
     meter
         .u64_observable_gauge("st.db.readers.open")
         .with_unit("{connection}")
@@ -483,6 +681,51 @@ mod tests {
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
     #[test]
+    fn checkpoint_histogram_exports_operation_and_report_outcome() {
+        use opentelemetry::metrics::MeterProvider as _;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        let instruments = Instruments::new(&provider.meter("checkpoint-test"));
+        let report = |frames: i32, recycled: bool| super::super::WalCheckpointReport {
+            frames, backfilled: frames, passive_ms: 2, writer_wait_ms: 0,
+            truncate_ms: recycled.then_some(1), recycled,
+        };
+        let reports = [Some(report(0, false)), Some(report(8, true)), Some(report(8, false)), None];
+        for operation in [CheckpointOperation::Truncate, CheckpointOperation::Passive] {
+            for report in &reports {
+                instruments.checkpoint.record(0.25,
+                    &checkpoint_attributes(operation, CheckpointOutcome::from_report(report.as_ref())));
+            }
+        }
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let metric = finished.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.db.wal.checkpoint.duration").unwrap();
+        assert_eq!(metric.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+            panic!("checkpoint duration must be an f64 histogram");
+        };
+        let mut labels = std::collections::BTreeSet::new();
+        for point in histogram.data_points() {
+            assert_eq!(point.count(), 1);
+            assert_eq!(point.sum(), 0.25);
+            let attributes: Vec<_> = point.attributes().collect();
+            assert_eq!(attributes.len(), 3);
+            let value = |key| attributes.iter().find(|attribute| attribute.key.as_str() == key)
+                .unwrap().value.to_string();
+            assert_eq!(value("db.system.name"), "sqlite");
+            labels.insert((value("db.operation.name"), value("st.db.wal.checkpoint.outcome")));
+        }
+        let expected: std::collections::BTreeSet<_> = ["checkpoint.truncate", "checkpoint.passive"]
+            .into_iter().flat_map(|operation| ["empty", "recycled", "deferred", "error"]
+                .map(|outcome| (operation.to_owned(), outcome.to_owned()))).collect();
+        assert_eq!(labels, expected);
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
     fn trace_only_origin_follows_request_scopes() {
         if isolated("trace_only_origin_follows_request_scopes") { return; }
         init(true);
@@ -506,8 +749,17 @@ mod tests {
             "task coordination-counts-catch-up", "task account-limits-catch-up",
             "task enforce-account-limits", "task trim-local-observations",
             "task mailbox-wake-dispatch", "task reconcile-pass", "task reconcile-deadline",
+            "reconcile", "published_list.agents", "published_list.missions",
+            "published_list.work", "replication.export", "replication.receive",
+            "startup.warmup", "maintenance.wal_checkpoint",
+            "task replication-projection-retry", "startup validate-replication-backlog",
+            "startup apply-replication-repairs", "startup project-replication-backlog",
         ] {
             assert_eq!(task_origin(label).attribute("origin").value, opentelemetry::Value::from(label));
+            crate::profile::task(label, || {
+                assert_eq!(current_origin().unwrap().attribute("origin").value,
+                    opentelemetry::Value::from(label));
+            });
         }
         assert_eq!(task_origin("unknown").attribute("origin").value, opentelemetry::Value::from("other"));
     }
@@ -530,6 +782,92 @@ mod tests {
             .unwrap();
         assert!(status.success());
         true
+    }
+
+    #[test]
+    fn worker_queue_exports_wait_and_abandoned_callback_starts() {
+        if isolated("worker_queue_exports_wait_and_abandoned_callback_starts") { return; }
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let writer = super::super::writer_admission::with_write_limit_for_test(1, || {
+            super::super::WriterConnection::new(
+                rusqlite::Connection::open_in_memory().unwrap(),
+                Arc::new(AtomicU64::new(0)),
+            )
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let mut worker = Box::pin(writer.spawn_blocking(move || {
+                entered.send(()).unwrap();
+                blocked.recv().unwrap();
+            }));
+            assert!(matches!(futures_util::poll!(worker.as_mut()), std::task::Poll::Pending));
+            started.await.unwrap();
+            let (requester, response) = tokio::sync::oneshot::channel::<()>();
+            let mut job = Box::pin(writer.write_workers()
+                .with_requester(Arc::new(requester), "/v1/intent/mission".to_owned())
+                .spawn_blocking(|| 42));
+            assert!(matches!(futures_util::poll!(job.as_mut()), std::task::Poll::Pending));
+            // The queue counts whole microseconds, and a release build can sample within the
+            // microsecond it enqueued, at age 0. Hold the job queued long enough to measure.
+            let queued = Duration::from_millis(2);
+            std::thread::sleep(queued);
+            let (depth, age) = writer.worker_queue.sample();
+            assert_eq!(depth, 1);
+            assert!(age >= queued.as_secs_f64(), "{age} s");
+            assert!(writer.worker_queue.sample().1 >= age);
+            provider.force_flush().unwrap();
+            let finished = exporter.get_finished_metrics().unwrap();
+            let metrics: Vec<_> = finished.iter().flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics()).collect();
+            let depth = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.depth").unwrap();
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = depth.data() else { panic!("depth gauge"); };
+            assert_eq!(gauge.data_points().next().unwrap().value(), 1);
+            let busy = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.busy_age").unwrap();
+            let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = busy.data() else { panic!("busy gauge"); };
+            assert!(gauge.data_points().next().unwrap().value() >= age);
+            drop(response);
+            release.send(()).unwrap();
+            worker.await.unwrap();
+            assert_eq!(job.await.unwrap(), 42); // Abandonment does not skip the mutation.
+            assert_eq!(writer.worker_queue.sample(), (0, 0.0));
+
+            let held = writer.admit_write().await;
+            let mut cancelled = Box::pin(writer.spawn_blocking(|| panic!("cancelled admission ran")));
+            assert!(matches!(futures_util::poll!(cancelled.as_mut()), std::task::Poll::Pending));
+            assert_eq!(writer.worker_queue.sample().0, 1);
+            drop(cancelled);
+            assert_eq!(writer.worker_queue.sample(), (0, 0.0));
+            drop(held);
+        });
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let metrics: Vec<_> = finished.iter().rev().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics()).collect();
+        let abandoned = metrics.iter().find(|metric| metric.name() == "st.write_workers.abandoned_callback_starts").unwrap();
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = abandoned.data() else { panic!("abandoned counter"); };
+        let points: Vec<_> = sum.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), 1);
+        assert!(points[0].attributes().any(|attribute| attribute == &KeyValue::new("outcome", "ran")));
+        let wait = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.wait").unwrap();
+        assert_eq!(wait.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = wait.data() else { panic!("wait histogram"); };
+        assert!(histogram.data_points().any(|point| point.attributes().any(
+            |attribute| attribute == &KeyValue::new("origin", "/v1/intent/mission")
+        ) && point.count() == 1 && point.sum() > 0.0));
+        let depth = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.depth").unwrap();
+        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = depth.data() else { panic!("depth gauge"); };
+        assert_eq!(gauge.data_points().next().unwrap().value(), 0);
+        let busy = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.busy_age").unwrap();
+        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = busy.data() else { panic!("busy gauge"); };
+        assert_eq!(gauge.data_points().next().unwrap().value(), 0.0);
+        provider.shutdown().unwrap();
     }
 
     fn write() {
@@ -564,6 +902,7 @@ mod tests {
             "st.db.writer.batch.size",
             "st.db.writer.commit.duration",
             "st.db.writer.batch.duration",
+            "st.db.writer.hold",
         ] {
             let metric = finished
                 .iter()
@@ -574,7 +913,7 @@ mod tests {
             let check_attributes = |attributes: Vec<&KeyValue>| {
                 assert_eq!(
                     attributes.len(),
-                    if name == "db.client.operation.duration" {
+                    if matches!(name, "db.client.operation.duration" | "st.db.writer.queue.duration" | "st.db.writer.hold") {
                         2
                     } else {
                         1
@@ -586,6 +925,11 @@ mod tests {
                         .any(|attribute| attribute.key.as_str() == "db.system.name"
                             && attribute.value == opentelemetry::Value::from("sqlite"))
                 );
+                if matches!(name, "st.db.writer.queue.duration" | "st.db.writer.hold") {
+                    assert!(attributes.iter().any(|attribute|
+                        attribute.key.as_str() == "st.db.writer.origin"
+                            && attribute.value == opentelemetry::Value::from("other")));
+                }
                 if name == "db.client.operation.duration" {
                     assert!(
                         attributes
@@ -618,6 +962,57 @@ mod tests {
                 }
                 _ => panic!("wrong histogram type for {name}"),
             }
+        }
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn loan_hold_exports_origin_and_current_hold_without_phase_spans() {
+        if isolated("loan_hold_exports_origin_and_current_hold_without_phase_spans") { return; }
+        init(false);
+        assert!(!phase_spans_enabled());
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let writer = super::super::WriterConnection::new(
+            rusqlite::Connection::open_in_memory().unwrap(), Arc::new(AtomicU64::new(0)));
+        let guard = crate::profile::task("task replication-projection-retry", || writer.write());
+        std::thread::sleep(Duration::from_millis(2));
+        provider.force_flush().unwrap();
+        let origin_matches = |attributes: Vec<&KeyValue>| attributes.iter().any(|attribute|
+            attribute.key.as_str() == "st.db.writer.origin"
+                && attribute.value == opentelemetry::Value::from("task replication-projection-retry"));
+        let current = |expected_held: bool| {
+            let finished = exporter.get_finished_metrics().unwrap();
+            let metric = finished.iter().rev().flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics())
+                .find(|metric| metric.name() == "st.db.writer.current_hold").unwrap();
+            assert_eq!(metric.unit(), "s");
+            let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = metric.data() else {
+                panic!("current hold must be an f64 gauge");
+            };
+            let point = gauge.data_points().find(|point| origin_matches(point.attributes().collect())).unwrap();
+            if expected_held { assert!(point.value() > 0.); } else { assert_eq!(point.value(), 0.); }
+        };
+        current(true);
+        drop(guard);
+        // The next completed batch fences the asynchronous connection return and hold recording.
+        writer.batched(|_| Ok::<(), rusqlite::Error>(())).unwrap().unwrap();
+        provider.force_flush().unwrap();
+        current(false);
+        let finished = exporter.get_finished_metrics().unwrap();
+        for name in ["st.db.writer.hold", "st.db.writer.queue.duration"] {
+            let metric = finished.iter().rev().flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics()).find(|metric| metric.name() == name).unwrap();
+            assert_eq!(metric.unit(), "s");
+            let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metric.data() else {
+                panic!("{name} must be an f64 histogram");
+            };
+            let point = histogram.data_points().find(|point| origin_matches(point.attributes().collect())).unwrap();
+            assert_eq!(point.count(), 1);
+            assert_eq!(point.bounds().last(), Some(600.));
+            if name == "st.db.writer.hold" { assert!(point.sum() > 0.); }
         }
         provider.shutdown().unwrap();
     }
