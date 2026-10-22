@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 import re
+import runpy
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1281,7 +1282,7 @@ class CommittedPolicy(unittest.TestCase):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'isolation-vm': 'off', 'genie-freshness': 'shadow',
-                                 'mail-redelivery-canaries': 'off'})
+                                 'mail-redelivery-canaries': 'off', 'fractal-web': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -1298,18 +1299,45 @@ class CommittedPolicy(unittest.TestCase):
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
             'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
-            'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client'])}
+            'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client']), 'fractal-web': sorted([
+            # The web lane detector's paths (scripts/ci-fractal-web-changes, PATTERNS and KIT_PATTERNS, as files that exist)...
+            '.buckconfig', '.buckconfig.genie.ts', '.buckroot', '.github/repo-settings.json', '.github/repo-settings.json.genie.ts',
+            '.github/workflows/cache-audit.ts', '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+            '.github/workflows/main-upkeep.yml', '.github/workflows/main-upkeep.yml.genie.ts', '.github/workflows/workspace-ci.ts',
+            'BUCK', 'BUCK.genie.ts', 'apps/fractal-web', 'buck2', 'clients/typescript/fractal-client', 'clients/typescript/fractal-scenarios',
+            'clients/typescript/fractal-views', 'docs/st3/client-v0/schemas', 'fixtures', 'flake.lock', 'flake.nix', 'megarepo.kdl',
+            'megarepo.lock', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-ui',
+            'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'scripts/ci-fractal-web', 'scripts/ci-fractal-web-changes',
+            'scripts/ci-fractal-web-gate', 'scripts/ci-fractal-web-kit-graph', 'scripts/ci-fractal-web-licenses',
+            'scripts/ci-fractal-web-licenses-test', 'scripts/ci-fractal-web-test', 'scripts/ci-typescript-client', 'scripts/ci-web-shell',
+            'scripts/ci-web-shell-inputs.jq', 'scripts/ci-web-shell-test',
+            # ...plus what the lane reads that the detector does not name: a workspace member's manifest (the frozen install), the
+            # client fixtures an SDK unit test opens, the source-input list the web shell hook publishes, and the public-repository
+            # lint the scenario privacy lane runs.
+            'apps/ios/package.json', 'docs/st3/client-v0/fixtures', 'pnpm-source-inputs.json', 'pnpm-source-inputs.json.genie.ts',
+            'scripts/check-public-repo'])}
         # Both run on linux-test-build's archive of the same tree and are members of the linux-gate aggregate, whose list
         # covers what its members read; sharing it gives the three one key (docs: The skip policy).
         declared['isolation-vm'] = declared['mail-redelivery-canaries'] = declared['linux-gate']
-        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web'):
             rules = self.rules(check)
             self.assertEqual(sorted(rules['inputs']) if rules['inputs'] else None, declared.get(check), check)
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
-        for check in ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries'):
+        for check in ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries', 'fractal-web'):
             self.assertEqual(self.rules(check)['sample_one_in'], 5, check)
+
+    def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
+        # The detector decides whether the lane runs at all; a path it matches that the key left out would let a change to it reuse a
+        # pass. Its patterns are compiled with its own semantics and run over every tracked file.
+        detector = runpy.run_path(str(ROOT / 'scripts/ci-fractal-web-changes'))
+        tracked = [p for p in subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z'], capture_output=True, text=True, check=True).stdout.split('\0') if p]
+        declared = self.rules('fractal-web')['inputs']
+        matched = detector['relevant_paths'](tracked)
+        self.assertGreater(len(matched), 100)
+        outside = [p for p in matched if not any(p == d or p.startswith(d + '/') for d in declared)]
+        self.assertEqual(outside, [], 'a path the fractal-web detector matches is not a declared input of the fractal-web check')
 
     def test_every_compile_time_include_of_the_rust_sources_is_inside_the_declared_inputs_of_linux_gate(self):
         # The declared list comes from a textual scan, which cannot see paths built at run time but CAN enumerate the
@@ -1404,6 +1432,12 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
+        # fractal-web: the fleet signer only, shadow, and its shard notes only (see the next tests).
+        web = self.rules('fractal-web')
+        self.assertEqual(web['trust_levels'], ('fleet',))
+        self.assertIsNone(web['max_age_s'])
+        self.assertIs(web['enforce'], False)
+        self.assertNotIn('fractal-web', ENFORCED)
 
     def test_the_wrapper_rules_match_what_the_note_jobs_record(self):
         gate = self.rules('linux-gate')['kinds']['wrapper']
@@ -1443,6 +1477,17 @@ class CommittedPolicy(unittest.TestCase):
             # No weaker signer is admitted, except the host level for the locally signable checks (see the test for the host level).
             self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in HOST_CHECKS else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
+        # fractal-web lists only its shard notes: the observer's record is of the always-emitted fractal-web job, which passes
+        # without running the lane when no web path changed against that run's base, so it is no evidence that the lane ran.
+        web = self.rules('fractal-web')
+        self.assertEqual(sorted(web['kinds']), ['wrapper'])
+        self.assertIsNone(web['kinds']['wrapper']['trust_levels'])
+        self.assertEqual(web['kinds']['wrapper']['by_level'], {})
+        self.assertEqual(web['kinds']['wrapper']['command'], ['bash', 'scripts/ci-fractal-web'])
+        self.assertEqual(web['kinds']['wrapper']['required_inputs'], sorted([
+            'attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256',
+            'app_test_set', 'kit_play_set', 'kit_shard', 'kit_shard_count']))
+        self.assertEqual(web['kinds']['wrapper']['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
 
 
 class InputKeyed(unittest.TestCase):

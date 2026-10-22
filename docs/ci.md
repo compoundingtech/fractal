@@ -729,8 +729,10 @@ reason=…`): `fractal-web` (the lane, the detector's relevant paths) and `fract
 (the kit plays, its kit paths). The key is `evidence-verify --project` over the check's
 inputs; a skip is only a trusted signed passing record with the same key, found by
 `evidence-verify` under the base skip policy. Inputs, detector, verifier and keys come
-from the base. Until the base policy declares a web check (and something signs it with
-input keys), every web decision is `run` with `reason=no-record`. `claims PATH…` and
+from the base. A matching record skips only when the base policy turns skipping on for
+the check (`enforce: true`); under a shadow entry the line reads `decision=run reason=shadow`
+and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
+its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
 `scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
