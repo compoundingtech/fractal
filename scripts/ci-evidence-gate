@@ -46,6 +46,8 @@ PROTECTED = (
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
     # What an agent-level note is held to (by_level "lane": true reads it from the base).
     '.st/required-lanes.json',
+    # The evidence log's key: which log heads the verifier reads at all.
+    '.st/evidence-log-key',
 )
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
@@ -115,7 +117,7 @@ def decide(context, outcome, result, tree):
         (not sampled(context, result, tree), 'sampled: the real job runs anyway, to compare it with the note'),
         (result.get('enforce') is True, 'shadow: the note would cover this check, but the skip policy has not turned skipping on for it'),
         (result.get('events') is None or context['event'] in result['events'],
-         'the policy does not let this signer level cover this event (a host key covers pull requests only)'),
+         'the policy does not let this note cover this event (the check\'s events, or a signer level that covers pull requests only)'),
         (result.get('satisfied') is True, 'verifier did not report satisfied'),
         (result.get('policy') is True, 'the skip policy was not applied'),
         (result.get('tier') == 'full', 'tier is not full'),
@@ -171,6 +173,14 @@ def protected_changes(base):
     return [p for p in paths if p in PROTECTED]
 
 
+def fetch_state(done):
+    """ok, none or failed for a quiet fetch of glob refspecs. git exits 1 and prints nothing when no remote ref matches any of
+    them (the tree has no record of its own); a fetch that could not reach or read the remote prints a fatal line."""
+    if done.returncode == 0:
+        return 'ok'
+    return 'none' if done.returncode == 1 and not done.stderr.strip() else 'failed'
+
+
 def observe(context, revision='HEAD'):
     """(outcome, result dict or None, detail, verifier sha256) without ever raising."""
     base, check, repository = context['base'], context['check'], context['repository']
@@ -184,7 +194,7 @@ def observe(context, revision='HEAD'):
     tree = run('git', 'rev-parse', '--verify', '--quiet', f'{revision}^{{tree}}')
     tree_id = tree.stdout.decode().strip() if tree.returncode == 0 else ''
     if OID.match(tree_id):
-        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)).returncode == 0 else 'failed'
+        context['notes_fetch'] = fetch_state(run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)))
     else:
         context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
@@ -421,7 +431,10 @@ def main():
     text = line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sha)
     print(text)
     record = (result or {}).get('record') if decision == 'skip' else None
-    for variable, body in (('GITHUB_OUTPUT', f'outcome={outcome}\nskip={"true" if decision == "skip" else "false"}\n'
+    # `line` is information only (evidence-presign-notice reads it). It goes first and without control characters, so
+    # nothing in it can stand in for the outputs below, the ones a skip is decided by.
+    single = re.sub(r'[\x00-\x1f\x7f]', '_', text)
+    for variable, body in (('GITHUB_OUTPUT', f'line={single}\noutcome={outcome}\nskip={"true" if decision == "skip" else "false"}\n'
                                              f'record={field(record)}\n'),
                            ('GITHUB_STEP_SUMMARY', text + '\n')):
         target = os.environ.get(variable)

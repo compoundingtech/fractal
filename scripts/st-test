@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--all] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
@@ -32,9 +32,12 @@ signing key within reach: code in that tree runs here. That is the cooperative t
 ("Host keys"); do not run it on a branch you would not run by hand.
 
 Exit 0 when every selected check passed and was signed; 1 when a check failed, timed out or could not be signed; 2 when it
-could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered.
+could not start (a refusal: dirty tree, bad argument); 3 from --status when the tree is not covered; 4 when nothing failed but a check
+was not signed because the tree edits that check's lane (evidence-wrap would refuse it; CI runs it).
 """
 import argparse
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -50,11 +53,18 @@ sys.dont_write_bytecode = True
 
 # The local command of each check: exactly the argv the wrapper records and a policy's `wrapper` kind pins.
 # A check without an entry cannot be signed from a checkout; it is not listed, and nothing pretends otherwise.
+# In the order they run: typescript-client first, because it is signed for nearly every tree (genie-freshness is refused for every
+# tree that edits its lane, and a cold genie dev shell takes minutes), so the pre-push hook's wait covers it first.
 LOCAL = {
-    'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
     'typescript-client': ['nix', 'develop', '.#web', '-c', 'bash', '-c',
                           'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
+    'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
+    # A Linux gate stage, run as its CI job runs it but with a home of its own (scripts/ci-local).
+    'mail-redelivery-canaries': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'mail-redelivery-canaries'],
 }
+# Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
+# --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
+HEAVY = frozenset({'mail-redelivery-canaries'})
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 
 
@@ -125,6 +135,20 @@ def lane_names(base):
         return set(lanes) if isinstance(lanes, dict) else set()
     except (ValueError, KeyError, UnicodeDecodeError, TypeError):
         return set()
+
+
+def lane_edits(verifier_path, directory, base, check, tree):
+    """The paths of `check`'s lane definition that `tree` changes relative to `base` (empty when it changes none). evidence-wrap refuses
+    to sign such a tree; asking first lets the run say so plainly, as "not signed", instead of reporting a failed check."""
+    loader = importlib.machinery.SourceFileLoader('evidence_verify_for_st_test', verifier_path)
+    verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(verifier)
+    try:
+        rules = verifier.lane_rules(git('show', f'{base}:{verifier.LANES_PATH}').stdout.decode(), check)
+        base_tree = text(git('rev-parse', '--verify', '--end-of-options', base + '^{tree}'))
+        return verifier.lane_definition(str(directory), base_tree, tree, rules)['changed']
+    except verifier.Failure:
+        return []  # evidence-wrap gives the reason
 
 
 def behind(base):
@@ -256,6 +280,7 @@ def main(argv):
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
+    parser.add_argument('--all', action='store_true', help='with no --check: the heavy checks too (' + ', '.join(sorted(HEAVY)) + ')')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree; exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
@@ -264,7 +289,7 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
-    checks = args.check or list(LOCAL)
+    checks = args.check or [name for name in LOCAL if args.all or name not in HEAVY]
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
@@ -306,13 +331,18 @@ def main(argv):
             repository = args.repository or repository_of(remote or 'origin')
             # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
-            rows, failed = [], False
+            rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
             unmaterialized = materialize_members(directory)
             for name in checks:
                 if unmaterialized:
                     rows.append((name, 'NOT RUN', 0, unmaterialized))
                     failed = True
+                    continue
+                edits = lane_edits(tools['evidence-verify'], directory, args.base, name, tree) if name in lanes else []
+                if edits:
+                    rows.append((name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'))
+                    unsigned = True
                     continue
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
@@ -341,7 +371,7 @@ def main(argv):
                 line = nudge_log()
                 if line:
                     print(f'  {line}')
-            return 1 if failed else 0
+            return 1 if failed else (4 if unsigned else 0)
         finally:
             if directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)

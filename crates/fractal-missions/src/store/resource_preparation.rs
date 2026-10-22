@@ -74,7 +74,12 @@ pub fn inputs_with_actuals(
             active_subscriptions.push((subject.clone(), expected.clone()));
         }
     }
-    let normalized_observation = normalize_resource_observation(
+    let resource_observation =
+        fractal_store::store::resources::preparation_observation(transaction, resource)
+            .map_err(internal)?;
+    let previous = resource_observation.actual.as_ref()
+        .and_then(|actual| actual.get("facts").cloned());
+    let normalized_observation = fractal_store::store::normalize_resource_observation_with_actuals(
         transaction,
         &ClaimInput {
             subject: resource.into(),
@@ -85,14 +90,13 @@ pub fn inputs_with_actuals(
             expected_subject: None,
             idempotency_key: None,
         },
+        resource_observation.kind,
+        || Ok(resource_observation.actual),
     )?
     .expect("a resource observation is normalized");
     let facts = normalized_observation
         .get("facts")
         .expect("a normalized resource observation has facts");
-    let previous = actual(resource)
-        .map_err(internal)?
-        .and_then(|actual| actual.get("facts").cloned());
     let baseline = previous.is_none();
     let previous_object = previous.as_ref().and_then(Value::as_object);
     let current_object = facts.as_object().ok_or_else(|| {
@@ -139,23 +143,12 @@ pub fn inputs_with_actuals(
             .filter_map(|item| item.get("number").and_then(Value::as_u64))
         {
             let subject = format!("{resource}/{segment}/{number}");
-            let recorded = actual(&subject)
-                .map_err(internal)?
+            let observation =
+                fractal_store::store::resources::preparation_observation(transaction, &subject)
+                    .map_err(internal)?;
+            let recorded = observation.actual
                 .and_then(|actual| actual.get("facts").cloned());
-            let observed_at = transaction
-                .query_row(
-                    /* sqlite-large-value: allow-for-now lv-h310c8b4305ae owner=fractal_missions::store::resource_preparation TODO=trace-statement-and-value-representation */ &canonical_sql(
-                        "SELECT accepted_at_unix_ms FROM claims
-                                     WHERE subject=?1 AND kind='resource.observed'
-                                     ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
-                    ),
-                    [&subject],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(internal)?
-                .and_then(|at| at.parse::<u128>().ok())
-                .unwrap_or_default();
+            let observed_at = observation.observed_at;
             recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
         }
     }
