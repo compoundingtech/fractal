@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st schedules ls",
+      "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_schedules_list_pages_declarations_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; explicit page flags and declarations compared after disk store reopen"
+    },
+    {
       "command": "st activity",
       "description": "Read bounded changes since a stable cursor",
       "tests": [

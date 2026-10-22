@@ -44,6 +44,7 @@ pub mod inventory;
 pub mod raw_terminal;
 mod runtime_start_diagnostics;
 pub mod search;
+pub mod schedules;
 pub mod summary;
 #[cfg(test)]
 mod agents_window_tests;
@@ -127,6 +128,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/conversations/{id}/stream",
             get(conversation_stream),
         )
+        .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
         .route("/v1/client/missions/{*id}", get(mission_detail))

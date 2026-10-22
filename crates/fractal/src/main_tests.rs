@@ -2478,6 +2478,8 @@ fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
 
 #[test]
 fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
+    #[cfg(test)]
+    const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2491,6 +2493,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
+        ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),

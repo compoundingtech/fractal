@@ -91,6 +91,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("launch-variants.list", "/v1/client/launches/{id}/variants"),
     ("launch-decisions.list", "/v1/client/launches/{id}/decisions"),
     ("launch-approvals.list", "/v1/client/launches/{id}/approvals"),
+    ("schedules.list", "/v1/client/schedules"),
     ("missions.list", "/v1/client/missions"),
     ("missions.get", "/v1/client/missions/{id}"),
     ("work.list", "/v1/client/work"),
