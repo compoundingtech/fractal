@@ -8,6 +8,9 @@ argues that a path does not matter. Per check it prints one line:
 
   check=<name> decision=skip|run key=<source_inputs|none> proof=<record|none> inputs_sha256=<sha256> reason=<...>
 
+A matching record decides `skip` only when the base policy turns skipping on for the check (`enforce: true`);
+otherwise the line says `decision=run reason=shadow` and names the record it would have used.
+
 Checks: `fractal-web` (the whole web lane, the detector's relevant paths) and `fractal-web-kit` (the
 kit plays, the detector's kit paths, whose coverage of the Storybook module graph CI checks). Inputs,
 the detector, the verifier and its keys come from the BASE commit, never from the change. When the
@@ -122,7 +125,9 @@ def decide(name, selector, base, head, repository, policy_inputs, scratch):
     except ValueError:
         result = {}
     if done.returncode == 0 and result.get('satisfied') and result.get('record'):
-        line.update(decision='skip', proof=result['record'], reason='match')
+        # Shadow: the record would cover the check, but the base policy has not turned skipping on for it.
+        line.update(decision='skip' if result.get('enforce') is True else 'run', proof=result['record'],
+                    reason='match' if result.get('enforce') is True else 'shadow')
     else:
         line['reason'] = 'sampled' if result.get('reason') == 'sampled' else 'no-record'
     return line

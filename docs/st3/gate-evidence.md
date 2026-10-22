@@ -618,7 +618,16 @@ The `fractal-web` lane runs only when web paths changed, in one shard on pull re
 `fractal-web-execution` shard signs its own result (check `fractal-web`, artifact `evidence-note-fractal-web-shard-N`) and
 records `kit_shard`, `kit_shard_count`, `kit_play_set` and `app_test_set`, so a pull request's per-commit set can never be
 mistaken for the merge queue's full one, and a later policy can require every shard. A run that did not execute the lane
-makes no note and the shadow report reads `n/a`. The lane has no skip policy yet: its notes are evidence only.
+makes no note and the shadow report reads `n/a`. The skip policy has a shadow entry for `fractal-web` (`enforce` false,
+`fleet` only, no gate job yet; see "The skip policy"), so nothing skips the lane and its notes are still evidence only.
+**One shard note cannot stand for the whole check.** The verifier takes the latest note for the tree and a policy rule can
+only require that an input is present, not that every shard of one run passed: a merge-queue run with two shards leaves two
+notes, and either alone satisfies the rule, including shard 1, which runs only the kit Storybook build and its half of the
+strict plays. A pull request's single shard runs the per-commit play set and the related app tests (`kit_play_set` `commit`,
+`app_test_set` `related`), and the note does not record whether kit plays ran at all (`KIT_INPUTS` false skips them).
+Until the verifier can require every shard of one run (or the lane signs one note for the whole check), the entry stays
+shadow and no gate job reads it; `ci-evidence-gate-test` demonstrates the limit with a shard-1-of-2 note. The local
+`scripts/web-skip-proof` reports a matching record under a shadow entry as `decision=run reason=shadow`, never `skip`.
 
 ### Shadow verification
 
@@ -946,6 +955,15 @@ artifact name, and `upgrade-impact`, which reads the fragments, always runs. The
 the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
 whole until a per-file list is reviewed against a trace of what each stage opens.
 
+`fractal-web` declares its inputs too (shadow only, `sample_one_in` 5, no gate job). The list is every path the lane's detector
+(`scripts/ci-fractal-web-changes`, embedded in `fractal-web-changes`) matches, written as the directories and files that exist, plus
+what the lane reads that the detector does not name: `apps/ios/package.json` (a workspace member, so the frozen install reads it),
+`docs/st3/client-v0/fixtures` (an SDK unit test opens `timeline-conformance.json`), `pnpm-source-inputs.json` (the web shell hook
+publishes the source inputs it lists) and `scripts/check-public-repo` (the scenario privacy lane runs it). Those four are detector
+gaps: a change to only them does not run the lane at all today. The privacy lane also fails when that lint fails outside its own
+scope; `genie-freshness`, whose key is the whole tree, runs the same lint for every tree. A policy test fails when a tracked path
+the detector matches lies outside the declared list.
+
 **Whole-tree lints run in genie-freshness, not in the Linux gate.** Two lints read every tracked file: the public-repository check
 (`scripts/check-public-repo`, formerly called from `tests/public_repo.rs`) and the retired-name check (`scripts/check-native-names`, formerly
 `tests/native_only.rs::tracked_product_surface_contains_only_native_names`). Run inside the Linux gate they would see a page under `apps`, `packages` or
@@ -984,7 +1002,11 @@ as `fleet/ci`) are listed for **every** required check, each with the exact comm
 - `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`;
 - `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
 - `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
-  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`.
+  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`;
+- `fractal-web` (shadow, `wrapper` only): `["bash", "scripts/ci-fractal-web"]`, the step-outcome note each
+  `fractal-web-execution` shard signs, which must also carry `kit_shard`, `kit_shard_count`, `kit_play_set` and
+  `app_test_set`. It lists no `observed` kind: the observer's record is of the always-emitted `fractal-web` job, which passes
+  without running the lane when no web path changed against that run's base.
 Every wrapper rule requires `flake_lock_sha256`, `toolchain_sha256`, `wrapper_sha256`, `system` and `attempt`
 and binds `flake_lock_sha256` to `flake.lock` in the verified tree; the stage rule also requires `stage` and
 `job`, and the step-outcome rules `job`, `steps` and `step_outcomes`. No rule names a weaker signer level, so only
@@ -1017,6 +1039,7 @@ tree: `"enforce": true, "events": ["pull_request"]`.
 | --- | --- | --- | --- | --- |
 | `typescript-client` | true | `pull_request` | 5 | this change |
 | `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |
+| `fractal-web` | false | - | 5 | - |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
