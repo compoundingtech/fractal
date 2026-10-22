@@ -25,7 +25,6 @@ fn custom_ordinary_claim_append_and_seal_never_enqueue_dirty_subjects() {
         store.append_claim(&ClaimInput {
             subject: subject.into(),
             kind: "runtime.observed".into(),
-            fields: BTreeMap::from([("state".into(), json!("running"))]),
             ..empty_input()
         }).unwrap();
     }
@@ -81,7 +80,7 @@ fn custom_non_custom_dependency_canonical_change_refreshes_consumer() {
 fn custom_noop_updates_preserve_dirty_queue_and_schema_reopen_is_stable() {
     let store = Store::open_memory("example").unwrap();
     store.append_claim(&ClaimInput {
-        subject: "custom/example-a".into(), kind: "custom.example.recorded".into(),
+        subject: "custom/example/fact".into(), kind: "custom.example.recorded".into(),
         ..empty_input()
     }).unwrap();
     store.put_document_as(
