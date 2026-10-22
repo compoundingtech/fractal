@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
 root="${CATALOG:-$PWD}"
-bus="${ST_ROOT:-$root}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+bus="${FRACTAL_ROOT-${ST_ROOT:-$root}}"
 
 bus_dir() {
   local identity="$1"

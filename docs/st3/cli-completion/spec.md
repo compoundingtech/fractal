@@ -17,7 +17,7 @@ Does not define: the entity model (see [../design.md](../design.md)) or the clie
 ## Mechanism
 
 st uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
-`crates/st3/Cargo.toml`). st pins the exact version and reviews the unstable API on
+`crates/fractal/Cargo.toml`). st pins the exact version and reviews the unstable API on
 each upgrade. The shell stub passes the command line back to st on every TAB:
 
 ```
@@ -43,7 +43,7 @@ argument without a completer or a value set offers nothing.
 
 ## Entity kinds
 
-`crates/st3/src/completion.rs` defines `Entity`. Each kind lists through generated-client list
+`crates/fractal/src/completion.rs` defines `Entity`. Each kind lists through generated-client list
 calls with the operational (non-history) default. A list follows `next_cursor` page by page (200
 items per page) until the collection ends or 5,000 items are read, subject to the shared deadline.
 
@@ -193,7 +193,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
 - Unit tests in `completion.rs` cover the resolution ladder, filters (terminal state, work
   filters, native sessions, people and actors), the terminal join and its age, pagination,
   `--endpoint` parsing, description bounds, ages, and plurals.
-- `crates/st3/tests/completion_shells.rs` serves an in-process daemon with 205 running terminals
+- `crates/fractal/tests/completion_shells.rs` serves an in-process daemon with 205 running terminals
   and one stopped terminal. It checks that completion offers every running terminal across pages
   with descriptions; that a missing or silent daemon yields no entity candidates, nothing on
   stderr, and an answer within seconds; and that the stubs from `st completions` complete a live

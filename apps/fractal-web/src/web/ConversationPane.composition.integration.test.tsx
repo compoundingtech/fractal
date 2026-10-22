@@ -13,15 +13,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import { Markdown, type WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
-import type * as Kit from '@smalltalk/fractal-ui/assistant-ui'
+import { Markdown, type WorkLogCall } from '@fractal/ui/assistant-ui'
+import type * as Kit from '@fractal/ui/assistant-ui'
 import type * as KitRuntime from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import type * as KitTranscript from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type * as KitComposer from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
-import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/fractal-ui/assistant-ui'
+import type { ConversationRuntimeOptions, TranscriptTurn } from '@fractal/ui/assistant-ui'
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
 import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
+import * as InputPaint from '../telemetry/inputPaint.ts'
+vi.mock('../telemetry/inputPaint.ts', { spy: true })
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -48,6 +50,7 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
+  useConnection: () => ({ _tag: 'Live' }),
   // A sendable view exposes attachments; the composer stays disabled otherwise.
   useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},
@@ -169,6 +172,27 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('registers the real composer field and only the latest turn, including a newly mounted transcript tail', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    source.sendable = true
+    await mount()
+    const dock = container.querySelector('[data-testid="conversation-composer-dock"]')!
+    const registration = vi.mocked(InputPaint.registerInputPaintRegions).mock.calls.findLast(([owner]) => owner === dock)!
+    const regions = registration[1]()
+    expect(regions.map((region) => region.target)).toEqual([
+      dock.querySelector('textarea'),
+      container.querySelector('[data-testid="transcript-turn"]:last-child'),
+    ])
+    vi.mocked(InputPaint.inputPaintRegionMounted).mockClear()
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [...scenario,
+      { _tag: 'Text', id: 'owned-send', role: 'user', text: 'Send into the tail', attachments: [], streaming: false, at: at(20), sendState: { _tag: 'Pending' } },
+    ], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(InputPaint.inputPaintRegionMounted).toHaveBeenCalledWith(dock)
+    expect(registration[1]().at(-1)?.target).toBe(container.querySelector('[data-testid="transcript-turn"]:last-child'))
+    expect(registration[1]().at(-1)?.target.textContent).toContain('Send into the tail')
+  })
   it('waits for actual source adoption without painting stranded rows or replacing the composer', async () => {
     source.feed = { _tag: 'Waiting' }
     // Focus and caret retention need an enabled composer once the conversation loads.
@@ -384,6 +408,8 @@ describe('ConversationPane composition activation', () => {
     expect(source.composerProps.length).toBeGreaterThan(0)
     expect(source.composerProps.every(props => props.readingColumn === true)).toBe(true)
     expect(source.composerProps.every(props => props.placeholder === undefined)).toBe(true)
+    expect(source.composerProps.every(props => props.conversationLabel === 'Example Agent')).toBe(true)
+    expect(container.querySelector('form')?.getAttribute('aria-label')).toBe('Message composer, Example Agent')
   })
 
   it('keeps the source-owned scroll command stable through settlement, echo and Retry until a new Send', async () => {
@@ -849,7 +875,7 @@ describe('ConversationPane composition activation', () => {
     await mount(undefined, strictMode)
     const stop = container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')!
     const message = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!
-    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer"]')!
+    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer, Example Agent"]')!
     expect(message.disabled).toBe(!sendGranted)
     stop.focus()
     expect(document.activeElement).toBe(stop)

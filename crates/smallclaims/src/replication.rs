@@ -159,6 +159,8 @@ pub struct ReplicationPeerFailureRequest {
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carrier: Option<ReplicationCarrier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ReplicationExchangeFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -306,6 +308,99 @@ impl ReplicationCarrier {
     }
 }
 
+/// The failing operation, independent of its route carrier.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplicationFailurePhase {
+    Dial,
+    LocalExport,
+    RequestHeaders,
+    ResponseBody,
+    Verify,
+    LocalReceive,
+    FollowUpExport,
+}
+
+/// Bounded, allowlisted diagnostic metadata, not arbitrary error display or peer prose.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReplicationExchangeFailure {
+    pub code: String,
+    pub phase: ReplicationFailurePhase,
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub cause: String,
+}
+
+impl ReplicationExchangeFailure {
+    /// Error display/source text may contain URLs, credentials or claim content.
+    /// Retain typed local codes and transport categories, never arbitrary prose.
+    pub fn from_error(
+        error: &anyhow::Error,
+        phase: ReplicationFailurePhase,
+        elapsed: std::time::Duration,
+        http_status: Option<u16>,
+    ) -> Self {
+        if let Some(failure) = error.downcast_ref::<Self>() {
+            let mut failure = failure.clone();
+            failure.elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+            if phase == ReplicationFailurePhase::FollowUpExport
+                && failure.phase == ReplicationFailurePhase::LocalExport
+            {
+                failure.phase = phase;
+            }
+            return failure;
+        }
+        let code = if let Some(error) = error.downcast_ref::<crate::error::Error>() {
+            error.code
+        } else if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+            if error.is_timeout() {
+                "replication-timeout"
+            } else if error.is_connect() {
+                "replication-connect-failed"
+            } else {
+                "replication-http-failed"
+            }
+        } else {
+            "replication-operation-failed"
+        };
+        // A typed I/O cause is useful without its possibly sensitive display/path.
+        // One category plus one ErrorKind has a fixed bound, well below 512 bytes.
+        let mut cause = if error.downcast_ref::<crate::error::Error>().is_some() {
+            "local store rejected the operation".to_owned()
+        } else if error.downcast_ref::<reqwest::Error>().is_some() {
+            "HTTP transport failed".to_owned()
+        } else {
+            "operation failed; free-form error chain withheld".to_owned()
+        };
+        if let Some(kind) = error.chain()
+            .find_map(|source| source.downcast_ref::<std::io::Error>().map(std::io::Error::kind))
+        {
+            use std::fmt::Write as _;
+            let _ = write!(cause, "; I/O kind: {kind:?}");
+        }
+        Self {
+            code: code.into(),
+            phase,
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            http_status,
+            cause,
+        }
+    }
+}
+
+impl std::fmt::Display for ReplicationExchangeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(status) = self.http_status {
+            write!(f, "{} (HTTP {status}): {}", self.code, self.cause)
+        } else {
+            write!(f, "{}: {}", self.code, self.cause)
+        }
+    }
+}
+
+impl std::error::Error for ReplicationExchangeFailure {}
+
 /// One locally initiated exchange observation. Absent after restart; never a replicated claim.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReplicationExchangeTransport {
@@ -314,6 +409,8 @@ pub struct ReplicationExchangeTransport {
     /// Fabric exposes no evidence for the direct/relay path of this particular dial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fabric_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ReplicationExchangeFailure>,
 }
 
 impl ReplicationExchangeTransport {
@@ -322,6 +419,7 @@ impl ReplicationExchangeTransport {
             at_unix_ms,
             carrier,
             fabric_route: (carrier == ReplicationCarrier::Fabric).then(|| "unknown".into()),
+            failure: None,
         }
     }
 }

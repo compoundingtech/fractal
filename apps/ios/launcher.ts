@@ -1,7 +1,7 @@
-// What a new shell is called, as stui names one (crates/stui/src/ui/screens.rs random_name), and
+// What a new shell is called, as stui names one (crates/fractal-tui/src/ui/screens.rs random_name), and
 // how a checkout reads. The new-agent form is gone from both (Nathan, 2026-10-07).
 
-import type { AgentCheckout } from '../../clients/typescript/st3-client';
+import type { AgentCheckout } from '../../clients/typescript/fractal-client';
 
 export function checkoutLabel(checkout?: AgentCheckout | null): string | undefined {
   return checkout ? `worktree · branch ${checkout.branch} · ${checkout.repository}` : undefined;

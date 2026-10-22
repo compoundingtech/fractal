@@ -18,9 +18,9 @@ verifiers accept both predicate types:
 permanent signed-history decoder exception named in
 [#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
 attestations are never rewritten. All other predicate URIs are rejected.
-The Rust observers and `scripts/evidence-sign` still write
-`https://smalltalk.dev/evidence/gate/v1`. The signer switches only in a later
-release, after this dual-URI verifier release is on main. Its fields are:
+The Rust observers and `scripts/evidence-sign` write
+`https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers
+also accept records produced by older signers. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
@@ -55,22 +55,217 @@ or a detached signature scheme. This is in-toto statement JSON inside a signed
 Git commit, **not** a DSSE envelope or a GitHub artifact attestation.
 
 The immutable record ID is this notes commit's full object ID. Its only ref is
-`refs/notes/evidence/<record-id>`. There is no shared mutable notes tip: different
+`refs/notes/evidence/<tree>/<record-id>`, where `<tree>` is the git tree the note is about (the
+name of the one entry in the note's flat tree). There is no shared mutable notes tip: different
 writers create different refs, so their updates cannot conflict. Duplicate
 imports verify the signature and create the ref transactionally, or confirm it
-already points to the same ID. A ref whose suffix does not equal its target is
-invalid. The flat notes tree remains readable with Git's notes command:
+already points to the same ID. A ref whose last component does not equal its target, or that
+sits under a tree the note is not about, is invalid and finds nothing. The flat notes tree
+remains readable with Git's notes command:
 
 ```sh
-git notes --ref=refs/notes/evidence/RECORD_ID show TREE_ID
-git push origin 'refs/notes/evidence/*:refs/notes/evidence/*'
-git fetch origin 'refs/notes/evidence/*:refs/notes/evidence/*'
+git notes --ref=refs/notes/evidence/TREE_ID/RECORD_ID show TREE_ID
+git push origin 'refs/notes/evidence/TREE_ID/RECORD_ID:refs/notes/evidence/TREE_ID/RECORD_ID'
+git fetch origin 'refs/notes/evidence/TREE_ID/*:refs/notes/evidence/TREE_ID/*'
 ```
 
-Keep the namespace when synchronizing repositories; do not prune records as a
-side effect of branch cleanup. The wildcard refspec is additive and does not
-need force updates or a merge of notes histories. v1 uses one ref per record;
-large-repository indexing and retention belong to later stages.
+**One tree is one prefix.** The verifier, the gate, the signed-tree job and the publisher reach the
+records of a tree through `refs/notes/evidence/<tree>/` (and the records of an input key through
+`refs/notes/evidence-input/<check>/<key>/`), never by listing or fetching every note: a lookup costs
+what that tree's own records cost, however many trees have records. A test pins this (the verifier's
+`for-each-ref` listings during one verification return at most the tree's own records). The cost of the
+whole namespace is paid only by `scripts/evidence-gc`, which also keeps its size bounded (see below).
+
+**Tags, written and read first.** Every reader also reads `refs/tags/evidence/<tree>/<record>` and
+`refs/tags/evidence/input/<check>/<key>/<record>` (lightweight tags naming the same signed commit), in the same
+listing or fetch as the notes, one prefix per tree or key in each namespace; a record under both names counts
+once. Records move there because a ruleset can protect tags and not notes (`doc/fleet/factory/skip-ci-plan`, the
+hard precondition: the readers were on main before any producer wrote one). The producers
+(`scripts/evidence-publish`, `scripts/ci-evidence-observe`, `scripts/evidence-wrap` and so `scripts/st-test --push`)
+file every record under both names, the tag and the note, created together or not at all and pushed in one push:
+a gate whose base predates the tag readers reads only notes, and a record only it cannot see would hide a newer
+failure from it. Writing notes stops in a later change, once no gate that still runs reads notes only. A tree id
+is hex, so `input/` never collides with a tree's prefix; both live under `evidence/`, which the tag release
+workflow ignores, full-history checkouts leave out and no workflow's push trigger matches (a lint pins it).
+
+**The first layout** was `refs/notes/evidence/<record-id>` (one object id under the prefix). The
+verifier still reads it, with a pattern that matches only names exactly one object id long, so it never
+lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
+refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
+Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
+the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
+removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
+
+Do not prune records as a side effect of branch cleanup, and keep the namespace when synchronizing
+repositories. The wildcard refspec is additive and does not need force updates or a merge of notes
+histories. v1 uses one ref per record.
+
+### Garbage collection and the size of the namespace
+
+Every gate member of every pull request and merge-group run adds one ref, so the namespace grows with CI
+(measured 2026-10-19: 9,430 records on 1,195 trees, about 8 records per tree, 258 input-index refs, 2.2k to
+3.5k new refs a day; the whole remote lists 13,797 refs, 1.3 MB, in about 0.5 s). `scripts/evidence-gc`
+keeps it bounded. It is the one tool that reads the whole namespace; nothing on a hot path does.
+
+```sh
+scripts/evidence-gc --fetch --remote origin                       # dry run: prints the plan's counts per reason
+scripts/evidence-gc --fetch --remote origin --plan-out plan.json  # the same, and the plan with its inputs, to recompute it
+scripts/evidence-gc --fetch --remote origin --apply               # deletes exactly the plan's refs, locally and on the remote
+```
+
+**A pure plan.** `gc_plan(records, index, live trees, live keys, retention, as_of)` is a function of git data alone,
+so anyone with the same refs gets the same plan; the output names its `inputs_sha256` and `plan_sha256`, and
+`--plan-out` writes the inputs beside the plan. Applying it deletes exactly the refs it names. Its inputs:
+
+- **live trees**: the tree of every branch tip committed within `branch_days` of `as_of` (`--fetch` reads every
+  `refs/heads/*` into `refs/evidence-gc/tips/*`; open pull request heads and merge-queue tips are branches, so no pull
+  request API is asked), plus `--head`/`--heads-from`; and the trees of main's first-parent commits within `main_days`
+  of `as_of`, main's tip always.
+- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs.
+- **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
+  change: `main_days` (3), `branch_days` (30), `grace_hours` (24), `soft_records` (3,000), `cap_records` (5,000).
+- **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
+
+**Whole trees.** A tree's records are deleted together or not at all, and a live tree's never; an input key's index
+refs likewise. The verifier decides a tree from that tree's records and its input key's records, so no verdict of a
+live tree can change. A dead tree that is pushed again is a new tree: its verdict is its old one, no record (the check
+runs), or what its input key alone says, as for any new tree with the same inputs. Deleting records one at a time by
+age, as the first version did, could remove a failure and keep the pass dated within the two-minute margin after it,
+which the failure still shadowed: that tree then verified. `scripts/evidence-gc-test` checks these properties on 400
+random worlds against a model of the verifier, and end to end with the verifier on real records.
+
+**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is kept (a record written moments
+ago for a head the listing raced with) unless more than `soft_records` records remain: then dead groups go oldest
+first by their newest record. Records are counted, not refs, so a record filed as a tag and a note counts once. If the
+live set alone is over `cap_records`, nothing live is deleted, the set is printed and the exit status is 3.
+
+**Measured 2026-10-21** (a dry run against the remote): 5,021 refs, 4,562 records; 960 branch tips within 30 days
+(their trees hold 434 refs) and 217 main trees within 3 days (2,593 refs); 155 dead trees and 22 dead keys are deleted
+(629 refs), and 1,077 refs more over the soft limit, leaving 3,000 records, 2,970 of them live, and 3,315 refs. The
+first run in an empty repository took 463 s (most of it fetching every record and 40 days of main's trees); a second
+run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
+
+**The lock window.** A tag ruleset on `refs/tags/evidence/**` (no deletion, no update) refuses GC's own deletions too,
+so `--lock-config FILE` names three commands, run without a shell: `unlock`, `relock` and `check` (exit 0 only while the
+protection is on). `scripts/evidence-gc-lock.example.json` has them for the ruleset through `gh api`; moving the
+credential to a sekrets profile is a change of that file alone. The order: migrations and note deletions first
+(nothing protects notes), then `check` (found off: relock, delete no tag, exit 4), a listing of the remote's evidence
+tags, `unlock`, the tag deletions, `relock` in a `finally` that also runs on SIGTERM, SIGINT and SIGHUP (retried three
+times), `check` again, and a second listing. A tag that disappeared or moved without being in the plan, or a protection
+that is not on at the end, is an alarm (exit 4). One line on stderr records it:
+`evidence-gc-lock v1 unlocked_at=... relocked_at=... window_s=... tags_deleted=N unexplained=N final=on`.
+`--relock-only` runs `relock` and `check` alone.
+
+**Where it runs.** `scripts/evidence-gc.timer` (daily, 03:40 UTC) starts `scripts/evidence-gc.service`, a systemd
+user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
+`scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
+`~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
+cannot change what deletes), runs it with `--fetch --apply` and the lock config in `~/.config/evidence-gc/lock.json`
+when present, keeps 30 days of summaries and plans, and stores each summary as a new version of the st document
+`doc/fleet/factory/evidence-gc/runs`. The unit's `ExecStopPost` runs `--relock-only` after every stop, so even a run
+killed inside its window leaves the protection on. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
+and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
+writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
+
+**Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
+file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero
+or cannot run, `--apply` changes nothing (`refused`, exit 1) and the lock window is never opened.
+
+**Safety.** It fails closed: if a commit named by `--head` cannot be turned into a tree, no branch tip is known at
+all, or the `--before-delete` command fails, `--apply` deletes nothing. A failed remote push leaves the local refs alone. A second run finds nothing to do.
+Refs outside the evidence namespaces and refs that are not well-formed records are never touched. The first layout
+(`refs/notes/evidence/<record>`) is read from the note: in a live tree it is migrated to
+`refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), in a dead tree it goes
+with the tree. Take a bundle first when running it by hand:
+`git bundle create evidence-notes.bundle 'refs/tags/evidence/*' 'refs/notes/evidence/*' 'refs/notes/evidence-input/*'`.
+
+### Records as tags (in progress)
+
+No ruleset can protect `refs/notes/*` (GitHub refuses the target pattern), so anyone with write access can delete a
+newer failing record and let an older pass decide again, and git keeps no trace of the deletion. The records are
+therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no deletion, no update) that GC turns off
+only around its own deletions; the ruleset is an extra, and the protection that does not depend on GitHub is a signed log
+of every record kept on a host we hold (`doc/fleet/factory/skip-ci-plan`, "Portable evidence"). Until then the exposure is bounded: nothing rejects, a pull request skip is
+undone by the merge queue's full run, and one run in five is sampled. The order, each step its own pull request:
+
+1. The tag release workflow ignores `evidence/**` tags (done).
+2. No workflow checkout fetches them (done). `fetch-depth: 0` fetches every tag, and 5,000 records as tags added 81.5 MiB and
+   16 s to a full fetch (measured 2026-10-19), mostly source objects of tested commits that no branch holds. Every
+   full-history checkout is now `fullHistoryCheckoutSteps` in `.github/workflows/workspace-ci.ts`: a one-commit checkout,
+   then one fetch of every branch and tag with the negative refspec `^refs/tags/evidence/*`. Deepening the shallow clone
+   took 21 s against 11 s for a full fetch, so the step drops the shallow marker, fetches as a fresh clone would
+   (`--refetch`, git 2.36 or later) and checks connectivity: 15 s in all, against 11 s for `fetch-depth: 0` today
+   (2026-10-20, from hetz2). `scripts/ci-evidence-signing-test` allows only literal positive depths and runs that fetch
+   against a real repository.
+   A plain `git fetch` does not follow these tags either: a record's tag points at a commit no fetched branch holds.
+   A fresh `git clone` does fetch them.
+3. The verifier and the gate read tags first and notes as the legacy layout (done); then the producers write each
+   record as a tag and a note (done, see "Tags, written and read first" above). Writing notes stops once no gate that
+   still runs reads notes only.
+4. GC as a pure plan of whole trees (done), GC's lock window and its timer (done), then the tag ruleset, and the
+   signed log.
+
+### The evidence log (in progress)
+
+A ruleset is GitHub's, and GitHub must not be the only thing that protects evidence (`doc/fleet/factory/skip-ci-plan`,
+"Portable evidence"). `scripts/evidence-log` keeps a copy of every trusted record on a host we hold and a signed,
+append-only list of them; GitHub is only its transport. No inbound port and no new account: a systemd user timer
+(`scripts/evidence-log.timer`, every 2 minutes) runs `scripts/evidence-log-timer`, which reads the script from
+`origin/main` and pulls over outbound HTTPS.
+
+One pull lists the remote's evidence refs and fetches, by name, only those whose object is new, with full history: a
+shallow copy sends every shallow root on every fetch (13 s to fetch 20 records into a copy of 5,000) and cannot push a
+record back. It accepts a record that is well formed and
+signed by a key main's `.st/evidence-keys` trusts for the signer the record names, keeps it under `refs/evidence-copy/`
+(never pruned), and appends one line per record and check to the log. An input-index ref is logged under its key only
+when the record carries that key. It then commits the log, every time, even with nothing new: the commit is signed by
+the log key and its message carries its time, so a verifier can refuse a head that is not fresh. `--publish` pushes the
+head to `refs/evidence-log/main`; a logged record the remote no longer has is reported (`missing`, exit 4), and
+`--restore` pushes it back. `evidence-log gc --plan FILE` appends a GC line for each tree and input key of an
+evidence-gc plan and drops their copies; it runs before the plan's deletions (`evidence-gc --before-delete`), so a pull
+does not restore them. It also keeps the plan's ref names as pending deletions in the copy
+(`evidence-log.gc-pending.json`): a pull that runs between the GC lines and the deletions does not log those records
+again after the GC line, which would turn their deletion into `missing` and let `--restore` push them back. A name stops
+being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
+any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
+next pull.
+
+The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
+`record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
+one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
+through `st sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
+log key list is main's `.st/evidence-log-key` (`~/.config/evidence-log/log-keys` on a host whose main has none), and a
+pull never extends a head that list does not sign. The signer starts without the caller's loader variables.
+
+**The log key's custody (interim).** The pinned key (principal `log/evidence`) is a plain file on the log host, readable by
+any process running as the account that runs the timer, until a `st sekrets` profile holds it. The log is shadow only
+until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
+replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
+
+Measured 2026-10-21 against this repository: the first pull (an empty copy) accepted 4,928 records in 548 s, most of it
+checking their signatures, and the copy is 230 MB; the 245 first-layout notes are not logged (their name carries no tree;
+GC migrates or removes them). A pull with 46 new records took 7.7 s, one with none 0.8 s. The log's files held 426 KB.
+
+**The verifier's view of the log (shadow).** With `--log-keys FILE` or `--log-keys-from COMMIT` (which reads
+`.st/evidence-log-key`; none there means no view), the verifier adds `log`, `log_head`, `log_age_s` and `log_missing`
+to its answer, and changes nothing else. `log` is the first of:
+- `absent`: no `refs/evidence-log/main` here;
+- `unsigned`: the head is not signed by that key (principal `log/...`);
+- `stale`: the head is more than 600 s old (five pulls), names no time, or is dated in the future;
+- `missing`: a record the log lists for this tree, or for its input key and check, after the last `gc` line is not
+  here, because it was deleted or not fetched;
+- `unlogged_pass`: the chosen record is a pass the log does not list;
+- `ok`.
+
+A failure counts whether or not the log lists it, as the verdict already does. Once the base pins the key, the gate
+fetches the one log ref (one commit deep) and prints the view on its decision line. Enforcing it, so that skipping
+requires `ok`, is a later change, after the shadow shows what it would refuse. Every read of the log is made with
+`GIT_NO_LAZY_FETCH`.
+
+The copy never becomes a partial clone, and no git call may fetch lazily (`GIT_NO_LAZY_FETCH`): in a partial clone a
+presence check of a missing record fetches it with no negotiation, that is with its whole history (3.4 GB before the
+first record was logged, in the first measurement).
 
 ## Trust and custody
 
@@ -95,7 +290,7 @@ or malformed statement supplies no evidence. Repository Git signing programs,
 allowed-signers paths, revocation files, and replacement objects cannot widen
 this caller-supplied trust. Key removal from the trust list revokes its evidence.
 
-`st3::evidence::sign_observation` is an API for trusted observers running under
+`fractal_daemon::evidence::sign_observation` is an API for trusted observers running under
 a separate signing account. It validates the statement, measures its own
 executable digest, constructs the note, and calls Git's SSH signer. The observer
 must construct facts from its own execution; it must never expose this API as a
@@ -296,7 +491,7 @@ for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected o
 (`$EVIDENCE_OBSERVER`, the operator's JSON argument vector; default
 `st sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
 persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
-against the key list in `main`, creates `refs/notes/evidence/<record>` and pushes it. It runs no
+against the key list in `main`, creates `refs/notes/evidence/<tree>/<record>` and pushes it. It runs no
 check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
 unverified. A full record that does not verify fails the job and creates no ref. A cancelled
 run has no `linux-gate` job to record (the observer exits 2): the workflow skips cancelled
@@ -404,6 +599,14 @@ notes signed by the stage jobs. The signer accepts extra named string inputs nex
 environment fingerprint, so a check's note can carry more over time; the repository policy decides
 which inputs a check must carry.
 
+The `linux-gate` aggregate records only the members of `linux-gate`: it leaves out the evidence gate jobs, the
+`fractal-web` lane and the two separate checks `genie-freshness` and `typescript-client`, which have their own notes
+(the note job still waits for them, to publish those notes). It refuses, making no note, when the gate of a member
+said skip (`evidence-gate-linux-gate`, `evidence-gate-mail-redelivery-canaries`, `evidence-gate-isolation-vm`; a gate
+added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
+shards may, outside a merge group), so a member that did not run never reads as success. A skip taken by the
+`genie-freshness` or `typescript-client` gate does not stop it.
+
 ### Stage notes and publishing
 
 Each `linux-gate` stage job (the test shards, clippy, fleet-compat and the mail canaries) signs its
@@ -413,11 +616,48 @@ seconds (`STAGE.time`) and the digest of the exact log (`STAGE.log`); a missing 
 file is recorded as a failure, never as success. `evidence-wrap --aggregate FILE --out DIR` signs
 those facts (and records `workspace_clean` rather than refusing a workspace the tests dirtied) and
 writes the note as a pack for upload. A stage job's checkout is shallow and the server refuses a push
-from one, so the aggregate note job collects the packs and `scripts/evidence-publish` publishes them:
-it accepts a note only if its signature verifies against `.st/evidence-keys` from the base commit for
+from one, so the aggregate note job collects the packs and `scripts/evidence-publish` publishes them.
+It does so whenever the job has its key configured, whether or not the aggregate itself signed: when the aggregate
+refused (another lane skipped), the stage notes that ran are still published, just without a `linux-gate` note.
+Each note stands on its own: its producer made none when its own gate skipped, and the publisher
+accepts a note only if its signature verifies against `.st/evidence-keys` from the base commit for
 the principal it claims, it is a full-tier single-note commit about this commit and tree, its check
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
+
+A step-based job may record extra named inputs next to the fixed ones: `STEP_INPUTS` is a JSON object of short
+lower-case names with nonempty string values (a shard number, a test set). It can add a name but never replace a fixed
+one, and anything malformed makes no note. The aggregate note ignores jobs of the separate `fractal-web` lane
+(`fractal-web-*`): that lane is skipped whenever no web path changed, which must not stop the `linux-gate` verdict.
+It ignores `genie-freshness` and `typescript-client` the same way, and their gates' decisions.
+
+The `fractal-web` lane runs only when web paths changed, in one shard on pull requests and two on the merge queue. Each
+`fractal-web-execution` shard signs its own result (check `fractal-web`, artifact `evidence-note-fractal-web-shard-N`) and
+records `kit_shard`, `kit_shard_count`, `kit_play_set` and `app_test_set`, so a pull request's per-commit set can never be
+mistaken for the merge queue's full one, and a later policy can require every shard. A run that did not execute the lane
+makes no note and the shadow report reads `n/a`. The skip policy has a shadow entry for `fractal-web` (`enforce` false,
+`fleet` only, no gate job yet; see "The skip policy"), so nothing skips the lane and its notes are still evidence only.
+**One shard note cannot stand for the whole check.** The verifier takes the latest note for the tree and a policy rule can
+only require that an input is present, not that every shard of one run passed: a merge-queue run with two shards leaves two
+notes, and either alone satisfies the rule, including shard 1, which runs only the kit Storybook build and its half of the
+strict plays. A pull request's single shard runs the per-commit play set and the related app tests (`kit_play_set` `commit`,
+`app_test_set` `related`), and the note does not record whether kit plays ran at all (`KIT_INPUTS` false skips them).
+Until the verifier can require every shard of one run (or the lane signs one note for the whole check), the entry stays
+shadow and no gate job reads it; `ci-evidence-gate-test` demonstrates the limit with a shard-1-of-2 note. The local
+`scripts/web-skip-proof` reports a matching record under a shadow entry as `decision=run reason=shadow`, never `skip`.
+
+### Shadow verification
+
+After publishing, the aggregate note job runs `scripts/ci-evidence-shadow` (from the base commit, fail-soft,
+skipped while the base has none). For every lane it published or should have published it fetches only that
+lane's record from the remote at depth 1 into an empty scratch repository and runs the standalone verifier
+there with the base commit's key list. That is what a later gate that fetched the refs would see, not this job's
+own local refs. A lane prints `ok`, or `would-reject` with the verifier's reason (`no_note` for a lane this run did
+not sign, `not_on_remote`, `check_failed`, `untrusted_level`, `stale_tree` and the rest of the verifier's reasons). The job summary carries the table and a
+total (`lanes`, `ok`, `would_reject`, `refs_added`, seconds); each line is also in the log as
+`evidence-shadow v1 ...`. A lane listed in `--optional` (one that runs only when its paths changed, such as
+`fractal-web`) reads `n/a not_run` when this run made no record for it and is counted apart. It gates nothing and never
+changes the job's result.
 
 ### What reaches the signing environment
 
@@ -439,6 +679,37 @@ untracked or ignored files the job had. The signer finds `git` and `ssh-keygen` 
 standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_PATH` when
 `ci-evidence-signing configure` writes it), which is how the Nix sandbox, where they live in
 `/nix/store`, supplies them without trusting the caller's PATH.
+
+## A check derivation as evidence: the `nix` record
+
+A required check that runs in the Nix sandbox can be a check derivation (`checks.<system>.<check>` in `flake.nix`). It only
+produces output when its tests pass, and the output path hashes every input (source, `flake.lock`, toolchain, build script),
+so a valid path is both the proof that these inputs passed and a cache: an unchanged tree needs no rebuild. Today
+The first one built this way is `checks.genie-freshness` (about 163 s cold, 0.4 s warm on hetz2; a change to any file in the flake
+source still rebuilds it, because its source is the whole flake).
+
+`scripts/nix-check-facts --check NAME --out FILE` builds the derivation and writes the facts for
+`scripts/evidence-wrap --aggregate FILE`: `runner` `nix`, the command `nix build .#checks.<system>.NAME`, the exit code and
+`output_sha256` (the SHA-256 of the NAR hash string), and the inputs `drv_path`, `out_path`, `nar_hash`, `nar_size`,
+`references` (sorted store paths joined by commas, `-` for none), `cache_hit`, `nix_signatures` (the daemon's `name:base64`
+signatures, `none` when unsigned), `nix_key_id` and `nix_unsigned`. A path that is already valid is not built again; the record
+says `cache_hit=true` and names the same derivation, which is the proof that an unchanged tree skips the rebuild. A failing build
+is recorded too (exit code 1, the derivation, no output path) and never satisfies a check.
+
+`scripts/evidence-sign` accepts `runner: nix` only for that command shape and holds the inputs to their formats (store paths, the
+output named like its derivation, a `sha256-` NAR hash, sorted references, signatures as the daemon prints them). It cannot see
+the store, so it does not judge the Nix signature. The verifier does, in a later slice: it recomputes the fingerprint
+`1;out_path;sha256:<nar_hash in Nix base 32>;nar_size;references` itself, and trusts a Nix signature only when its key name and
+public key are in `.st/evidence-nix-keys` (Nix `trusted-public-keys` lines) read from the accepted base. A record cannot name its
+own key. The record needs both signatures: the SSH wrapper key, and at least one valid Nix signature from a different key.
+
+**Residual trust.** The Nix key proves the content of the path is genuine. Only the wrapper key says "this tree built to this
+path": a cache hit shares one derivation across trees, so the path cannot name a tree. A stolen wrapper key could attach a genuine
+old path to a new tree; the `flake_lock_sha256` bind and `max_age_s` limit that, they do not close it.
+
+**Key custody.** The Nix key is the machine's own (`nix.conf` `secret-key-files`, readable by the Nix daemon only). ci1 and ci2
+have none today (checked 2026-10-20), so no record can be signed by a production Nix key yet; tests and the sample in
+`doc/fleet/factory/nix-evidence/nix-sample-20261020` use a throwaway key.
 
 ## Fresh CI re-attestation
 
@@ -499,15 +770,15 @@ a policy input, until deadlines and the production controller are decided.
 
 `scripts/evidence-verify` answers one question without a built st: does a trusted,
 signed note exist for this exact tree and this check? It needs only `git`,
-`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<record-id>` notes
+`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<tree>/<record-id>` notes
 (one SSH-signed commit per record), and finishes in well under a second on a
 repository with hundreds of records. `st evidence verify` stays the reference
 implementation; the script's tests use real Git repositories and real SSH
 signatures.
 
 ```sh
-scripts/evidence-verify --repo . --revision HEAD --check typescript-client \
-  --keys-from BASE_COMMIT [--command '["nix","build",".#checks.x86_64-linux.suite"]']
+scripts/evidence-verify --repo . --revision HEAD --check genie-freshness \
+  --keys-from BASE_COMMIT [--command '["nix","build",".#checks.x86_64-linux.genie-freshness"]']
 ```
 
 Exit 0 is satisfied, exit 1 is not satisfied, exit 2 is a usage error. Both print one JSON
@@ -526,7 +797,8 @@ Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is ne
 and is reported as `degraded`, not as a signature fault, because it is what the observer writes
 when its signer is unreachable. The latest
 trusted record for the tree and check decides, so a newer failure supersedes an older
-pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
+pass; `observed_at` is the signer's own clock, so a pass replaces a failure only when it is dated MORE than two minutes after it (the same margin as
+`future_dated`): equal, inverted or within-the-margin dates leave the failure standing, whatever order the notes were created in. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
 signature from a key not on the list, or a principal that differs from the record's
 signer), `untrusted_tier`, `untrusted_level`, `wrong_runner`, `too_old`, `future_dated`, `degraded`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and
@@ -692,17 +964,44 @@ members of the aggregate read: the whole of `.github` (workflows, the clippy and
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
 on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the st3 crate), `evals` (the example and graph tests read `evals/st3`),
-`claude-channel` and `plugins` (the plugin files `include_bytes!`d into st-drivers) and `docs/st2` (`tests/invariants.rs` includes
+`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
 `docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
 artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
-(`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/st3-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
+(`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/fractal-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
 the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
 whole until a per-file list is reviewed against a trace of what each stage opens.
 
-**Known gap, whole-tree lints:** `tests/public_repo.rs`, `tests/native_only.rs` and `tests/vrs_ledger.rs` read EVERY tracked file, so a pull request that changes only a path outside the declared inputs (a page under `apps`, `packages`, `release-notes`) still changes what those lints see. The Rust key therefore must not be enforced until those lints run on every tree (a separate always-run check or an inputs list that includes them); until then it is shadow only, and a miss would show as a satisfied note beside a failing real job. The skip decision is taken once per stage group
+`fractal-web` declares its inputs too (shadow only, `sample_one_in` 5, no gate job). The list is every path the lane's detector
+(`scripts/ci-fractal-web-changes`, embedded in `fractal-web-changes`) matches, written as the directories and files that exist, plus
+what the lane reads that the detector does not name: `apps/ios/package.json` (a workspace member, so the frozen install reads it),
+`docs/st3/client-v0/fixtures` (an SDK unit test opens `timeline-conformance.json`), `pnpm-source-inputs.json` (the web shell hook
+publishes the source inputs it lists) and `scripts/check-public-repo` (the scenario privacy lane runs it). Those four are detector
+gaps: a change to only them does not run the lane at all today. The privacy lane also fails when that lint fails outside its own
+scope; `genie-freshness`, whose key is the whole tree, runs the same lint for every tree. A policy test fails when a tracked path
+the detector matches lies outside the declared list.
+
+**Whole-tree lints run in genie-freshness, not in the Linux gate.** Two lints read every tracked file: the public-repository check
+(`scripts/check-public-repo`, formerly called from `tests/public_repo.rs`) and the retired-name check (`scripts/check-native-names`, formerly
+`tests/native_only.rs::tracked_product_surface_contains_only_native_names`). Run inside the Linux gate they would see a page under `apps`, `packages` or
+`release-notes` that the declared inputs leave out, so a skip by input key could hide their failure. `scripts/ci-genie-freshness` runs both; that check's
+key is the whole tree, so it runs for every tree the Linux gate skips. `tests/vrs_ledger.rs` reads only `docs/vrs`, `src`, `tests` and `crates`, all
+declared. A policy test (`test_no_rust_source_lints_the_whole_tree`) fails when a Rust source lists the whole tree with `git ls-files` or calls one of
+those scripts. The aggregate `linux-gate` note signs its input key like a stage note (its job has no `PROJECT_BASE_SHA`, so
+`ci-evidence-signing` takes the same base from the event payload), which is what publishes `refs/notes/evidence-input/linux-gate/...`. The skip decision is taken once per stage group
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
+
+`isolation-vm` and `mail-redelivery-canaries` declare the same list (shadow only too: `enforce` stays false, `sample_one_in` 5),
+so the three lanes share one input key. Both are members of the `linux-gate` aggregate, whose list already covers what its members
+read, and neither reads anything outside it. The canaries are `scripts/ci-linux mail-redelivery-canaries`, which runs
+`scripts/ci-mail-redelivery-canaries`: a fixed set of the Rust tests from `linux-test-build`'s archive, with the `ci` profile of
+`.config/nextest.toml`. `isolation-vm` builds the two VM drivers from `flake.nix`, `flake.lock`, `nix/transport-isolation-vm.nix` and
+`nix/sekrets-vm.nix` (the `pty` package is a flake input), the provider components from the workspace's Rust sources, and runs the
+same archive and the `sekrets-st3` binary of the same build, with only `Cargo.toml` copied into the VM; its other steps are
+`scripts` and the baselines under `.github`. Each job signs its key itself (`STEP_CHECK` and `STAGE_JOB` are the policy's check
+names, and both steps set `PROJECT_BASE_SHA`), and the aggregate job's publish step indexes every accepted record with a key, so
+nothing in the workflow changes.
 
 The projection reads names as bytes and passes them NUL-terminated both ways (`ls-tree -z`, `update-index -z`),
 so a newline in a name cannot split one file into two entries; symlinks and gitlinks keep their modes. When none
@@ -728,10 +1027,15 @@ a typo cannot silently weaken a rule, and a check with no entry never skips. The
 name, the command, the exit code and the output hash are part of every record and are always
 checked. `observed` (the central observer's record of a finished job) and `wrapper` (a note the in-job producer signs
 as `fleet/ci`) are listed for **every** required check, each with the exact command that producer records:
-- `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`;
+- `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`, without the gate jobs, `fractal-web-*`,
+  `genie-freshness` and `typescript-client`;
 - `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
 - `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
-  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`.
+  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`;
+- `fractal-web` (shadow, `wrapper` only): `["bash", "scripts/ci-fractal-web"]`, the step-outcome note each
+  `fractal-web-execution` shard signs, which must also carry `kit_shard`, `kit_shard_count`, `kit_play_set` and
+  `app_test_set`. It lists no `observed` kind: the observer's record is of the always-emitted `fractal-web` job, which passes
+  without running the lane when no web path changed against that run's base.
 Every wrapper rule requires `flake_lock_sha256`, `toolchain_sha256`, `wrapper_sha256`, `system` and `attempt`
 and binds `flake_lock_sha256` to `flake.lock` in the verified tree; the stage rule also requires `stage` and
 `job`, and the step-outcome rules `job`, `steps` and `step_outcomes`. No rule names a weaker signer level, so only
@@ -747,7 +1051,57 @@ A kind's rule may also name `by_level`: for one signer level (the first part of 
 host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
-`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only.
+A level's rule may also say `"lane": true` (default false): that level's notes are then held to the lane of the check in
+`.st/required-lanes.json` at the same accepted base as the policy, exactly as `--lanes-from` holds any note: the tree must not change
+the lane's definition paths (`definition_changed`) and the note must carry that base's `lane_definition_sha256` (`wrong_definition`); a base
+without a lane for the check refuses such a note (`no_lane`). Other levels are unaffected. The `agent` level (below) uses it.
+
+A check may also name `events` itself (optional; the same two values). It limits the runs ANY note for that check may skip, whoever signed it,
+and a signer level's own `events` can only narrow it further (the verifier reports the intersection, which may be empty: then nothing skips).
+Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
+tree: `"enforce": true, "events": ["pull_request"]`.
+
+### Which checks skip today
+
+| Check | `enforce` | `events` | `sample_one_in` | Since |
+| --- | --- | --- | --- | --- |
+| `typescript-client` | true | `pull_request` | 5 | this change |
+| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |
+| `fractal-web` | false | - | 5 | - |
+
+`typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
+trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
+real job; the published notes' shadow verification (`evidence-shadow v1`) was `ok` for every lane in every merge-group run since it landed. The
+sampled one in five keeps comparing the note with a real run. Each further check is its own reviewed change to this table, the policy and the
+`enforced` lists in `ci-evidence-gate-test` and `evidence-verify-test`.
+
+### When a check is ready to flip (`scripts/evidence-flip-ready`)
+
+The trigger for turning a further check on is read from the gate's own decision lines, once the base pins the evidence log key
+(the log view, "The evidence log"). `scripts/evidence-flip-ready` reads the `evidence-decision v1` line of every `evidence-gate-<check>`
+job of the `Workspace CI` pull request runs created in the last 24 hours (job logs through `gh api`, cached by job id) and, per check in
+the policy at origin/main, says `ready` when all of these hold, and otherwise lists `why_not`:
+
+- 24 hours of fresh published log: no line in the window says `log=stale`, `absent`, `unsigned` or `-` (the base did not pin the
+  key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
+- at least 30 lines with `outcome=satisfied` and `log=ok`;
+- no `log=missing`;
+- no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
+  created, or after it;
+- no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
+  job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
+  (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
+  `linux-clippy`, `linux-fleet-compat`) failed or was cancelled; a red from a member that always runs (`upgrade-impact`) would show
+  under enforce too, and is reported as `visible_red`, which does not block.
+
+It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
+and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
+`--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
+temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
+moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and
+opens a pull request whose body carries the trigger. An edit it cannot make mechanically stops that proposal before anything is pushed;
+`--dry-run` prints the diff instead. The pull request is reviewed and queued like any other.
 
 ### Requiring a signed note (`require`, shadow only so far)
 
@@ -835,6 +1189,21 @@ that rewrites the script, the verifier, the policy and the lane file and shows t
 `skipped`. With no check requiring a note the job is a no-op that fetches nothing. A new `pull_request_target` workflow does not run for the pull
 request that adds it (the base does not have it yet), so its first runs are the next pull requests after it lands.
 
+### SLO counters (`scripts/ci-evidence-slo`)
+
+`scripts/ci-evidence-slo --repository OWNER/NAME [--hours 24 | --since T --until T] [--max-logs N] [--json]` reads the finished `Workspace CI` runs of an
+interval (GitHub's read API only; nothing is written or started) and, for every `evidence-gate-<check>` job, the one fixed step the gate ended with. Per check
+and event (`pull_request`, `merge_group`, `push`) it reports:
+
+- `decisions`: gate jobs that completed with an outcome, the DENOMINATOR of every rate (a gate job that failed or was cancelled before printing an outcome is `gate_incomplete`, not a decision);
+- `satisfied`: an existing trusted note covered the run, split into `skipped` (the gate took the skip: `enforce` true) and `shadow` (it would have), and `satisfied_by_producer`, the same count by `kind/trust_level` of the note
+  read from the gate's decision line (`unread` for jobs beyond `--max-logs`, the log budget, which only bounds the producer and reason split, never the outcome counts);
+- `produced_not_verified`: a note exists and is NOT usable, `rejected` (refused: bad signature, untrusted signer, failed check ...) plus `degraded` (only an unsigned degraded record), with the reasons. TARGET ZERO;
+- `no_note` and `unavailable`: nothing usable was found, or the verifier or notes could not be obtained (the check ran as before).
+
+Runs still in progress are not counted (their gate jobs may not have finished) and an API that cannot be read exits 1 instead of printing zeros. The counters measure the gate in
+shadow today (`skipped` is 0 while every `enforce` is false); they are the numbers the flip decisions in the proof table read.
+
 ### Which tree a pull request run asks about
 
 A `pull_request` run checks out GitHub's merge of the head into the CURRENT base, a new tree whenever main moved, so a note for the tree an agent
@@ -848,12 +1217,24 @@ protected file differs between the branch point and the head, the base, or the c
 keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
 `merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
 it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
-says `notes_fetch=ok|failed` and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), and input-keyed lookups use
+says `notes_fetch=ok|none|failed` (`none`: the remote has no record under the tree's own prefix, which git reports by
+exiting 1 without a word; `failed`: the fetch could not reach or read the remote) and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), then the evidence
+log's shadow view (`log`, `log_head`, `log_age_s`, `log_missing`, `log_fetch`; `-` until the base pins `.st/evidence-log-key`, see "The evidence log"), and input-keyed lookups use
 the key of the tree the run asks about (the head's, in head mode). The signer is not checked against the author list: signers are the keys of
 `.st/evidence-keys` (the trust root, read from the base), authors are GitHub accounts; the two answer different questions and a host key has no login. **Time
 dependence:** a skip now depends on state outside the pull request. The same head can run when the gate looks (no note yet) and skip on a re-run once the
 agent has signed and pushed the note, or the reverse if a note is later superseded by a failing record; a skip is the decision at that run, not a property of the sha. A skip on a pull request therefore means "the head tree passed on a trusted host", not
 "the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
+
+**How stale a head may be (the staleness policy).** A head-tree note says the head passed; it says nothing about the main the branch has
+not seen. The gate therefore uses the head tree only while the branch point is at most `HEAD_TREE_MAX_BEHIND` = 24 first-parent commits of
+main behind the tip GitHub merged into (the merge's first parent). Further behind, the run asks about the merge tree, as before head trees
+existed (`head_tree=fallback:the_branch_is_N_commits_behind_main...`), which in practice means the checks run; rebasing or merging main
+brings the branch back inside the bound. The decision line prints `behind=N` for every head-tree candidate. 24 is about 8 hours of main at
+today's 3 merges an hour; measured over 707 pull-request runs (2026-10-17 to 2026-10-19), the median branch was 2 commits behind, the 90th
+percentile 11 and the 99th 22, so the bound refuses only outliers. The merge queue still tests the combined tree for every change, so the bound
+limits how much a green pull request can differ from what lands, not what lands. The number lives in the gate (read from the accepted base,
+a protected path), so changing it is a reviewed change like any other.
 
 ### Host keys
 
@@ -877,19 +1258,47 @@ record too, the latest record decides, the merge queue still tests the integrate
 covers it), and sampled real runs compare a note with the job. The root-installed, hash-pinned signer
 (`scripts/evidence-sign` behind a `sekrets` grant) stays supported for a host that wants it.
 
+### Agent keys
+
+Agents push signatures (Nathan, 2026-10-19). An agent signing account has its own key and its own principal, `agent/ALIAS`, made by
+`scripts/evidence-keygen --level agent --name ALIAS` under that account (the alias is invented, never a seat or host name; keep the
+alias-to-account mapping private). Its line goes into `.st/evidence-keys` with a pull request, like a host key, and is read from the
+accepted base, so a change can never vouch for its own key. The skip policy admits `agent` exactly where it admits `host` (the `wrapper`
+kind of `genie-freshness` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
+queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base, so a tree that
+edits the lane's own scripts never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
+for); what the separate level adds is the lane binding and revocation per account: deleting one `agent/...` line from `.st/evidence-keys`
+on main stops every note that key signed from counting, for the next run after that change merges, without touching any other agent or
+host. Revocation needs no ref deletion: the notes stay, they simply no longer verify.
+
+Who can push the notes: no repository ruleset covers `refs/notes/*` (the only ruleset protects the default branch), so any identity with
+write access, including an agent seat using the operator's credential, can create, move or delete `refs/notes/evidence/*`. Creating a
+ref cannot forge evidence (a record counts only with a trusted signature and the right tree, check, command and inputs). Deleting one
+can: if a newer failing record of a tree were deleted, an older passing record would decide again. That is the same write-access boundary
+as editing a workflow, and it is why sampling stays on, the merge queue still tests the combined tree, and the gate's decision line names
+the record it used.
+
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
-`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+`scripts/st-test` runs each required check that has a local command (today `genie-freshness`, `typescript-client` and
+`mail-redelivery-canaries`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
 the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
-throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. When that tree has a
+`megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
+from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
+shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
 recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+On a host that runs the evidence log (`evidence-log.service` installed as a systemd user unit, see "Portable evidence" in the plan), a
+run with `--push` then starts that unit without waiting (`systemctl --user start --no-block evidence-log.service`, or the JSON argv in
+`ST_EVIDENCE_LOG_NUDGE`): a pass counts only once the log lists it, so the agent's record is logged in seconds instead of at the next
+2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
+changes the result.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
@@ -911,6 +1320,35 @@ path (the checks run once); so does every fixup that changes the tree; a tree th
 
 The checks run without the agent seat's identity and session variables (`ST_*`, `ST2_*`, `ST3_*`, `CLAUDE*`, `ANTHROPIC_*`; `ST_AGENT`, `ST_SKIP_EVIDENCE` and the `ST_EVIDENCE*` switches stay, by exact name: that list in `scripts/st-test` is the only exception mechanism, and `ST_AGENT` stays visible to the checks because the `nix` wrapper that needs it starts them), as on a CI runner: tests that read them fail or behave differently under a seat. Tests that bind a request to the seat by process ancestry still do, so a trustworthy full run of the Linux gate must be started detached from any seat. It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
 there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
+
+**The signer starts with a scrubbed loader environment.** `evidence-sign` refuses to start when the loader or the interpreter was
+told to load code (`LD_PRELOAD` and the rest of its `REFUSED_ENVIRONMENT`): a preloaded library inside the signer is an injection
+point, and the refusal stays. Some hosts set `LD_PRELOAD` for every process (hetz2 preloads jemalloc), which made every signed push
+there report "a check failed". So the launcher scrubs instead: `evidence-wrap` resolves the signer program with the caller's PATH,
+then starts it by absolute path without any `LD_*`, `DYLD_*` or `PYTHON*` variable, `GLIBC_TUNABLES`, `GCONV_PATH` or `NLSPATH`,
+and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `st-test` starts the signer's interpreter with `-I`. The checks themselves
+keep the caller's environment. Tests set these variables in the caller and require a signed note, and require the signer to still
+refuse when it is started with `LD_PRELOAD`.
+
+
+**Heavy checks and Linux gate stages (`scripts/ci-local`).** A check that builds and tests the Rust workspace
+(`mail-redelivery-canaries` today) is heavy: tens of minutes of a shared build host. st-test runs it only when it is named
+(`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its wait. Its local
+command is `nix develop -c bash scripts/ci-local STAGE`: the `scripts/ci-linux` stage as its CI job runs it, after building and
+installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
+and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
+since the rename, `FRACTAL_*`: a seat's live endpoint and identity), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
+configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
+rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
+stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
+shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+`ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
+`CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
+default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
+pty first on PATH, which made every boot canary fail on that host (the seat launch passes environment names only). The lane in `.st/required-lanes.json`
+holds both the host and the agent level to its definition (`scripts`, `.st`, `.config/nextest.toml`, the flake), so a tree that
+edits the scripts that decide what the stage runs never skips on a local note; the host and agent levels cover pull requests
+only, and the merge queue runs the stage.
 
 ### When the gate says skip
 
@@ -968,7 +1406,8 @@ values and `-` for none:
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
 reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false match=tree|inputs source_inputs=…
-tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
+tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… notes_fetch=ok|none|failed
+policy_sha256=… keys_sha256=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 
 (one line; wrapped here). Each job also ends with exactly one of these steps running, which is how a
