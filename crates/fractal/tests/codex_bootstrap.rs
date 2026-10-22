@@ -20,13 +20,12 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const SUBJECT: &str = "agent/eval.codex-bootstrap";
-const RUNTIME: &str = "codex-bootstrap";
 const TERMINAL: &str = "pty/person/eval/019a0000-0000-7000-8000-000000000001";
 
-fn runtime_claim(store: &Store, status: &str, incarnation: Option<&str>) {
+fn runtime_claim(store: &Store, runtime_id: &str, status: &str, incarnation: Option<&str>) {
     let mut fields = BTreeMap::from([
         ("status".into(), json!(status)),
-        ("runtime_id".into(), json!(RUNTIME)),
+        ("runtime_id".into(), json!(runtime_id)),
         ("host".into(), json!("bootstrap")),
     ]);
     if let Some(incarnation) = incarnation {
@@ -45,11 +44,21 @@ fn runtime_claim(store: &Store, status: &str, incarnation: Option<&str>) {
         .unwrap();
 }
 
-struct Cleanup(PtyRuntime);
+fn declared_runtime(store: &Store, subject: &str) -> String {
+    store
+        .desired_subjects_named(&[subject.to_owned()])
+        .unwrap()
+        .remove(0)
+        .member
+        .unwrap()
+        .runtime_id
+}
+
+struct Cleanup(PtyRuntime, String);
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _ = self.0.stop(RUNTIME);
-        let _ = self.0.remove(RUNTIME);
+        let _ = self.0.stop(&self.1);
+        let _ = self.0.remove(&self.1);
     }
 }
 
@@ -148,7 +157,6 @@ async fn delivery_recovery_control(
     let state_socket = root.join("state.sock");
     let pty_root = root.join("pty");
     let runtime = PtyRuntime::new(pty_root.clone()).with_binary(pty.to_string_lossy());
-    let _cleanup = Cleanup(runtime.clone());
     // Real driver publications run concurrently with views and mailbox reads. Use the
     // daemon's WAL storage; shared-memory fixtures return SQLITE_LOCKED on that mix.
     let store = Arc::new(Store::open(&root.join("claims.sqlite3"), "bootstrap").unwrap());
@@ -183,6 +191,8 @@ async fn delivery_recovery_control(
             Some("person/eval"),
         )
         .unwrap();
+    let runtime_id = declared_runtime(&store, if bound_shell { TERMINAL } else { SUBJECT });
+    let _cleanup = Cleanup(runtime.clone(), runtime_id.clone());
     let queued = mailbox_loss.then(|| {
         let run = store
             .create_mission_run(&fractal_daemon::model::MissionRunRequest {
@@ -199,7 +209,7 @@ async fn delivery_recovery_control(
         store.set_step_state(&subject, "ready", None).unwrap();
         subject
     });
-    runtime_claim(&store, "starting", None);
+    runtime_claim(&store, &runtime_id, "starting", None);
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
     let state = AppState {
@@ -307,12 +317,13 @@ async fn delivery_recovery_control(
         environment.insert("ST3_FIXTURE_TERMINAL_COMPLETION", barrier.to_string_lossy().into_owned());
     }
     let launch_root = root.to_owned();
+    let launch_runtime_id = runtime_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new(pty);
         command
             .env_clear()
             .env("PTY_ROOT", pty_root)
-            .args(["run", "-d", "--force", "--id", RUNTIME, "--cwd"])
+            .args(["run", "-d", "--force", "--id", &launch_runtime_id, "--cwd"])
             .arg(launch_root)
             .args([
                 "--tag",
@@ -356,7 +367,7 @@ async fn delivery_recovery_control(
         .snapshot()
         .unwrap()
         .into_iter()
-        .find(|p| p.name == RUNTIME)
+        .find(|p| p.name == runtime_id)
         .unwrap();
     let physical_incarnation = format!(
         "{}:{}",
@@ -366,7 +377,7 @@ async fn delivery_recovery_control(
     let shell_pid = if bound_shell {
         let stats: Value = serde_json::from_str(
             &pty_core::registry::with_root(&root.join("pty"), || {
-                pty_client::query_status_json(RUNTIME, pty_client::STATS_TIMEOUT)
+                pty_client::query_status_json(&runtime_id, pty_client::STATS_TIMEOUT)
             })
             .unwrap(),
         )
@@ -408,7 +419,7 @@ async fn delivery_recovery_control(
     } else {
         physical_incarnation.clone()
     };
-    runtime_claim(&store, "running", Some(&incarnation));
+    runtime_claim(&store, &runtime_id, "running", Some(&incarnation));
     if bound_shell {
         std::fs::write(root.join("launch-bound-codex"), b"launch").unwrap();
     }
@@ -439,7 +450,7 @@ async fn delivery_recovery_control(
                 .collect::<Vec<_>>();
             let screen = std::process::Command::new(on_path("pty").unwrap())
                 .env("PTY_ROOT", root.join("pty"))
-                .args(["peek", "--plain", "--full", RUNTIME])
+                .args(["peek", "--plain", "--full", &runtime_id])
                 .output()
                 .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
                 .unwrap_or_else(|error| format!("pty peek failed: {error}"));
@@ -671,7 +682,7 @@ async fn delivery_recovery_control(
             .snapshot()
             .unwrap()
             .into_iter()
-            .find(|p| p.name == RUNTIME)
+            .find(|p| p.name == runtime_id)
             .unwrap();
         assert_eq!(
             format!(
@@ -806,7 +817,7 @@ async fn delivery_recovery_control(
                 .snapshot()
                 .unwrap()
                 .into_iter()
-                .find(|p| p.name == RUNTIME)
+                .find(|p| p.name == runtime_id)
                 .unwrap()
                 .status,
             "running"
@@ -858,7 +869,6 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let state_socket = root.path().join("state.sock");
     let pty_root = root.path().join("pty");
     let runtime = PtyRuntime::new(pty_root.clone()).with_binary(pty.to_string_lossy());
-    let _cleanup = Cleanup(runtime.clone());
     let store = Arc::new(Store::open_memory("bootstrap").unwrap());
     let source = format!(
         "version 2\nagent \"eval.codex-bootstrap\" {{ host \"bootstrap\"; workspace {:?}; harness \"codex\" {{}} }}",
@@ -868,7 +878,9 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     store
         .apply_internal(&intent, "bootstrap-declared-seat")
         .unwrap();
-    runtime_claim(&store, status, previous);
+    let runtime_id = declared_runtime(&store, SUBJECT);
+    let _cleanup = Cleanup(runtime.clone(), runtime_id.clone());
+    runtime_claim(&store, &runtime_id, status, previous);
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
     let state = AppState {
@@ -955,12 +967,13 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         ),
         ("ST3_MAILBOX_TRANSPORT", "push".to_owned()),
     ]);
+    let launch_runtime_id = runtime_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new(pty);
         command
             .env_clear()
             .env("PTY_ROOT", &pty_root)
-            .args(["run", "-d", "--force", "--id", RUNTIME, "--cwd"])
+            .args(["run", "-d", "--force", "--id", &launch_runtime_id, "--cwd"])
             .arg(Path::new(&environment["HOME"]))
             .args([
                 "--tag",
@@ -1012,7 +1025,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         .snapshot()
         .unwrap()
         .into_iter()
-        .find(|p| p.name == RUNTIME)
+        .find(|p| p.name == runtime_id)
         .unwrap();
     assert_eq!(
         observation.status, "running",
@@ -1024,7 +1037,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         observation.created_at.unwrap()
     );
     assert_eq!(harness.body["fields"]["incarnation_id"], incarnation);
-    runtime_claim(&store, "running", Some(&incarnation));
+    runtime_claim(&store, &runtime_id, "running", Some(&incarnation));
     until(
         || marker.exists(),
         "the provider did not launch after its mailbox bound",
