@@ -4000,6 +4000,22 @@ export const SubjectDefinition = /*#__PURE__*/ (() => Schema.Struct({
 export type SubjectDefinition = typeof SubjectDefinition.Type
 export type SubjectDefinitionEncoded = typeof SubjectDefinition.Encoded
 
+export const TerminalFabricRoute = /*#__PURE__*/ (() => Schema.Struct({
+  "node": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "service": Schema.String.check(Schema.isPattern(new RegExp("^st3/client/[^\\s]+$", "u"))).check(Schema.isMaxLength(255))
+}).annotate({ identifier: "TerminalFabricRoute" }))()
+export type TerminalFabricRoute = typeof TerminalFabricRoute.Type
+export type TerminalFabricRouteEncoded = typeof TerminalFabricRoute.Encoded
+
+export const TerminalRoute = /*#__PURE__*/ (() => Schema.Struct({
+  "fabric": optionalKey(TerminalFabricRoute),
+  "owner_host_id": Schema.String.check(Schema.isMinLength(1)),
+  "runtime_incarnation": Schema.String.check(Schema.isMinLength(1)),
+  "terminal_id": TerminalId
+}).annotate({ identifier: "TerminalRoute" }))()
+export type TerminalRoute = typeof TerminalRoute.Type
+export type TerminalRouteEncoded = typeof TerminalRoute.Encoded
+
 export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
   /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
   "header": optionalKey(ConversationHeader),
@@ -4015,7 +4031,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, ClientDiagnosticsAck, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, ClientDiagnosticsAck, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, TerminalRoute, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded

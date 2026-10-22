@@ -123,6 +123,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("conversation-content.chunk", "/v1/client/conversations/{id}/content/{reference}/chunk"),
     ("conversation.changes", "/v1/client/conversations/{id}/changes"),
     ("events.list", "/v1/client/events"),
+    ("terminal.route", "/v1/client/terminals/{id}/route"),
     ("terminal.screen", "/v1/client/terminals/{id}/screen"),
     ("arrangements.list", "/v1/client/arrangements"),
     ("arrangements.get", "/v1/client/arrangements/{person_name}/{uuid}"),

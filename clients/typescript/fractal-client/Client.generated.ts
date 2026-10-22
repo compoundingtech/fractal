@@ -10,7 +10,7 @@ import type {
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
-    PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
+    PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TerminalRoute, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
@@ -678,6 +678,7 @@ export class FractalClient {
     async conversationContentChunk(id: string, reference: string, offset = 0, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ConversationContentChunk>> { return this.get(`/v1/client/conversations/${encodeURIComponent(id)}/content/${encodeURIComponent(reference)}/chunk` + query({offset}), undefined, requestOptions); }
     async conversationChanges(id: string, options: { after?: string; wait_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ConversationChanges>> { return this.get(`/v1/client/conversations/${encodeURIComponent(routedId(id))}/changes` + query(options), undefined, requestOptions); }
     async eventsList(options: EventOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<EventPage>> { return this.get('/v1/client/events' + query(options), 'events', requestOptions); }
+    async terminalRoute(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<TerminalRoute>> { return this.get(`/v1/client/terminals/${encodeURIComponent(routedId(id))}/route`, undefined, requestOptions); }
     async terminalScreen(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<TerminalScreen>> { return this.get(`/v1/client/terminals/${encodeURIComponent(routedId(id))}/screen`, undefined, requestOptions); }
     async arrangementsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ArrangementPage>> { return this.get('/v1/client/arrangements' + query({ person, ...options }), undefined, requestOptions); }
     async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Arrangement>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}`, undefined, requestOptions); }
