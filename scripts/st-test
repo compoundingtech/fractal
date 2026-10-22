@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--all] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
@@ -54,7 +54,12 @@ LOCAL = {
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
     'typescript-client': ['nix', 'develop', '.#web', '-c', 'bash', '-c',
                           'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
+    # A Linux gate stage, run as its CI job runs it but with a home of its own (scripts/ci-local).
+    'mail-redelivery-canaries': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'mail-redelivery-canaries'],
 }
+# Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
+# --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
+HEAVY = frozenset({'mail-redelivery-canaries'})
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 
 
@@ -256,6 +261,7 @@ def main(argv):
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
+    parser.add_argument('--all', action='store_true', help='with no --check: the heavy checks too (' + ', '.join(sorted(HEAVY)) + ')')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree; exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
@@ -264,7 +270,7 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
-    checks = args.check or list(LOCAL)
+    checks = args.check or [name for name in LOCAL if args.all or name not in HEAVY]
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Run Linux gate stages on this machine the way their CI jobs run them, for a note signed here (scripts/st-test, a lane in
+# .st/required-lanes.json). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
+#
+#   scripts/ci-local mail-redelivery-canaries
+#
+# Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
+# first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
+# test-archive setup does.
+#
+# The stages start daemons and harnesses, so they run with a home of their own: HOME and the XDG state, config, data and cache
+# directories are a scratch directory that is removed afterwards, and no st, GitHub or SSH agent variable reaches them, so
+# nothing they start can read or write this account's st state, harness configuration or credentials. Two things are kept:
+# the account's cargo and rustup homes (the dependency cache) with the saved dev shell environment a build host's cargo reads
+# (DEVSHELL_ENV), and XDG_RUNTIME_DIR with the session bus, because the build admission shim queues there. RUNNER_TEMP and GITHUB_STEP_SUMMARY, which CI provides, are scratch files too.
+set -euo pipefail
+if [ "$#" -eq 0 ]; then
+  echo "usage: scripts/ci-local STAGE..." >&2
+  exit 2
+fi
+for stage in "$@"; do
+  case "$stage" in
+    mail-redelivery-canaries) ;;
+    *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
+  esac
+done
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/ci-local.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+cargo_real=${CARGO_REAL:-$HOME/.cargo/bin/cargo}
+devshell_env=${DEVSHELL_ENV:-${XDG_STATE_HOME:-$HOME/.local/state}/devshell/env.sh}
+while IFS='=' read -r -d '' name _; do
+  case "$name" in
+    ST_*|ST3_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
+  esac
+done < <(env -0)
+export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
+export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
+export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
+touch "$GITHUB_STEP_SUMMARY"
+# A build host whose real cargo reads a saved dev shell environment from the account's state directory is told where it is.
+if [ -r "$devshell_env" ]; then export DEVSHELL_ENV="$devshell_env"; fi
+cargo build --locked -p fractal-drivers --bin ci-hooks-install
+bash scripts/ci-install-built-hooks
+status=0
+for stage in "$@"; do
+  code=0
+  bash scripts/ci-linux "$stage" || code=$?
+  echo "ci-local: $stage exit $code"
+  if [ "$status" -eq 0 ]; then status=$code; fi
+done
+exit "$status"

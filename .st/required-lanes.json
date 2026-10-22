@@ -20,6 +20,26 @@
         "."
       ]
     },
+    "mail-redelivery-canaries": {
+      "argv": [
+        "nix",
+        "develop",
+        "-c",
+        "bash",
+        "scripts/ci-local",
+        "mail-redelivery-canaries"
+      ],
+      "definition_paths": [
+        ".config/nextest.toml",
+        ".st",
+        "flake.lock",
+        "flake.nix",
+        "scripts"
+      ],
+      "tree_inputs": [
+        "."
+      ]
+    },
     "typescript-client": {
       "argv": [
         "nix",
