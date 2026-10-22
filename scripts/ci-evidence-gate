@@ -171,6 +171,14 @@ def protected_changes(base):
     return [p for p in paths if p in PROTECTED]
 
 
+def fetch_state(done):
+    """ok, none or failed for a quiet fetch of glob refspecs. git exits 1 and prints nothing when no remote ref matches any of
+    them (the tree has no record of its own); a fetch that could not reach or read the remote prints a fatal line."""
+    if done.returncode == 0:
+        return 'ok'
+    return 'none' if done.returncode == 1 and not done.stderr.strip() else 'failed'
+
+
 def observe(context, revision='HEAD'):
     """(outcome, result dict or None, detail, verifier sha256) without ever raising."""
     base, check, repository = context['base'], context['check'], context['repository']
@@ -184,7 +192,7 @@ def observe(context, revision='HEAD'):
     tree = run('git', 'rev-parse', '--verify', '--quiet', f'{revision}^{{tree}}')
     tree_id = tree.stdout.decode().strip() if tree.returncode == 0 else ''
     if OID.match(tree_id):
-        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)).returncode == 0 else 'failed'
+        context['notes_fetch'] = fetch_state(run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)))
     else:
         context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):

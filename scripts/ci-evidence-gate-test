@@ -465,11 +465,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((fields['tree_of'], fields['outcome']), ('merge', 'no_note'))
 
     def test_a_repository_with_no_notes_yet_fetches_nothing_without_failing_and_the_check_runs(self):
-        # Whether git calls a glob refspec that matches nothing a failure depends on its version and protocol (here: the one
-        # in the test environment); either way the line says which, the outcome is no_note and the check runs.
+        # A glob refspec that matches nothing: git exits 1 and prints nothing (or 0, by version and protocol). The line says
+        # none (or ok), never failed; the outcome is no_note and the check runs.
         s = self.pull_request()
         fields = self.assertRuns(s['base'], 'no notes at all', **self.pr_env(s))
-        self.assertIn(fields['notes_fetch'], ('ok', 'failed'))
+        self.assertIn(fields['notes_fetch'], ('ok', 'none'))
         self.assertEqual((fields['outcome'], fields['tree_of']), ('no_note', 'head'))
 
     def test_the_notes_are_fetched_without_the_partial_clone_filter_so_their_blobs_arrive_at_once(self):
@@ -503,6 +503,16 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse([c for c in note_fetches if any(str(part).startswith(('refs/notes/evidence/*', '+refs/notes/evidence/*')) for part in c)])
         self.assertNotIn('--no-filter', [part for c in calls if c[:2] == ('git', 'fetch') and 'refs/notes' not in ' '.join(map(str, c)) for part in c])
 
+    def test_a_fetch_is_ok_none_when_nothing_matched_and_failed_only_when_git_says_why(self):
+        def state(code, stderr=b''):
+            return gate.fetch_state(subprocess.CompletedProcess([], code, stdout=b'', stderr=stderr))
+        self.assertEqual(state(0), 'ok')
+        self.assertEqual(state(1), 'none')  # git's answer when no remote ref matches a glob refspec
+        self.assertEqual(state(1, b'  \n'), 'none')
+        self.assertEqual(state(1, b'fatal: could not read from remote repository\n'), 'failed')
+        self.assertEqual(state(128, b"fatal: unable to access 'x'\n"), 'failed')
+        self.assertEqual(state(128), 'failed')
+
     def test_a_notes_fetch_that_fails_is_logged_as_failed_not_as_no_note(self):
         calls = []
         real_run = gate.run
@@ -513,7 +523,7 @@ class EndToEnd(unittest.TestCase):
             if command[:2] == ('git', 'rev-parse'):
                 return subprocess.CompletedProcess(command, 0, stdout=b'c' * 40 + b'\n', stderr=b'')
             if command[:2] == ('git', 'fetch') and any(str(part).startswith('+refs/notes/evidence/' + 'c' * 40) for part in command):
-                return real_run('false')
+                return subprocess.CompletedProcess(command, 128, stdout=b'', stderr=b"fatal: unable to access 'origin'\n")
             return done
         context = gate.context_from({'CHECK': 'linux-gate', 'REPOSITORY': REPOSITORY, 'BASE_SHA': 'a' * 40, 'EVENT_NAME': 'pull_request'})
         gate.run = fake
