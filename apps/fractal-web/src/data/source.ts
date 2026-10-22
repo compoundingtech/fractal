@@ -108,6 +108,16 @@ export interface AgentSubagent {
   readonly lease_expires_at: string
 }
 
+/** Retained native work identity; the title is optional and never synthesized from a goal. */
+export interface AgentWork {
+  readonly id: string
+  readonly missionId: string
+  readonly runId: string
+  readonly path: string
+  readonly title?: string
+  readonly state: string
+}
+
 /** One agent session as the fleet projection lists it, keyed by `ref` with its terminal ref beside it. */
 export interface Agent {
   readonly ref: string
@@ -138,6 +148,9 @@ export interface Agent {
   readonly statusSince?: number
   readonly subagents?: readonly AgentSubagent[]
   readonly mission?: string
+  readonly currentWork?: readonly AgentWork[]
+  /** The server's bounded upcoming window, not the complete queue. */
+  readonly upcomingWork?: readonly AgentWork[]
 }
 
 /** The fleet projection: every host the gateway knows and the agents running on them. */

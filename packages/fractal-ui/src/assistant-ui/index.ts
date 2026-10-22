@@ -46,7 +46,7 @@ export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export { usageScopeLabel } from './sidebar/model.ts'
-export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, SidebarMissionContext, SidebarMissionInfo, SidebarMissionProgress, SidebarMissionStep, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export { SidebarTree } from './sidebar/SidebarTree.tsx'
 export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 /** Read-only declaration source (KDL, or a labelled structured fallback) with copy-all. */

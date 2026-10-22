@@ -192,16 +192,13 @@ export const TwoLineAndNesting: Story = {
       // SidebarTree owns the disclosure and indentation: no row-level chevron column.
       await expect(row.querySelector('[data-row-column="chevron"]')).toBeNull()
     }
-    // Line 2: status word (working included) · host · spend and tokens · duration.
-    const line2 = (row: Element, field: string) => row.querySelector(`[data-row-column="line2"] [data-row-field="${field}"]`)
-    await expect(line2(root!, 'status-label')?.textContent).toBe('Working')
-    await expect(line2(root!, 'host')?.textContent).toBe('build-2')
-    await expect(line2(root!, 'spend')?.textContent).toBe('$3.4 · 1.2M')
-    await expect(line2(root!, 'duration')).not.toBeNull()
-    await expect(line2(review!, 'status-label')?.textContent).toBe('Ended')
-    // A reported-agent aggregate without a USD cost shows tokens only, never a substituted $0.
-    await expect(line2(review!, 'spend')?.textContent).toBe('48K tokens')
-    await expect(line2(review!, 'spend')).toHaveAttribute('aria-label', 'Reported by agent: 48200 tokens')
+    // Without a mission, line 2 is exactly status · host; metrics remain in reported details.
+    const line2 = (row: Element) => row.querySelector('[data-row-column="line2"]')!
+    await expect(line2(root!).textContent).toBe('Working·build-2')
+    await expect(line2(review!).textContent).toBe('Ended·build-2')
+    for (const row of rows) {
+      await expect(line2(row).querySelector('[data-box="pill"], [data-row-field="spend"], [data-row-field="duration"]')).toBeNull()
+    }
     // Attention and unread share the trailing signal column.
     await expect(root!.querySelector('[data-row-column="attention"]')).toHaveTextContent('!')
     await expect(checks!.querySelector('[data-row-signal="unread"]')).toHaveTextContent('2')
