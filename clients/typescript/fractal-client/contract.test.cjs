@@ -981,15 +981,26 @@ test('schedules list preserves unknown rows and explicitly encodes one page; old
     const requests = [];
     let old = false;
     const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
-        requests.push(String(input));
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        assert.equal(new URL(url).pathname, '/v1/client/schedules', 'no fallback route');
         return old ? new Response(null, {status:404}) : Response.json(fixture);
     }});
     const response = await client.schedulesList({ cursor:'next&cursor', limit:1, unheard_after_ms:300000 });
     assert.deepEqual(response, fixture);
-    assert.equal(new URL(requests[0]).searchParams.get('cursor'), 'next&cursor');
-    assert.equal(new URL(requests[0]).pathname, '/v1/client/schedules');
-    assert.equal(requests.length, 1);
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/capabilities'), [
+        'https://example.test/v1/client/capabilities',
+    ]);
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/schedules'), [
+        'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
+    ]);
+    assert.equal(requests.length, 2, 'one capability discovery and exactly one schedules page');
     old = true;
     await assert.rejects(client.schedulesList(), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
-    assert.equal(requests.length, 2, 'no unsupported fallback or automatic page traversal');
+    assert.deepEqual(requests, [
+        'https://example.test/v1/client/capabilities',
+        'https://example.test/v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000',
+        'https://example.test/v1/client/schedules',
+    ], 'cached capabilities, no unsupported fallback or automatic page traversal');
 });
