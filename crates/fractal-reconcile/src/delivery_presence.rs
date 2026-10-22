@@ -1062,8 +1062,19 @@ mod tests {
         delivery.epoch = 1;
         let mut title = crate::mailbox::Fence::new(recipient, "current", "title");
         title.epoch = 1;
-        record_fenced(&delivery, &claude_report(true, 0));
+        // The daemon's own image, read once: through /proc/self/exe on Linux and current_exe()
+        // elsewhere. When that read fails it is None, and then every image counts as current.
+        let image = presence().image.clone();
+        record_fenced(
+            &delivery,
+            &json!({"transport":"claude-channel", "ready":true, "image":image,
+                "channel":{"pid":8,"image":image,"age_ms":0}})
+            .to_string(),
+        );
         let without_monitor = assess_current(recipient, "claude", Some("current"));
+        // The delivery beat alone is current, so only the monitor can make the seat stale below.
+        assert!(!without_monitor.stale(), "{without_monitor:?}");
+        assert_eq!(without_monitor.state, "current", "{without_monitor:?}");
         record_fenced(
             &title,
             &json!({"transport":"claude-channel", "ready":false,
@@ -1077,6 +1088,19 @@ mod tests {
             aged = age;
             let assessment = assess_current(recipient, "claude", Some("current"));
             assert!(assessment.stale(), "{age:?}: {assessment:?}");
+            // The stale reading is the monitor's: it carries the monitor's age, and its reason
+            // until that age passes the poll limit, which is checked first.
+            assert!(
+                assessment.polled_seconds_ago >= Some(age.as_secs()),
+                "{age:?}: {assessment:?}"
+            );
+            if age + Duration::from_secs(30) < POLL_STALE_AFTER {
+                assert_eq!(
+                    assessment.reason.as_deref(),
+                    Some("claude-channel-unattached: mail held"),
+                    "{age:?}"
+                );
+            }
         }
         record_fenced(
             &title,
