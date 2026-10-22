@@ -9,10 +9,13 @@ use std::{
     time::Duration,
 };
 mod reconcile;
+mod pairing;
 
 #[derive(Debug, Parser)]
 #[command(about = "Reconcile verified local st fleet membership into Fabric runtime peers")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<PairingCommand>,
     /// Trusted local st3 HTTP socket (never the replication socket).
     #[arg(long)]
     st_socket: Option<PathBuf>,
@@ -33,6 +36,18 @@ struct Args {
     interval: u64,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum PairingCommand {
+    /// Attach a restricted Fabric permit to an existing invite ({code} on stdin).
+    #[command(name = "pairing-invite")]
+    Invite,
+    /// Exchange signed admission over Fabric's restricted pairing ALPN.
+    #[command(name = "pairing-join")]
+    Join,
+    /// Read an authenticated retained pairing receipt without presenting a token.
+    #[command(name = "pairing-status")]
+    Receipt,
+}
 #[derive(Debug, Deserialize)]
 struct LeaveSnapshot {
     fleet_id: Option<String>,
@@ -119,6 +134,35 @@ fn retained(snapshot: &LeaveSnapshot, now: u128) -> BTreeSet<String> {
         .collect()
 }
 
+fn fence_pairing(snapshot: &mut LeaveSnapshot, pending: &pairing::PairingState) {
+    for member in &mut snapshot.membership.members {
+        // A fresh confirmed receipt supersedes an older failed attempt only for
+        // this exact current signed member and Fabric identity, never node-wide.
+        let confirmed_node = member.node_id.as_deref().filter(|node| {
+            member.state == "current"
+                && snapshot.fleet_id.as_ref().is_some_and(|fleet| {
+                    pending.confirmed.contains(&(
+                        fleet.clone(), member.member_key.clone(), (*node).to_owned(),
+                    ))
+                })
+        });
+        if let (Some(fleet), Some(node)) = (
+            &snapshot.fleet_id,
+            confirmed_node.filter(|_| !member.endpoints_published),
+        ) {
+            member.endpoints.push(serde_json::json!({
+                "transport":"fabric", "node":node,
+                "protocol":format!("st3/fleet/{fleet}")
+            }));
+        }
+        member.endpoints.retain(|endpoint| {
+            endpoint["transport"] != "fabric"
+                || endpoint["node"].as_str().is_none_or(|node| {
+                    !pending.blocked.contains(node) || confirmed_node == Some(node)
+                })
+        });
+    }
+}
 async fn poll(
     client: &reqwest::Client,
     socket: &Path,
@@ -138,7 +182,7 @@ async fn poll(
         );
         bytes.extend_from_slice(&chunk);
     }
-    let snapshot: LeaveSnapshot = serde_json::from_slice(&bytes).context(
+    let mut snapshot: LeaveSnapshot = serde_json::from_slice(&bytes).context(
         "read st leave-state contract; upgrade st to a version supporting local adapters",
     )?;
     ensure!(
@@ -146,6 +190,10 @@ async fn poll(
         "st leave state is not durable: {}",
         snapshot.persistence_error.as_deref().unwrap_or_default()
     );
+    // Admission publishes signed membership before Fabric confirmation. Fence
+    // every pending bound identity so normal reconciliation cannot grant it early.
+    let pending = pairing::tick(client, socket, state).await?;
+    fence_pairing(&mut snapshot, &pending);
     let owners_path = state.join("owners.json");
     let mut known = owners(&owners_path)?;
     if let Some(fleet) = &snapshot.fleet_id {
@@ -225,6 +273,28 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string(&status)?);
         return Ok(());
     }
+    let fabric_socket = match args.fabric_socket {
+        Some(path) => path,
+        None => reconcile::control_socket()?,
+    };
+    if matches!(args.command, Some(PairingCommand::Join)) {
+        return pairing::join(&fabric_socket, &state).await;
+    }
+    if matches!(args.command, Some(PairingCommand::Receipt)) {
+        return pairing::status(&fabric_socket).await;
+    }
+    let st_socket = match args.st_socket {
+        Some(path) => path,
+        None => default_st_socket()?,
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .unix_socket(st_socket)
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    if matches!(args.command, Some(PairingCommand::Invite)) {
+        return pairing::invite(&client, &fabric_socket, &state).await;
+    }
     std::fs::create_dir_all(&state)?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -234,19 +304,7 @@ async fn main() -> Result<()> {
         .open(state.join("adapter.lock"))?;
     lock.try_lock()
         .context("another adapter owns this state directory")?;
-    let st_socket = match args.st_socket {
-        Some(path) => path,
-        None => default_st_socket()?,
-    };
-    let fabric_socket = match args.fabric_socket {
-        Some(path) => path,
-        None => reconcile::control_socket()?,
-    };
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .unix_socket(st_socket)
-        .timeout(Duration::from_secs(10))
-        .build()?;
+
     loop {
         let result = poll(&client, &fabric_socket, &state).await;
         let status = match &result {

@@ -752,7 +752,7 @@ pub async fn run<B: Backend>(
         notify,
     );
     let endpoints = Endpoints::default();
-    let app = peer_router(state, routes);
+    let app = peer_router(state.clone(), routes);
     let listening = config
         .fleet
         .as_ref()
@@ -829,7 +829,10 @@ pub async fn run<B: Backend>(
             let fleet_id = leave_fleet_id.clone();
             async move { axum::Json(fleet.leave_snapshot(Some(fleet_id)).await) }
         }),
-    );
+    ).route(
+        "/v1/internal/fleet/pairing-admission",
+        post(receive_pairing_admission::<B>).layer(DefaultBodyLimit::max(MAX_JOIN_BYTES)),
+    ).with_state(state);
     let serving_leave = async move { axum::serve(leave_listener, leave_app).await };
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
@@ -2592,6 +2595,39 @@ async fn fetch_checkpoint_manifest_page(
     Ok(response.value)
 }
 
+/// Local adapter boundary. This reuses the ordinary sealed handshake; Fabric policy
+/// remains entirely outside st. The proxy pins this worker's fleet incarnation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingAdmissionRequest {
+    request: crate::fleet::handshake::JoinRequest,
+    node_id: String,
+    expected_fleet_id: String,
+    expected_sponsor_key: String,
+}
+
+async fn receive_pairing_admission<B: Backend>(
+    State(state): State<PeerState<B>>,
+    body: Bytes,
+) -> Response {
+    let Ok(admission) = serde_json::from_slice::<PairingAdmissionRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if admission.expected_fleet_id != state.auth.fleet_id()
+        || state.auth.member.as_ref().map(|key| key.public())
+            != Some(admission.expected_sponsor_key.as_str())
+        || admission.request.node_id.as_deref() != Some(admission.node_id.as_str())
+        || admission.node_id.len() != 64
+        || !admission.node_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(request) = serde_json::to_vec(&admission.request) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    receive_join(State(state), Bytes::from(request)).await
+}
+
 /// The join route. It exists only while this node sponsors an open invite; otherwise it answers
 /// 404 like any unknown path. Every refusal looks the same to the caller.
 ///
@@ -2635,6 +2671,12 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
         writer_floor: answer["writer_floor"].as_u64(),
         fabric_protocol: text("fabric_protocol"),
         admitted_claim: text("admitted_claim"),
+        sponsor_node_id: request.node_id.as_ref().and_then(|_| text("sponsor_node_id")),
+        sponsor_endpoints: if request.node_id.is_some() {
+            answer["sponsor_endpoints"].as_array().cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     };
     match crate::fleet::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
         Ok(response) => {

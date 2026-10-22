@@ -3379,6 +3379,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "fleet.member-admitted" => &[
             ("fleet_id", required_string()),
             ("member_key", required_string()),
+            ("node_id", string()),
             ("via", required_enum(&["anchor", "invite", "migration"])),
             ("sponsor", reference_to(&["host"])),
             ("invite", reference_to(&["fleet-invite"])),

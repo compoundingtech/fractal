@@ -106,6 +106,75 @@ async fn lock_fleet_admission(
     }
 }
 
+/// Pairing credentials travel over the helper's private stdin/stdout, never argv.
+async fn bootstrap_fabric_invite(
+    endpoint: &Endpoint,
+    created: &mut fractal_daemon::api::FleetInviteCreated,
+) -> Result<()> {
+    let code = fractal_daemon::fleet::code::JoinCode::decode(&created.code)?;
+    if code.migrate
+        || !code.endpoints.iter().any(|endpoint| {
+            matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+        })
+    {
+        return Ok(());
+    }
+    let Endpoint::Unix(socket) = endpoint else {
+        anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
+    };
+    let helper = std::env::var_os("ST_FABRIC_ADAPTER")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("st-fabric-adapter")))
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "st-fabric-adapter"))
+        .context(
+            "Fabric invitations need st-fabric-adapter installed and Fabric running with \
+             --runtime-peers; use --via tailscale for a Tailscale-only invitation",
+        )?;
+    let mut child = tokio::process::Command::new(helper)
+        .arg("--st-socket")
+        .arg(socket)
+        .arg("pairing-invite")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("start the Fabric invitation helper")?;
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let mut input = child.stdin.take().context("open pairing helper input")?;
+        input
+            .write_all(&serde_json::to_vec(&json!({ "code": created.code }))?)
+            .await?;
+        input.write_all(b"\n").await?;
+        input.shutdown().await?;
+    }
+    let output = child.wait_with_output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Fabric invitation bootstrap failed; the st invite remains open until revoked or expired"
+    );
+    #[derive(serde::Deserialize)]
+    struct PairedInvite {
+        code: String,
+    }
+    let paired: PairedInvite =
+        serde_json::from_slice(&output.stdout).context("decode the Fabric invitation helper")?;
+    let paired_code = fractal_daemon::fleet::code::JoinCode::decode(&paired.code)?;
+    anyhow::ensure!(
+        paired_code.fleet_id == code.fleet_id && paired_code.invite == code.invite,
+        "Fabric invitation helper returned another invitation"
+    );
+    created.expires_at_unix_ms = paired_code.expires_at.saturating_mul(1000);
+    created.code = paired.code;
+    Ok(())
+}
+
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
     let manages_services = match &command {
         FleetCommand::Create(args) => !args.no_service,
@@ -172,7 +241,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "--send-fabric needs the NAME of the machine to send it to"
                 );
             }
-            let created: fractal_daemon::api::FleetInviteCreated = client
+            let mut created: fractal_daemon::api::FleetInviteCreated = client
                 .post(
                     "/v1/internal/fleet/invites",
                     &fractal_daemon::api::FleetInviteRequest {
@@ -184,6 +253,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     },
                 )
                 .await?;
+            bootstrap_fabric_invite(endpoint, &mut created).await?;
             let command = if args.migrate { "migrate" } else { "join" };
             if let Some(path) = &args.code_file {
                 fractal_daemon::fleet::join::write_private(path, created.code.as_bytes())?;
@@ -226,15 +296,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "Invite {} for {target} expires in about {expires_in} minutes.",
                     created.invite
                 );
+                println!("On {target}, run:\n  st fleet {command} {}", created.code);
                 println!(
-                    "On {target}, run this and paste the code when asked:\n  st fleet {command}"
+                    "The code is a one-use credential. To avoid shell history, run \
+                     `st fleet {command}` and paste it at the hidden prompt instead."
                 );
-                println!("Code:\n  {}", created.code);
-                if let Some(name) = &args.name {
-                    println!(
-                        "Or, if {name} is a Fabric peer of this machine, send the code instead of showing it:\n  st fleet invite {name} --send-fabric\n  fabric exec {name} -- st fleet {command} --fabric-inbox"
-                    );
-                }
             }
             Ok(())
         }

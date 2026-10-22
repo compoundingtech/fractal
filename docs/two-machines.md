@@ -32,7 +32,9 @@ Join restarts the installed services and waits for the first sync. Beacon also l
 
 ## Fabric
 
-Use this route when the machines are already trusted Fabric peers. Run Fabric as a service on both, and allow the fleet's protocol in the peers' Fabric service grants. See [fleet join](fleet-join.md#fabric) for the exact exposure, dial, and service-grant configuration.
+Run Fabric with `--runtime-peers` on both machines and install `st-fabric-adapter`.
+Run the adapter as a separate user service on the sponsoring member. The machines
+do not need prior Fabric peer configuration or manual service grants.
 
 On **studio**:
 
@@ -42,23 +44,35 @@ st fleet status --json
 st service status
 ```
 
-The replication worker listens on `127.0.0.1:31313` and exposes that listener through Fabric. Status shows the `fabric://NODE_ID/PROTOCOL` endpoint: the node ID comes from studio's Fabric identity, and the protocol belongs to this fleet. Grant that exact protocol to the other machine in Fabric before joining.
+The replication worker listens on `127.0.0.1:31313` and exposes that listener through Fabric. Status shows the `fabric://NODE_ID/PROTOCOL` endpoint: the node ID comes from studio's Fabric identity, and the protocol belongs to this fleet.
 
-On **studio**, issue an invitation containing that Fabric endpoint:
+Once the fleet exists, adding a machine takes two commands. On **studio**:
 
 ```sh
-st fleet invite beacon --via fabric
+st fleet invite beacon
 ```
 
-On **beacon**, paste it at the join prompt:
+On **beacon**, use the code printed by the invitation:
 
 ```sh
-st fleet join --transports fabric
+st fleet join CODE
 st fleet status --json
 st replication status
 ```
 
-Beacon listens on its own loopback port and exposes it through Fabric. The invitation sets the sponsor's peer address; the replication worker creates and reacquires the local Fabric tunnel. No manual `fabric dial` or `[[peers]]` entry is needed. Add `--dial-out` to accept no inbound connections on beacon.
+The invite pins studio's Fabric identity and carries a short-lived, one-use pairing
+permit. The adapter exchanges the signed st admission over Fabric's restricted
+pairing channel. A pending node receives no ordinary Fabric trust or service
+grants. Only after verifying signed membership and its binding to beacon's
+authenticated Fabric NodeID does the adapter atomically confirm the exact
+replication and client API grants. Beacon also verifies studio's signed answer before
+installing reciprocal access. Neither command edits `peers.toml`.
+
+The default code expires after ten minutes; Fabric pairing never extends beyond
+ten minutes even when `--expires` requests longer. Treat the whole code as a
+credential. For a hidden prompt rather than shell history, type `st fleet join`
+and paste it. Beacon exposes its own loopback listener through Fabric; add
+`--dial-out` if it must accept no inbound replication.
 
 With their user services installed, Tailscale, Fabric, and the Fractal replication worker restart after reboot and reconnect after network interruptions. A terminal does not need to stay open.
 
@@ -100,8 +114,10 @@ revoke: remove those at their source before treating a departure as fully revoke
 Read failures leave policy untouched; inspect the JSON `message` and retry.
 `--status` reads the last attempt, so inspect `observed_unix_ms` for freshness.
 
-The adapter does not bootstrap Fabric pairing or replace the initial trust/grants
-required for joining above. Service-manager units are configured separately.
+The same external adapter owns invitation permits and pairing confirmation.
+Service-manager units are configured separately. An expired, rejected, or
+restart-lost pairing attempt requires a fresh invitation; it never grants access
+as a fallback.
 
 ## SSH as a last resort
 

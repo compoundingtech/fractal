@@ -726,6 +726,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
         .route(
+            "/v1/internal/fleet/pairing-admission",
+            post(fleet::fleet_pairing_admission),
+        )
+        .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
         )

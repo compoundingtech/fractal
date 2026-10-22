@@ -51,6 +51,7 @@ stop declared seats. See [Checkpoints](st3/checkpoints.md) before treating remov
 | `STATE/fleet/secret` | `0600` | Fleet secret |
 | `STATE/fleet/node.key` | `0600` | Private member key |
 | `STATE/fleet/join.json` | `0600` | Interrupted join progress, without secrets |
+| `STATE/fleet/pairing-recovery.json` | `0600` | Authenticated pending pairing answer, including fleet secret; bound to code digest, member key and name; erased after the durable join checkpoint |
 | `STATE/fleet/removal.json` | `0600` | Signed removal reporter, reason and time |
 
 Fleet commands maintain `fleet.toml`; change it through those commands. Config loading uses the
@@ -73,10 +74,12 @@ st fleet invites [--all]
 st fleet invites revoke fleet-invite/ID --reason TEXT
 ```
 
-The optional name pins the joiner's name. Expiry defaults to 15 minutes and accepts 10 seconds to
-24 hours. `auto` includes advertised endpoints; `--via` selects a transport. A sponsor must already
-be a fleet member with a listener. Invites are person operations; an agent seat must provide an
-explicit `--as person/NAME` where the command permits it.
+The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
+10 seconds to 24 hours; an invitation carrying Fabric pairing is capped at 10
+minutes. `auto` includes advertised endpoints; `--via` selects a transport. A
+sponsor must already be a fleet member with a listener. Invites are person
+operations; an agent seat must provide an explicit `--as person/NAME` where the
+command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.
 The Fabric form creates a private temporary code file, sends it and deletes the local copy;
@@ -228,11 +231,84 @@ allow the peer port. See [Tailscale](st3/tailscale.md) for setup.
 
 ### Fabric
 
-The default protocol is `st3/fleet/FLEET_ID`; `fabric_protocol` can retain an existing grant name.
-The worker exposes its loopback listener with `fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and
-obtains an outbound tunnel with `fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`. `st fleet transports remove fabric`, leave, dial-out
-mode and uninstall remove the exposure. st does not edit Fabric trust: the exposing member must
-allow the dialer's NodeID and protocol. Missing grants are reported with the entry to add.
+Run Fabric with `--runtime-peers` and install the external `st-fabric-adapter` on
+both machines. Keep the adapter running on the sponsor. No prior peer trust is
+needed:
+
+```sh
+# On a member:
+st fleet invite beacon
+# On beacon:
+st fleet join CODE
+```
+
+The code includes a pinned sponsor Fabric NodeID and a one-use pairing permit.
+The joining adapter uses its existing Fabric daemon identity, not a temporary
+peer or a second identity. The restricted `fabric/pair/1` exchange carries the
+existing signed, sealed st admission. It grants no ordinary service access.
+The sponsor verifies the request's signed Fabric NodeID against the authenticated
+pending identity and its admitted member key against signed st membership before
+atomic confirmation. The immutable permit and reciprocal policy grant exactly
+`st3/fleet/FLEET_ID` and `st3-client-v0`, under owner `st/fleet/FLEET_ID`.
+Terminal access (`st3/pty/FLEET_ID`) requires an explicit operator grant in
+static Fabric policy, which the adapter never edits.
+The joiner verifies the sponsor's signed response and pinned endpoint before its
+adapter installs reciprocal access. The st daemon carries admission data only;
+all Fabric permit, confirmation, and policy calls belong to the adapter.
+
+Pending attempts expire or fail closed after a Fabric restart; issue a fresh
+invite rather than manually granting trust. Preserve adapter state across
+restarts. Existing static or other-owner grants are not revoked by pairing or
+membership reconciliation.
+
+The default replication protocol is `st3/fleet/FLEET_ID`.
+`fabric_protocol` can retain an existing grant name for non-pairing migrations.
+The worker exposes its loopback listener with
+`fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and obtains an outbound tunnel with
+`fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`.
+`st fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
+the exposure. The adapter maintains trust and grants; st does not edit
+`peers.toml`.
+
+#### Adapter helper boundary
+
+The CLI discovers `st-fabric-adapter` beside its executable or on `PATH`;
+`ST_FABRIC_ADAPTER` selects an explicit helper for isolated tests.
+`pairing-invite` accepts one JSON line `{"code":"..."}` on standard input and
+returns a JSON line containing the augmented `code`. `pairing-join` is a
+private interactive JSON-line protocol: the code produces `node_id`, the signed
+join `request` produces a sealed `response`, and the authenticated sealed
+admission plus `sponsor_key` produces `confirmed: true` only after confirmation.
+Credentials travel through pipes, not helper arguments. The st side verifies
+the sealed response before sending the authenticated admission back to the
+helper; it does not write fleet settings before confirmation.
+
+For isolated development/live proofs, `nix build .#fabric-pairing` builds the
+published Fabric revision pinned with this adapter's control contract. Use
+`--st-socket`, `--fabric-socket`, and `--state-dir` to keep proof daemons and
+adapter journals separate from user services.
+
+After an interruption following authentication, rerun the same code with the
+same name and local member key. The private recovery journal retains the
+authenticated answer before irreversible confirmation; the helper queries the
+retained receipt without presenting the spent bearer token. Confirmed recovery
+does not reinstall Fabric policy. A restart-lost or expired unconfirmed exchange
+still requires a fresh invite.
+When given a fresh code, st replaces a saved recovery only after `pairing-status`
+observes an authenticated expired or rejected receipt for the old attempt and
+the same Fabric NodeID. Pending, confirmed, unknown, and unreachable outcomes
+preserve the recovery journal; use the original code rather than discarding a
+possibly confirmed admission.
+The replacement invitation can retain the same machine name and local member
+key: the sponsor reuses the existing verified invite admission only when its
+member key, machine name, Fabric NodeID and mode match, without migration. It
+does not remove that member or append another incarnation; unrelated identities
+still receive the normal name-collision refusal.
+
+If Fabric has pruned an old permit record after receipt retention, the sponsor
+adapter terminates that expired journal while retaining its unconfirmed identity
+fence. Historical journal expiry does not stop other invitations or membership
+policy reconciliation.
 
 ### Loopback and plain HTTP
 

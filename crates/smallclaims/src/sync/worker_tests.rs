@@ -971,9 +971,11 @@ fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
         |name: &str, state: &str, mode: &str, endpoints: Vec<Value>| crate::fleet::MemberView {
             name: name.into(),
             member_key: format!("{name}-key"),
+            node_id: None,
             state: state.into(),
             mode: mode.into(),
             endpoints,
+            endpoints_published: true,
             start: 1,
             end: None,
             ended: None,
@@ -1177,6 +1179,76 @@ fn a_refusal_waits_for_the_settings_lock_without_blocking_the_runtime() {
             .removed
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
+    use crate::fleet::code::{JoinCode, fingerprint};
+    use crate::fleet::handshake::{JoinResponse, Joiner};
+    let fleet = "3b241101-e2bb-4255-8caf-4136c566a962";
+    let anchor = Arc::new(MemberKey::generate().unwrap().0);
+    let member = MemberKey::generate().unwrap().0;
+    let store = Arc::new(plain_memory("a").unwrap());
+    store.bind_fleet(fleet).unwrap();
+    store.pin_fleet_anchor(anchor.public()).unwrap();
+    store.set_member_key(Some(anchor.clone())).unwrap();
+    fleet_claim(&store, "fleet.member-admitted", "host/a", serde_json::json!({
+        "fleet_id": fleet, "member_key": anchor.public(), "via": "anchor", "mode": "listening"
+    }));
+    let invitation = store.create_fleet_invite(
+        Some("b"), Duration::from_secs(600), &["fabric".into()], "person/test", false,
+    ).unwrap();
+    let code = JoinCode {
+        fleet_id: uuid::Uuid::parse_str(fleet).unwrap(),
+        invite: hex::decode(invitation.invite).unwrap().try_into().unwrap(),
+        token: invitation.token,
+        fingerprint: fingerprint(anchor.public()),
+        expires_at: invitation.expires_at_unix_ms / 1000,
+        name: Some("b".into()),
+        migrate: false,
+        endpoints: Vec::new(),
+        pairing: None,
+    };
+    let node_id = "a".repeat(64);
+    let session = Joiner::start_bound(&code, &member, "b", "dial-out", None, "test", Some(node_id.clone())).unwrap();
+    let state = PeerState {
+        backend: Local(store.clone()),
+        node: "a".into(),
+        auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
+        fleet: member_context(&store, &anchor, &[], &[], false),
+        outbound_notify: watch::channel(0_u64).0,
+    };
+    let body = serde_json::json!({
+        "request": session.request(), "node_id": node_id,
+        "expected_fleet_id": fleet, "expected_sponsor_key": anchor.public()
+    });
+    let response = receive_pairing_admission(State(state.clone()), Bytes::from(serde_json::to_vec(&body).unwrap())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), MAX_JOIN_BYTES).await.unwrap();
+    let answer: JoinResponse = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(session.open(&answer).unwrap().fleet_id, fleet);
+    store.verify_fleet_pairing_admission("b", member.public(), &node_id).unwrap();
+    let view = store.fleet_view().unwrap();
+    let admitted = view.current("b");
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].member_key, member.public());
+    assert_eq!(admitted[0].node_id.as_deref(), Some(node_id.as_str()));
+    assert!(admitted[0].endpoints.is_empty(), "admission must not wait for joiner endpoint publication");
+    assert!(!admitted[0].endpoints_published);
+    let encoded = serde_json::to_value(&view).unwrap();
+    assert_eq!(serde_json::from_value::<FleetView>(encoded).unwrap(), view);
+    assert!(store.verify_fleet_pairing_admission("b", member.public(), &"b".repeat(64)).is_err());
+    assert!(store.verify_fleet_pairing_admission("b", anchor.public(), &node_id).is_err());
+    let mut wrong_fleet = body.clone();
+    wrong_fleet["expected_fleet_id"] = serde_json::json!("3b241101-e2bb-4255-8caf-4136c566a963");
+    let refused = receive_pairing_admission(
+        State(state.clone()), Bytes::from(serde_json::to_vec(&wrong_fleet).unwrap()),
+    ).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let mut wrong_node = body;
+    wrong_node["node_id"] = serde_json::json!("b".repeat(64));
+    let refused = receive_pairing_admission(State(state), Bytes::from(serde_json::to_vec(&wrong_node).unwrap())).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -3898,6 +3970,8 @@ mod retry_tests {
             state: "current".into(),
             mode: "listening".into(),
             member_key: "member-key".into(),
+            node_id: None,
+            endpoints_published: true,
             start: 0,
             end: None,
             ended: None,
