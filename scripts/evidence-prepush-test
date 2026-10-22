@@ -194,12 +194,36 @@ class Hook(unittest.TestCase):
             self.assertEqual(self.calls()[1]['argv'][-1], '1200')
             git(self.work, 'commit', '-q', '--allow-empty', '-m', f'again {bad}')
 
-    def test_skipping_says_so_and_runs_nothing(self):
-        done = self.push(ST_SKIP_EVIDENCE='1')
+    def test_the_skip_flag_does_not_wait_but_still_signs_in_the_background(self):
+        started = time.monotonic()
+        done = self.push(ST_SKIP_EVIDENCE='1', STUB_STATUS='3', STUB_SLEEP='4', tty=True)  # even at a terminal: no wait
+        self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('NOT signing', done.stderr)
-        self.assertEqual(self.calls(), [])
+        self.assertIn('ST_SKIP_EVIDENCE=1: not waiting. The checks are signed in the background', done.stderr)
+        self.assertIn('runs that check in full', done.stderr)
         self.assertTrue(self.remote_has('refs/heads/feature'))
+        self.assertNotIn({'done': True}, self.entries())
+        self.wait_done()  # the signing run went on by itself
+        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status', '--base'])
+        self.assertEqual(self.receipts()[-1]['outcome'], 'skip_flag')
+        self.assertTrue(list((self.home / '.local/state/st3/evidence-prepush').glob('*.log')))
+
+    def test_local_off_does_no_local_work_at_all_and_says_so_in_one_line(self):
+        for env in ({}, {'ST_SKIP_EVIDENCE': '1'}):  # it wins over the skip flag, which would start background work
+            with self.subTest(env):
+                git(self.work, 'commit', '-q', '--allow-empty', '-m', f'again {env}')
+                done = self.push('--force', 'feature', ST_EVIDENCE_LOCAL='off', STUB_STATUS='3', **env)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual([line for line in done.stderr.splitlines() if line.startswith('evidence:')],
+                                 ["evidence: ST_EVIDENCE_LOCAL=off: no local signing work for this push; the pull request's checks run in CI"])
+                self.assertEqual(self.calls(), [])  # not even the status question
+                self.assertEqual(self.receipts()[-1]['outcome'], 'local_off')
+                self.assertTrue(self.remote_has('refs/heads/feature'))
+
+    def test_the_skip_flag_on_a_covered_tree_is_as_quiet_as_without_it(self):
+        done = self.push(ST_SKIP_EVIDENCE='1', STUB_STATUS='0')
+        self.assertNotIn('evidence:', done.stderr)
+        self.assertEqual(self.receipts()[-1]['outcome'], 'covered')
 
     def test_a_status_it_cannot_read_is_not_a_reason_to_block_or_sign(self):
         done = self.push(STUB_STATUS='2')
@@ -503,6 +527,73 @@ class Hook(unittest.TestCase):
         self.assertIn({'done': True}, self.entries())  # and it finished by itself afterwards
         self.assertTrue(list((self.home / '.local/state/st3/evidence-prepush').glob('*.log')))
 
+    def receipts(self):
+        path = self.home / '.local/state/st3/evidence-prepush/receipts.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def wait_done(self, count=1):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and self.entries().count({'done': True}) < count:
+            time.sleep(0.2)
+        self.assertEqual(self.entries().count({'done': True}), count)
+
+    def test_an_agent_waits_up_to_five_minutes_by_default(self):
+        done = self.push(STUB_STATUS='3', ST_AGENT='some-agent')
+        self.assertIn('this push waits at most 5 min', done.stderr)
+
+    def test_a_tree_that_edits_a_lane_is_reported_as_not_signed_not_as_a_failure(self):
+        done = self.push(STUB_STATUS='3', STUB_RUN_EXIT='4')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('a check whose lane this tree edits is not signed, so CI runs that one', done.stderr)
+        self.assertNotIn('failed', done.stderr)
+        self.assertEqual(self.receipts()[-1]['outcome'], 'signed_lane_edit')
+
+    def test_each_push_of_the_checked_out_head_leaves_one_receipt_of_what_the_hook_did(self):
+        tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        # The skip flag's run goes on in the background holding the tree's lock, so it comes last.
+        for env, outcome in (({'STUB_STATUS': '0'}, 'covered'), ({'STUB_STATUS': '3'}, 'signed'),
+                             ({'STUB_STATUS': '3', 'STUB_RUN_EXIT': '1'}, 'failed'), ({'STUB_STATUS': '7'}, 'not_signing:status_error'),
+                             ({'ST_SKIP_EVIDENCE': '1', 'STUB_STATUS': '3', 'STUB_SLEEP': '3'}, 'skip_flag')):
+            with self.subTest(outcome):
+                # A new remote branch each time: git runs no pre-push hook for a push with nothing to update.
+                branch = outcome.replace(':', '-')
+                done = self.push(f'feature:refs/heads/{branch}', **env, ST_AGENT='agent/some/seat')
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual({k: v for k, v in self.receipts()[-1].items() if k != 'time'},
+                                 {'tree': tree, 'branch': branch, 'agent': 'agent/some/seat', 'outcome': outcome})
+        self.wait_done(3)  # the skip flag's background run too
+        (self.work / 'a.txt').write_text('changed, not committed')
+        self.push('feature:refs/heads/dirty')
+        self.assertEqual(self.receipts()[-1]['outcome'], 'not_signing:dirty')
+        self.assertIsNone(self.receipts()[-1]['agent'])
+        git(self.work, 'checkout', '-q', '--', 'a.txt')
+        before = len(self.receipts())
+        self.push('HEAD~1:refs/heads/elsewhere', 'refs/heads/feature:refs/tags/t')  # not the checked-out head
+        self.assertEqual(len(self.receipts()), before)
+        self.assertRegex(self.receipts()[0]['time'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+
+    def test_a_receipt_that_cannot_be_written_does_not_stop_the_push(self):
+        state = self.home / '.local/state/st3/evidence-prepush'
+        state.mkdir(parents=True)
+        (state / 'receipts.jsonl').mkdir()  # a directory where the file goes: every append fails
+        done = self.push(STUB_STATUS='0')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(self.remote_has('refs/heads/feature'))
+
+    def test_a_tree_still_being_signed_in_the_background_is_not_signed_twice(self):
+        done = self.push(STUB_STATUS='3', STUB_SLEEP='4', ST_AGENT='some-agent', ST_EVIDENCE_AGENT_LIMIT='1')
+        self.assertIn('still signing in the background', done.stderr)
+        again = self.push('feature:refs/heads/copy', STUB_STATUS='3', STUB_SLEEP='4', ST_AGENT='some-agent', ST_EVIDENCE_AGENT_LIMIT='1')
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn('already being signed by another push', again.stderr)
+        self.assertTrue(self.remote_has('refs/heads/copy'))
+        self.assertEqual([r['outcome'] for r in self.receipts()], ['background', 'not_signing:in_progress'])
+        self.wait_done()
+        # The lock went with the run: the next push of the tree signs again.
+        self.push('feature:refs/heads/third', STUB_STATUS='3')
+        self.assertEqual(self.receipts()[-1]['outcome'], 'signed')
+        self.assertEqual([c['argv'][0] for c in self.calls()].count('--base'), 2)
+
     def test_an_interactive_push_waits_for_the_whole_limit_not_the_agent_limit(self):
         done = self.push(STUB_STATUS='3', STUB_SLEEP='3', ST_EVIDENCE_AGENT_LIMIT='1', tty=True)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -535,7 +626,7 @@ class Hook(unittest.TestCase):
         hook = self.work / '.git/hooks/pre-push'
         hook.unlink()
         first = self.install()
-        self.assertEqual(first.stdout.strip(), 'evidence pre-push hook installed (ST_SKIP_EVIDENCE=1 skips)')
+        self.assertEqual(first.stdout.strip(), 'evidence pre-push hook installed (ST_SKIP_EVIDENCE=1: sign in the background, do not wait)')
         self.assertEqual(self.install().stdout.strip(), '')  # already installed: quiet
         hook.unlink()
         for name in ('GITHUB_ACTIONS', 'CI'):

@@ -698,6 +698,10 @@ instead of accidentally selecting the older peer's full-inventory answer path.
 
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
+Each exchange also carries a claim-range summary: claim-range protocol version 1, and the count and digest of every claim its sender retains. Two members can hold different envelopes and still retain the same claims, so a member compares the claims, not envelope histories or projection outputs. The digest comes from the store's range index (`claim_range_digests`), and a summary omits it while the index is still folding claims in. A member compares only a summary of the version it speaks with its own folded index, and records in the peer's sync status when it last compared and since when the claims have differed (`claims_compared_at_unix_ms`, `claims_differ_since_unix_ms`). Claims in flight differ for a while, so the difference is reported and gates nothing: it does not mark the pair diverged, end or hold a first sync, or start a repair. Missing claims still arrive through ordinary envelope transport. An older peer sends no summary and ignores this one, and is compared by envelopes alone.
+
+When the claims differ and an exchange moved no envelopes, the dialing worker walks the difference as the lowest-priority sync work, at most four round trips per exchange. Each round trip is an ordinary summary exchange whose inventory carries one bounded `claim_range_query`, and the peer answers in its exchange's `claim_ranges`: every non-empty top range (64 tops by the first six bits of a claim ID), then the leaves of at most 4 differing tops (4,096 leaves by the first three hex digits), then the IDs of at most 8 differing leaves (at most 4,096 IDs beyond the first leaf), then the envelopes carrying at most 512 claims the walker found it lacks. Those envelopes travel with the peer's ordinary exchange and are admitted like any other; no projection image or peer result is installed. A claim the walker has retired is never asked for, and a range the peer holds nothing in is not descended, since only the peer's claims can be missing here. A walk runs once for each pair of whole-set digests, so claims one side retired, or holds that the other lacks, cost one walk until either side's claims change; an answer from an index still folding claims in is asked again at the next exchange. A peer without the claim-range protocol ignores the query and is never walked.
+
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
@@ -1175,6 +1179,14 @@ person runs `st replication checkpoint resume --reason ...`.
 
 Checkpoints are on by default. `[checkpoint] enabled = false` in a node's config stops that node
 sealing. Every participant must seal, so this stops trimming for the whole fleet.
+
+`[trim] local = true` in a member's config makes that member trim on its own instead of by
+checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
+checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
+had already committed still finishes; a checkpoint it was still recording stays recorded as it was
+and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
+it stops the old checkpoints on the other members until a person excuses it. No claim family is
+trimmed locally yet.
 
 ## Recovery
 

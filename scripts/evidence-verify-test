@@ -1489,6 +1489,104 @@ class CommittedPolicy(unittest.TestCase):
             'attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256',
             'app_test_set', 'kit_inputs', 'kit_play_set', 'kit_shard_count', 'shard_results']))
         self.assertEqual(web['kinds']['wrapper']['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
+        # Its shard inputs are values, not just present: every shard a success, and one shard on a pull request.
+        self.assertEqual(web['kinds']['wrapper']['shard_inputs'],
+                         {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
+        # A note made without kit plays covers only a run whose own change detection says the kit did not change either.
+        self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
+
+
+class ValueRules(unittest.TestCase):
+    """input_order and shard_inputs: a kind's checks on input values (docs/st3/gate-evidence.md, "Input values")."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.commit, self.tree = self.f.commit('one')
+        self.seconds = 0
+
+    def policy(self, **wrapper):
+        doc = json.loads(policy_text())
+        doc['checks']['unit']['kinds']['wrapper'] = dict({'command': ['make', 'test']}, **wrapper)
+        return evidence_verify.policy_rules(json.dumps(doc), 'unit', 'org/repo')
+
+    def note(self, **inputs):
+        self.seconds += 1
+        return self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='wrapper', inputs=inputs, seconds=self.seconds)
+
+    def outcome(self, rules, **run_inputs):
+        code, result = self.f.verify(self.tree, rules=rules, run_inputs=run_inputs or None)
+        return 'satisfied' if code == 0 else result['reason']
+
+    def test_value_rules_are_validated_strictly(self):
+        for bad in ({'input_order': {'kit_inputs': ['true']}}, {'input_order': {'kit_inputs': ['true', 'true']}},
+                    {'input_order': {'kit_inputs': 'true'}}, {'input_order': ['kit_inputs']}, {'input_order': {'': ['a', 'b']}},
+                    {'shard_inputs': {'count': 'n'}}, {'shard_inputs': {'count': 'n', 'results': 'r', 'typo': 1}},
+                    {'shard_inputs': {'count': 'n', 'results': 'r', 'pull_request_count': 0}},
+                    {'shard_inputs': {'count': 'n', 'results': 'r', 'pull_request_count': True}}, {'shard_inputs': []}):
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as caught:
+                self.policy(**bad)
+            self.assertEqual(caught.exception.reason, 'error', repr(bad))
+        self.assertEqual(self.policy()['kinds']['wrapper']['input_order'], {})
+        self.assertIsNone(self.policy()['kinds']['wrapper']['shard_inputs'])
+
+    def test_a_note_covers_a_run_only_when_its_value_ranks_at_or_above_the_runs(self):
+        rules = self.policy(input_order={'kit_inputs': ['true', 'false']})
+        self.note(kit_inputs='false')
+        # A note made without kit plays covers a run that would skip them too, never one that would run them.
+        self.assertEqual(self.outcome(rules, kit_inputs='false'), 'satisfied')
+        self.assertEqual(self.outcome(rules, kit_inputs='true'), 'wrong_input')
+        # A run that did not say its value is never covered: the gate must pass it.
+        self.assertEqual(self.outcome(rules), 'no_run_input')
+        self.assertEqual(self.outcome(rules, kit_inputs='maybe'), 'no_run_input')
+        self.note(kit_inputs='true')
+        self.assertEqual(self.outcome(rules, kit_inputs='true'), 'satisfied')
+        self.assertEqual(self.outcome(rules, kit_inputs='false'), 'satisfied')
+        self.note(kit_inputs='unknown')
+        self.assertEqual(self.outcome(rules, kit_inputs='false'), 'wrong_input')
+        self.note()  # absent
+        self.assertEqual(self.outcome(rules, kit_inputs='false'), 'wrong_input')
+
+    def test_a_sharded_note_must_name_every_shard_as_a_success_and_one_shard_on_a_pull_request(self):
+        rules = self.policy(shard_inputs={'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
+        cases = [
+            (dict(kit_shard_count='1', shard_results='0=success', event_name='pull_request'), 'satisfied'),
+            (dict(kit_shard_count='2', shard_results='0=success,1=success', event_name='merge_group'), 'satisfied'),
+            (dict(kit_shard_count='2', shard_results='0=success,1=success', event_name='pull_request'), 'wrong_input'),
+            (dict(kit_shard_count='2', shard_results='0=success', event_name='merge_group'), 'wrong_input'),
+            (dict(kit_shard_count='1', shard_results='0=failure', event_name='pull_request'), 'wrong_input'),
+            (dict(kit_shard_count='1', shard_results='1=success', event_name='pull_request'), 'wrong_input'),
+            (dict(kit_shard_count='0', shard_results='', event_name='merge_group'), 'wrong_input'),
+            (dict(kit_shard_count='17', shard_results='0=success', event_name='merge_group'), 'wrong_input'),
+            (dict(kit_shard_count='x', shard_results='0=success', event_name='merge_group'), 'wrong_input'),
+            (dict(shard_results='0=success', event_name='merge_group'), 'wrong_input'),
+        ]
+        for inputs, expected in cases:
+            self.note(**inputs)
+            self.assertEqual(self.outcome(rules), expected, inputs)
+
+    def test_the_cli_passes_the_runs_own_values(self):
+        doc = json.loads(policy_text())
+        doc['checks']['unit']['kinds']['wrapper'] = {'command': ['make', 'test'], 'input_order': {'kit_inputs': ['true', 'false']}}
+        self.f.git('config', 'user.email', 't@example.invalid')
+        self.f.git('config', 'user.name', 't')
+        policy = self.f.repo / '.st' / 'evidence-skip-policy.json'
+        policy.parent.mkdir(exist_ok=True)
+        policy.write_text(json.dumps(doc))
+        self.f.git('add', '.st/evidence-skip-policy.json')
+        self.f.git('commit', '-q', '-m', 'policy')
+        base = self.f.git('rev-parse', 'HEAD').strip()
+        self.note(kit_inputs='false')
+        common = ('--tree', self.tree, '--check', 'unit', '--keys', str(self.f.keys), '--policy-from', base, '--repository', 'org/repo')
+        code, out, _ = self.f.cli(*common, '--run-input', 'kit_inputs=false')
+        self.assertEqual((code, json.loads(out)['satisfied']), (0, True), out)
+        code, out, _ = self.f.cli(*common, '--run-input', 'kit_inputs=true')
+        self.assertEqual(json.loads(out)['reason'], 'wrong_input', out)
+        code, out, _ = self.f.cli(*common)
+        self.assertEqual(json.loads(out)['reason'], 'no_run_input', out)
+        code, out, _ = self.f.cli(*common, '--run-input', 'kit_inputs')
+        self.assertEqual(json.loads(out)['reason'], 'error', out)
 
 
 class InputKeyed(unittest.TestCase):

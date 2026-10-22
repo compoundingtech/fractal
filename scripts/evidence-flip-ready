@@ -118,11 +118,39 @@ def fields_of(text):
     return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
 
 
+def pr_runs(github, since, until, tries=4):
+    """The window's pull request runs, newest first, page by page until a page reaches back before the window. The created=
+    filter is not used: it answers an empty listing for about one request in four (2026-10-22: 205, 205, 0, ... for the
+    same request), which would read as missing lines. A page that is empty or short of what the listing's total says it
+    holds is asked again, then the run is unreadable; so is a window of more than the listing's 1,000 runs."""
+    runs, page = {}, 1
+    while True:
+        path = f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100&page={page}'
+        for attempt in range(tries):
+            out = json.loads(github.gh('api', path))
+            batch, total = out.get('workflow_runs') or [], min(out.get('total_count') or 0, 1000)
+            expected = max(1 if page == 1 else 0, min(100, total - (page - 1) * 100))  # a repository with no runs is not real
+            if len(batch) >= expected:
+                break
+            if attempt < tries - 1:
+                time.sleep(2 ** attempt)
+        else:
+            raise Unreadable(f'page {page} of the pull request run listing came back with {len(batch)} of the {expected} runs it holds')
+        times = [parse_time(run.get('created_at')) for run in batch]
+        for run, created in zip(batch, times):
+            if created and since <= created <= until:
+                runs[run['id']] = run  # a run that arrived while paging shifts the pages: the same run can come twice
+        if len(batch) < 100 or any(created and created < since for created in times):
+            return list(runs.values())
+        if page * 100 >= 1000:
+            raise Unreadable(f'more than the listing\'s 1,000 runs since {iso(since)}')
+        page += 1
+
+
 def collect(github, checks, since, until):
     """One row per gate job that printed a line for a known check: the run, its creation time, the line's fields and
     the conclusion of the check's own job in the same attempt."""
-    runs = github.items(f'repos/{github.repo}/actions/workflows/fleet.yml/runs?event=pull_request&per_page=100'
-                        f'&created={iso(since)}..{iso(until)}', 'workflow_runs')
+    runs = pr_runs(github, since, until)
     finished = [run for run in runs if run.get('status') == 'completed']  # a run still going is counted next time
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         job_lists = list(pool.map(
@@ -145,6 +173,7 @@ def collect(github, checks, since, until):
             fields = fields_of(text)
             if fields.get('check') == check:
                 rows.append({'check': check, 'run': run['id'], 'created_at': parse_time(run.get('created_at')),
+                             'actor': ((run.get('actor') or {}).get('login') or '-'),
                              'fields': fields, 'real': conclusion, 'members_red': members_red})
     return rows
 
@@ -192,6 +221,29 @@ def evaluate(rows, enforce, now):
     return result
 
 
+def presign_rates(rows, now):
+    """Per account that started the runs: how many distinct pull request heads in the window had a pre-signed (host or agent)
+    note for some check, how many only an earlier CI run's note, and how many no note at all."""
+    start = now - datetime.timedelta(seconds=WINDOW_S)
+    heads = {}
+    for row in rows:
+        if not row['created_at'] or not start <= row['created_at'] <= now:
+            continue
+        fields = row['fields']
+        key = (row['actor'], fields.get('pr', '-'), fields.get('pr_head') if fields.get('pr_head', '-') != '-' else fields.get('head', '-'))
+        level = fields.get('trust_level') if fields.get('outcome') in ('satisfied', 'degraded') else None
+        rank = 2 if level in ('host', 'agent') else 1 if level == 'fleet' else 0
+        heads[key] = max(heads.get(key, 0), rank)
+    rates = {}
+    for (actor, _, _), rank in heads.items():
+        counts = rates.setdefault(actor, {'heads': 0, 'presigned': 0, 'ci_note': 0, 'no_note': 0})
+        counts['heads'] += 1
+        counts[('no_note', 'ci_note', 'presigned')[rank]] += 1
+    for counts in rates.values():
+        counts['presigned_share'] = round(counts['presigned'] / counts['heads'], 3)
+    return dict(sorted(rates.items()))
+
+
 def clippy_base_pinned(entry):
     """linux-gate's clippy stage ratchets against a base: a host or agent note must say which one it measured against."""
     levels = ((entry.get('kinds') or {}).get('wrapper') or {}).get('by_level') or {}
@@ -200,8 +252,20 @@ def clippy_base_pinned(entry):
     return [f'the policy does not require clippy_base_sha of {" and ".join(missing)} linux-gate notes'] if missing else []
 
 
+def web_values_checked(entry):
+    """fractal-web's pull request runs pick their tests from their own diff: a note covers a run only when it ran the kit plays or the
+    run would skip them too (input_order on kit_inputs, true before false), and its shard results must be checked as values."""
+    wrapper = (entry.get('kinds') or {}).get('wrapper') or {}
+    why = []
+    if (wrapper.get('input_order') or {}).get('kit_inputs') != ['true', 'false']:
+        why.append('the policy does not order kit_inputs (true before false) for fractal-web notes')
+    if not wrapper.get('shard_inputs'):
+        why.append('the policy does not check the shard inputs of fractal-web notes')
+    return why
+
+
 # Conditions a check's policy entry must meet before its flip is proposed, whatever the decision lines say.
-PRECONDITIONS = {'linux-gate': clippy_base_pinned}
+PRECONDITIONS = {'linux-gate': clippy_base_pinned, 'fractal-web': web_values_checked}
 
 
 def preconditions(result, check, entry):
@@ -388,7 +452,7 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         return 2
     report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
         check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry)
-        for check, entry in policy.items()}}
+        for check, entry in policy.items()}, 'presign': presign_rates(rows, now)}
     print(json.dumps(report, indent=2))
     if args.propose:
         return propose(report, root, github, runner, args.dry_run, now.date().isoformat())

@@ -463,6 +463,7 @@ jobs:
     outputs:
       skip: ${{ steps.taken.outputs.skip }}
       record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -523,6 +524,7 @@ jobs:
     outputs:
       skip: ${{ steps.taken.outputs.skip }}
       record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -583,6 +585,7 @@ jobs:
     outputs:
       skip: ${{ steps.taken.outputs.skip }}
       record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -643,6 +646,7 @@ jobs:
     outputs:
       skip: ${{ steps.taken.outputs.skip }}
       record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -703,6 +707,7 @@ jobs:
     outputs:
       skip: ${{ steps.taken.outputs.skip }}
       record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -755,6 +760,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-gate-fractal-web:
     name: evidence-gate-fractal-web
+    needs: [fractal-web-changes]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
@@ -763,6 +769,7 @@ jobs:
     outputs:
       skip: ${{ steps.taken.outputs.skip }}
       record: ${{ steps.taken.outputs.record }}
+      line: ${{ steps.gate.outputs.line }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -784,6 +791,7 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_INPUTS: '{"kit_inputs":"${{ needs.fractal-web-changes.outputs.kit-inputs }}"}'
         run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
@@ -813,6 +821,46 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-presign-notice:
+    name: evidence-presign-notice
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    continue-on-error: true
+    needs:
+      - evidence-gate-linux-gate
+      - evidence-gate-typescript-client
+      - evidence-gate-isolation-vm
+      - evidence-gate-genie-freshness
+      - evidence-gate-mail-redelivery-canaries
+      - evidence-gate-fractal-web
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && github.event_name == 'pull_request') }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Say which checks a pre-signed note would have covered
+        env:
+          LINES: |
+            ${{ needs.evidence-gate-linux-gate.outputs.line }}
+            ${{ needs.evidence-gate-typescript-client.outputs.line }}
+            ${{ needs.evidence-gate-isolation-vm.outputs.line }}
+            ${{ needs.evidence-gate-genie-freshness.outputs.line }}
+            ${{ needs.evidence-gate-mail-redelivery-canaries.outputs.line }}
+            ${{ needs.evidence-gate-fractal-web.outputs.line }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: 'git fetch --no-tags --depth=1 -q origin "$BASE_SHA" && git show "$BASE_SHA:scripts/ci-evidence-presign-notice" > "$RUNNER_TEMP/ci-evidence-presign-notice" && python3 "$RUNNER_TEMP/ci-evidence-presign-notice" || echo ''evidence-presign-notice: not at the base yet, or it could not run; nothing to say'''
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Reads the gates' decision lines and the pull request's file list; builds nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   upgrade-impact:
     name: upgrade-impact
     runs-on: ubuntu-latest
@@ -878,7 +926,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"evidence-gate-fractal-web":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-typescript-client","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-mail-redelivery-canaries","evidence-gate-fractal-web"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3

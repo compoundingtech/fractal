@@ -955,6 +955,9 @@ group base), never from the change under test, and says per check what a note mu
                 "bind_inputs": {"flake_lock_sha256": "flake.lock"}}}}}}
 ```
 
+`enforce: true` means a covering signed note lets CI skip this job; it never fails or blocks a pull request that has no
+note, that pull request just runs the job and CI signs it.
+
 `enforce` is the per-check switch for skipping and is **off unless it says `true`** (absent means
 false; any other value is an error). With it off the gate still looks the note up and verifies it, and
 prints `outcome=satisfied` with `decision=run` and a reason starting `shadow:`, so the proof that a
@@ -1082,6 +1085,39 @@ and a signer level's own `events` can only narrow it further (the verifier repor
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
 
+#### Input values (`input_order`, `shard_inputs`)
+
+`required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
+
+**`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
+when its value ranks at or above the run's own value.
+- The run's value comes from the gate: `evidence-verify --run-input KEY=VALUE`.
+- A run that did not say its value is never covered (`no_run_input`).
+- A note whose value is missing, unknown or weaker is refused (`wrong_input`).
+
+It is for inputs that depend on the run, not the tree. fractal-web's `kit_inputs` says whether the diff from the run's base touched kit
+paths; with `false` the lane skips every kit play. A note made without kit plays may cover a run that would skip them too, never one that
+would run them.
+
+**`shard_inputs`** names a sharded job's inputs: `count` (1 to 16) and `results`.
+- `results` must read `0=success,1=success,...` for every shard.
+- `pull_request_count`, when given, is the only count a note from a `pull_request` run may carry.
+
+The fractal-web note's per-shard results come from the matrix's single result, which GitHub reports as success only when every shard
+succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test` holds every shard count in the workflow to the
+matrix's own condition and length.
+
+fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifier through the gate:
+- `evidence-gate-fractal-web` needs `fractal-web-changes` and sets `RUN_INPUTS` to `{"kit_inputs": "<its kit-inputs output>"}`.
+- The gate passes each value as `--run-input` once the base's verifier takes that flag.
+- A malformed `RUN_INPUTS` is dropped, so no note covers the run.
+
+`scripts/evidence-flip-ready` does not propose fractal-web's flip until both keys are in the policy.
+
+`app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
+main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a
+note covers.
+
 ### Which checks skip today
 
 | Check | `enforce` | `events` | `sample_one_in` | Since |
@@ -1120,7 +1156,7 @@ its clippy stage ratchets against a base, so it is not ready until the policy re
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
 
 It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
-and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
+and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (it pages the pull request runs newest first back to the window start, without GitHub's `created=` filter, which answers an empty listing for about one request in four; a page that is empty or short of what the listing's total says it holds is asked again up to four times, then the run counts as unreadable, not as zero lines; so does a window of more than the listing's 1,000 runs). Enforced checks are reported too. `presign` counts, per account that started the runs, the distinct pull request heads in the window: `presigned` (some check had a host or agent note), `ci_note` (only an earlier CI run's note), `no_note`, and `presigned_share`.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
 temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
 moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and
@@ -1304,8 +1340,8 @@ the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `genie-freshness`, `typescript-client`,
-`mail-redelivery-canaries` and `linux-gate`; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+`scripts/st-test` runs each required check that has a local command (today `typescript-client`, `genie-freshness`,
+`mail-redelivery-canaries` and `linux-gate`, in that order; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
@@ -1334,11 +1370,21 @@ within reach: that is cooperative trust (known defect 22), not something the bas
 you have checked out, the hook asks `st-test --status`; if every check is covered the push goes, silently. Otherwise it runs `st-test --push REMOTE`
 (an interactive push waits for it up to `ST_EVIDENCE_TIME_LIMIT`, default 1200 seconds, then stops it with TERM and KILL of its whole process
 group) and the push goes. A push from an agent (`ST_AGENT` set, or no terminal on stderr) runs inside a tool call with a short timeout, so there the hook
-waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 120), prints that signing continues in the background with its log path, and lets the push go;
-the notes are pushed when the run finishes, and agents should run `scripts/st-test --push origin` before pushing so the first CI run already sees them.
+waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 300: the light checks' 90th percentile on the signing host was about 250 s, a typical run
+about 60 s, and an agent's tool call allows 600 s), prints that signing continues in the background with its log path, and lets the push go; the notes
+are pushed when the run finishes. `typescript-client` runs first because it is signed for nearly every tree, and each note is pushed as soon as its
+check is signed, so a note signed within the wait is on the remote before git sends the branch (the hook finishes before git updates any ref) and the
+first CI run sees it. A tree that edits a lane's definition is not signed for that lane: st-test says "not signed" for it without running it and exits
+4 when nothing else failed, and the hook says CI runs that check, not that a check failed. One signing run per tree: a push of a tree that another
+push on the machine is still signing (in the background, say) says so and goes, and that run's notes follow. Each push of the checked-out head appends
+one line to `~/.local/state/st3/evidence-prepush/receipts.jsonl` (`time`, `tree`, `branch`, `agent`, `outcome`: `covered`, `signed`,
+`signed_lane_edit`, `background`, `failed`, `skip_flag`, `local_off` or `not_signing:REASON`), append only, so the pre-sign rate can be read per push.
 **The hook's environment is scrubbed (st2#3014).** git exports `GIT_DIR` (and `GIT_PREFIX`, `GIT_EXEC_PATH`, ...) to a hook, and `GIT_DIR` is set whenever the push is made from a linked worktree, which every agent seat uses. A script run with it that makes its own repository or says `git -C elsewhere ...` still acts on the CALLER's repository, because `GIT_DIR` wins over `-C` and over the working directory. The repository's own fixture tests do exactly that; run from the hook they committed on the caller's branches, rewrote the shared repository's identity and pushed. The stub, `evidence-prepush`, `st-test` and `ci-genie-freshness` (through `scripts/git-env-clean`) now drop the variables that select a repository or an identity (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_PREFIX`, `GIT_QUARANTINE_PATH`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `GIT_PUSH_OPTION*`, ...) before they start anything; transport and credential variables (`GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`, `GIT_HTTP_*`, `GIT_CONFIG_*`) stay, because the notes push needs them. The shell scrub uses only `export -p` (the non-interactive bash of a nix shell has no `compgen`, which made its first version a silent no-op there) and checks its own result: a scrub that did not work stops the caller, and makes the stub skip the hook with a message. The stub is a copy in each repository's hooks directory but runs `evidence-prepush` and `st-test` as they are on `origin/main`, so a stub installed before this change is covered as soon as it is on main; `install-git-hooks` replaces an older stub carrying its marker on the next shell entry. Tests push from a linked worktree through the real hook, also with `compgen` disabled, and require the caller's config, HEAD, status, branches and tags to be byte-identical.
 It never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
-a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` skips it and says so. Tags, deletes,
+a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` does not wait: the push
+goes at once, the same signing runs in the background, and the hook says that a CI run that starts before a note is there runs that check in full.
+`ST_EVIDENCE_LOCAL=off` does no local signing work at all, not even the status question, and says so in one line (for a seat or unit where
+local builds are fenced; it wins over `ST_SKIP_EVIDENCE`); `git push --no-verify` skips the hook entirely. Tags, deletes,
 other branches and the base branch are pushed untouched, and the notes push inside the run does not run the hook again. A new tree always takes the slow
 path (the checks run once); so does every fixup that changes the tree; a tree that already has notes is instant.
 
@@ -1382,6 +1428,36 @@ input-keyed note serves another tree with the same key. The host and agent level
 queue runs the stages. Measured on the 16-core dev host: the canaries alone 345 s wall, build included; the four `linux-gate`
 stages 1592 s wall with a warm target and the tests' scratch on `/dev/shm` (tests 871 s, clippy 390 s, fleet-compat 211 s, canaries
 120 s), at 6 test threads, peak IO pressure 12.6%. A cold target adds about 10 minutes and roughly 19 GB of writes.
+
+**The pre-sign worker (`scripts/evidence-presign-worker`).** Signing at push time depends on the push: a push with `ST_SKIP_EVIDENCE=1`
+does not wait, a push made where no hook runs signs nothing, and no push signs the heavy checks. The worker closes that gap on the signing
+host, from the tools' side. Two systemd user timers (`scripts/evidence-presign-light.timer` every 2 minutes, `scripts/evidence-presign-heavy.timer`
+every 5) each run one tick of one class through `scripts/evidence-presign-timer`, which reads the worker from `origin/main` of a clone the
+worker owns (one per class, so a light tick never moves the checkout under a heavy run). A tick lists the open pull requests and keeps the
+ready ones (not drafts) that target `main`, come from the repository itself (no forks) and are authored by a GitHub login in
+`~/.config/evidence-presign/authors`. That file is the host's own configuration, not repository data a pull request could edit; without it,
+or with no login in it, the worker refuses to run, and an outside author's code is never run (it would run with the host's key within
+reach). Newest first, it takes the first head with a check of its class that `st-test --status` does not call covered and that it has not
+run for that tree before, runs `st-test --check NAME... --push origin` on it, records the result and stops: one head per tick, serially per
+class (a lock; a tick still running skips the next). The light class is st-test's default checks; the heavy class is what `--all` adds. A
+failure or a lane-edit refusal is a result, recorded and not retried for that tree (CI runs the check); a run stopped for load is not, and
+that head waits 30 minutes before it is tried again. Load, for the heavy class: it starts only after IO pressure (some avg60) stayed under
+8% for 10 minutes with no admitted heavy build active and at least 140 GiB free (it clears nothing to make room), runs with `TMPDIR` on
+`/dev/shm`, and is stopped (TERM, then KILL of its process group) above 15% avg60, under 16 GiB available memory, under 136 GiB free disk
+or past 20 GB of scratch; the light class starts below 15% and stops the same way. The heavy class keeps its cargo target between runs
+in `~/.cache/evidence-presign-target`, so a head does not start cold (a cold target costs about 10 minutes and 19 GB of writes). It is
+never pinned: the host's scratch sweep may reclaim it when it has been idle for two hours and disk runs short, and the worker removes it
+itself before a run once it passes 25 GB. Every tick that does not start for load or disk appends a line to `skips.jsonl`. `~/.config/evidence-presign/limits.json` overrides these numbers (agreed with operations) and
+`~/.config/evidence-presign/off` stops every tick. Both services run in `builds.slice`, with every other build on the host (operations' terms). The units' environment is minimal on purpose: they run pull request code with the
+host's signing key within reach, so they carry no secret beyond that key and the git credential the notes push uses, and
+`~/.config/evidence-presign/env` holds settings only (`EVIDENCE_PRESIGN_*`), never a token. The authors file lists only our own account.
+The heavy class's kept target is shared between heads; that is accepted for our own authors' code (the same trust as a seat's warm
+checkout), and it is one reason the authors file must stay that short. A check's result is read only from st-test's final summary. Each attempt appends a JSON line to `~/.local/state/evidence-presign/attempts.jsonl`
+(pull request, head, tree, class, first seen ready, start, seconds, per-check result, peak IO pressure, outcome `worker_signed`,
+`worker_signed_lane_edit` (signed, apart from a check whose lane the tree edits), `lane_edit_not_signed` (nothing
+signed: the tree edits every lane), `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
+window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
+how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
 
 ### When the gate says skip
 
@@ -1448,6 +1524,38 @@ collector reads the outcome from the jobs API: `evidence satisfied by existing n
 `evidence existing note is degraded`, `evidence no note`, `evidence note rejected`,
 `evidence verifier unavailable`, plus `evidence skip taken` when the decision is skip. A note made for a pull request is reused by the merge queue's run
 only when the tree is identical, that is, when main has not moved in between.
+
+The gate step also writes the line as its output `line` (first, with control characters replaced, so it cannot stand in for
+`outcome`, `skip` or `record`), and each gate job passes it on as `outputs.line`. Only `evidence-presign-notice` reads it.
+
+### Not pre-signed: the notice (`scripts/ci-evidence-presign-notice`)
+
+Nothing rejects a pull request for a missing note. A pull request that is not pre-signed runs its checks, and CI signs them.
+The `evidence-presign-notice` job only says so. It runs on pull requests (not drafts) after the six gate jobs and takes
+`scripts/ci-evidence-presign-notice` from the accepted base, like the gate. It never fails, is not a required check, and nothing
+reads its result.
+
+It lists a check only when all of these hold:
+
+- `scripts/st-test` can sign it: the check is a lane of `.st/required-lanes.json` at the base.
+- Its gate ran it for lack of a note: `decision=run outcome=no_note` on a same-repository pull request.
+- The gate asked about the head's own tree (`tree_of=head head_tree=used`). After a fallback to the merge tree, a pre-signed
+  note could not have counted.
+- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refuses to sign
+  such a tree.
+
+With a check listed, it writes one notice annotation and the job summary:
+
+> These jobs ran in full because no pre-signed note covered this head: genie-freshness, typescript-client. Run
+> `scripts/st-test --push origin` before marking the pull request ready, and CI can skip them. How: (#3621). This never fails a
+> check or blocks a merge.
+
+`--all` is added when `mail-redelivery-canaries` is listed. Every run also prints one counting line,
+`evidence-presign-notice v1 pr=… listed=…|- passed_over=check:reason,…|-`. If the lanes file or the file list cannot be read,
+the affected checks are passed over, never listed.
+
+This is phase A, a notice only. Phase B, from a date announced in #3621 first, adds one comment on the pull request, edited
+in place on later pushes. It still never blocks anything.
 
 ### Loops
 

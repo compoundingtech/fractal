@@ -622,3 +622,16 @@ assert 'environment: evidence-signing' not in text, 'an unconditional environmen
 note = re.search(r'  evidence-note-linux-gate:\n(?:    .*\n)*?    if: (.*)\n', text)
 assert note and "(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))" in note.group(1), 'the aggregate note job must run only for the merge queue, main and same-repository pull requests (the generator adds its own draft guard in front)'
 print(f'passed: all {len(environments)} jobs reach the signing environment only for merge_group, push to main, manual runs on main and same-repository pull requests; the aggregate note job skips forks')
+
+# The fractal-web note's kit_shard_count/shard_results come from the same expression as the execution matrix: GitHub gives the
+# note job one result for the matrix, so the per-shard results are exactly as true as that count. Every KIT_SHARD_COUNT and
+# kit_shard_count in the workflow must use the matrix's own condition, and its count must be the matrix's length.
+matrix = re.search(r"matrix: \$\{\{ fromJSON\((.+?) && '(\{\"shard\":\[[0-9,]+\]\})' \|\| '\{\"shard\":\[0\]\}'\) \}\}", text)
+assert matrix, 'the fractal-web execution matrix has the expected two-branch shape'
+condition, sharded = matrix.group(1), json.loads(matrix.group(2))['shard']
+assert sharded == list(range(len(sharded))) and len(sharded) >= 2, sharded
+counts = re.findall(r"(?:KIT_SHARD_COUNT: |kit_shard_count\":\")\$\{\{ (.+?) && '([0-9]+)' \|\| '1' \}\}", text.replace("''", "'"))
+assert len(counts) >= 3, counts
+for count_condition, count in counts:
+    assert count_condition == condition and int(count) == len(sharded), (count_condition, count, condition, sharded)
+print(f'passed: all {len(counts)} kit shard counts use the execution matrix condition and its {len(sharded)} shards')
