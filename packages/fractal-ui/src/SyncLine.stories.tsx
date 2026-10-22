@@ -20,13 +20,16 @@ function TransitionPreview({ scheme, sequence, next, retry }: { scheme: Scheme; 
     <div {...stylex.props(styles.statusBar)}><SyncLine status={current.status} label="socket" socket gateway="gateway-1" now={syncNow} observedAt={current.observedAt} onRetry={retry} /></div>
   </ThemePortal></main>
 }
-function StoryRender({ scheme, sequence: initialSequence }: SyncArgs) {
+function TransitionStory({ scheme, sequence: initialSequence }: SyncArgs) {
   // These are component transitions, not new Storybook renders/play lifecycles.
   const [sequence, setSequence] = React.useState(initialSequence)
   React.useEffect(() => setSequence(initialSequence), [initialSequence])
   const next = React.useCallback(() => setSequence(value => (value + 1) % syncObservations.length), [])
   const retry = React.useCallback(() => setSequence(1), [])
   return <TransitionPreview scheme={scheme} sequence={sequence} next={next} retry={retry} />
+}
+function StoryRender(args: SyncArgs) {
+  return <TransitionStory {...args} />
 }
 function ObservationRow({ observation, label }: { observation: typeof syncObservations[number]; label?: string }) {
   const [retried, setRetried] = React.useState(false)
