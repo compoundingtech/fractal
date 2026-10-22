@@ -1,8 +1,8 @@
-"""Production module graph of the st3 source tree, and the layering rule checked against it.
+"""Production module graph of the Fractal source tree, and the layering rule checked against it.
 
-A module is a top-level file or directory under a source directory of st3 (crates/st3/src, and the
-crates that st3's library is split into). A reference from module A to module B is a path in
-non-test code that starts `crate::B` or `st3::B`, or a name in a `crate::{...}` group. Comments,
+A module is a top-level file or directory under a source directory of Fractal (crates/fractal/src, and the
+crates that Fractal's library is split into). A reference from module A to module B is a path in
+non-test code that starts `crate::B` or `fractal_daemon::B`, or a name in a `crate::{...}` group. Comments,
 `#[cfg(test)]` items, `*_tests.rs`, `tests/` and `test_support.rs` are left out. Re-exported items
 that the library names at its root count toward the module that defines them (REEXPORTS).
 
@@ -16,7 +16,7 @@ import os
 import re
 import tomllib
 
-SOURCE_DIRS = ("crates/st3-core/src", "crates/st3-kernel/src", "crates/st3-telemetry/src", "crates/st3-secrets/src", "crates/st3-seats-base/src", "crates/st3-delivery-base/src", "crates/st3-missions-base/src", "crates/st3-github-base/src", "crates/st3-store/src", "crates/st3-github/src", "crates/st3-peer/src", "crates/st3-reconcile/src", "crates/st3-api/src", "crates/st3-daemon/src", "crates/st3/src")
+SOURCE_DIRS = ("crates/fractal-core/src", "crates/fractal-kernel/src", "crates/fractal-telemetry/src", "crates/fractal-secrets/src", "crates/fractal-seats-base/src", "crates/fractal-delivery-base/src", "crates/fractal-missions-base/src", "crates/fractal-github-base/src", "crates/fractal-store/src", "crates/fractal-delivery/src", "crates/fractal-missions/src", "crates/fractal-seats/src", "crates/fractal-attention/src", "crates/fractal-evidence/src", "crates/fractal-github/src", "crates/fractal-peer/src", "crates/fractal-reconcile/src", "crates/fractal-api-core/src", "crates/fractal-api-client-v0/src", "crates/fractal-api-mailbox/src", "crates/fractal-daemon/src", "crates/fractal/src")
 ENTRY_FILES = {"lib", "main", "fixture"}
 TEST_ONLY_MODULES = {"test_support"}
 REEXPORTS = {
@@ -124,7 +124,7 @@ def _skip_literal(source, cursor):
 
 def path_targets(source):
     counts = collections.Counter()
-    for match in re.finditer(r"\b(?:crate|st3)::", source):
+    for match in re.finditer(r"\b(?:crate|fractal_daemon)::", source):
         start = match.end()
         if source[start:start + 1] == "{":
             depth, cursor, begin, items = 0, start + 1, start + 1, []
@@ -240,18 +240,94 @@ def layers(edges):
     return depth
 
 
-BINARY_SIDE_CRATES = ("stui", "st3-conversation-ui")
+BINARY_SIDE_CRATES = ("fractal-tui", "fractal-conversation-ui", "fractal-build-stamp")
+
+
+def client_alias_findings(manifest_path, workspace_dependencies):
+    """Reject renamed client dependencies after resolving workspace inheritance."""
+    if not os.path.isfile(manifest_path):
+        return []
+    with open(manifest_path, "rb") as handle:
+        manifest = tomllib.load(handle)
+    problems = []
+
+    def inspect(table, location=()):
+        for key, value in table.items():
+            if not isinstance(value, dict):
+                continue
+            if key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                for name, spec in value.items():
+                    resolved = workspace_dependencies.get(name, {}) \
+                        if isinstance(spec, dict) and spec.get("workspace") is True else spec
+                    package = resolved.get("package", name) if isinstance(resolved, dict) else name
+                    if name != "fractal-client" and package == "fractal-client":
+                        section = ".".join((*location, key))
+                        problems.append(
+                            f"{manifest_path}: [{section}] aliases fractal-client as {name}; "
+                            "the client dependency must retain its canonical name"
+                        )
+            else:
+                inspect(value, (*location, key))
+
+    inspect(manifest)
+    return problems
+
+
+def client_boundary_findings(root):
+    """The kernel and telemetry may not reach the standalone client's API."""
+    problems = []
+    workspace_dependencies = {}
+    workspace_manifest = os.path.join(root, "Cargo.toml")
+    if os.path.isfile(workspace_manifest):
+        with open(workspace_manifest, "rb") as handle:
+            workspace_dependencies = tomllib.load(handle).get("workspace", {}).get("dependencies", {})
+    for crate in ("fractal-kernel", "fractal-telemetry"):
+        crate_directory = os.path.join(root, "crates", crate)
+        problems.extend(client_alias_findings(
+            os.path.join(crate_directory, "Cargo.toml"), workspace_dependencies
+        ))
+        for target in ("src", "tests", "benches", "examples"):
+            for base, _, names in os.walk(os.path.join(crate_directory, target)):
+                for name in sorted(names):
+                    if not name.endswith(".rs"):
+                        continue
+                    path = os.path.join(base, name)
+                    with open(path, errors="replace") as handle:
+                        source = strip_comments(handle.read())
+                    # Literals (including source snippets in tests) do not name a crate.
+                    code, cursor = [], 0
+                    while cursor < len(source):
+                        end = _skip_literal(source, cursor)
+                        if end != cursor:
+                            code.append("".join("\n" if c == "\n" else " " for c in source[cursor:end]))
+                            cursor = end
+                        else:
+                            code.append(source[cursor])
+                            cursor += 1
+                    source = "".join(code)
+                    for match in re.finditer(r"\bfractal_client\b", source):
+                        allowed = False
+                        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032
+                        # The standalone client owns the single R11 directory resolver.
+                        allowed = re.match(r"\s*::\s*product_dirs\b", source[match.end():]) is not None
+                        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-state-dirs-fractal
+                        if not allowed:
+                            line = source.count("\n", 0, match.start()) + 1
+                            problems.append(
+                                f"{os.path.relpath(path, root)}:{line}: forbidden fractal_client reference"
+                            )
+    return problems
 
 
 def crate_findings(root):
-    """Facts about the st3 and st3-daemon packages that docs/st3/crate-contract.md promises.
+    """Facts about the fractal and fractal-daemon packages that docs/st3/crate-contract.md promises.
 
-    They apply once crates/st3-daemon exists: the library does not depend on a binary-side crate,
+    They apply once crates/fractal-daemon exists: the library does not depend on a binary-side crate,
     the two packages carry the same version (the library reports CARGO_PKG_VERSION), a dependency both
     manifests name is declared the same, and their build.rs files are the same (both read the
     ST3_FIXTURE_* variables for the same feature).
     """
-    daemon = os.path.join(root, "crates", "st3-daemon")
+    daemon = os.path.join(root, "crates", "fractal-daemon")
     if not os.path.isfile(os.path.join(daemon, "Cargo.toml")):
         return []
     problems = []
@@ -260,24 +336,24 @@ def crate_findings(root):
         with open(os.path.join(directory, "Cargo.toml"), "rb") as handle:
             return tomllib.load(handle)
 
-    library, binary = manifest(daemon), manifest(os.path.join(root, "crates", "st3"))
+    library, binary = manifest(daemon), manifest(os.path.join(root, "crates", "fractal"))
     if library["package"]["version"] != binary["package"]["version"]:
-        problems.append(f"crates/st3-daemon version {library['package']['version']} differs from "
-                        f"crates/st3 version {binary['package']['version']}")
+        problems.append(f"crates/fractal-daemon version {library['package']['version']} differs from "
+                        f"crates/fractal version {binary['package']['version']}")
     for section in ("dependencies", "build-dependencies"):
         for key, spec in library.get(section, {}).items():
             name = spec.get("package", key) if isinstance(spec, dict) else key
             if name in BINARY_SIDE_CRATES:
-                problems.append(f"crates/st3-daemon depends on {name}, which is binary-side")
+                problems.append(f"crates/fractal-daemon depends on {name}, which is binary-side")
     # Both manifests list the library's dependencies, so a bump in one that the other misses would put
     # two versions of a crate into the build: a dependency named in both must be declared the same.
     for section in ("dependencies", "dev-dependencies", "build-dependencies"):
         for key, spec in sorted(library.get(section, {}).items()):
             other = binary.get(section, {}).get(key)
             if other is not None and other != spec:
-                problems.append(f"{key} in [{section}] differs between crates/st3-daemon ({spec}) and crates/st3 ({other})")
-    # A nextest filter that names package st3 and not st3-daemon silently stops matching the library's
-    # tests once they live in st3-daemon; only filters for the binary-side integration tests may do so.
+                problems.append(f"{key} in [{section}] differs between crates/fractal-daemon ({spec}) and crates/fractal ({other})")
+    # A nextest filter that names package fractal and not fractal-daemon silently stops matching the library's
+    # tests once they live in fractal-daemon; only filters for the binary-side integration tests may do so.
     nextest = os.path.join(root, ".config", "nextest.toml")
     if os.path.isfile(nextest):
         with open(nextest, "rb") as handle:
@@ -289,11 +365,11 @@ def crate_findings(root):
                     if "filter" in entry:
                         filters.append((f"profile.{profile}.{kind}[{index}]", entry["filter"]))
             for where, expression in filters:
-                if re.search(r"package\(=?st3\)", expression) and "st3-daemon" not in expression \
+                if re.search(r"package\(=?fractal\)", expression) and "fractal-daemon" not in expression \
                         and "binary(=integration)" not in expression:
-                    problems.append(f".config/nextest.toml {where} names package st3 but not st3-daemon, "
+                    problems.append(f".config/nextest.toml {where} names package fractal but not fractal-daemon, "
                                     "so it no longer selects the library's tests")
-    build = [os.path.join(d, "build.rs") for d in (daemon, os.path.join(root, "crates", "st3"))]
+    build = [os.path.join(d, "build.rs") for d in (daemon, os.path.join(root, "crates", "fractal"))]
     contents = []
     for path in build:
         try:
@@ -302,7 +378,7 @@ def crate_findings(root):
         except FileNotFoundError:
             contents.append(None)
     if contents[0] != contents[1]:
-        problems.append("crates/st3-daemon/build.rs and crates/st3/build.rs differ or one is missing")
+        problems.append("crates/fractal-daemon/build.rs and crates/fractal/build.rs differ or one is missing")
     return problems
 
 
@@ -319,7 +395,7 @@ def findings(root):
     cycle = find_cycle(without(edges, allowed & present))
     if cycle:
         problems.append("module cycle outside the allowlist: " + " -> ".join(cycle))
-    return problems + crate_findings(root)
+    return problems + crate_findings(root) + client_boundary_findings(root)
 
 
 def reverse_closure(edges, start):

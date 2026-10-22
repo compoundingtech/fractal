@@ -1,7 +1,7 @@
 // What was said in conversations, as st's search finds it: the rows the Agents search shows
 // under "said in conversations", as stui's Ctrl+K does. Only hits in an agent's conversation
 // open; st's freshness notes ride along, so a missing match is not read as "never said".
-import type { Agent, ConversationSearch } from '../../clients/typescript/st3-client';
+import type { Agent, ConversationSearch } from '../../clients/typescript/fractal-client';
 import { agentName } from './agentsView';
 
 export type SaidRow = { key: string; agentId: string; name: string; excerpt: string; when: string };

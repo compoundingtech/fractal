@@ -85,6 +85,29 @@
         }
       ],
       "bypass_actors": []
+    },
+    {
+      "name": "evidence-tags",
+      "enforcement": "active",
+      "target": "tag",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/tags/evidence/**"],
+          "exclude": []
+        }
+      },
+      "rules": [
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "update"
+        },
+        {
+          "type": "non_fast_forward"
+        }
+      ],
+      "bypass_actors": []
     }
   ]
 }
