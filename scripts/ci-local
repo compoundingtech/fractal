@@ -70,6 +70,18 @@ if [ -z "${CLIPPY_BASE_SHA:-}" ]; then
   CLIPPY_BASE_SHA=$(git rev-parse --verify --quiet origin/main || true)
   export CLIPPY_BASE_SHA
 fi
+# The tests stage needs what CI's test-build job prepares for it: the provider components the resource-provider tests load,
+# and the previous release the messaging compatibility tests run against.
+if [[ " $* " == *" tests "* ]]; then
+  system=$(nix eval --impure --raw --expr builtins.currentSystem)
+  components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths)
+  for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+    wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+    export "ST2_${provider}_COMPONENT=$components/share/st2/providers/st2_${wasm}_component.component.wasm"
+  done
+  compat=$(timeout 10m bash scripts/messaging-compat-binary)
+  export FRACTAL_MESSAGING_COMPAT_BIN="$compat" ST3_MESSAGING_COMPAT_BIN="$compat"
+fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
 # A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless

@@ -30,6 +30,11 @@ class CiLocal(unittest.TestCase):
         (self.bin / 'cargo').write_text(RECORD)
         (self.bin / 'cargo').chmod(0o755)
         (self.work / 'scripts/ci-install-built-hooks').write_text(RECORD)
+        # nix and the compat-binary script stand in for CI's test-build preparation (they record that they ran).
+        (self.bin / 'nix').write_text('#!/usr/bin/env bash\necho "nix $*" >> "$CI_LOCAL_TEST_LOG.prep"\n'
+                                      'case "$1" in eval) printf x86_64-linux ;; build) echo /nix/store/components ;; esac\n')
+        (self.bin / 'nix').chmod(0o755)
+        (self.work / 'scripts/messaging-compat-binary').write_text('echo compat >> "$CI_LOCAL_TEST_LOG.prep"; echo /compat/fractal\n')
         self.home = root / 'account home'
         (self.home / '.local/bin').mkdir(parents=True)
         # The dev shell's real cargo: a wrapper script outside the account's home (never run here).
@@ -128,6 +133,22 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], tip)
         done, calls = self.run_local('clippy', CLIPPY_BASE_SHA='f' * 40)
         self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], 'f' * 40, 'a named base wins')
+
+    def test_the_tests_stage_gets_ci_s_provider_components_and_compat_binary_and_others_build_nothing(self):
+        done, calls = self.run_local('tests', CLIPPY_BASE_SHA='f' * 40)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        env = calls[-1]['env']
+        for provider, wasm in (('GITHUB_ISSUE', 'github_issue'), ('GITHUB_PR', 'github_pr'), ('PTY_STATS', 'pty_stats'), ('VISTA', 'vista')):
+            self.assertEqual(env[f'ST2_{provider}_COMPONENT'], f'/nix/store/components/share/st2/providers/st2_{wasm}_component.component.wasm')
+        self.assertEqual((env['FRACTAL_MESSAGING_COMPAT_BIN'], env['ST3_MESSAGING_COMPAT_BIN']), ('/compat/fractal', '/compat/fractal'))
+        prep = Path(f'{self.log}.prep')
+        self.assertIn('nix build .#checks.x86_64-linux.provider-components --no-link --print-out-paths', prep.read_text())
+        prep.unlink()
+        self.log.unlink()
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(prep.exists(), 'no tests stage: nothing is prepared')
+        self.assertNotIn('ST2_GITHUB_PR_COMPONENT', calls[-1]['env'])
 
     def test_a_failed_hook_install_runs_no_stage(self):
         (self.work / 'scripts/ci-install-built-hooks').write_text('exit 9\n')

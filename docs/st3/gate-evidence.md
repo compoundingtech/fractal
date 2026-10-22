@@ -1363,7 +1363,8 @@ through the ordinary admission slot; it runs only code that seat wrote, so the t
 cannot know when a pull request is marked ready, so it reminds instead: after its own status it asks `st-test --status --all`,
 read only, and names the heavy checks not yet signed for the pushed tree, once per push. Their local command is
 `nix develop -c bash scripts/ci-local STAGE...`; `linux-gate`'s runs the four stages a `linux-gate` skip covers, `tests clippy
-fleet-compat mail-redelivery-canaries` (the test build with them; `upgrade-impact` is not skipped and runs in CI), with clippy's
+fleet-compat mail-redelivery-canaries` (the test build with them, after preparing what CI's test-build job does for the tests: the
+provider components the resource-provider tests load and the previous release the messaging compatibility tests run against; `upgrade-impact` is not skipped and runs in CI), with clippy's
 ratchet compared with the base branch's tip (`CLIPPY_BASE_SHA`, as CI compares with the event's base). Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
