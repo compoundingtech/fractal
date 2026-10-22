@@ -498,6 +498,10 @@ class Verifier(unittest.TestCase):
 OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
+# The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
+ENFORCED = ('typescript-client',)
+
+
 def policy_text(**overrides):
     doc = {'version': 1, 'checks': {'unit': {
         'trust_levels': ['machine'],
@@ -636,6 +640,30 @@ class SkipPolicy(unittest.TestCase):
         self.wrapper(seconds=5)
         code, result = self.f.verify(self.tree, rules=self.rules(self.host_policy()))
         self.assertEqual((code, result['trust_level'], result['events']), (0, 'machine', None))
+
+    def test_check_level_events_limit_what_any_note_may_skip_and_a_level_only_narrows_them(self):
+        self.wrapper()
+        code, result = self.f.verify(self.tree, rules=self.rules(policy_text(events=['pull_request'])))
+        self.assertEqual((code, result['events']), (0, ['pull_request']))  # the fleet signer is limited too, not only a host key
+        code, result = self.f.verify(self.tree, rules=self.rules())
+        self.assertEqual((code, result['events']), (0, None))  # no events key: every event the gate allows
+        # A host level that covers pull requests only, under a check that allows only the merge queue, covers nothing.
+        doc = json.loads(self.host_policy())
+        self.host_note(seconds=1)
+        for check_events, expected in ((['merge_group'], []), (['pull_request', 'merge_group'], ['pull_request']), (None, ['pull_request'])):
+            if check_events is None:
+                doc['checks']['unit'].pop('events', None)
+            else:
+                doc['checks']['unit']['events'] = check_events
+            code, result = self.f.verify(self.tree, rules=self.rules(json.dumps(doc)))
+            self.assertEqual((code, result['trust_level'], result['events']), (0, 'host', expected), check_events)
+
+    def test_check_level_events_are_validated_strictly(self):
+        for bad in ([], ['push'], ['pull_request', 'pull_request'], 'pull_request', 0, {'pull_request': 1}):
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as raised:
+                self.rules(policy_text(events=bad))
+            self.assertEqual(raised.exception.reason, 'error')
+        self.assertEqual(self.rules(policy_text(events=['merge_group', 'pull_request']))['events'], ['merge_group', 'pull_request'])
 
     def test_a_host_note_with_the_ordinary_command_or_missing_its_inputs_is_refused(self):
         self.host_note(command=('make', 'test'))
@@ -1314,9 +1342,13 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # Nothing enforces anywhere: every check, not only the host ones, keeps enforce false until the flip PR.
+        # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
+        # every other check keeps enforce false until its own flip PR.
         self.assertEqual({check: entry.get('enforce', False) for check, entry in policy['checks'].items()},
-                         {check: False for check in policy['checks']})
+                         {check: check in ENFORCED for check in policy['checks']})
+        for check in ENFORCED:
+            self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
+            self.assertGreaterEqual(policy['checks'][check].get('sample_one_in', 1), 2, f'{check}: an enforced check keeps a comparison sample')
         with_host = {}
         for check, entry in policy['checks'].items():
             for kind, rule in entry['kinds'].items():
@@ -1338,7 +1370,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(agent, override, check)
             self.assertEqual(override['events'], ['pull_request'], check)
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
-            self.assertEqual(policy['checks'][check].get('enforce', False), False, check)
+            self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
             self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
         # The commands are the ones scripts/st-test records, so a local note can match.
@@ -1356,7 +1388,7 @@ class CommittedPolicy(unittest.TestCase):
             rules = self.rules(check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
-            self.assertIs(rules['enforce'], False, check)  # skipping is off until the policy says otherwise
+            self.assertIs(rules['enforce'], check in ENFORCED, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
             self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
                                                    '.github/workflows/fleet.yml', check])

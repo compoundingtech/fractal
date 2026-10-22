@@ -81,6 +81,7 @@ def enforcing(path):
         entry['enforce'] = True
         entry['sample_one_in'] = 1  # sampling is tested on its own; here a matching note must always skip
         entry.pop('inputs', None)  # these tests use exact-tree notes
+        entry.pop('events', None)  # and a merge_group run; the committed events are tested on their own
     return json.dumps(doc)
 
 
@@ -805,12 +806,38 @@ class EndToEnd(unittest.TestCase):
 
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
-        enforced = ()
+        enforced = ('typescript-client',)
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(sorted(policy['checks']), sorted(CHECKS))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
+
+    def test_the_committed_policy_skips_an_enforced_check_on_pull_requests_and_never_in_the_merge_queue(self):
+        # The committed policy as it is (only sampling and inputs neutralised): an enforced check skips a pull request run on a
+        # trusted note and still runs in the merge queue, which keeps testing the combined tree; a check that is not enforced never skips.
+        doc = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        for entry in doc['checks'].values():
+            entry['sample_one_in'] = 1
+            entry.pop('inputs', None)
+        import hashlib
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        (self.f.repo / 'flake.lock').write_text(LOCK)
+        base = self.commit_base(policy=json.dumps(doc))
+        commit, tree = self.head()
+        lock = hashlib.sha256(LOCK.encode()).hexdigest()
+        for check in CHECKS:
+            self.wrapper_note(commit, tree, lock, check=check)
+            enforced = doc['checks'][check].get('enforce') is True
+            pull, _ = self.run_gate(base, check=check, EVENT_NAME='pull_request')
+            queue, _ = self.run_gate(base, check=check, EVENT_NAME='merge_group')
+            self.assertEqual((pull['outcome'], queue['outcome']), ('satisfied', 'satisfied'), check)
+            self.assertEqual(pull['decision'], 'skip' if enforced else 'run', check)
+            self.assertEqual(queue['decision'], 'run', check)
+            if enforced:
+                self.assertIn('cover_this_event', queue['reason'], check)
 
     def input_scenario(self, **per_check):
         """A base whose policy declares `inputs.txt` as the only input of every check; head 1 has a note."""
