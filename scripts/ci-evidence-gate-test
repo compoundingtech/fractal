@@ -107,6 +107,11 @@ class Classify(unittest.TestCase):
             ((1, {'satisfied': False, 'reason': 'too_old'}), 'rejected'),
             ((1, {'satisfied': False, 'reason': 'check_failed'}), 'rejected'),
             ((1, {'satisfied': False, 'reason': 'error'}), 'unavailable'),
+            ((1, {'satisfied': False, 'reason': 'log_absent'}), 'unavailable'),
+            ((1, {'satisfied': False, 'reason': 'log_unsigned'}), 'unavailable'),
+            ((1, {'satisfied': False, 'reason': 'log_stale'}), 'unavailable'),
+            ((1, {'satisfied': False, 'reason': 'log_missing'}), 'rejected'),
+            ((1, {'satisfied': False, 'reason': 'log_unlogged'}), 'rejected'),
             ((2, None), 'unavailable'),
         ]
         for (code, result), outcome in cases:
@@ -248,7 +253,8 @@ class EndToEnd(unittest.TestCase):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-evidence-gate')], cwd=work, env=env,
                               capture_output=True)
         self.assertEqual(done.returncode, 0, done.stderr.decode())  # the gate never fails the job
-        fields = decision(done.stdout.decode())
+        self.printed = done.stdout.decode()
+        fields = decision(self.printed)
         outputs = dict(line.split('=', 1) for line in output.read_text().split())
         self.assertEqual(fields['decision'] == 'skip', outputs['skip'] == 'true')
         self.assertIn('evidence-decision v1', summary.read_text())
@@ -1251,6 +1257,39 @@ class EndToEnd(unittest.TestCase):
                           '-m', f'evidence-log v1 as_of={datetime.now(timezone.utc).isoformat()} added={len(records)} gc=0 missing=0')
         self.f.git('update-ref', 'refs/evidence-log/main', head)
         return head
+
+    def test_under_an_enforced_log_rule_a_pass_skips_only_when_the_log_backs_it(self):
+        log_key = self.f.key('log-key')
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-log-key').write_text(f'log/evidence namespaces="git" {log_key.with_suffix(".pub").read_text()}')
+        base = self.commit_base(policy=skip_policy(log='enforce'))
+        commit, tree = self.head()
+        record = self.note(commit, tree)
+        fields, _ = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['outcome'], fields['reason'], fields['log']), ('run', 'unavailable', 'log_absent', 'absent'), fields)
+        self.log_head(tree, [], log_key)
+        fields, _ = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['reason'], fields['log']), ('run', 'log_unlogged', 'unlogged_pass'), fields)
+        self.log_head(tree, [record], log_key)
+        fields, _ = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['record'], fields['log']), ('skip', record, 'ok'), fields)
+        self.assertNotIn('::error', self.printed)
+        # A record the log lists that the remote lost: the check runs, and the run carries an alarm.
+        self.log_head(tree, [record, 'b' * 40], log_key)
+        fields, _ = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['reason'], fields['log_missing']), ('run', 'log_missing', '1'), fields)
+        self.assertIn('::error title=Evidence log::1 logged record(s) for linux-gate', self.printed)
+
+    def test_an_enforced_log_rule_with_no_log_key_at_the_base_never_skips(self):
+        base = self.commit_base(policy=skip_policy(log='enforce'))
+        commit, tree = self.head()
+        self.note(commit, tree)
+        fields, _ = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['reason'], fields['log_fetch']), ('run', 'log_absent', '-'), fields)
+        shadow = self.commit_base(policy=skip_policy())
+        commit, tree = self.f.commit('the same, with the log rule in shadow')
+        self.note(commit, tree)
+        self.assertEqual(self.run_gate(shadow)[0]['decision'], 'skip')
 
     def test_once_the_base_pins_the_log_key_the_line_carries_the_log_s_view_and_the_decision_is_unchanged(self):
         base = self.commit_base()
