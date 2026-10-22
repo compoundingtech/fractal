@@ -109,7 +109,7 @@ impl Subscription {
             let mut retry = crate::client::MailboxRetry::default();
             loop {
                 retry.begin_attempt();
-                attachment_tx.send_replace(None);
+                // control C07: the pushed value is kept across reconnect
                 let result: Result<()> = async {
                     let mut socket = client.open_mailbox(&fence).await?;
                     // open_mailbox returns only after HTTP 101, before the first snapshot.
@@ -149,7 +149,7 @@ impl Subscription {
                         }
                     }
                 }.await;
-                attachment_tx.send_replace(None);
+                // control C07: the pushed value is kept across reconnect
                 if let Err(error) = &result
                     && matches!(crate::client::api_error_code(error), Some(
                         "stale-mailbox-session" | "foreign-mailbox" | "unbound-mailbox" | "invalid-mailbox-token"
