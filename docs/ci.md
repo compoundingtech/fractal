@@ -753,6 +753,18 @@ user agent), as Storybook's own runner does: after each play the preview pauses
 animations at their end state for the a11y check instead of a fixed 100 ms sleep
 before waiting for them. A play that leaves UI opening after it returns (a hover
 card under the pointer) waits for that state itself rather than relying on the sleep.
+Each case must have exactly one completed strict story record for its requested story.
+The guard follows the iframe document's identity, not its current URL: `pushState` and
+`replaceState` keep collecting lifecycle and axe evidence at the final in-app URL.
+A replacement document fails closed: Node observes main-frame document navigation
+requests before the initial `goto`, rejecting a second request even for a same-URL
+reload before DOMContentLoaded. History API changes do not request another document.
+Receipts record both the initial Storybook URL and the final evidence URL; empty
+records or missing/duplicate completions cannot pass. This detects accidental
+navigation, not an application deliberately forging evidence.
+Play-driven component transitions use local React state: Storybook's `updateArgs`
+starts another story render, which emits another completion and accessibility report.
+SyncLine's transition demo keeps its full play assertions without updating story args.
 
 The gate takes three options. Pull requests run the per-commit set (`KIT_PLAY_SET=commit`)
 with a11y off and a 100-second budget; merge groups (observed and signed by Evidence

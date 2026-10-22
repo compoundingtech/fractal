@@ -5,11 +5,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { assertStrictEvidence } from './kit-play-gate-runner.mjs'
 
 // A fixture build with the strict policy's aliases and kept bases. Like Storybook's addon-a11y,
 // it reports an a11y result unless the a11y.manual global is set; `report` overrides that report.
-const iframe = (report, probes = []) => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
+const iframe = (report, probes = [], navigation) => `<!doctype html><meta charset="utf-8"><title>Gate fixture</title>
 <script>
+  ${navigation?.startsWith('reload-') ? `
+  if (!sessionStorage.getItem('reloaded')) {
+    sessionStorage.setItem('reloaded', 'true')
+    ${navigation === 'reload-before-dom' ? "location.reload()" : "document.addEventListener('DOMContentLoaded', () => location.reload(), { once: true })"}
+  }` : ''}
   const listeners = new Map()
   const manual = new URLSearchParams(location.search).get('globals') === 'a11y.manual:!true'
   const id = new URLSearchParams(location.search).get('id')
@@ -19,11 +25,14 @@ const iframe = (report, probes = []) => `<!doctype html><meta charset="utf-8"><t
       if (!listeners.has(name)) listeners.set(name, [])
       listeners.get(name).push(listener)
       if (name === 'storyErrored') setTimeout(async () => {
+        // Match Storybook's lifecycle: fixture play cannot precede DOM readiness.
+        if (document.readyState === 'loading') await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once: true }))
         const phase = newPhase => emit('storyRenderPhaseChanged', { storyId: id, newPhase })
         phase('playing')
         await new Promise(resolve => setTimeout(resolve, 2))
         phase('played')
         phase('completing')
+        ${navigation === 'document' ? "location.assign('/away.html'); return" : ['push', 'replace'].includes(navigation) ? `history.${navigation}State({}, '', '/w/fixture/missions')` : ''}
         if (!manual) {
           window.dispatchEvent(new CustomEvent('kit-a11y-timing', { detail: { storyId: id, phase: 'start', at: performance.now() } }))
           await new Promise(resolve => setTimeout(resolve, 2))
@@ -49,7 +58,7 @@ const policyFixtureIds = [
   'fractal-ui-sidebar-tree--filter-keystroke-to-paint',
 ]
 
-const runGate = async ({ env = {}, report, probes, fixtureOverrides } = {}) => {
+const runGate = async ({ env = {}, report, probes, navigation, fixtureOverrides } = {}) => {
   const directory = await mkdtemp(join(tmpdir(), 'kit-play-gate-test-'))
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
@@ -61,7 +70,8 @@ const runGate = async ({ env = {}, report, probes, fixtureOverrides } = {}) => {
         type: 'story', id, importPath: './Kit.stories.tsx', tags: ['dev'],
       }])),
     } }))
-    await writeFile(join(build, 'iframe.html'), iframe(report, probes))
+    await writeFile(join(build, 'iframe.html'), iframe(report, probes, navigation))
+    await writeFile(join(build, 'away.html'), '<!doctype html><title>Not Storybook</title>')
     // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
     const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
     const args = fixtureOverrides === undefined
@@ -113,6 +123,49 @@ test('fixture code can inject its policy through the runner parameter, not proce
   assert.deepEqual(receipt.caseOverrides, {})
   assert.equal(receipt.cases, 28)
 })
+
+test('empty, duplicate, and wrong-story strict evidence fail closed', () => {
+  const event = { payload: { storyId: 'kit--critical', status: 'success', reporters: [{ type: 'a11y', status: 'passed' }] } }
+  for (const records of [[], [{ finished: [] }], [{ finished: [event, event] }], [{ finished: [event] }, { finished: [event] }]]) {
+    assert.throws(() => assertStrictEvidence(records, 'kit--critical', 'on'), /exactly one completed strict story record/)
+  }
+  assert.throws(() => assertStrictEvidence([{ finished: [event] }], 'kit--other', 'on'), /requested story/)
+  const duplicateReports = { ...event.payload, reporters: [...event.payload.reporters, ...event.payload.reporters] }
+  assert.throws(() => assertStrictEvidence([{ finished: [{ payload: duplicateReports }] }], 'kit--critical', 'on'), /expected one passed a11y report/)
+})
+
+test('History API navigation preserves one completed record at the final URL', { timeout: 60000 }, async () => {
+  for (const navigation of ['push', 'replace']) {
+    const { code, receipt } = await runGate({ navigation, env: { KIT_PLAY_SET: 'critical' } })
+    assert.equal(code, 0)
+    assert.ok(receipt.rows.every(row => row.strict.length === 1 && row.strict[0].url.endsWith('/w/fixture/missions')))
+    assert.ok(receipt.rows.every(row => row.strict[0].finished.length === 1))
+  }
+})
+
+test('in-app navigation without axe evidence fails', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ navigation: 'push', report: [], env: { KIT_PLAY_SET: 'critical' } })
+  assert.equal(code, 1)
+  assert.equal(receipt.pass, false)
+  assert.ok(receipt.rows.every(row => /expected one passed a11y report/.test(row.error)))
+  assert.ok(receipt.rows.every(row => row.strict[0].url.endsWith('/w/fixture/missions')))
+})
+
+test('cross-document navigation away from Storybook fails closed', { timeout: 60000 }, async () => {
+  const { code, receipt } = await runGate({ navigation: 'document', env: { KIT_PLAY_SET: 'critical' } })
+  assert.equal(code, 1)
+  assert.equal(receipt.pass, false)
+  assert.ok(receipt.rows.every(row => /story document was replaced|Execution context was destroyed/.test(row.error)))
+})
+
+for (const navigation of ['reload-before-dom', 'reload-after-dom']) {
+  test(`same-URL ${navigation} fails closed`, { timeout: 60000 }, async () => {
+    const { code, receipt } = await runGate({ navigation, env: { KIT_PLAY_SET: 'critical' } })
+    assert.equal(code, 1)
+    assert.equal(receipt.pass, false)
+    assert.ok(receipt.rows.every(row => /story document was replaced/.test(row.error)), JSON.stringify(receipt.rows.map(row => row.error)))
+  })
+}
 
 test('a11y on rejects a case whose axe report is missing', { timeout: 60000 }, async () => {
   const { code, receipt } = await runGate({ report: [] })
