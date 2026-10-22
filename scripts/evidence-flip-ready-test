@@ -80,17 +80,15 @@ class FakeGitHub:
         elif command[1:3] == ['pr', 'create']:
             return subprocess.CompletedProcess(command, 0, b'https://github.com/org/repo/pull/9\n', b'')
         elif '/workflows/fleet.yml/runs' in path:
-            newest = sorted(self.runs, key=lambda run: run['created_at'], reverse=True)
-            if '&created=' not in path:
-                out = [{'workflow_runs': newest[:1]}]
-            elif self.empty_window:
-                self.empty_window -= 1  # True: every time; a number: that many times, then the real listing
-                out = [{'total_count': 0, 'workflow_runs': []}]
+            page = int(path.split('&page=')[1]) if '&page=' in path else 1
+            listed = sorted(self.runs, key=lambda run: run['created_at'], reverse=True)[(page - 1) * 100:page * 100]
+            if self.empty_window:
+                self.empty_window -= 1  # a page answers empty this many times, then the real page
+                listed = []
             elif self.short_window:
-                self.short_window -= 1
-                out = [{'total_count': len(self.runs), 'workflow_runs': self.runs[1:]}]
-            else:
-                out = [{'total_count': len(self.runs), 'workflow_runs': self.runs}]
+                self.short_window -= 1  # ... or one run short
+                listed = listed[1:]
+            return subprocess.CompletedProcess(command, 0, json.dumps({'total_count': len(self.runs), 'workflow_runs': listed}).encode(), b'')
         elif path.endswith('/logs'):
             return subprocess.CompletedProcess(command, 0, self.logs[int(path.split('/')[-2])].encode(), b'')
         else:
@@ -273,18 +271,29 @@ class FlipReady(unittest.TestCase):
         self.gh.empty_window = 10 ** 6
         code, result, text = self.report()
         self.assertEqual((code, text), (2, ''))
-        self.assertIn('came back empty', self.err)
+        self.assertIn('page 1 of the pull request run listing came back with 0 of the 30 runs it holds', self.err)
         self.gh.empty_window = 0
         clean = self.check()
         self.gh.empty_window, self.gh.short_window = 1, 1  # one empty, one short answer, then the real one: asked again
         self.assertEqual(self.check(), clean)
         self.gh.short_window = 10 ** 6
         self.assertEqual(self.report()[0], 2)
-        self.assertIn('returned 29 of its 30 runs', self.err)
+        self.assertIn('came back with 29 of the 30 runs it holds', self.err)
         self.gh.short_window = 0
-        self.gh.empty_window = 10 ** 6
         self.gh.runs = [{'id': 1, 'status': 'completed', 'created_at': stamp(at(40))}]  # quiet: the newest run is older
         self.assertEqual(self.check()['lines'], 0)
+
+    def test_the_listing_is_read_page_by_page_back_to_the_window_and_a_window_past_the_cap_is_unreadable(self):
+        for i in range(230):  # 230 runs over the last 23 hours, then 20 older ones that must not be read
+            self.gh.run(5000 + i, at(23 * i / 230), [decision()], real='success')
+        for i in range(20):
+            self.gh.runs.append({'id': 9000 + i, 'status': 'completed', 'created_at': stamp(at(40 + i))})
+        self.assertEqual(self.check()['lines'], 230)
+        pages = [call[-1] for call in self.gh.calls if '/workflows/fleet.yml/runs' in call[-1]]
+        self.assertEqual([path.split('&page=')[1] for path in pages], ['1', '2', '3'])
+        self.gh.runs = [{'id': i, 'status': 'completed', 'created_at': stamp(at(i / 100))} for i in range(1001)]
+        self.assertEqual(self.report()[0], 2)
+        self.assertIn("more than the listing's 1,000 runs", self.err)
 
     def test_the_presign_rate_counts_each_head_once_per_account_by_its_best_note(self):
         # otter-bot: head a pre-signed (host for one check, nothing for another), head b only a CI note, head c none.
