@@ -252,6 +252,32 @@ mod tests {
         }
     }
 
+    struct StreamHandshake {
+        path: &'static str,
+        protocol: &'static str,
+    }
+
+    // The handshake trait fixes the rejection type to an HTTP response. Implement
+    // that contract directly rather than giving an infallible closure a large Err.
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for StreamHandshake {
+        fn on_request(
+            self,
+            request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            assert_eq!(request.uri().path(), self.path);
+            assert_eq!(request.headers()["authorization"], "Bearer paired-test");
+            response.headers_mut().insert(
+                hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                hyper::header::HeaderValue::from_static(self.protocol),
+            );
+            Ok(response)
+        }
+    }
+
     #[tokio::test]
     async fn fake_fabric_upgrades_every_stream_transport() {
         let root = tempfile::tempdir().unwrap();
@@ -272,16 +298,7 @@ mod tests {
                 let (stream, _) = listener.accept().await.unwrap();
                 let websocket = tokio_tungstenite::accept_hdr_async(
                     stream,
-                    |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                     mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                        assert_eq!(request.uri().path(), path);
-                        assert_eq!(request.headers()["authorization"], "Bearer paired-test");
-                        response.headers_mut().insert(
-                            hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                            hyper::header::HeaderValue::from_static(protocol),
-                        );
-                        Ok(response)
-                    },
+                    StreamHandshake { path, protocol },
                 ).await.unwrap();
                 drop(websocket);
             }

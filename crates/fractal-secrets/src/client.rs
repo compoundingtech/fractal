@@ -684,8 +684,7 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    self.person.as_deref(),
-                    None,
+                    RequestAuthority::LocalPerson(self.person.as_deref()),
                 )
                 .await?
             }
@@ -707,8 +706,7 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    None,
-                    credential.as_ref(),
+                    RequestAuthority::FabricBearer(credential.as_ref()),
                 )
                 .await?
             }
@@ -1228,6 +1226,12 @@ where
     Ok(())
 }
 
+/// A tunneled request cannot claim the Unix socket's local-person authority.
+enum RequestAuthority<'a> {
+    LocalPerson(Option<&'a str>),
+    FabricBearer(Option<&'a reqwest::header::HeaderValue>),
+}
+
 async fn unix_request(
     socket: &Path,
     method: &str,
@@ -1235,10 +1239,14 @@ async fn unix_request(
     body: &[u8],
     connect_deadline: Duration,
     deadline: Duration,
-    person: Option<&str>,
-    authorization: Option<&reqwest::header::HeaderValue>,
+    authority: RequestAuthority<'_>,
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let (person, authorization) = match authority {
+        RequestAuthority::LocalPerson(person) => (person, None),
+        RequestAuthority::FabricBearer(credential) => (None, credential),
+    };
 
     let started = tokio::time::Instant::now();
     let endpoint = socket.display().to_string();
@@ -1716,7 +1724,8 @@ mod tests {
         let credential = reqwest::header::HeaderValue::from_static("Bearer paired-test-token");
         let bytes = unix_request(
             &socket, "GET", "/v1/client/capabilities", &[],
-            Duration::from_secs(1), Duration::from_secs(1), None, Some(&credential),
+            Duration::from_secs(1), Duration::from_secs(1),
+            RequestAuthority::FabricBearer(Some(&credential)),
         ).await.unwrap();
         assert_eq!(decode_api_response::<Value>(&bytes).unwrap(), json!({"accepted": true}));
         server.await.unwrap();
