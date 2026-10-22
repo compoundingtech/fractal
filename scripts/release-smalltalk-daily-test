@@ -20,8 +20,9 @@ import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 if args[:2] == ['run', 'list']:
     print(json.dumps([{'databaseId': 7, 'headSha': os.environ['FAKE_SHA']}]))
-elif args[:2] == ['release', 'view']:
-    print('v0.3.17')
+elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
+    print(json.dumps([[{'tag_name': 'v0.3.17', 'draft': False, 'prerelease': False,
+                       'published_at': '2026-10-07T00:00:00Z', 'id': 17}]]))
 elif args[:2] == ['run', 'download']:
     destination = pathlib.Path(args[args.index('--dir') + 1])
     for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
@@ -51,24 +52,26 @@ def build_dist(dist, source):
     dist.mkdir()
     sums = []
     for target in TARGETS:
-        package = f'smalltalk-{target}'
-        with tarfile.open(dist / f'{package}.tar.gz', 'w:gz') as archive:
-            def add(name, data=b'', mode=0o755, link=None):
-                info = tarfile.TarInfo(f'{package}/{name}')
-                info.mode = mode
-                if link:
-                    info.type, info.linkname = tarfile.SYMTYPE, link
-                    archive.addfile(info)
-                else:
-                    info.size = len(data)
-                    archive.addfile(info, io.BytesIO(data))
-            add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
-            add('bin/st3', b'st3'); add('bin/pty', b'pty'); add('bin/st', link='st3')
-            add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
-        digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
-        line = f'{digest}  {package}.tar.gz\n'
-        (dist / f'{package}.tar.gz.sha256').write_text(line)
-        sums.append(line)
+        for prefix in ('fractal', 'smalltalk'):
+            package = f'{prefix}-{target}'
+            with tarfile.open(dist / f'{package}.tar.gz', 'w:gz') as archive:
+                def add(name, data=b'', mode=0o755, link=None):
+                    info = tarfile.TarInfo(f'{package}/{name}')
+                    info.mode = mode
+                    if link:
+                        info.type, info.linkname = tarfile.SYMTYPE, link
+                        archive.addfile(info)
+                    else:
+                        info.size = len(data)
+                        archive.addfile(info, io.BytesIO(data))
+                add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
+                add('bin/st3', b'st3'); add('bin/pty', b'pty')
+                add('bin/st', link='st3'); add('bin/fractal', link='st3')
+                add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
+            digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
+            line = f'{digest}  {package}.tar.gz\n'
+            (dist / f'{package}.tar.gz.sha256').write_text(line)
+            sums.append(line)
     (dist / 'SHA256SUMS').write_text(''.join(sums))
 
 
@@ -78,6 +81,14 @@ with tempfile.TemporaryDirectory() as temporary:
     (checkout / 'scripts').mkdir(parents=True)
     shutil.copy(repo / 'scripts/release-smalltalk-daily', checkout / 'scripts/release-smalltalk-daily')
     shutil.copy(repo / 'scripts/release-smalltalk-manifest.py', checkout / 'scripts/release-smalltalk-manifest.py')
+    shutil.copy(repo / 'scripts/compat-baseline-release', checkout / 'scripts/compat-baseline-release')
+    (checkout / '.github').mkdir()
+    pin = {'commit': 'a' * 40, 'tag': 'v0.3.17', 'why': 'Previous stable release fixture',
+           'exception_reason': None, 'bundles': {target: {
+               'url': f'https://github.com/example/project/releases/download/v0.3.17/smalltalk-{target}.tar.gz',
+               'sha256': 'b' * 64} for target in TARGETS}}
+    for kind in ('fleet', 'messaging'):
+        (checkout / f'.github/{kind}-compat-baseline.json').write_text(json.dumps(pin))
     (checkout / 'scripts/release_notes.py').write_text(STUB_NOTES)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)

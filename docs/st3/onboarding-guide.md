@@ -1,7 +1,7 @@
-# The Smalltalk guide
+# The Fractal guide
 
-Smalltalk runs agents as durable seats and records missions, messages and decisions in a
-graph. This guide is bundled into the executable so the Smalltalk Assistant can run
+Fractal runs agents as durable seats and records missions, messages and decisions in a
+graph. This guide is bundled into the executable so the Fractal Assistant can run
 first-run onboarding and answer questions on a machine without a source checkout. The
 onboarding mission pins its version.
 
@@ -86,7 +86,7 @@ result that is recorded.
    it now appears above the message input, that they can read it and dismiss it, and ask them to try.
    Wait for them with `st conversations wait --as "$ST_AGENT" --from PERSON --timeout 30s`. On `no
    reply`, say in one short line that it stays there until they dismiss it, and carry on.
-2. Ask: "What do you want to accomplish in Smalltalk today?" Wait the same way. Listen, then ask short
+2. Ask: "What do you want to accomplish in Fractal today?" Wait the same way. Listen, then ask short
    follow-ups, one at a time, to learn the kind of work, the project folder and the harness. Offer to plan
    it. When they say yes, create their seat with `st agents new` in the folder they named (the work folder
    when they name none), send it a first message, and tell them where to find it. Or write and start a
@@ -149,7 +149,7 @@ the agent read the message; use the recorded receipt.
 doing and where it works. `st agents restart` recovers a stuck harness while keeping
 its declaration. `st agents stop` leaves it stopped until explicitly started.
 Suspend and resume preserve a quiet seat's native conversation on the same machine;
-they refuse busy seats. The built-in Smalltalk Assistant stays available after onboarding, and
+they refuse busy seats. The built-in Fractal Assistant stays available after onboarding, and
 setup does not resurrect it after the person stops it. `st setup --onboarding`
 explicitly starts another onboarding run.
 

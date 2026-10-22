@@ -2,8 +2,9 @@
 //!
 //! The graph knows claims, envelopes, batches, documents and blobs, but not what any claim kind
 //! means. A runtime knows its kinds: their schemas, the tables it projects them into, and which of
-//! them a checkpoint may drop. The store calls it at each of these seams, inside the store's own
-//! transactions, and never the other way around: the runtime may call the graph freely.
+//! them a checkpoint may drop. Projection mutations run inside the store's transactions;
+//! bounded startup work may commit its own chunks before readers are exposed.
+//! The runtime may call the graph freely.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +49,10 @@ pub struct ReplayProgress {
 
 /// A runtime's claim kinds and projections.
 pub trait Runtime: Send + Sync {
+    /// Optional process-local invalidation at the single writer's resolution boundary.
+    fn writer_observer(&self) -> Option<std::sync::Arc<dyn crate::sqlite::WriterObserver>> {
+        None
+    }
     /// A completed local response still names live work. Cleanup extends its retry window;
     /// the runtime checks only the bounded candidate, never its complete history.
     fn idempotency_response_in_use(
@@ -74,6 +79,13 @@ pub trait Runtime: Send + Sync {
     /// Bring the runtime's projections up to date as the store opens: a store in shared memory
     /// is new, and a store on disk may need a replay after an upgrade.
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()>;
+
+    /// Persist bounded initialization metadata after `open_projections` commits.
+    /// Called before readers are exposed; full projection builds belong to
+    /// post-serving maintenance, not this first-serving critical path.
+    fn finish_open_projections(&self, _connection: &mut Connection) -> Result<()> {
+        Ok(())
+    }
 
     /// The digest of the claim kinds and fields this build knows. Peers whose digests differ may
     /// project the same claims differently, so they compare their logs instead of their graphs.
@@ -170,6 +182,14 @@ pub trait Runtime: Send + Sync {
 
     /// Reapply this node's local state that a projection replaced, once a projection ends.
     fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), Error>;
+
+    /// Once per managed outer transaction, after all batched jobs or lent helpers
+    /// and before source-adapter finalization and COMMIT. Bound maintenance for the
+    /// entire transaction here, not in append/projection helpers that may repeat.
+    /// Startup and checkpoint-copy raw transactions do not use this boundary.
+    fn before_commit(&self, _transaction: &Transaction<'_>) -> Result<()> {
+        Ok(())
+    }
 
     /// Projections changed beneath whatever the runtime keeps in memory about them.
     fn forget_views(&self);
