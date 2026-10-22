@@ -3,6 +3,7 @@
 # .st/required-lanes.json). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
 #
 #   scripts/ci-local mail-redelivery-canaries
+#   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
 #
 # Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
 # first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
@@ -21,7 +22,7 @@ if [ "$#" -eq 0 ]; then
 fi
 for stage in "$@"; do
   case "$stage" in
-    mail-redelivery-canaries) ;;
+    tests|clippy|fleet-compat|mail-redelivery-canaries) ;;
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
@@ -46,8 +47,11 @@ if [ -z "$cargo_real" ]; then
   echo "ci-local: no cargo executable of the dev shell on PATH (run it inside nix develop, or set CI_LOCAL_CARGO)" >&2
   exit 2
 fi
-while IFS='=' read -r -d '' name _; do
+while IFS='=' read -r -d '' name value; do
   case "$name" in
+    # The dev shell's own test settings (flake.nix): the collector CI's OTLP export tests run against. Kept when they name a store
+    # path, so a seat's own setting of the same name still leaves.
+    ST2_OTELITE_BIN|ST3_OTELITE_BIN|FRACTAL_OTELITE_BIN) [[ "$value" == /nix/store/* ]] || unset "$name" ;;
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)
@@ -64,6 +68,23 @@ export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_D
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
 touch "$GITHUB_STEP_SUMMARY"
+# clippy's ratchet compares with the base, as CI compares with the event's base: the base branch's tip unless named.
+if [ -z "${CLIPPY_BASE_SHA:-}" ]; then
+  CLIPPY_BASE_SHA=$(git rev-parse --verify --quiet origin/main || true)
+  export CLIPPY_BASE_SHA
+fi
+# The tests stage needs what CI's test-build job prepares for it: the provider components the resource-provider tests load,
+# and the previous release the messaging compatibility tests run against.
+if [[ " $* " == *" tests "* ]]; then
+  system=$(nix eval --impure --raw --expr builtins.currentSystem)
+  components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths)
+  for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+    wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+    export "ST2_${provider}_COMPONENT=$components/share/st2/providers/st2_${wasm}_component.component.wasm"
+  done
+  compat=$(timeout 10m bash scripts/messaging-compat-binary)
+  export FRACTAL_MESSAGING_COMPAT_BIN="$compat" ST3_MESSAGING_COMPAT_BIN="$compat"
+fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
 # A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless

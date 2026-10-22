@@ -71,6 +71,67 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
           }
         }
       }

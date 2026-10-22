@@ -5,8 +5,9 @@
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
-For every check that has a local command (the table below) it runs that command once, on the tree the pull
-request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
+For every check that has a local command (the table below; the heavy ones, which build and test the Rust workspace, only when
+named or with --all: run `scripts/st-test --all --push origin` once on the head you mark ready) it runs that command once, on the
+tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
 the output it measured under this host's key (scripts/evidence-keygen). A failing run is recorded too. It then
 asks the verifier, from the accepted base, whether the tree is now covered, and prints one line per check.
 
@@ -61,10 +62,12 @@ LOCAL = {
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
     # A Linux gate stage, run as its CI job runs it but with a home of its own (scripts/ci-local).
     'mail-redelivery-canaries': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'mail-redelivery-canaries'],
+    # The stages a linux-gate skip covers (the tests, clippy, fleet compatibility and the canaries), in one run.
+    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries'],
 }
 # Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
 # --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
-HEAVY = frozenset({'mail-redelivery-canaries'})
+HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate'})
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 
 
