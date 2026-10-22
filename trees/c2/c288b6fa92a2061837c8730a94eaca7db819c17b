@@ -6,3 +6,4 @@ record b606c8d43f90ac296ab130d38e13d09fd5df20cc isolation-vm 0 fleet/ci 2026-10-
 record c910196d8dccdf5ecd9ef6086a8f0437f72ad9c6 linux-tests-shard-2 100 fleet/ci 2026-10-22T12:00:33Z
 record d94566a07154b40271f8435e740971694af70e90 genie-freshness 1 fleet/ci 2026-10-22T11:50:33Z
 record e064fa41e554c65e98c65ee786be8a93e64028f2 mail-redelivery-canaries 0 fleet/ci 2026-10-22T11:56:09Z
+record e7a2595b3813b44f11c09e96bb8807f2a44ed0c2 typescript-client 0 host/forge 2026-10-22T18:54:19Z
