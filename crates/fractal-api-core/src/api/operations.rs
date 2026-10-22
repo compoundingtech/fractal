@@ -219,34 +219,23 @@ pub async fn apply_operational_repair(
     Ok(Json(result))
 }
 
-/// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
+mod backup_export;
+
+/// Return export headers before preparing the archive; its stream owns the work.
 pub async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let permit = backup_export::reserve()?;
     let store = state.store.clone();
+    // A bounded metadata check keeps ordinary precondition failures as HTTP errors.
+    // The producer checks again in the snapshot that actually backs up the data.
+    blocking_store(move || store.check_backup_projection()).await?;
     let bodies = message_body::bodies(&state.state_dir);
-    let file = blocking_store(move || {
+    Ok(backup_export::response(permit, move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
+        state.store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
-    })
-    .await?;
-    let file = tokio::fs::File::from_std(file);
-    let stream = futures_util::stream::try_unfold(file, |mut file| async move {
-        use tokio::io::AsyncReadExt;
-        let mut bytes = vec![0_u8; 64 * 1024];
-        let read = file.read(&mut bytes).await?;
-        if read == 0 {
-            return Ok::<_, std::io::Error>(None);
-        }
-        bytes.truncate(read);
-        Ok(Some((bytes, file)))
-    });
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
-        Body::from_stream(stream),
-    )
-        .into_response())
+    }))
 }
 
 #[derive(Deserialize)]

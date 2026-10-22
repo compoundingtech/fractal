@@ -298,6 +298,38 @@ fn refresh_watches(
     projects: &Path,
     transcript: Option<&Path>,
 ) -> Result<()> {
+    // A directory created after it was found missing, but before its parent's watch began,
+    // raises no event at all: look again once the watches are in place, until nothing new
+    // appeared. Anything created after that is reported through a watched parent.
+    let mut desired = desired_watches(paths, projects, transcript)?;
+    for _ in 0..WATCH_ROUNDS {
+        #[cfg(test)]
+        tests::BEFORE_WATCHING.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        apply_watches(watch, watched, &desired)?;
+        let now = desired_watches(paths, projects, transcript)?;
+        if now == desired {
+            return Ok(());
+        }
+        desired = now;
+    }
+    // Still changing: the next event reconciles again.
+    apply_watches(watch, watched, &desired)
+}
+
+/// The watched directories nest at most three deep below the project (the project, the native
+/// session and its subagents), so this many rounds settle unless they keep being replaced.
+const WATCH_ROUNDS: usize = 4;
+
+/// Each directory to watch now, by the identity it has.
+fn desired_watches(
+    paths: &Paths,
+    projects: &Path,
+    transcript: Option<&Path>,
+) -> Result<BTreeMap<PathBuf, (u64, u64)>> {
     let mut desired = BTreeMap::new();
     for path in [&paths.agent_dir, &paths.session_dir, projects] {
         let metadata = fs::metadata(path)?;
@@ -334,6 +366,14 @@ fn refresh_watches(
             desired.insert(canonical, (metadata.dev(), metadata.ino()));
         }
     }
+    Ok(desired)
+}
+
+fn apply_watches(
+    watch: &mut RecommendedWatcher,
+    watched: &mut BTreeMap<PathBuf, (u64, u64)>,
+    desired: &BTreeMap<PathBuf, (u64, u64)>,
+) -> Result<()> {
     // Retire old native-session subscriptions, and replace watches on a recreated inode.
     // Nonexistent directories are observed through their nearest existing parent first.
     for path in watched.keys().cloned().collect::<Vec<_>>() {
@@ -350,9 +390,9 @@ fn refresh_watches(
         }
     }
     for (path, identity) in desired {
-        if let std::collections::btree_map::Entry::Vacant(entry) = watched.entry(path) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = watched.entry(path.clone()) {
             watch.watch(entry.key(), RecursiveMode::NonRecursive)?;
-            entry.insert(identity);
+            entry.insert(*identity);
         }
     }
     Ok(())
@@ -741,6 +781,12 @@ mod tests {
     use std::time::Duration;
 
     const SESSION: &str = "11111111-2222-4333-8444-555555555555";
+
+    thread_local! {
+        /// Runs once, after the directories to watch were read and before they are watched.
+        pub(super) static BEFORE_WATCHING: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, Writer) {
         let root = tempfile::tempdir().unwrap();
@@ -1248,6 +1294,35 @@ mod tests {
         }
         assert_eq!(usages(&agent)[0].body["output_tokens"], 23);
         drop(observer);
+    }
+
+    /// The flake in subagent_directory_created_after_start_is_observed_through_its_parent: the
+    /// subagents directory appeared after it was found missing but before the session
+    /// directory's watch began, so no event ever named it and its transcripts went unseen.
+    #[test]
+    fn a_directory_created_while_its_parent_is_being_watched_is_watched_too() {
+        let (root, agent, projects, path, _writer) = fixture();
+        let paths = Paths {
+            root: root.path().into(),
+            agent_dir: agent,
+            session_dir: root.path().join("session"),
+        };
+        fs::create_dir_all(&paths.session_dir).unwrap();
+        let native = path.parent().unwrap().join(SESSION);
+        fs::create_dir(&native).unwrap();
+        let children = native.join("subagents");
+        let created = children.clone();
+        BEFORE_WATCHING.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || fs::create_dir(&created).unwrap()));
+        });
+        let mut watch = RecommendedWatcher::new(|_| {}, notify::Config::default()).unwrap();
+        let mut watched = BTreeMap::new();
+        refresh_watches(&mut watch, &mut watched, &paths, &projects, Some(&path)).unwrap();
+        assert!(watched.contains_key(&native));
+        assert!(
+            watched.contains_key(&children),
+            "the subagents directory is watched: {watched:?}"
+        );
     }
 
     #[test]

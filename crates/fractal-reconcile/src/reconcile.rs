@@ -368,8 +368,35 @@ pub struct RuntimeObservation {
     pub incarnation_id: Option<String>,
 }
 
+/// Read-only pass evidence; provenance is keyed by the exact observed incarnation.
+#[derive(Default)]
+pub struct PtyRegistrySnapshot {
+    pub observations: Vec<RuntimeObservation>,
+    pub start_operations: HashMap<String, (String, String)>,
+}
+
+type PassPtySnapshot = std::sync::OnceLock<Result<PtyRegistrySnapshot>>;
+
 pub trait RuntimeControl: Send + Sync + 'static {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
+    /// Existing controls can supply provenance separately; native controls read both
+    /// from one registry snapshot so the evidence describes the same incarnation.
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        let observations = self.snapshot_ptys()?;
+        let mut start_operations = HashMap::new();
+        for observation in &observations {
+            if let Some(incarnation) = &observation.incarnation_id
+                && let Some(operation) =
+                    self.start_operation(&observation.runtime_id, true, incarnation)?
+            {
+                start_operations.insert(
+                    observation.runtime_id.clone(),
+                    (incarnation.clone(), operation),
+                );
+            }
+        }
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
     /// Inspect the resulting runtime. Callers must still verify its operation provenance.
     fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
@@ -542,12 +569,13 @@ fn local_process_is_alive(_pid: u32) -> bool {
     true
 }
 
-impl RuntimeControl for NativeRuntime {
-    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+impl NativeRuntime {
+    fn snapshot_pty_registry(&self, include_provenance: bool) -> Result<PtyRegistrySnapshot> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
         fractal_runtime::protect_servers(&observations);
-        observations
+        let mut start_operations = HashMap::new();
+        let observations = observations
             .into_iter()
             .map(|item| {
                 let incarnation_id = match (&item.pid, &item.created_at) {
@@ -555,15 +583,35 @@ impl RuntimeControl for NativeRuntime {
                     _ => None,
                 };
                 let status = observed_pty_status(&item);
-                Ok(RuntimeObservation {
+                if include_provenance
+                    && let Some(incarnation) = &incarnation_id
+                    && let Some(operation) = item.tags.get(start_jobs::OPERATION_TAG)
+                {
+                    start_operations.insert(
+                        item.name.clone(),
+                        (incarnation.clone(), operation.clone()),
+                    );
+                }
+                RuntimeObservation {
                     runtime_id: item.name,
                     terminal: true,
                     status,
                     exit_code: item.exit_code,
                     incarnation_id,
-                })
+                }
             })
-            .collect()
+            .collect();
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
+}
+
+impl RuntimeControl for NativeRuntime {
+    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
+        Ok(self.snapshot_pty_registry(false)?.observations)
+    }
+
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        self.snapshot_pty_registry(true)
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -766,10 +814,12 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
-        let mut producer_entered = false;
-        self.start_checked_inner(member, guard, &mut producer_entered)
+        // The backend owns its launch boundary and returns an exact StartRejected
+        // witness when it can prove that no producer was created.
+        let mut backend_entered = false;
+        self.start_checked_inner(member, guard, &mut backend_entered)
             .map_err(|error| {
-                if producer_entered {
+                if backend_entered {
                     error
                 } else {
                     error.context(fractal_runtime::StartRejected {
@@ -783,7 +833,7 @@ impl NativeRuntime {
         &self,
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
-        producer_entered: &mut bool,
+        backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let environment =
@@ -833,7 +883,7 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
                         &launch,
@@ -847,7 +897,7 @@ impl NativeRuntime {
                         guard,
                     )
                 } else {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     runtime.spawn_after(
                         &member.runtime_id,
                         &launch,
@@ -862,7 +912,7 @@ impl NativeRuntime {
                 }
             } else {
                 if let Some(guard) = guard {
-                    *producer_entered = true;
+                    *backend_entered = true;
                     return runtime.spawn_checked(
                         &member.runtime_id,
                         &launch,
@@ -874,7 +924,7 @@ impl NativeRuntime {
                         guard,
                     );
                 }
-                *producer_entered = true;
+                *backend_entered = true;
                 runtime.spawn(
                     &member.runtime_id,
                     &launch,
@@ -887,13 +937,13 @@ impl NativeRuntime {
             }
         } else {
             if let Some(guard) = guard {
-                *producer_entered = true;
+                *backend_entered = true;
                 return self
                     .exec
                     .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
                     .map(|_| ());
             }
-            *producer_entered = true;
+            *backend_entered = true;
             self.exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
@@ -2480,7 +2530,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_pass(&self) -> Result<()> {
-        self.reconcile_start_jobs()?;
+        // Start completion can mutate the runtime-observation fence. Capture before
+        // it can read the shared snapshot, so pre-completion evidence cannot later
+        // be presented to planning as a post-completion observation.
+        let _observation_capture = self.store.capture_runtime_observations()?;
+        let pty_snapshot = PassPtySnapshot::new();
+        self.reconcile_start_jobs_with_snapshot(&pty_snapshot)?;
         // A refusal changes this item's diagnostic input during its evaluation.
         // Deliver that change on the next pass, after the current evaluation has
         // registered its reads, rather than losing a touch when it becomes clean.
@@ -2494,7 +2549,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.incremental
                 .touch(&format!("runtime-observation-drops:{subject}"));
         }
-        let _observation_capture = self.store.capture_runtime_observations()?;
         let observe_span = crate::reconcile_telemetry::phase("pass/changes");
         self.incremental.observe(&self.store)?;
         self.incremental.observe_value(
@@ -2594,7 +2648,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = root_tasks;
         let mut pty_span = crate::reconcile_telemetry::phase("pass/pty-snapshot");
-        let ptys = self.runtime.snapshot_ptys();
+        // Read-only launch completion evidence and planning share one pass snapshot.
+        // A mutation can make it stale: guarded launches and exact native controls
+        // still take their own fresh fences before acting on an incarnation.
+        let ptys = pty_snapshot
+            .into_inner()
+            .unwrap_or_else(|| self.runtime.snapshot_ptys_with_provenance())
+            .map(|snapshot| snapshot.observations);
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
         drop(pty_span);
         let ptys = match ptys {
@@ -3036,6 +3096,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let ((result, due), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     caught(|| -> Result<()> {
+                        if subject.kind == "agent" {
+                            use crate::store::identities::{IdentityKind, IdentityStore as _};
+                            // Naming is an admission fence, never a physical runtime rekey.
+                            // Continue using the original desired subject, runtime ID and
+                            // incarnation for every native/PTY operation below.
+                            self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+                        }
                         // A workspace or render failure blocks only a start or restart. A running member
                         // is still observed, checked, and given its work.
                         let mut blocked = member_errors.remove(&subject.subject);
@@ -3184,6 +3251,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                                             ),
                                         ]),
                                     )?;
+                                    // Keep the old incarnation visible while its declaration is
+                                    // replacing it. A running wrapper is not a completed relaunch.
+                                    let mut fields = member_fields(
+                                        member,
+                                        &observation.status,
+                                        observation.incarnation_id.as_deref(),
+                                        true,
+                                    );
+                                    if let Some(incarnation) = &observation.incarnation_id {
+                                        fields.insert(
+                                            "restarting_from".into(),
+                                            Value::String(incarnation.clone()),
+                                        );
+                                    }
+                                    self.record_once(&subject.subject, "runtime.observed", fields)?;
                                     self.reconcile_runtime_stop(
                                         &subject.subject,
                                         &member.runtime_id,
@@ -6681,6 +6763,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence.push(token);
             }
             fields.insert("host".into(), Value::String(self.host.clone()));
+            if self.store.latest_actual_value(subject)?.is_some_and(|actual| {
+                actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
+            }) {
+                fields.insert("restarting_from".into(), Value::Null);
+            }
             self.record_once_with_evidence(subject, "runtime.observed", fields, evidence)?;
             return Ok(true);
         }
@@ -6887,6 +6974,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         reason: &str,
         request: Option<&crate::model::ClaimRecord>,
     ) -> Result<bool> {
+        if subject.kind == "agent" {
+            use crate::store::identities::{IdentityKind, IdentityStore as _};
+            self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
+        }
         if self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
@@ -6909,9 +7000,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             "a bound terminal seat cannot be spawned"
         );
         self.store.owned_desired_guard(subject)?;
+        // A self-restart released at its quiet boundary is as explicit as an immediate one.
         let explicit_retry = request.is_some_and(|request| {
-            request.body["fields"]["action"] == "restart"
-                && request.actor.as_deref().is_some_and(|actor| {
+            matches!(
+                request.body["fields"]["action"].as_str(),
+                Some("restart" | crate::restart::WHEN_IDLE)
+            ) && request.actor.as_deref().is_some_and(|actor| {
                     actor.starts_with("person/") || actor.starts_with("agent/")
                 })
         });
@@ -7240,11 +7334,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(format!("start-failed:{operation_id}")),
             };
+            let mut absent = member_fields(member, "absent", None, false);
+            if self.store.latest_actual_value(&subject.subject)?.is_some_and(|actual| {
+                actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
+            }) {
+                absent.insert("restarting_from".into(), Value::Null);
+            }
             let observed = ClaimInput {
                 subject: subject.subject.clone(),
                 kind: "runtime.observed".into(),
                 actor: None,
-                fields: member_fields(member, "absent", None, false),
+                fields: absent,
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(format!("start-absent:{operation_id}")),
@@ -7285,11 +7385,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
+        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
+            && let Some(from) = actual_field(&previous, "restarting_from")
+        {
+            starting.insert("restarting_from".into(), from.clone());
+        }
         let observed = ClaimInput {
             subject: subject.subject.clone(),
             kind: "runtime.observed".into(),
             actor: None,
-            fields: member_fields(member, "starting", incarnation.as_deref(), false),
+            fields: starting,
             evidence: placement_evidence,
             expected_subject: None,
             idempotency_key: Some(format!("start-observed:{operation_id}")),
@@ -7835,16 +7941,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if subject.kind != "agent" {
             return Ok(false);
         }
-        let Some(request) = self
-            .store
-            .claims_for(&subject.subject, Some("runtime.action.requested"))?
-            .into_iter()
-            .rev()
-            .find(|claim| {
-                claim.actor.is_some()
-                    && claim.body.pointer("/fields/action").and_then(Value::as_str)
-                        == Some("restart")
-            })
+        let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)?
         else {
             return Ok(false);
         };
@@ -7877,6 +7974,76 @@ impl<R: RuntimeControl> Reconciler<R> {
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
+        if request.body["fields"]["action"] == crate::restart::WHEN_IDLE
+            && attempted.is_none()
+            && self
+                .store
+                .operation_claim(&crate::restart::release_key(&request))?
+                .is_none()
+            && observation.is_none_or(|item| {
+                item.incarnation_id
+                    .as_deref()
+                    .is_none_or(|incarnation| incarnation == previous)
+            })
+        {
+            let now = now_ms();
+            let quiet = observation.is_some_and(|item| item.status == "running")
+                && crate::restart::fresh_harness(&self.store, &subject.subject, previous, now)?
+                    .as_ref()
+                    .is_some_and(crate::restart::quiet);
+            if !quiet {
+                let deadline = request
+                    .accepted_at_unix_ms
+                    .saturating_add(crate::restart::ATTENTION_AFTER_MS);
+                if now < deadline {
+                    // Harness transitions invalidate this member's tracked reads. This one
+                    // deadline raises attention; it never polls or forces a restart.
+                    self.arm_restart(&format!("self-restart:{}", request.id), deadline);
+                } else {
+                    self.store.record_runtime_failure(
+                        &crate::restart::attention_episode(&request),
+                        &AttentionRequest {
+                            reviewer: self
+                                .store
+                                .agent_person(&subject.subject)?
+                                .unwrap_or_else(|| "person/operator".into()),
+                            title: "A self-restart is still waiting for its turn to end".into(),
+                            reason: format!(
+                                "{} requested restart {} at {}ms and has not reported a fresh idle, quiescent boundary for 30 minutes. The restart remains pending and is never forced. Inspect its harness; to interrupt explicitly, run `st agents restart {} --now --as PERSON_OR_AGENT`.",
+                                subject.subject, request.id, request.accepted_at_unix_ms, subject.subject,
+                            ),
+                            severity: "warning".into(),
+                            targets: vec![subject.subject.clone()],
+                            actor: RECONCILER_ACTOR.into(),
+                            idempotency_key: format!("agent-restart-attention:{}", request.id),
+                        },
+                        crate::restart::WHEN_IDLE,
+                    )?;
+                }
+                // The incumbent still receives ordinary observations, work and mail.
+                return Ok(false);
+            }
+            // Persist the quiet boundary before normal shutdown. A daemon restarting between
+            // shutdown and launch must finish this same request without requiring a report from
+            // the harness it just stopped.
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: request.actor.clone(),
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String("restart".into())),
+                    ("operation_status".into(), Value::String("quiesced".into())),
+                    ("incarnation_id".into(), Value::String(previous.into())),
+                    (
+                        "reason".into(),
+                        Value::String("the self-restart reached an idle, quiescent boundary".into()),
+                    ),
+                ]),
+                evidence: vec![request.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(crate::restart::release_key(&request)),
+            })?;
+        }
         // An unidentified prior target supplies no replacement proof. In
         // particular, an older exited runtime after a closed failed attempt
         // cannot complete a new request that has not admitted any start yet.
@@ -7971,7 +8138,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &format!("restart blocked: {error:#}"),
                 );
             }
+            // A self-restart that waited for its idle, quiescent boundary was asked for by the
+            // seat itself. Asking it to prepare now would wake it into a new turn at that boundary.
+            let quiesced = self
+                .store
+                .operation_claim(&crate::restart::release_key(&request))?
+                .is_some();
             if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+                && !quiesced
                 && !self.restart_may_proceed(
                     &subject.subject,
                     observation,
@@ -8714,6 +8888,41 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(exit_code) = observation.exit_code {
             fields.insert("exit_code".into(), Value::from(exit_code));
         }
+        // Reuse the observation needed for record-once deduplication. Unmarked agents
+        // need no extra actual-state query or harness fold on this hot path.
+        let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        if subject.kind == "agent"
+            && let Some(from) = previous.as_ref()
+                .and_then(|claim| claim.body.pointer("/fields/restarting_from"))
+                .and_then(Value::as_str)
+        {
+            let replacement_ready = observation
+                .incarnation_id
+                .as_deref()
+                .is_some_and(|current| current != from)
+                && observation.status == "running"
+                && (member.driver.is_none()
+                    || self
+                        .store
+                        .current_harness(&subject.subject)?
+                        .is_some_and(|harness| {
+                            Some(harness.incarnation_id.as_str())
+                                == observation.incarnation_id.as_deref()
+                                && harness.is_ready()
+                        }));
+            fields.insert(
+                "restarting_from".into(),
+                if replacement_ready { Value::Null } else { Value::String(from.into()) },
+            );
+        }
+        if subject.kind == "agent" && previous.as_ref()
+            .and_then(|claim| claim.body.pointer("/fields/restarting_from"))
+            .is_some_and(Value::is_null)
+        {
+            // Keep the explicit clear stable: omitting it on the next pass would
+            // append an otherwise identical observation just to remove the field.
+            fields.insert("restarting_from".into(), Value::Null);
+        }
         let mut evidence = Vec::new();
         if member.kind == MemberKind::Exec {
             // Launch receipts stay on the runtime's node. Carry the launched declaration as
@@ -8753,7 +8962,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .collect();
             }
         }
-        self.record_once_with_evidence(&subject.subject, "runtime.observed", fields, evidence)
+        self.record_once_with_previous(&subject.subject, "runtime.observed", fields, evidence, previous.as_ref())
     }
 
     /// An unchanged diagnostic is one durable operation per affected subject and code, even
@@ -8845,10 +9054,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         fields: BTreeMap<String, Value>,
         evidence: Vec<String>,
     ) -> Result<()> {
-        if self
-            .store
-            .latest_observation(subject, kind)?
-            .is_some_and(|claim| {
+        let previous = self.store.latest_observation(subject, kind)?;
+        self.record_once_with_previous(subject, kind, fields, evidence, previous.as_ref())
+    }
+
+    fn record_once_with_previous(
+        &self,
+        subject: &str,
+        kind: &str,
+        fields: BTreeMap<String, Value>,
+        evidence: Vec<String>,
+        previous: Option<&crate::model::ClaimRecord>,
+    ) -> Result<()> {
+        if previous.is_some_and(|claim| {
                 claim.body.get("fields")
                     == Some(&serde_json::to_value(&fields).unwrap_or(Value::Null))
                     && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
@@ -25666,6 +25884,178 @@ agent "test/worker" { workspace "/tmp"; command "true"; name "X"; restart "never
         }).unwrap();
         store.rename_agent("agent/test/worker", Some("X again"), "relabel-x").unwrap();
         reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn declaration_restart_marker_reuses_deduplication_reads_for_unmarked_agents() {
+        for agents in [1, 16] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let source = format!("version 2\n{}", (0..agents).map(|index| {
+                format!("agent \"control/{index}\" {{ workspace \"/tmp\"; harness \"codex\" {{}} }}\n")
+            }).collect::<String>());
+            apply_source(&store, &source, "unmarked-controls");
+            let runtime = Arc::new(FakeRuntime::default());
+            let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+            let desired = store.desired_subjects().unwrap();
+            for subject in &desired {
+                let member = subject.member.as_ref().unwrap();
+                reconciler.record_member_as(subject, member, &RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+                    exit_code: None, incarnation_id: Some("stable".into()),
+                }, false).unwrap();
+            }
+            let cut = store.index().unwrap();
+            // The pre-change observation path: build fields, then record-once dedupe.
+            let baseline = smallclaims::sqlite::work::SqliteWorkScope::start();
+            for subject in &desired {
+                let member = subject.member.as_ref().unwrap();
+                reconciler.record_once(&subject.subject, "runtime.observed",
+                    member_fields(member, "running", Some("stable"), false)).unwrap();
+            }
+            let baseline = baseline.finish();
+            let revised = smallclaims::sqlite::work::SqliteWorkScope::start();
+            for subject in &desired {
+                let member = subject.member.as_ref().unwrap();
+                reconciler.record_member_as(subject, member, &RuntimeObservation {
+                    runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+                    exit_code: None, incarnation_id: Some("stable".into()),
+                }, false).unwrap();
+            }
+            let revised = revised.finish();
+            assert_eq!(revised.statements, baseline.statements, "unmarked agents add no statements");
+            assert_eq!(revised.vm_steps, baseline.vm_steps, "unmarked agents add no SQL work");
+            assert_eq!(store.index().unwrap(), cut, "unchanged agents append no observation");
+            eprintln!("unmarked agents={agents} baseline={baseline:?} revised={revised:?}");
+        }
+    }
+
+    #[test]
+    fn declaration_restart_marker_survives_shutdown_and_clears_on_ready_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"version 2
+agent "example/relaunch" { workspace "/tmp"; harness "codex" {}; env { REVISION "one" }; restart "never" }
+"#;
+        apply_source(&store, source, "relaunch-one");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        // A ready seat is asked for its handoff before a planned restart; do not wait for it.
+        .with_restart_prepare_deadline(std::time::Duration::ZERO);
+        reconciler.reconcile_once().unwrap();
+        let runtime_id = runtime.starts.lock().unwrap()[0].clone();
+        // The fake runtime names each start's incarnation; launch evidence is keyed by it.
+        let started = |nth: usize| {
+            store
+                .observations_for("agent/example/relaunch", "runtime.action.succeeded")
+                .unwrap()
+                .into_iter()
+                .filter(|claim| claim.body.pointer("/fields/action") == Some(&serde_json::json!("start")))
+                .nth(nth)
+                .and_then(|claim| claim.body.pointer("/fields/incarnation_id").and_then(Value::as_str).map(str::to_owned))
+                .unwrap()
+        };
+        let old = started(0);
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(old.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        assert!(
+            store
+                .latest_actual_value("agent/example/relaunch")
+                .unwrap()
+                .unwrap()["restarting_from"]
+                .is_null()
+        );
+        let replacement_cut = store.index().unwrap();
+        apply_source(&store, &source.replace("/tmp", "/var/tmp"), "relaunch-two");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(
+            runtime.stops.lock().unwrap().as_slice(),
+            std::slice::from_ref(&runtime_id)
+        );
+        let marker = || {
+            store
+                .latest_actual_value("agent/example/relaunch")
+                .unwrap()
+                .unwrap()["restarting_from"]
+                .clone()
+        };
+        assert_eq!(marker(), old.as_str());
+        let cut = store.index().unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(marker(), old.as_str());
+        assert_eq!(
+            store
+                .observations_for("agent/example/relaunch", "runtime.observed")
+                .unwrap()
+                .iter()
+                .filter(|claim| claim.store_index > cut)
+                .count(),
+            0,
+            "unchanged shutdown must not alternate running and restarting observations"
+        );
+        // The old wrapper is gone: the replacement start is observed under its own incarnation.
+        runtime.ptys.lock().unwrap().clear();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), 2);
+        let new = started(1);
+        assert_ne!(new, old);
+        assert_eq!(marker(), old.as_str());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(new.clone()),
+        });
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(marker(), old.as_str());
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/example/relaunch".into(),
+                kind: "harness.observed".into(),
+                actor: None,
+                fields: serde_json::from_value(
+                    serde_json::json!({"state":"idle","driver":"codex","incarnation_id":new}),
+                )
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert!(marker().is_null());
+        let finished_cut = store.index().unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(store.observations_for("agent/example/relaunch", "runtime.observed").unwrap()
+            .iter().filter(|claim| claim.store_index > finished_cut).count(), 0, "ready clear must remain stable");
+        let replacement_observations = store.observations_for("agent/example/relaunch", "runtime.observed")
+            .unwrap().into_iter().filter(|claim| claim.store_index > replacement_cut).count();
+        assert_eq!(replacement_observations, 4,
+            "cutover, starting, new running, and ready clear; no per-pass claims");
+
+        // An explicit stop during a later cutover ends the replacement interval.
+        apply_source(&store, source, "relaunch-back");
+        reconciler.reconcile_once().unwrap(); // asks the ready seat for its handoff
+        reconciler.reconcile_once().unwrap(); // the zero deadline has passed
+        assert_eq!(marker(), new.as_str());
+        apply_source(&store, r#"version 2
+stop "agent/example/relaunch"
+"#, "stop-relaunch");
+        runtime.ptys.lock().unwrap()[0].status = "exited".into();
+        runtime.ptys.lock().unwrap()[0].exit_code = Some(0);
+        reconciler.reconcile_once().unwrap();
+        assert!(marker().is_null());
         assert_eq!(runtime.starts.lock().unwrap().len(), 2);
     }
 

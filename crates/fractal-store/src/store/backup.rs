@@ -76,6 +76,26 @@ impl Store {
         Ok(hex::encode(hash.finalize()))
     }
 
+    /// Refuse an incomplete projection before returning an export stream. The
+    /// export repeats this check inside its own snapshot before emitting records.
+    pub fn check_backup_projection(&self) -> Result<()> {
+        self.read_snapshot(|_| {
+            let health: Option<(String, u64)> = self.readers.get().query_row(
+                "SELECT status,last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            let admitted: u64 = self.readers.get().query_row(
+                "SELECT value FROM meta WHERE key='replication_admitted_index'", [],
+                |row| row.get::<_, String>(0),
+            )?.parse()?;
+            anyhow::ensure!(
+                health.map_or(admitted == 0, |(status, through)| status == "healthy" && through >= admitted),
+                "backup requires a healthy, fully projected graph; retry after replication catches up"
+            );
+            Ok(())
+        })
+    }
+
     /// Run on a blocking read worker, never the writer queue. No page query scans the full log.
     pub fn write_backup(&self, output: &mut impl Write) -> Result<Header> {
         self.write_backup_with_bodies(output, None)
@@ -124,18 +144,7 @@ impl Store {
                 }
                 // Admission and projection commit separately. Only a snapshot whose persisted
                 // projection frontier covers its log can promise the same graph on restore.
-                let health: Option<(String, u64)> = self.readers.get().query_row(
-                    "SELECT status,last_good_store_index FROM projection_health WHERE aggregate='graph'",
-                    [], |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional()?;
-                let admitted: u64 = self.readers.get().query_row(
-                    "SELECT value FROM meta WHERE key='replication_admitted_index'", [],
-                    |row| row.get::<_, String>(0),
-                )?.parse()?;
-                anyhow::ensure!(
-                    health.map_or(admitted == 0, |(status, through)| status == "healthy" && through >= admitted),
-                    "backup requires a healthy, fully projected graph; retry after replication catches up"
-                );
+                self.check_backup_projection()?;
                 let mut header = self.backup_header()?;
                 if !header.ledgers.is_empty() {
                     header.version = super::backup_format::VERSION_WITH_LEDGERS;

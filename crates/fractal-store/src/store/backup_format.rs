@@ -48,6 +48,9 @@ pub struct Header {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "record", content = "data", rename_all = "kebab-case")]
 pub enum Record {
+    /// An export failed before producing its archive. This is never a valid
+    /// backup: readers report the cause and refuse publication or restore.
+    Failure { code: String, message: String },
     Header(Header),
     Envelope(ReplicaEnvelope),
     Checkpoint(CheckpointManifestPage),

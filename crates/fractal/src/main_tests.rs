@@ -7825,3 +7825,52 @@ async fn reading_the_outbox_does_not_wake_an_idle_driver() {
     })).unwrap();
     tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
 }
+
+#[test]
+fn native_identity_rename_commands_preserve_full_ids_and_fences() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/robin", "--reason", "Clarify responsibility",
+            "--if-naming-revision", "claim/example", "--idempotency-key", "example-rename", "--json",
+        ]).unwrap();
+        assert!(cli.json);
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected identity rename"),
+        };
+        assert_eq!(args.from, "agent/example-old");
+        assert_eq!(args.to, "agent/example-new");
+        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
+        assert_eq!(args.expected_declaration, None);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
+    }
+}
+
+#[test]
+fn native_identity_rename_requires_actor_and_reason() {
+    for missing in ["--as", "--reason"] {
+        let mut arguments = vec!["st", "agents", "rename-id", "agent/example-old", "agent/example-new"];
+        for (flag, value) in [("--as", "person/robin"), ("--reason", "Clarify responsibility"),
+            ("--idempotency-key", "example-rename")] {
+            if flag != missing {
+                arguments.extend([flag, value]);
+            }
+        }
+        assert!(Cli::try_parse_from(arguments).is_err(), "{missing}");
+    }
+}
+
+#[test]
+fn native_identity_rename_allows_generated_idempotency_key() {
+    let cli = Cli::try_parse_from([
+        "st", "agents", "rename-id", "agent/example-old", "agent/example-new",
+        "--as", "person/robin", "--reason", "Clarify responsibility",
+    ]).unwrap();
+    let Command::Agents { command: AgentsCommand::RenameId(args) } = cli.command else {
+        panic!("expected identity rename");
+    };
+    assert_eq!(args.idempotency_key, None);
+}

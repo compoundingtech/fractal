@@ -119,11 +119,16 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
     // All database reads use this cut; potentially large mission JSON is parsed after release.
     #[cfg(any(test, feature = "test-support"))]
     let snapshot_started = std::time::Instant::now();
-    let captured = store.read_snapshot(|_| inputs(store, &actor, at));
+    let captured = store.read_snapshot(|_| {
+        let connection = store.readers.get();
+        let actor = identities::resolve_reference_conn(&connection, &actor)?;
+        let inputs = inputs(store, &actor, at)?;
+        Ok((actor, inputs))
+    });
     #[cfg(any(test, feature = "test-support"))]
     MAX_SNAPSHOT_CALL_NS
         .with(|maximum| maximum.set(maximum.get().max(snapshot_started.elapsed().as_nanos())));
-    let mut inputs = captured?;
+    let (actor, mut inputs) = captured?;
     let mut definitions = BTreeMap::<String, Option<DefinitionIndex>>::new();
     for view in &mut inputs.views {
         // A pending available-to step or a draining run can become visible without joining a

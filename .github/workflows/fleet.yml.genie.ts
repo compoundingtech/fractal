@@ -47,6 +47,7 @@ import {
   extraMergeTestRunsOn,
   workspacePreparationSteps,
   testArchiveConsumerSetup,
+  nextestFlakyUpload,
 } from './workspace-ci.ts'
 
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
@@ -60,6 +61,7 @@ const linuxStageJob = ({
   before = [],
   extraLogs = '',
   runsOn = supportingStageRunsOn,
+  flakyArtifact = false,
 }: {
   name: string
   stage: string
@@ -69,6 +71,8 @@ const linuxStageJob = ({
   before?: readonly unknown[]
   extraLogs?: string
   runsOn?: unknown
+  /** A test lane: publish nextest's flaky-test count as an artifact name, for `st slo`'s flakes. */
+  flakyArtifact?: boolean
 }) => ({
   name,
   ...afterPickRunner,
@@ -84,7 +88,11 @@ const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
-    nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
+    {
+      ...nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
+      ...(flakyArtifact ? { id: 'nextest' } : {}),
+    },
+    ...(flakyArtifact ? [nextestFlakyUpload(name)] : []),
     {
       name: 'Save Nix outputs to the local Nix cache',
       if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`,
@@ -466,6 +474,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests': {
       ...linuxStageJob({
         name: 'linux-tests',
+        flakyArtifact: true,
         stage: 'tests',
         setup: testArchiveConsumerSetup,
         runsOn: primaryTestRunsOn,
@@ -481,6 +490,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests-shard-2': {
       ...linuxStageJob({
         name: 'linux-tests-shard-2',
+        flakyArtifact: true,
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
@@ -493,6 +503,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests-shard-3': {
       ...linuxStageJob({
         name: 'linux-tests-shard-3', stage: 'tests', setup: testArchiveConsumerSetup,
+        flakyArtifact: true,
         runsOn: extraMergeTestRunsOn,
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:3/4', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
@@ -503,6 +514,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-tests-shard-4': {
       ...linuxStageJob({
         name: 'linux-tests-shard-4', stage: 'tests', setup: testArchiveConsumerSetup,
+        flakyArtifact: true,
         runsOn: extraMergeTestRunsOn,
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:4/4', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',

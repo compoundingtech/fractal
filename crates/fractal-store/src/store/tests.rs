@@ -2749,6 +2749,23 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
 }
 
 #[test]
+fn declaration_restart_observation_waits_on_an_older_registry() {
+    let store = Store::open_memory("node").unwrap();
+    let record = store.append_claim(&ClaimInput {
+        subject: "agent/example/relaunch".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "status":"running", "incarnation_id":"old", "restarting_from":"old"
+        })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut older = fractal_schema::registry().clone();
+    older.claims.get_mut("runtime.observed").unwrap().fields.remove("restarting_from").unwrap();
+    assert!(matches!(classify_replicated_claim_with_registry(&record, &older).unwrap(),
+        ReplicatedClaimAdmission::UnknownField));
+    assert!(matches!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).unwrap(),
+        ReplicatedClaimAdmission::Valid));
+}
+
+#[test]
 fn a_subject_with_no_actual_or_desired_state_has_unknown_reachability() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/diagnostic-run/sig.hub";
@@ -4493,6 +4510,8 @@ fn nodes_that_received_the_same_claims_in_different_orders_agree() {
 fn the_same_envelopes_projecting_different_graphs_diverge() {
     let left = Store::open_memory("left").unwrap();
     let right = Store::open_memory("right").unwrap();
+    left.capture_divergences(true);
+    right.capture_divergences(true);
     let intent = simple("true");
     let preview = left
         .mission(

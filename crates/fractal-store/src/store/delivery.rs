@@ -80,6 +80,28 @@ impl Store {
             Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
         drop(statement);
+        self.message_view_cached_at_version(
+            connection,
+            subject,
+            created_index,
+            message_versions::Version {
+                latest_claim_index,
+                desired_claim_id,
+            },
+        )
+    }
+
+    pub fn message_view_cached_at_version(
+        &self,
+        connection: &Connection,
+        subject: &str,
+        created_index: u64,
+        version: message_versions::Version,
+    ) -> Result<MessageView> {
+        let message_versions::Version {
+            latest_claim_index,
+            desired_claim_id,
+        } = version;
         if let Some(view) = self
             .smalltalk
             .message_cache
@@ -124,8 +146,10 @@ impl Store {
         limit: usize,
         delivery: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        let recipient = recipient.map(normalize_message_party);
         let connection = self.readers.get();
+        let recipient = recipient.map(|recipient|
+            super::identities::resolve_reference_conn(&connection, &normalize_message_party(recipient))
+        ).transpose()?;
         // Native harnesses repeatedly ask for their complete durable mailbox so
         // they can reconcile delivery receipts. Start at the indexed recipient
         // claims, not every lifecycle claim for every message in the fleet.

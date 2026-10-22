@@ -23,6 +23,9 @@ Commands that call cargo reach the build admission shim on PATH like any other c
 admission. With --push the signed notes are pushed to REMOTE after they verify, with the identity git uses for REMOTE
 (or EVIDENCE_PUSH_TOKEN if set), as refs/tags/evidence/<tree>/<record> and refs/notes/evidence/<tree>/<record> (see
 evidence-wrap); whether that identity may create them is a repository rule that has not been confirmed for agent seats.
+On a host that runs the evidence log (scripts/evidence-log.service installed as a systemd user unit), a run with --push then
+asks it to pull at once, without waiting: a pass counts only once the log lists it, so this saves up to one pull interval.
+ST_EVIDENCE_LOG_NUDGE (a JSON argv) replaces that command; asking never changes the result.
 
 It runs `nix develop` and `pnpm install` from the tree under test, on this machine, as this user, with the host's
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
@@ -201,6 +204,39 @@ def covered(verifier, directory, tree, check, base, repository):
     return False, result.get('reason') or 'not covered'
 
 
+LOG_UNIT = 'evidence-log.service'
+
+
+def log_nudge_argv():
+    """The command that asks this host's evidence log to pull now, or None when the host runs no log."""
+    configured = os.environ.get('ST_EVIDENCE_LOG_NUDGE')
+    if configured:
+        argv = json.loads(configured)
+        if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+            raise ValueError('ST_EVIDENCE_LOG_NUDGE must be a JSON array of strings')
+        return argv
+    if (Path.home() / '.config/systemd/user' / LOG_UNIT).exists() and shutil.which('systemctl'):
+        return ['systemctl', '--user', 'start', '--no-block', LOG_UNIT]
+    return None
+
+
+def nudge_log():
+    """One line for the summary, or None when there is no log to ask. Best effort: the pull's own timer runs anyway."""
+    try:
+        argv = log_nudge_argv()
+    except ValueError as error:
+        return f'evidence log: not asked ({error})'
+    if argv is None:
+        return None
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f'evidence log: could not ask it to pull now ({error}); its timer will'
+    if done.returncode != 0:
+        return f'evidence log: asking it to pull now failed ({done.stderr.decode(errors="replace").strip()[-200:]}); its timer will'
+    return 'evidence log: asked this host\'s log to pull now'
+
+
 def repository_of(remote):
     url = text(git('remote', 'get-url', remote, check=False))
     for prefix in ('https://github.com/', 'git@github.com:', 'ssh://git@github.com/'):
@@ -301,6 +337,10 @@ def main(argv):
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
+            if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
+                line = nudge_log()
+                if line:
+                    print(f'  {line}')
             return 1 if failed else 0
         finally:
             if directory.exists():

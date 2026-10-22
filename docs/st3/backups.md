@@ -2,12 +2,24 @@
 
 `st backup create FILE` saves one live daemon snapshot as a private file. It reads signed sync
 envelopes on a pooled read worker in pages of 512, then downloads the completed archive. Writes
-and other requests continue while it reads. A slow download does not keep the database snapshot
+and other requests continue while it reads. The server returns headers after a bounded health
+check; archive preparation follows the response stream lifetime, rather than the ordinary
+15-second header deadline. Only one live export may prepare or download at a time; another
+receives `backup-busy` (503). Dropping the response cancels preparation, and the slot remains
+occupied until its worker has released the snapshot. A slow download does not keep the database snapshot
 open. The daemon needs temporary disk space for the archive; the destination is published only
 once its checksum and end record verify. Existing backup files are never overwritten. If
 replication has admitted claims whose projections are still pending, or the graph is stale,
 export refuses before writing an archive; retry after the graph has recovered. A missing writer
 predecessor also prevents publication until that history arrives.
+
+Preparation can take minutes before the first archive bytes arrive. The CLI has no total or
+idle read timeout on this download; the normal local Unix-socket path has no HTTP proxy.
+A separately configured HTTP proxy must allow that preparation interval. A producer failure
+after headers is reported as a terminal `failure` record with a code and message, never a valid
+backup; the CLI reports the cause and leaves no destination file. Older clients still reject
+such an incomplete export but may show a generic format error. Successful archive bytes and
+the restore format are unchanged.
 
 ```sh
 st backup create before-upgrade.jsonl
