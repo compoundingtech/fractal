@@ -27,6 +27,11 @@ TEMPLATE = ('2026-10-22T05:58:31.4Z git show "$BASE_SHA:scripts/ci-evidence-gate
             'decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }')
 
 
+def trigger_reasons(entry):
+    """The trigger's own reasons, without a precondition read from the repository's current policy (it changes as PRs land)."""
+    return [why for why in entry['why_not'] if not why.startswith('the policy does not require')]
+
+
 def at(hours_ago, seconds=0):
     return NOW - datetime.timedelta(hours=hours_ago, seconds=seconds)
 
@@ -140,6 +145,19 @@ class FlipReady(unittest.TestCase):
         self.assertTrue(result['checks']['typescript-client']['enforce'])  # reported though enforced
         self.assertEqual(result['checks']['typescript-client']['lines'], 0)
 
+    def test_linux_gate_is_not_proposed_until_its_host_and_agent_notes_must_name_the_clippy_base(self):
+        ready = {'ready': True, 'why_not': []}
+        level = lambda *inputs: {'required_inputs': ['flake_lock_sha256', *inputs]}
+        entry = lambda **levels: {'kinds': {'wrapper': {'command': ['linux-gate'], 'by_level': levels}}}
+        self.assertEqual(flip.preconditions(ready, 'linux-gate', {'kinds': {}}),
+                         {'ready': False, 'why_not': ['the policy does not require clippy_base_sha of host and agent linux-gate notes']})
+        self.assertEqual(flip.preconditions(ready, 'linux-gate', entry(host=level('clippy_base_sha'), agent=level()))['why_not'],
+                         ['the policy does not require clippy_base_sha of agent linux-gate notes'])
+        self.assertEqual(flip.preconditions(ready, 'linux-gate', entry(host=level('clippy_base_sha'), agent=level('clippy_base_sha'))), ready)
+        # The trigger's own reasons stay, the precondition's are added; other checks have none.
+        self.assertEqual(flip.preconditions({'ready': False, 'why_not': ['x']}, 'linux-gate', {})['why_not'][0], 'x')
+        self.assertEqual(flip.preconditions(ready, CHECK, {}), ready)
+
     def test_the_window_has_not_started_while_the_log_key_is_not_pinned(self):
         self.ready_history(count=40)
         self.gh.run(3000, at(20), [decision(log='-')])
@@ -194,14 +212,14 @@ class FlipReady(unittest.TestCase):
                     members={'linux-tests': 'failure'})  # another attempt's member red does not make attempt 1's hidden
         code, result, _ = self.report()
         entry = result['checks']['linux-gate']
-        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['ready'], entry['why_not']), ([5001], [5000], False,
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['ready'], trigger_reasons(entry)), ([5001], [5000], False,
                                                                                                         ['1 runs with a hidden red']))
         # (a run with a hidden red in any attempt is listed as hidden only)
         self.gh = FakeGitHub()
         self.ready_history(count=40, check='linux-gate')
         self.gh.run(5000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate', members={'upgrade-impact': 'failure'})
         entry = self.check_of('linux-gate')
-        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['ready']), ([], [5000], True))
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([], [5000], []))  # the trigger holds
 
     def test_an_aggregate_red_from_a_member_the_skip_would_skip_is_hidden(self):
         self.ready_history(count=40, check='linux-gate')
@@ -210,7 +228,7 @@ class FlipReady(unittest.TestCase):
         self.gh.run(6001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate',
                     members={'linux-tests-shard-3': 'cancelled', 'upgrade-impact': 'failure'})
         entry = self.check_of('linux-gate')
-        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['why_not']), ([6000, 6001], [], ['2 runs with a hidden red']))
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([6000, 6001], [], ['2 runs with a hidden red']))
 
     def test_the_members_a_linux_gate_skip_skips_are_the_jobs_whose_condition_reads_its_skip_output(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()

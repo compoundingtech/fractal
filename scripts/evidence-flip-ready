@@ -192,6 +192,24 @@ def evaluate(rows, enforce, now):
     return result
 
 
+def clippy_base_pinned(entry):
+    """linux-gate's clippy stage ratchets against a base: a host or agent note must say which one it measured against."""
+    levels = ((entry.get('kinds') or {}).get('wrapper') or {}).get('by_level') or {}
+    missing = [level for level in ('host', 'agent')
+               if 'clippy_base_sha' not in ((levels.get(level) or {}).get('required_inputs') or ())]
+    return [f'the policy does not require clippy_base_sha of {" and ".join(missing)} linux-gate notes'] if missing else []
+
+
+# Conditions a check's policy entry must meet before its flip is proposed, whatever the decision lines say.
+PRECONDITIONS = {'linux-gate': clippy_base_pinned}
+
+
+def preconditions(result, check, entry):
+    """Fold a check's preconditions, read from the policy at origin/main, into its trigger result."""
+    why = [*result['why_not'], *PRECONDITIONS.get(check, lambda entry: [])(entry)]
+    return {**result, 'ready': not why, 'why_not': why}
+
+
 def git(root, *args, runner=default_runner):
     done = runner(['git', '-C', str(root), *args])
     if done.returncode != 0:
@@ -351,7 +369,7 @@ def propose(report, root, github, runner, dry_run, today):
 
 def main(argv, runner=default_runner, now=None, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--repo', default='compoundingtech/smalltalk')
+    parser.add_argument('--repo', default='compoundingtech/fractal')
     parser.add_argument('--cache', default=os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'evidence-flip-ready'))
     parser.add_argument('--propose', action='store_true', help='open a flip pull request for each ready check')
     parser.add_argument('--dry-run', action='store_true', help='with --propose: print the diff, change nothing')
@@ -369,7 +387,7 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         print(f'could not read GitHub or origin/main: {error}', file=sys.stderr)
         return 2
     report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
-        check: evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now)
+        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry)
         for check, entry in policy.items()}}
     print(json.dumps(report, indent=2))
     if args.propose:
