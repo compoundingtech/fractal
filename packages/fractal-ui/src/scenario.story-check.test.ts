@@ -331,8 +331,9 @@ const configuredStoryFiles = (globs: string[], directory = storybookDirectory) =
       for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
       walk(root)
     }
-    for (const file of globSync(glob, { cwd: directory, exclude: ['**/node_modules/**'] })) {
-      files.add(nodePath.resolve(directory, file))
+    for (const file of globSync(glob, { cwd: directory })) {
+      // Glob exclusions miss leading ../ patterns; match dependency segments like the walk.
+      if (!file.split(nodePath.sep).includes('node_modules')) files.add(nodePath.resolve(directory, file))
     }
   }
   return [...files]
@@ -378,6 +379,32 @@ test('configured inventory rejects directory and file symlinks without following
     expect(configuredStoryFiles(globs, directory)).toEqual([story])
     expect(() => configuredStoryFiles(['src/node_modules/**/*.stories.tsx'], directory))
       .toThrow('Unsupported node_modules segment in configured Storybook pattern: src/node_modules/**/*.stories.tsx; extend the scenario inventory check')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('configured inventory excludes dependency stories with leading relative prefixes', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-dependencies-'))
+  try {
+    const config = nodePath.join(directory, '.storybook')
+    const source = nodePath.join(directory, 'src')
+    mkdirSync(config)
+    mkdirSync(nodePath.join(source, 'a/node_modules/b'), { recursive: true })
+    mkdirSync(nodePath.join(source, 'a/not_node_modules/b'), { recursive: true })
+    const story = nodePath.join(source, 'a/Example.stories.tsx')
+    const similarNameStory = nodePath.join(source, 'a/not_node_modules/b/Example.stories.tsx')
+    writeFileSync(story, '')
+    writeFileSync(similarNameStory, '')
+    writeFileSync(nodePath.join(source, 'a/node_modules/b/Dependency.stories.tsx'), '')
+    for (const glob of [
+      '../src/**/*.stories.tsx',
+      './../src/**/*.stories.tsx',
+      '../.storybook/../src/**/*.stories.{ts,tsx}',
+      '../src/{a,./a}/**/*.stories.tsx',
+    ]) {
+      expect(configuredStoryFiles([glob], config).sort(), glob).toEqual([story, similarNameStory].sort())
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
