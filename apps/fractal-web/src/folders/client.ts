@@ -1,14 +1,14 @@
-import { St3Client } from '@smalltalk/st3-client'
-import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@smalltalk/st3-client'
+import { FractalClient } from '@fractal/client'
+import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@fractal/client'
 import { Schema } from 'effect'
-import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@smalltalk/st3-client/schema'
+import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 const isCapabilities = Schema.is(Schema.toEncoded(CapabilitiesSchema))
 const isEdit = Schema.is(Schema.toEncoded(ArrangementEditSchema))
 
 export type ArrangementEdit = Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>
-export type ArrangementsGateway = Pick<St3Client, 'discover' | 'arrangementsGet' | 'arrangementsList' | 'arrangementEdit'>
+export type ArrangementsGateway = Pick<FractalClient, 'discover' | 'arrangementsGet' | 'arrangementsList' | 'arrangementEdit'>
 export interface Selection { readonly owner: string; readonly subject: string }
 export interface FoldersClient {
   readonly selection: Selection
@@ -65,8 +65,8 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
 
 // Generated arrangements are authoritative. FolderDoc is only the Tree's presentation shape.
 import * as Atom from 'effect/reactivity/Atom'
-import type { CollectionSocketFactory } from '@smalltalk/st3-client'
-import { arrangementActions, type ArrangementActionPort } from '@st3/sdk/effect'
+import type { CollectionSocketFactory } from '@fractal/client'
+import { arrangementActions, type ArrangementActionPort } from '@fractal/sdk/effect'
 import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, st3InventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
 import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
@@ -97,7 +97,7 @@ export const arrangementSidebarDoc = (arrangement: Arrangement): FolderDoc => {
       [subject, { ...placement.value, at: at(placement.revision) }])),
   }
 }
-export type SidebarGateway = ArrangementInventoryGateway & Pick<St3Client, 'discover'> & {
+export type SidebarGateway = ArrangementInventoryGateway & Pick<FractalClient, 'discover'> & {
   readonly actions: ArrangementActionPort
 }
 /**
@@ -202,9 +202,17 @@ export const sidebarFolders = ({ gateway, socket }: {
   return current
 })
 /** Same-origin paired client API, scoped to the discovered person. */
-export const folders = sidebarFolders({
+const pageHotData = import.meta.hot?.data
+export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
     const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
-    return { ...st3InventoryGateway(options), actions: arrangementActions(new St3Client(options)) }
+    return { ...st3InventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
   },
 })
+
+/** Page startup may provide an alternate transport before the first registry consumer mounts. */
+export const installPageFolders = (source: Atom.Atom<FolderState>): void => {
+  folders = source
+  // The folder module can reload without re-evaluating the retained page runtime.
+  if (pageHotData !== undefined) pageHotData.pageFolders = source
+}
