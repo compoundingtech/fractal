@@ -60,7 +60,9 @@ class CiLocal(unittest.TestCase):
                # The names a seat carries since the rename: the live daemon's endpoint and the seat's identity.
                'FRACTAL_ENDPOINT': '/run/user/test/live.sock', 'FRACTAL_AGENT': 'agent/x', 'ST2_HOME': '/x',
                'GH_TOKEN': 'secret', 'GITHUB_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x', 'EVIDENCE_PUSH_TOKEN': 'secret',
-               'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'), **extra}
+               'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'),
+               'ST2_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite', 'FRACTAL_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite',
+               'ST3_OTELITE_BIN': f'{self.home}/bin/otelite', **extra}
         done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
@@ -78,8 +80,10 @@ class CiLocal(unittest.TestCase):
             for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
                 self.assertTrue(env[name].startswith(str(scratch.parent)), (name, env[name]))
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
-                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE'):
+                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
+            # The dev shell's collector for the OTLP export tests stays, as in CI; the same name pointing anywhere else does not.
+            self.assertEqual((env.get('ST2_OTELITE_BIN'), env.get('FRACTAL_OTELITE_BIN')), ('/nix/store/x-otelite/bin/otelite',) * 2)
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
             # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),

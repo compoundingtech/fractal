@@ -78,32 +78,6 @@ def git(*args):
     return subprocess.run(['git', *args], capture_output=True, text=True)
 
 
-def rows(output):
-    """{check: covered?} from `st-test --status` rows."""
-    found = {}
-    for line in output.splitlines():
-        parts = line.split()
-        if line.startswith('  ') and len(parts) > 1 and parts[1] in ('covered', 'not'):
-            found[parts[0]] = parts[1] == 'covered'
-    return found
-
-
-def remind_heavy(script, base, top, light):
-    """The heavy checks (st-test --all) are never run here: say, once per push, which are not signed for this tree, so the
-    seat runs them before it marks the pull request ready. It only reads; it never changes what the hook does."""
-    try:
-        every = subprocess.run([sys.executable, str(script), '--status', '--all', '--base', base], capture_output=True, text=True,
-                               cwd=top, env=clean_environment(), timeout=positive('ST_EVIDENCE_STATUS_TIMEOUT', STATUS_LIMIT))
-    except subprocess.TimeoutExpired:
-        return
-    if every.returncode not in (0, 3):
-        return
-    missing = sorted(name for name, covered in rows(every.stdout).items() if name not in rows(light.stdout) and not covered)
-    if missing:
-        say(f'not signed for this tree: {", ".join(missing)} (heavy, never run by this hook). Before marking the pull request '
-            f'ready, run scripts/st-test --all --push {base.split("/", 1)[0]} once on its head')
-
-
 def positive(name, default):
     raw = os.environ.get(name)
     if raw is None:
@@ -198,7 +172,6 @@ def hook(argv):
     except subprocess.TimeoutExpired:
         say('could not tell whether the tree is covered in time (a slow fetch?); not signing, the pull request will run in CI')
         return 0
-    remind_heavy(script, base, top, status)
     if status.returncode == 0:
         return 0  # already covered: nothing to say
     if status.returncode != 3:
