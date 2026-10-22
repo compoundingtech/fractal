@@ -405,7 +405,7 @@ impl RuntimeStopEvidence<'_> {
                     registry_created_at = "unavailable_at_reconcile_boundary",
                     recorded_scope = "unavailable_at_reconcile_boundary",
                     tagged_scope = "unavailable_at_reconcile_boundary",
-                    spawn_lock_outcome = "not_applicable_at_reconcile_boundary",
+                    spawn_lock = "not_applicable_at_reconcile_boundary",
                     action,
                     guard_decision,
                     "reconcile runtime stop boundary"
@@ -6826,7 +6826,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
-            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", true);
+            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
             self.runtime.end_leftovers(runtime_id, terminal);
             let mut fields = BTreeMap::from([
                 ("status".into(), Value::String("stopped".into())),

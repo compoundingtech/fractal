@@ -235,7 +235,7 @@ fn observe(unit: &str) -> Result<ScopeRetirementProof> {
         registry_status = "unavailable",
         registry_pid = "unavailable",
         registry_created_at = "unavailable",
-        registry_exit = "unavailable",
+        registry_exit_code = "unavailable",
         tagged_scope = "unavailable",
         spawn_lock = "not_applicable"
     )

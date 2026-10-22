@@ -1112,6 +1112,6 @@ fn runtime_stop_evidence_distinguishes_guards_from_destructive_actions() {
         assert!(line.contains("registry_exit_code=Some(17)"));
         assert!(line.contains("fresh_observed_incarnation=\"unavailable_at_reconcile_boundary\""));
         assert!(line.contains("recorded_scope=\"unavailable_at_reconcile_boundary\""));
-        assert!(line.contains("spawn_lock_outcome=\"not_applicable_at_reconcile_boundary\""));
+        assert!(line.contains("spawn_lock=\"not_applicable_at_reconcile_boundary\""));
     }
 }
