@@ -65,6 +65,7 @@ pub mod resource_preparation;
 pub mod observer_actuals;
 #[cfg(test)]
 pub mod resource_preparation_fence_tests;
+pub mod message_versions;
 pub mod github_workflow_failures;
 pub mod git_change_tables;
 pub mod message_subscriptions;
