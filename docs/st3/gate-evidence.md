@@ -1085,6 +1085,36 @@ and a signer level's own `events` can only narrow it further (the verifier repor
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
 
+#### Input values (`input_order`, `shard_inputs`)
+
+`required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
+
+**`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
+when its value ranks at or above the run's own value.
+- The run's value comes from the gate: `evidence-verify --run-input KEY=VALUE`.
+- A run that did not say its value is never covered (`no_run_input`).
+- A note whose value is missing, unknown or weaker is refused (`wrong_input`).
+
+It is for inputs that depend on the run, not the tree. fractal-web's `kit_inputs` says whether the diff from the run's base touched kit
+paths; with `false` the lane skips every kit play. A note made without kit plays may cover a run that would skip them too, never one that
+would run them.
+
+**`shard_inputs`** names a sharded job's inputs: `count` (1 to 16) and `results`.
+- `results` must read `0=success,1=success,...` for every shard.
+- `pull_request_count`, when given, is the only count a note from a `pull_request` run may carry.
+
+The fractal-web note's per-shard results come from the matrix's single result, which GitHub reports as success only when every shard
+succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test` holds every shard count in the workflow to the
+matrix's own condition and length.
+
+fractal-web's policy checks `shard_inputs` now. Its `input_order` arrives with the gate change that passes the run's `kit_inputs`,
+since without it no fractal-web note could cover any run. `scripts/evidence-flip-ready` does not propose fractal-web's flip until both are in
+the policy.
+
+`app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
+main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a
+note covers.
+
 ### Which checks skip today
 
 | Check | `enforce` | `events` | `sample_one_in` | Since |
