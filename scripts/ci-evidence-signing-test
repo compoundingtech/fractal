@@ -247,6 +247,27 @@ with tempfile.TemporaryDirectory() as directory:
     web = {**needs, 'fractal-web-execution': {'result': 'skipped'}}
     assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(web), GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'a skipped fractal-web job does not stop the linux-gate note'
     assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests'], 'and it is not recorded in the command'
+    # The separate checks (typescript-client, genie-freshness) have their own notes: neither their results nor their gates'
+    # decisions are part of the linux-gate note. A gate of a linux-gate member that skipped still stops it.
+    def gates(**skips):
+        return {f'evidence-gate-{name}': {'result': 'success', 'outputs': {'skip': 'true' if skips.get(name.replace('-', '_')) else 'false'}}
+                for name in ('linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'typescript-client', 'genie-freshness')}
+    members = {**needs, 'isolation-vm': {'result': 'success'}, 'typescript-client': {'result': 'success'}, 'genie-freshness': {'result': 'success'}}
+    separate = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(typescript_client=True)}), GITHUB_EVENT_NAME='merge_group'))
+    recorded = json.loads(out.read_text())
+    assert separate.returncode == 0, ('a separate check\'s gate that skipped does not stop the linux-gate note', separate.stdout)
+    assert recorded['command'] == ['linux-gate', 'aggregate', 'isolation-vm', 'linux-clippy', 'linux-gate', 'linux-tests'], recorded['command']
+    assert 'typescript-client' not in recorded['output']['needs'] and 'genie-freshness' not in recorded['output']['needs']
+    assert 'typescript-client' not in json.dumps(recorded['inputs']) and 'genie-freshness' not in json.dumps(recorded['inputs']), recorded['inputs']
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(genie_freshness=True), 'genie-freshness': {'result': 'skipped'}}),
+                                                  GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'a skipped separate check is not a linux-gate member'
+    for gate_name in ('linux_gate', 'mail_redelivery_canaries', 'isolation_vm'):
+        refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(**{gate_name: True})}), GITHUB_EVENT_NAME='merge_group'))
+        assert refused.returncode == 1 and 'evidence-gate-' + gate_name.replace('_', '-') in refused.stdout, (gate_name, refused.stdout)
+    for member in ('linux-tests', 'isolation-vm', 'mail-redelivery-canaries', 'upgrade-impact'):
+        refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**members, **gates(), member: {'result': 'skipped'}}), GITHUB_EVENT_NAME='merge_group'))
+        assert refused.returncode == 1 and member in refused.stdout and 'did not run' in refused.stdout, (member, refused.stdout)
+    print('passed: a skipped linux-gate member or a skip by its gate never reads as success; the separate checks are not in the linux-gate note')
     missing = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({'linux-tests': {'result': 'success'}})))
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')

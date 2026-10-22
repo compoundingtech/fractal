@@ -299,7 +299,10 @@ assert "bash scripts/ci-web-shell fill" in upkeep
 assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
-assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"
+required = [check["context"] for ruleset in json.loads(settings)["rulesets"] if ruleset["name"] == "main"
+            for rule in ruleset["rules"] if rule["type"] == "required_status_checks"
+            for check in rule["parameters"]["required_status_checks"]]
+assert "fractal-web" in required, "fractal-web is a required check on main"
 print("passed: generated jobs are unfiltered, hosted, bounded and fail closed")
 
 client = blocks["typescript-client"]

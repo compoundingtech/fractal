@@ -50,7 +50,6 @@
           "command": [
             "linux-gate",
             "aggregate",
-            "genie-freshness",
             "isolation-vm",
             "linux-clippy",
             "linux-fleet-compat",
@@ -61,7 +60,6 @@
             "linux-tests-shard-3",
             "linux-tests-shard-4",
             "mail-redelivery-canaries",
-            "typescript-client",
             "upgrade-impact"
           ],
           "required_inputs": [
@@ -196,6 +194,36 @@
         "fleet"
       ],
       "enforce": false,
+      "sample_one_in": 5,
+      "inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ],
       "kinds": {
         "observed": {
           "command": [
@@ -325,6 +353,36 @@
         "fleet"
       ],
       "enforce": false,
+      "sample_one_in": 5,
+      "inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ],
       "kinds": {
         "observed": {
           "command": [
@@ -352,6 +410,61 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
           }
         }
       }
