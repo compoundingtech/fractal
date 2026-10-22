@@ -248,10 +248,6 @@ const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#Drawers': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersLight': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersOpen': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersFlow': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
@@ -561,13 +557,13 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('app mode debt matches its reviewed shrink-only pin', () => {
-  expect(Object.keys(deferredAppStoryModes)).toHaveLength(10)
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(6)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(312)
+  expect(exemptions).toHaveLength(381)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 

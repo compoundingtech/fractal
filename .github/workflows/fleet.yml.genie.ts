@@ -17,6 +17,7 @@ import {
   fullHistoryCheckoutSteps,
   megarepoApplyStep,
   fractalWebJobs,
+  fractalWebNoteEnv,
   isolationVmSteps,
   testArchiveProducer,
   genieSetupSteps,
@@ -223,7 +224,7 @@ const skipIfCovered = (check: string, steps: readonly any[]) => {
 // Shadow mode: for each required check, ask the verifier from the accepted base whether a trusted note
 // exists for this run's tree and record the outcome in a fixed step name a collector can count.
 // It never skips a check, never fails, and is not itself a required check.
-const evidenceGateChecks = ['linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries']
+const evidenceGateChecks = ['linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web']
 const evidenceGateOutcomes = [
   ['satisfied', 'evidence satisfied by existing note'],
   ['degraded', 'evidence existing note is degraded'],
@@ -597,7 +598,8 @@ done`,
     // key. The signer scripts come from the BASE commit of the change, never from the tree under test.
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
-      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames, 'fractal-web-execution', 'evidence-gate-linux-gate', 'evidence-gate-mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-genie-freshness', 'evidence-gate-typescript-client'],
+      // The fractal-web jobs and gate are for the web lane's own whole-check note; the linux-gate note leaves them out.
+      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames, 'fractal-web-changes', 'fractal-web-execution', 'fractal-web', 'evidence-gate-linux-gate', 'evidence-gate-mail-redelivery-canaries', 'evidence-gate-isolation-vm', 'evidence-gate-genie-freshness', 'evidence-gate-typescript-client', 'evidence-gate-fractal-web'],
       // The merge queue, main and pull requests from this repository sign; a fork never gets the key.
       if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}",
       'runs-on': 'ubuntu-latest',
@@ -650,17 +652,40 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"`,
         },
-        // The stage jobs' signed notes, written as packs by each stage's own signing steps.
+        // The fractal-web check's one whole-check note, from the lane's jobs in this run: refused when the lane did not run,
+        // when any execution shard was skipped, failed or was cancelled, or when its evidence gate skipped it. Signed here
+        // because this job, not the always-run fractal-web job, holds the key; independent of the linux-gate note above.
+        {
+          name: 'Sign the fractal-web note',
+          id: 'sign-fractal-web',
+          if: "${{ steps.configure.outcome == 'success' }}",
+          'continue-on-error': true,
+          env: fractalWebNoteEnv,
+          // A base whose helper predates the whole-check note would sign the linux-gate shape under this name: skip it.
+          run: `helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+grep -q fractal_web_aggregate "$helper" || { echo "no fractal-web aggregate in the base commit's signing helper; not signed"; exit 1; }
+python3 "$helper" once fractal-web
+python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check fractal-web \\
+  --aggregate "$RUNNER_TEMP/fractal-web-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/fractal-web"`,
+        },
+        // The stage jobs' signed notes, written as packs by each stage's own signing steps. Collected and published
+        // whenever the key is configured, whether or not the aggregate signed: a stage note stands on its own (its
+        // producer refuses when its own gate skipped, and only notes that verify are published), and an aggregate
+        // that refused simply leaves no linux-gate note among them.
         {
           name: 'Collect the stage notes',
-          if: "${{ steps.sign.outcome == 'success' }}",
+          if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           uses: 'actions/download-artifact@v4',
           with: { pattern: 'evidence-note-*', path: '${{ runner.temp }}/evidence-notes/stages', 'merge-multiple': true },
         },
         {
           name: 'Publish the notes that verify',
-          if: "${{ steps.sign.outcome == 'success' }}",
+          if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
@@ -672,7 +697,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
         // is fail-soft like every other step of this job.
         {
           name: 'Shadow-verify the published notes',
-          if: "${{ always() && steps.sign.outcome == 'success' }}",
+          if: "${{ always() && steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
 [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
@@ -698,9 +723,16 @@ python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "
         ...evidenceStepSteps('isolation-vm', ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'], ['kvm', 'driver', 'vmtest', 'sekrets-driver', 'sekrets-test']),
       ],
     },
-    // Not yet a required check: the ruleset gains `fractal-web` after both PR and merge-group
-    // runs have emitted it successfully.
+    // `fractal-web` is a required check (.github/repo-settings.json): it must report on every PR
+    // and merge-group run, so the gate job always runs and fails closed.
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
+    // The web lane reads its evidence gate the way typescript-client and genie-freshness do: each execution shard keeps
+    // running and skips its steps (never the checkout) when evidence-gate-fractal-web says skip, so turning `enforce` on
+    // in the skip policy is the only change a skip needs. With `enforce` false the gate never says skip.
+    'fractal-web-execution': {
+      ...fractalWebJobs['fractal-web-execution'],
+      steps: skipIfCovered('fractal-web', fractalWebJobs['fractal-web-execution'].steps),
+    },
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))
