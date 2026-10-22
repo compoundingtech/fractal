@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, type FractalClient } from '@fractal/client'
+import type * as Native from '@fractal/client/schema'
 import { DateTime, Option } from 'effect'
 
 // Node rendering exercises the real composition, not the CSS compiler.
@@ -233,7 +233,7 @@ describe('gatewayAlertActions', () => {
   it('reads the alert again and sends one answer fenced on the revision the person read', async () => {
     const workDone = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const reviewApprove = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
-    const client = { attentionGet: vi.fn(async () => envelope(open)), workDone, reviewApprove } as unknown as St3Client
+    const client = { attentionGet: vi.fn(async () => envelope(open)), workDone, reviewApprove } as unknown as FractalClient
     const port = gatewayAlertActions(client)
     expect(await port.act({ alert: answered, action: { type: 'work.done', summary: 'Merge', answer: { id: 'merge' } } })).toEqual({ _tag: 'Sent' })
     expect(workDone).toHaveBeenCalledTimes(1)
@@ -253,7 +253,7 @@ describe('gatewayAlertActions', () => {
       envelope({ ...open, revision: 'r2' }),
       envelope({ ...open, actions: [] }),
     ]
-    const client = { attentionGet: vi.fn(async () => reads.shift()), workDone } as unknown as St3Client
+    const client = { attentionGet: vi.fn(async () => reads.shift()), workDone } as unknown as FractalClient
     const port = gatewayAlertActions(client)
     const action = { type: 'work.done', summary: 'Yes' } as const
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This was already answered or closed.' })
@@ -277,7 +277,7 @@ describe('gatewayAlertActions', () => {
         { kind: 'launch-variant', id: 'variant/three', revision: 'v3', ordinal: 3, preview_token: token('c') },
       ] } })),
       launchApprove, launchRevise, launchCancel,
-    } as unknown as St3Client
+    } as unknown as FractalClient
     const port = gatewayAlertActions(client)
     expect(await port.act({ alert: answered, action: { type: 'launch.approve' } })).toEqual({ _tag: 'Sent' })
     expect(client.launchesGet).toHaveBeenCalledWith('launch/nightly')
@@ -301,7 +301,7 @@ describe('gatewayAlertActions', () => {
         launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
         launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items } })),
         launchApprove,
-      } as unknown as St3Client
+      } as unknown as FractalClient
       const result = await gatewayAlertActions(client).act({ alert: answered, action: { type: 'launch.approve' } })
       expect(launchApprove).not.toHaveBeenCalled()
       return result
@@ -321,10 +321,10 @@ describe('gatewayAlertActions', () => {
   it('says why st refused, and never sends an unconfirmed answer again', async () => {
     const refusal = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'invalid', message: 'the step already has an answer', retryable: false, details: {} }, 422)
     const workDone = vi.fn(async () => { throw refusal })
-    const port = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone } as unknown as St3Client)
+    const port = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone } as unknown as FractalClient)
     const result = await port.act({ alert: answered, action: { type: 'work.done', summary: 'Yes' } })
     expect(result).toMatchObject({ _tag: 'Refused', detail: expect.stringContaining('the step already has an answer') })
-    const lost = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone: vi.fn(async () => { throw new TypeError('network') }) } as unknown as St3Client)
+    const lost = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone: vi.fn(async () => { throw new TypeError('network') }) } as unknown as FractalClient)
     expect(await lost.act({ alert: answered, action: { type: 'work.done', summary: 'Yes' } })).toEqual({
       _tag: 'Refused', detail: 'The answer could not be confirmed; check the alert before answering again. It was not sent again.',
     })

@@ -1,4 +1,4 @@
-import type { ActionCommon, Attention, Mission } from '@smalltalk/st3-client/schema'
+import type { ActionCommon, Attention, Mission } from '@fractal/client/schema'
 
 /** Mission actions exposed by the fixture-only proposal overlay. */
 export type MissionActionType = Extract<ActionCommon['type'], `mission.${string}`>

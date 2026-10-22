@@ -75,6 +75,13 @@ export const statusVars = stylex.defineVars({
   scrollThumbHover: 'rgba(255, 255, 255, 0.12)',
 })
 
+/** DiffPanel-only inks; source previews elsewhere retain their syntax palette. */
+export const diffPanelVars = stylex.defineVars({
+  added: '#7295ed',
+  removed: '#f87171',
+  literal: '#fe9a00',
+})
+
 /** Type scale pairs and font stacks. UI 14/20, meta 12/16, dense 11, code 13, body 14/22.75. */
 export const typeVars = stylex.defineVars({
   fontSans: `-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif`,
@@ -88,6 +95,8 @@ export const typeVars = stylex.defineVars({
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
   trackingWide: '0.1em', trackingEyebrow: '0.2em',
   headingSize: '16px', headingLeading: '24px',
+  /** Text fields on a phone: below 16px, iOS Safari zooms the page when the field takes focus. */
+  touchInputSize: '16px',
 })
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
@@ -111,6 +120,8 @@ export const geometryVars = stylex.defineVars({
   sidebarMin: '208px', sidebarDefault: '256px',
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
+  /** Minimum hit target for every control in the narrow (phone) layout. */
+  touchTarget: '44px',
   toolRow: '24px',
   menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
