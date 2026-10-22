@@ -3007,6 +3007,7 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                     item["state"] = json!("waiting");
                 }
             }
+            overlay_declaration_restart(item, client_now_ms());
             overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
@@ -3021,6 +3022,23 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
         overlay_subagents(store, items)?;
         Ok(())
     })
+}
+
+// A marker describes a replacement, not proof that its owner is still progressing.
+// Evaluate this on every live presentation, including retained roster cards, rather
+// than only when a new claim invalidates the fold. Expiry changes no durable fact.
+const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
+
+fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let fields = item.as_object_mut().expect("agent card");
+    let previous = fields.remove("_restart_underlying_state");
+    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
+    if fields.get("state").and_then(Value::as_str) == Some("restarting")
+        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
+        && let Some(previous) = previous
+    {
+        fields.insert("state".into(), previous);
+    }
 }
 
 /// How long a declared seat may take to show a running session before it is called down.
@@ -3461,6 +3479,28 @@ fn client_agent_cards_presented(
                     .or_else(|| subject.desired_token.as_deref().and_then(claim_time))
             })
             .flatten();
+            // A declaration replacement carries the incarnation it is retiring. Keep
+            // that shutdown and the new harness readiness interval distinct from a first start.
+            let restarting_from = fields
+                .and_then(|fields| fields.get("restarting_from"))
+                .and_then(Value::as_str);
+            let restart_underlying_state = state;
+            let restart_until = subject.actual_claim.as_deref()
+                .and_then(|claim| actual_claim_times.as_ref().ok()?.get(claim).copied())
+                .map(|accepted| accepted.saturating_add(DECLARATION_RESTART_PRESENTATION_MS));
+            let restarting = restart_until.is_some() && restarting_from.is_some_and(|from| {
+                subject.reachability == "reachable"
+                    && !matches!(state, "waiting" | "failed")
+                    && (state == "starting"
+                        || (fields
+                            .and_then(|fields| fields.get("incarnation_id"))
+                            .and_then(Value::as_str) == Some(from)
+                            && matches!(
+                                observed,
+                                Some("running")
+                            )))
+            });
+            let state = if restarting { "restarting" } else { state };
             let handoff = subject.desired_token.as_deref()
                 .map(|token| crate::placement::handoff(store, &subject.subject, token, snapshot_index))
                 .transpose()?.flatten();
@@ -3554,6 +3594,8 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "_restart_underlying_state": restart_underlying_state,
+                "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
                 "runtime_ids": runtime_ids,
                 "owner_run_id": subject.owner_run,
