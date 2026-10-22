@@ -1424,7 +1424,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
-        # fractal-web: the fleet signer only, shadow, and its shard notes only (see the next tests).
+        # fractal-web: the fleet signer only, shadow, and its whole-check note only (see the next tests).
         web = self.rules('fractal-web')
         self.assertEqual(web['trust_levels'], ('fleet',))
         self.assertIsNone(web['max_age_s'])
@@ -1467,16 +1467,17 @@ class CommittedPolicy(unittest.TestCase):
             host_checks = ('genie-freshness', 'typescript-client')
             self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in host_checks else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
-        # fractal-web lists only its shard notes: the observer's record is of the always-emitted fractal-web job, which passes
-        # without running the lane when no web path changed against that run's base, so it is no evidence that the lane ran.
+        # fractal-web lists only its whole-check note, signed by the evidence note job from the lane's jobs (never one shard's
+        # note, whose command is ['bash', 'scripts/ci-fractal-web']): the observer's record is of the always-emitted fractal-web
+        # job, which passes without running the lane when no web path changed against that run's base, so it is no evidence.
         web = self.rules('fractal-web')
         self.assertEqual(sorted(web['kinds']), ['wrapper'])
         self.assertIsNone(web['kinds']['wrapper']['trust_levels'])
         self.assertEqual(web['kinds']['wrapper']['by_level'], {})
-        self.assertEqual(web['kinds']['wrapper']['command'], ['bash', 'scripts/ci-fractal-web'])
+        self.assertEqual(web['kinds']['wrapper']['command'], ['fractal-web', 'aggregate', 'fractal-web', 'fractal-web-changes', 'fractal-web-execution'])
         self.assertEqual(web['kinds']['wrapper']['required_inputs'], sorted([
-            'attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256',
-            'app_test_set', 'kit_play_set', 'kit_shard', 'kit_shard_count']))
+            'attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256',
+            'app_test_set', 'kit_inputs', 'kit_play_set', 'kit_shard_count', 'shard_results']))
         self.assertEqual(web['kinds']['wrapper']['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
 
 

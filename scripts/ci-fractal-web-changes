@@ -60,6 +60,13 @@ PATTERNS = (
     ".github/workflows/main-upkeep.yml*",
     ".github/workflows/cache-audit.ts",
     ".github/repo-settings.json*",
+    # Read by the lane although no web source names them: a workspace member's manifest (the frozen install reads every
+    # member), the client fixtures an SDK unit test opens (timeline-conformance.json), the pnpm source-input list the web
+    # shell hook publishes, and the public-repository lint the scenario privacy lane runs.
+    "apps/ios/package.json",
+    "docs/st3/client-v0/fixtures/**",
+    "pnpm-source-inputs.json*",
+    "scripts/check-public-repo",
 )
 # Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
 # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.

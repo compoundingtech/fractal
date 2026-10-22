@@ -251,6 +251,63 @@ with tempfile.TemporaryDirectory() as directory:
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')
 
+    # --- the fractal-web whole-check note (GATE_JOB=fractal-web): one note for the lane, only when the lane ran and every shard passed
+    lane = {'fractal-web': {'result': 'success'}, 'fractal-web-changes': {'result': 'success', 'outputs': {'relevant': 'true', 'kit-inputs': 'true'}},
+            'fractal-web-execution': {'result': 'success'}, 'evidence-gate-fractal-web': {'result': 'success', 'outputs': {'skip': 'false'}}}
+    linux = {**needs, 'evidence-gate-linux-gate': {'result': 'success', 'outputs': {'skip': 'false'}}}
+    queue_web = dict(GATE_JOB='fractal-web', KIT_SHARD_COUNT='2', KIT_INPUTS='true', KIT_PLAY_SET='all', APP_TEST_SET='all',
+                     GITHUB_EVENT_NAME='merge_group', GITHUB_REF=QUEUE, GITHUB_RUN_ID='9', GITHUB_RUN_ATTEMPT='1')
+    pull_web = dict(queue_web, KIT_SHARD_COUNT='1', KIT_PLAY_SET='commit', APP_TEST_SET='related', GITHUB_EVENT_NAME='pull_request',
+                    GITHUB_REF='refs/pull/1/merge')
+
+    def web_run(lane_needs, extra=None):
+        out.unlink(missing_ok=True)
+        done = helper('aggregate', str(out), env=dict(queue_web, NEEDS_JSON=json.dumps({**linux, **lane_needs}), **(extra or {})))
+        return done, json.loads(out.read_text()) if out.exists() else None
+
+    done, facts = web_run(lane)
+    assert done.returncode == 0, done.stdout
+    assert facts['command'] == ['fractal-web', 'aggregate', 'fractal-web', 'fractal-web-changes', 'fractal-web-execution'], facts['command']
+    assert facts['exit_code'] == 0 and facts['output']['shards'] == {'0': 'success', '1': 'success'}
+    assert {k: facts['inputs'][k] for k in ('kit_shard_count', 'shard_results', 'kit_inputs', 'kit_play_set', 'app_test_set', 'stage_results')} == {
+        'kit_shard_count': '2', 'shard_results': '0=success,1=success', 'kit_inputs': 'true', 'kit_play_set': 'all', 'app_test_set': 'all',
+        'stage_results': 'fractal-web=success,fractal-web-changes=success,fractal-web-execution=success'}, facts['inputs']
+    assert not [n for n in facts['output']['needs'] if n.startswith(('linux-', 'evidence-gate-'))], 'the linux-gate jobs and the gates are not the lane\'s'
+    # A pull request runs one shard of the per-commit set: the note says exactly that, never the merge queue's two shards of everything.
+    done = helper('aggregate', str(out), env=dict(pull_web, NEEDS_JSON=json.dumps({**linux, **lane})))
+    facts = json.loads(out.read_text())
+    assert done.returncode == 0 and (facts['inputs']['kit_shard_count'], facts['inputs']['shard_results'], facts['inputs']['kit_play_set'],
+                                     facts['inputs']['app_test_set']) == ('1', '0=success', 'commit', 'related'), facts['inputs']
+    # A skipped, failed or cancelled shard never reads as success: no note at all (GitHub reports the matrix's result, success only
+    # when every shard succeeded). The same for a lane that did not run, a detection that failed, and an unfinished verdict.
+    for result in ('skipped', 'failure', 'cancelled', ''):
+        done, facts = web_run({**lane, 'fractal-web-execution': {'result': result}})
+        assert done.returncode == 1 and facts is None and 'fractal-web-execution ended' in done.stdout, (result, done.stdout)
+    for changes in ({'result': 'success', 'outputs': {'relevant': 'false', 'kit-inputs': 'false'}}, {'result': 'success'},
+                    {'result': 'failure', 'outputs': {'relevant': 'true'}}):
+        done, facts = web_run({**lane, 'fractal-web-changes': changes, 'fractal-web-execution': {'result': 'skipped'}})
+        assert done.returncode == 1 and facts is None and 'did not run' in done.stdout, (changes, done.stdout)
+    for verdict in ('skipped', 'cancelled'):
+        done, facts = web_run({**lane, 'fractal-web': {'result': verdict}})
+        assert done.returncode == 1 and facts is None, verdict
+    done, facts = web_run({**lane, 'fractal-web': {'result': 'failure'}})
+    assert done.returncode == 0 and facts['exit_code'] == 1, 'every shard passed but the verdict failed (the kit coverage check): an honest failing note'
+    done, facts = web_run({**lane, 'evidence-gate-fractal-web': {'result': 'success', 'outputs': {'skip': 'true'}}})
+    assert done.returncode == 1 and facts is None and 'evidence gate skipped' in done.stdout, 'a lane its gate skipped tested nothing itself'
+    for name in ('fractal-web', 'fractal-web-changes', 'fractal-web-execution'):
+        done, facts = web_run({k: v for k, v in lane.items() if k != name})
+        assert done.returncode == 1 and facts is None and name in done.stdout, name
+    for bad in (dict(KIT_SHARD_COUNT=''), dict(KIT_SHARD_COUNT='0'), dict(KIT_SHARD_COUNT='two'), dict(KIT_INPUTS=''),
+                dict(KIT_PLAY_SET='some'), dict(APP_TEST_SET='')):
+        done, facts = web_run(lane, bad)
+        assert done.returncode == 1 and facts is None, bad
+    # The linux-gate note leaves the lane out entirely: its jobs are not in the command, and its gate's skip does not stop it.
+    done = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**linux, **lane, 'evidence-gate-fractal-web': {'outputs': {'skip': 'true'}},
+                                                                          'fractal-web-execution': {'result': 'skipped'}}), GITHUB_EVENT_NAME='merge_group'))
+    assert done.returncode == 0, done.stdout
+    assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests']
+    print('passed: the fractal-web whole-check note records the lane\'s jobs, shard count and test sets, and is refused when the lane did not run, a shard did not pass or its gate skipped')
+
     # --- stage-facts: the log digest and status of a stage that already ran
     logs = tmp / 'stage-runner/ci-logs'
     logs.mkdir(parents=True)
@@ -360,6 +417,9 @@ with tempfile.TemporaryDirectory() as directory:
     for payload in ('not json', {'merge_group': {'base_sha': 'not-a-sha'}}, '[]'):
         done, facts = aggregate_run(payload, dict(GITHUB_SHA=''))
         assert done.returncode == 0 and 'source_inputs' not in facts['inputs'], (payload, 'an unreadable base is no base: an exact-tree note')
+    done, facts = aggregate_run({'pull_request': {'base': {'sha': 'e' * 40}}}, dict(NEEDS_JSON=json.dumps(lane), **pull_web, GITHUB_REPOSITORY='example/repo'))
+    assert done.returncode == 0 and facts['inputs']['source_inputs'] == KEY, done.stdout
+    assert json.loads(seen.read_text())[:3] == ['--project', '--check', 'fractal-web'], 'the whole-check note carries the fractal-web input key'
     print('passed: the aggregate note signs its input key, with the base from PROJECT_BASE_SHA or the event payload, and none when that is unreadable')
 
     # --- a job whose gate said skip makes no note even if its logs and steps look like a success

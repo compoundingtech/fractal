@@ -34,10 +34,9 @@ gate = load('ci_evidence_gate', 'scripts/ci-evidence-gate')
 fixtures = load('evidence_verify_test', 'scripts/evidence-verify-test')
 REPOSITORY = 'org/repo'
 # The checks with an evidence gate job in fleet.yml (evidence-gate-<check>).
-CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries')
-# The checks with an entry in the skip policy: the gated ones plus fractal-web, a shadow entry with no gate job yet
-# (nothing prints a decision for it, so nothing can skip it; its notes are one per kit shard, see its own test).
-POLICY_CHECKS = CHECKS + ('fractal-web',)
+CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web')
+# The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
+POLICY_CHECKS = CHECKS
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
 # here independently of the policy file so a typo in either cannot make the test agree with itself.
@@ -51,9 +50,12 @@ STEP_ARGV = {
     'typescript-client': ['bash', 'scripts/ci-typescript-client'],
     'isolation-vm': ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'],
 }
-# Each fractal-web-execution shard signs this step-outcome note, with its shard and test sets as extra inputs.
-FRACTAL_WEB_ARGV = ['bash', 'scripts/ci-fractal-web']
-FRACTAL_WEB_INPUTS = ('kit_shard', 'kit_shard_count', 'kit_play_set', 'app_test_set')
+# fractal-web's whole-check note, signed by the evidence note job from the lane's jobs (scripts/ci-evidence-signing
+# aggregate with GATE_JOB=fractal-web), with the shard count, shard results and test sets as extra inputs.
+FRACTAL_WEB_ARGV = ['fractal-web', 'aggregate', 'fractal-web', 'fractal-web-changes', 'fractal-web-execution']
+FRACTAL_WEB_INPUTS = ('kit_shard_count', 'shard_results', 'kit_inputs', 'kit_play_set', 'app_test_set')
+# Each fractal-web-execution shard still signs its own step-outcome note; the policy no longer accepts it for the check.
+FRACTAL_WEB_SHARD_ARGV = ['bash', 'scripts/ci-fractal-web']
 ARGV = {'linux-gate': GATE_ARGV, 'mail-redelivery-canaries': CANARIES_ARGV, **STEP_ARGV, 'fractal-web': FRACTAL_WEB_ARGV}
 LOCK = 'fake flake.lock contents\n'
 # Written out here, not read from the script, so removing a path from the script cannot hide it.
@@ -981,8 +983,7 @@ class EndToEnd(unittest.TestCase):
         elif check in STEP_ARGV:
             inputs.update(job=check, steps='client,install', step_outcomes='client=success,install=success')
         elif check == 'fractal-web':
-            inputs.update(job=check, steps='run', step_outcomes='run=success', kit_shard='0', kit_shard_count='1',
-                          kit_play_set='commit', app_test_set='related')
+            inputs.update(kit_shard_count='1', shard_results='0=success', kit_inputs='false', kit_play_set='commit', app_test_set='related')
         inputs.update(kwargs.pop('inputs', {}))
         for drop in kwargs.pop('drop', ()):
             inputs.pop(drop, None)
@@ -1077,29 +1078,63 @@ class EndToEnd(unittest.TestCase):
             self.wrapper_note(commit, tree, lock, inputs={'toolchain_sha256': ''})
             self.assertRuns(base)
 
-    def test_one_fractal_web_shard_note_satisfies_the_verifier_so_the_check_stays_shadow_with_no_gate_job(self):
-        """Each fractal-web-execution shard signs its own note (one shard on a pull request; two in the merge queue when kit
-        inputs changed, the second running only its half of the kit plays). The verifier takes the latest note for the tree and
-        no rule can require every shard of one run, so a single shard's note satisfies the check. That is why the entry stays
-        shadow (enforce false, the fleet signer only, no host or agent level) and no evidence-gate job reads it yet."""
+    def test_one_fractal_web_shard_note_cannot_satisfy_the_check_and_the_whole_check_note_covers_pull_requests_only(self):
+        """Each fractal-web-execution shard signs its own note; the policy accepts only the whole-check note the evidence note job
+        signs from the lane's jobs. One shard's note, even shard 1 of 2 or a pull request's only shard, never satisfies the
+        check. A pull request's one-shard whole-check note covers a pull request run (it ran everything a pull request runs);
+        the policy keeps it out of the merge queue with its events, which the committed shadow entry has not turned on yet."""
         entry = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['fractal-web']
         self.assertIs(entry['enforce'], False)
         self.assertEqual(entry.get('require', 'off'), 'off')
         self.assertEqual(entry['trust_levels'], ['fleet'])
         self.assertEqual(sorted(entry['kinds']), ['wrapper'])  # the always-emitted fractal-web job passes without running the lane
         self.assertFalse({'trust_levels', 'by_level'} & set(entry['kinds']['wrapper']))
-        self.assertNotRegex((ROOT / '.github/workflows/fleet.yml').read_text(), re.compile(r'^  evidence-gate-fractal-web:', re.M))
-        # The limit, against the committed rule with skipping turned on: shard 1 of 2 alone would skip the whole check.
+        self.assertRegex((ROOT / '.github/workflows/fleet.yml').read_text(), re.compile(r'^  evidence-gate-fractal-web:', re.M))
+        shard_inputs = {'job': 'fractal-web', 'steps': 'run', 'step_outcomes': 'run=success'}
+        for shard in ({'kit_shard': '1', 'kit_shard_count': '2', 'kit_play_set': 'all', 'app_test_set': 'all'},
+                      {'kit_shard': '0', 'kit_shard_count': '1', 'kit_play_set': 'commit', 'app_test_set': 'related'}):
+            with self.subTest(shard=shard):
+                # Against the committed rule with skipping turned on: one shard's own note is a different command, never a skip.
+                base, commit, tree, lock = self.wrapper_scenario()
+                self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV,
+                                  inputs={**shard_inputs, **shard}, drop=('shard_results', 'kit_inputs'))
+                self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
+                # Every shard's note together still is not the whole-check note, nor is a shard note that carries every input.
+                self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=1,
+                                  inputs={**shard_inputs, **shard, 'kit_shard': '0'}, drop=('shard_results', 'kit_inputs'))
+                self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
+                self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=2, inputs={**shard_inputs, **shard})
+                self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
+        # The whole-check note of a pull request's one shard satisfies the check; without any of its extra inputs it does not.
         base, commit, tree, lock = self.wrapper_scenario()
-        self.wrapper_note(commit, tree, lock, check='fractal-web',
-                          inputs={'kit_shard': '1', 'kit_shard_count': '2', 'kit_play_set': 'all', 'app_test_set': 'all'})
-        fields, _ = self.run_gate(base, check='fractal-web')
+        self.wrapper_note(commit, tree, lock, check='fractal-web')
+        fields, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='pull_request')
         self.assertEqual((fields['outcome'], fields['decision']), ('satisfied', 'skip'))
         for missing in FRACTAL_WEB_INPUTS:
             with self.subTest('missing ' + missing):
                 base, commit, tree, lock = self.wrapper_scenario()
                 self.wrapper_note(commit, tree, lock, check='fractal-web', drop=[missing])
                 self.assertEqual(self.assertRuns(base, check='fractal-web')['reason'], 'missing_input')
+        import hashlib
+        # The flip this entry is for: enforce on pull requests only. The same one-shard note then skips a pull request run and
+        # never a merge-queue run, which keeps running both shards of everything.
+        doc = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        for entry in doc['checks'].values():
+            entry['sample_one_in'] = 1
+            entry.pop('inputs', None)
+        doc['checks']['fractal-web'].update(enforce=True, events=['pull_request'])
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        (self.f.repo / 'flake.lock').write_text(LOCK)
+        base = self.commit_base(policy=json.dumps(doc))
+        commit, tree = self.head()
+        self.wrapper_note(commit, tree, hashlib.sha256(LOCK.encode()).hexdigest(), check='fractal-web')
+        pull, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='pull_request')
+        queue, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='merge_group')
+        self.assertEqual((pull['outcome'], pull['decision']), ('satisfied', 'skip'))
+        self.assertEqual((queue['outcome'], queue['decision']), ('satisfied', 'run'))
+        self.assertIn('cover_this_event', queue['reason'])
 
     def test_a_future_dated_or_newer_failing_wrapper_note_never_skips(self):
         base, commit, tree, lock = self.wrapper_scenario()
@@ -1323,6 +1358,7 @@ class WorkflowStructure(unittest.TestCase):
 
     WIRED = ('genie-freshness', 'typescript-client')
     NOT_YET_WIRED = ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries')  # not wired at the check-job level (see below)
+    LANE_WIRED = ('fractal-web',)  # wired in its execution shards (see its own test)
 
     def job_text(self, name):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
@@ -1376,7 +1412,7 @@ class WorkflowStructure(unittest.TestCase):
                 self.assertIn('evidence covered by a trusted note', names)
                 self.assertEqual(names[-1], 'Report job cache coverage')
         # The gate jobs publish exactly the decision and the record the consumers read.
-        for check in self.WIRED + self.NOT_YET_WIRED:
+        for check in self.WIRED + self.NOT_YET_WIRED + self.LANE_WIRED:
             self.assertIn('      skip: ${{ steps.taken.outputs.skip }}\n      record: ${{ steps.taken.outputs.record }}\n',
                           self.job_text(f'evidence-gate-{check}'))
 
@@ -1635,7 +1671,7 @@ class WorkflowStructure(unittest.TestCase):
 
     def test_the_skip_output_can_only_come_from_the_marker_step(self):
         """The decision the check jobs act on must not exist unless `evidence skip taken` already ran."""
-        for check in self.WIRED + self.NOT_YET_WIRED:
+        for check in self.WIRED + self.NOT_YET_WIRED + self.LANE_WIRED:
             with self.subTest(check):
                 job = self.job_text(f'evidence-gate-{check}')
                 outputs = re.search(r'^    outputs:\n((?:      .*\n)+)', job, re.M).group(1)
@@ -1713,18 +1749,13 @@ class WorkflowStructure(unittest.TestCase):
                 signed += 1
                 env = re.search(r'^          GATE_SKIP: (.*)$', chunk, re.M)
                 self.assertIsNotNone(env, f'{name} signs without being told when its gate skipped')
-                if name == 'fractal-web-execution':
-                    # A lane with no gate: its paths decide whether it runs, nothing ever skips it on a prior note.
-                    self.assertIn(env.group(1).strip(), ('false', '"false"', "'false'"), name)
-                    self.assertNotIn('needs.', env.group(1), name)
-                    continue
                 referenced = set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', env.group(1)))
                 self.assertTrue(referenced, name)
                 # Every gate it reads must be one of its needs, and the check's own gate must be among them.
                 self.assertTrue({f'evidence-gate-{g}' for g in referenced} <= self.needs_of(block), name)
                 expected = {'mail-redelivery-canaries': {'linux-gate', 'mail-redelivery-canaries'},
                             'genie-freshness': {'genie-freshness'}, 'typescript-client': {'typescript-client'},
-                            'isolation-vm': {'isolation-vm'}}.get(name, {'linux-gate'})
+                            'isolation-vm': {'isolation-vm'}, 'fractal-web-execution': {'fractal-web'}}.get(name, {'linux-gate'})
                 self.assertEqual(referenced, expected, name)
         self.assertGreaterEqual(signed, 10)  # the stage jobs, the canaries and the three step-outcome jobs
         aggregate = self.needs_of(blocks['evidence-note-linux-gate'])
@@ -1766,7 +1797,7 @@ class WorkflowStructure(unittest.TestCase):
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
         names = [line.strip()[2:] for line in needs.splitlines()]
-        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith(('evidence-gate-', 'fractal-web-')))
+        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith(('evidence-gate-', 'fractal-web-')) and n != 'fractal-web')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], derived)
         self.assertEqual(GATE_ARGV, derived)
@@ -1775,23 +1806,77 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(sorted(n for n in names if n.startswith('evidence-gate-')),
                          sorted(f'evidence-gate-{c}' for c in CHECKS))
 
-    def test_the_fractal_web_wrapper_rule_is_what_each_shard_signs(self):
-        """The rule's command and inputs, read back from the shard job's signing step, so renaming either cannot silently stop matching."""
-        block = self.blocks()['fractal-web-execution']
-        chunk = next(c for c in re.split(r'^      - ', block, flags=re.M) if 'name: Sign this job result' in c)
-        env = dict(re.findall(r'^          ([A-Z_]+): (.*)$', chunk, re.M))
-        self.assertEqual(env['STEP_CHECK'].strip(), 'fractal-web')
-        command = json.loads(env['STEP_COMMAND'].strip().strip("'"))
-        outcomes = re.findall(r'"([a-z_]+)":"', env['STEP_OUTCOMES'])
-        extra = re.findall(r'"([a-z_]+)":"', env['STEP_INPUTS'])
-        self.assertEqual(sorted(extra), sorted(FRACTAL_WEB_INPUTS))
+    def test_the_fractal_web_wrapper_rule_is_the_whole_check_note_the_evidence_note_job_signs(self):
+        """The rule's command and inputs, read back from the note job's needs and its fractal-web signing step, so adding a
+        lane job or renaming an input cannot silently stop matching; the shards' own command is not the rule's."""
+        blocks = self.blocks()
+        job = blocks['evidence-note-linux-gate']
+        needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
+        names = [line.strip()[2:] for line in needs.splitlines()]
+        derived = ['fractal-web', 'aggregate'] + sorted(n for n in names if n == 'fractal-web' or n.startswith('fractal-web-'))
         rule = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['fractal-web']['kinds']['wrapper']
-        self.assertEqual(rule['command'], command)
-        self.assertEqual(command, FRACTAL_WEB_ARGV)
-        self.assertEqual(outcomes, ['run'])
-        fixed = ['flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt', 'job', 'steps', 'step_outcomes']
-        self.assertEqual(sorted(rule['required_inputs']), sorted(fixed + extra))
+        self.assertEqual(rule['command'], derived)
+        self.assertEqual(FRACTAL_WEB_ARGV, derived)
+        self.assertIn('evidence-gate-fractal-web', names)
+        steps = {self.fields(c).get('name'): c for c in re.split(r'^      - ', job.split('    steps:\n', 1)[1], flags=re.M)[1:]}
+        sign = steps['Sign the fractal-web note']
+        self.assertIn("if: ${{ steps.configure.outcome == 'success' }}", sign)
+        self.assertIn('continue-on-error: true', sign)
+        env = dict(re.findall(r'^          ([A-Z_]+): (.*)$', sign, re.M))
+        self.assertEqual(env['GATE_JOB'].strip(), 'fractal-web')
+        # The note's shard count and test sets are the very expressions the matrix and the run step use.
+        execution = blocks['fractal-web-execution']
+        self.assertIn(env['KIT_SHARD_COUNT'].strip(), execution)
+        self.assertIn('KIT_SHARD_COUNT: ' + env['KIT_SHARD_COUNT'].strip(), execution)
+        self.assertIn('KIT_PLAY_SET: ' + env['KIT_PLAY_SET'].strip(), execution)
+        self.assertIn('APP_TEST_SET: ' + env['APP_TEST_SET'].strip(), execution)
+        self.assertIn('matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == \'true\' && github.event_name != \'pull_request\' && \'{"shard":[0,1]}\'', execution)
+        self.assertIn("&& '2' || '1' }}", env['KIT_SHARD_COUNT'])
+        self.assertEqual(env['KIT_INPUTS'].strip(), '${{ needs.fractal-web-changes.outputs.kit-inputs }}')
+        self.assertIn('python3 "$helper" once fractal-web', sign)
+        self.assertIn('python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"', sign)
+        self.assertIn('--check fractal-web', sign)
+        self.assertIn('--aggregate "$RUNNER_TEMP/fractal-web-facts.json"', sign)
+        self.assertIn('--out "$RUNNER_TEMP/evidence-notes/fractal-web"', sign)
+        # The inputs the rule requires are the ones the aggregate records, beyond what every wrapper note carries.
+        fixed = ['flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt']
+        self.assertEqual(sorted(rule['required_inputs']), sorted(fixed + list(FRACTAL_WEB_INPUTS)))
         self.assertEqual(rule['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
+        # Each shard still signs its own note, under another command.
+        shard = next(c for c in re.split(r'^      - ', execution, flags=re.M) if 'name: Sign this job result' in c)
+        shard_env = dict(re.findall(r'^          ([A-Z_]+): (.*)$', shard, re.M))
+        self.assertEqual(json.loads(shard_env['STEP_COMMAND'].strip().strip("'")), FRACTAL_WEB_SHARD_ARGV)
+        self.assertNotEqual(FRACTAL_WEB_SHARD_ARGV, rule['command'])
+
+    def test_the_fractal_web_lane_skips_its_shards_steps_only_when_its_own_gate_says_so(self):
+        """Wired like typescript-client: each execution shard keeps running and skips its steps (never the checkout) on its own
+        gate's skip, so an enforce flip is the only change a skip needs; the verdict job still runs and the kit coverage check
+        in the merge queue never reads the gate."""
+        blocks = self.blocks()
+        execution, verdict = blocks['fractal-web-execution'], blocks['fractal-web']
+        self.assertIn('evidence-gate-fractal-web', self.needs_of(execution))
+        self.assertIn('evidence-gate-fractal-web', self.needs_of(verdict))
+        self.assertNotIn('evidence-gate', self.job_condition(execution))
+        self.assertNotIn('evidence-gate', self.job_condition(verdict))
+        covered = "needs.evidence-gate-fractal-web.outputs.skip != 'true'"
+        steps = self.steps_of('fractal-web-execution')
+        names = [n for n, _ in steps]
+        self.assertIn('evidence covered by a trusted note', names)
+        for name, condition in steps:
+            if str(name).startswith('actions/checkout'):
+                self.assertIsNone(condition, 'the checkout is never skipped')
+            elif name == 'evidence covered by a trusted note':
+                self.assertEqual(condition, "needs.evidence-gate-fractal-web.outputs.skip == 'true'")
+            elif name == 'Report job cache coverage':
+                self.assertEqual(condition, 'always()')
+            else:
+                self.assertIsNotNone(condition, f'{name} would run on a skip')
+                self.assertIn(covered, condition, name)
+        for name, condition in self.steps_of('fractal-web'):
+            if name == 'Require every kit shard and exact full-index coverage':
+                self.assertNotIn('evidence-gate', condition)
+            elif name == 'Require detection and, for web changes, execution':
+                self.assertIsNone(condition, 'the verdict always runs')
 
     def test_the_aggregate_note_job_signs_only_for_the_queue_main_and_pull_requests_of_this_repository(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()

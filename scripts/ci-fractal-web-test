@@ -72,6 +72,13 @@ web_inputs = (
     "flake.lock",
     "scripts/ci-web-shell",
     "scripts/ci-web-shell-test",
+    # Read by the lane without a web source naming them (the frozen install, an SDK fixture, the web shell hook, the
+    # scenario privacy lane): a change to only these must still run the lane.
+    "apps/ios/package.json",
+    "docs/st3/client-v0/fixtures/timeline-conformance.json",
+    "pnpm-source-inputs.json",
+    "pnpm-source-inputs.json.genie.ts",
+    "scripts/check-public-repo",
 )
 non_web_inputs = (
     "crates/fractal-client/src/lib.rs",
@@ -81,6 +88,9 @@ non_web_inputs = (
     "nested/megarepo.kdl",
     "nested/megarepo.lock",
     "nested/flake.lock",
+    "apps/ios/Sources/App.swift",
+    "apps/ios/package.json.bak",
+    "scripts/check-public-repo-test",
 )
 unexpected = []
 for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
@@ -263,7 +273,7 @@ assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' 
 assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}" in execution, "the per-commit budget"
 assert "APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}" in execution, "PRs run the related app tests, merge groups all"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
-assert "needs: [fractal-web-changes, genie-freshness]" in execution
+assert "needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]" in execution
 assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
 assert "needs.genie-freshness.result == 'success'" in execution
 assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
@@ -286,7 +296,7 @@ upkeep = (root / ".github/workflows/main-upkeep.yml").read_text()
 assert "name: Save the web shell closure" in upkeep
 assert "name: Save the pnpm store" in upkeep
 assert "bash scripts/ci-web-shell fill" in upkeep
-assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
+assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
 assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"

@@ -617,7 +617,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
-  and `.github/repo-settings.json*`.
+  `.github/repo-settings.json*`, and what the lane reads although no web source names it:
+  `apps/ios/package.json` (a workspace member of the frozen install), `docs/st3/client-v0/fixtures/**`
+  (an SDK unit test's fixture), `pnpm-source-inputs.json*` (published by the web shell hook) and
+  `scripts/check-public-repo` (run by the scenario privacy lane).
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
