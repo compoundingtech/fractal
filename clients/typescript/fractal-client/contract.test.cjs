@@ -987,8 +987,8 @@ test('schedules list preserves unknown rows and explicitly encodes one page; old
         assert.equal(new URL(url).pathname, '/v1/client/schedules', 'no fallback route');
         return old ? new Response(null, {status:404}) : Response.json(fixture);
     }});
-    const response = await client.schedulesList({ cursor:'next&cursor', limit:1, unheard_after_ms:300000 });
-    assert.deepEqual(response, fixture);
+    const page = await client.schedulesList({ cursor:'next&cursor', limit:1, unheard_after_ms:300000 });
+    assert.deepEqual(page, fixture);
     assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/capabilities'), [
         'https://example.test/v1/client/capabilities',
     ]);
