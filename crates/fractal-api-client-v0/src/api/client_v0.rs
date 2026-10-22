@@ -42,6 +42,7 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
+mod runtime_start_diagnostics;
 pub mod search;
 pub mod summary;
 #[cfg(test)]
@@ -130,6 +131,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/missions-tree", get(missions_tree))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
+        .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
         .route("/v1/client/runtimes/{*id}", get(runtime_detail))
         .route("/v1/client/observers", get(observers))
         .route(

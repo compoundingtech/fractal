@@ -112,6 +112,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("lanes.list", "/v1/client/lanes"),
     ("lanes.get", "/v1/client/lanes/{id}"),
     ("terminals.list", "/v1/client/terminals"),
+    ("runtime-starts.list", "/v1/client/runtime-starts"),
     ("operations.list", "/v1/client/operations"),
     ("operations.get", "/v1/client/operations/{id}"),
     ("history.list", "/v1/client/history"),
