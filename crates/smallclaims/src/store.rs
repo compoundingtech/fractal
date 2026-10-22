@@ -2595,13 +2595,21 @@ pub fn fleet_meta(connection: &Connection, key: &str) -> Result<Option<String>> 
         .optional()?)
 }
 
-/// The highest sequence this node holds of a writer, counting envelopes a checkpoint dropped.
+/// The highest sequence this node has held of a writer, counting envelopes a trim dropped: the
+/// writer's batch head (`writer_heads`) and retired envelopes as well as tombstones, the same
+/// floor as `next_replica_sequence`. Adoption can withdraw a trimmed envelope's tombstone, and a
+/// removal's high water or a rejoin floor read only from the tombstones would then fall below a
+/// sequence peers already hold.
 pub fn writer_high_water(connection: &Connection, writer: &str) -> Result<Option<u64>> {
     Ok(connection.query_row(
         "SELECT MAX(sequence) FROM (
              SELECT MAX(sequence) AS sequence FROM replica_envelopes WHERE writer=?1
              UNION ALL
              SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1
+             UNION ALL
+             SELECT sequence FROM writer_heads WHERE writer=?1
          )",
         [writer],
         |row| row.get(0),
