@@ -136,3 +136,38 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
     store.project_replication_backlog().unwrap();
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streamed_export_failure_names_the_cause_and_never_publishes_a_cli_backup() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("config/st3")).unwrap();
+    std::fs::write(root.path().join("config/st3/config.toml"), "node = \"alder\"\n").unwrap();
+    let socket = root.path().join("error.sock");
+    let server_socket = socket.clone();
+    let router = axum::Router::new().route("/v1/backup", axum::routing::get(|| async {
+        let mut bytes = serde_json::to_vec(&backup::Record::Failure {
+            code: "backup-fixture-io".into(),
+            message: "export fixture ran out of disk space".into(),
+        }).unwrap();
+        bytes.push(b'\n');
+        ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], bytes)
+    }));
+    let server = tokio::spawn(async move { serve_unix(&server_socket, router).await.unwrap(); });
+    // A missing endpoint is the only startup condition being awaited here.
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let archive = root.path().join("failed-backup.jsonl");
+    let output = backup_cli(root.path(), &socket)
+        .args(["backup", "create"]).arg(&archive).output().await.unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("backup-fixture-io"), "{error}");
+    assert!(error.contains("export fixture ran out of disk space"), "{error}");
+    assert!(!archive.exists());
+    assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry.unwrap().file_name().to_string_lossy().starts_with(".tmp")
+    }), "the failed download must also remove its private temporary file");
+    server.abort();
+}

@@ -753,6 +753,66 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-fractal-web:
+    name: evidence-gate-fractal-web
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: fractal-web
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        id: taken
+        if: steps.gate.outputs.skip == 'true'
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   upgrade-impact:
     name: upgrade-impact
     runs-on: ubuntu-latest
@@ -818,7 +878,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-execution","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"evidence-gate-fractal-web":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate"],"linux-clippy":["pick-runner","evidence-gate-linux-gate"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate"],"mail-redelivery-canaries":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-mail-redelivery-canaries","evidence-gate-isolation-vm","evidence-gate-genie-freshness","evidence-gate-typescript-client","evidence-gate-fractal-web"],"isolation-vm":["pick-runner","linux-test-build","evidence-gate-isolation-vm"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -831,7 +891,7 @@ jobs:
           from urllib.parse import quote
           from urllib.request import Request, urlopen
 
-          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries"}
+          REQUIRED = {"linux-gate", "typescript-client", "isolation-vm", "genie-freshness", "mail-redelivery-canaries", "fractal-web"}
 
 
           def decision(jobs, ref_status, ref, sha):
@@ -3215,12 +3275,15 @@ jobs:
       - genie-freshness
       - typescript-client
       - isolation-vm
+      - fractal-web-changes
       - fractal-web-execution
+      - fractal-web
       - evidence-gate-linux-gate
       - evidence-gate-mail-redelivery-canaries
       - evidence-gate-isolation-vm
       - evidence-gate-genie-freshness
       - evidence-gate-typescript-client
+      - evidence-gate-fractal-web
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on: ubuntu-latest
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -3293,8 +3356,28 @@ jobs:
             --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
             --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"
+      - name: Sign the fractal-web note
+        id: sign-fractal-web
+        if: ${{ steps.configure.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GATE_JOB: fractal-web
+          KIT_SHARD_COUNT: ${{ needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '2' || '1' }}
+          KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
+          KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}
+          APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          grep -q fractal_web_aggregate "$helper" || { echo "no fractal-web aggregate in the base commit's signing helper; not signed"; exit 1; }
+          python3 "$helper" once fractal-web
+          python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check fractal-web \
+            --aggregate "$RUNNER_TEMP/fractal-web-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/fractal-web"
       - name: Collect the stage notes
-        if: ${{ steps.sign.outcome == 'success' }}
+        if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -3302,7 +3385,7 @@ jobs:
           path: "${{ runner.temp }}/evidence-notes/stages"
           merge-multiple: true
       - name: Publish the notes that verify
-        if: ${{ steps.sign.outcome == 'success' }}
+        if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
@@ -3311,7 +3394,7 @@ jobs:
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
             --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
-        if: ${{ always() && steps.sign.outcome == 'success' }}
+        if: ${{ always() && steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
           shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
@@ -3666,6 +3749,13 @@ jobs:
               ".github/workflows/main-upkeep.yml*",
               ".github/workflows/cache-audit.ts",
               ".github/repo-settings.json*",
+              # Read by the lane although no web source names them: a workspace member's manifest (the frozen install reads every
+              # member), the client fixtures an SDK unit test opens (timeline-conformance.json), the pnpm source-input list the web
+              # shell hook publishes, and the public-repository lint the scenario privacy lane runs.
+              "apps/ios/package.json",
+              "docs/st3/client-v0/fixtures/**",
+              "pnpm-source-inputs.json*",
+              "scripts/check-public-repo",
           )
           # Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
           # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.
@@ -3694,7 +3784,12 @@ jobs:
               "apps/fractal-web/src/data/arrangements.ts",
               "apps/fractal-web/src/data/asking.ts",
               "apps/fractal-web/src/data/attention.ts",
+              "apps/fractal-web/src/data/contextOccupancy.ts",
               "apps/fractal-web/src/data/fixtureSource.ts",
+              "apps/fractal-web/src/data/nativeDeclarations.ts",
+              "apps/fractal-web/src/data/nativeDetails.ts",
+              "apps/fractal-web/src/data/nativeDetailsSource.ts",
+              "apps/fractal-web/src/data/observedClock.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/react.tsx",
               "apps/fractal-web/src/data/source.ts",
@@ -3769,6 +3864,7 @@ jobs:
               "apps/fractal-web/src/ui-compat/live-theme.stylex.ts",
               "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
               "apps/fractal-web/src/web/AgentActions.tsx",
+              "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
               "apps/fractal-web/src/web/AttentionControls.tsx",
               "apps/fractal-web/src/web/capturedChanges.ts",
               "apps/fractal-web/src/web/ChangesInspector.tsx",
@@ -3780,6 +3876,7 @@ jobs:
               "apps/fractal-web/src/web/ConversationStates.tsx",
               "apps/fractal-web/src/web/conversationTranscript.ts",
               "apps/fractal-web/src/web/DeclarationDialog.tsx",
+              "apps/fractal-web/src/web/detailsSupplement.ts",
               "apps/fractal-web/src/web/lastObserved.tsx",
               "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
               "apps/fractal-web/src/web/liveSidebarTree.ts",
@@ -3790,6 +3887,7 @@ jobs:
               "apps/fractal-web/src/web/sidebarAttention.ts",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
+              "apps/fractal-web/src/web/useNativeDetails.ts",
               "apps/fractal-web/src/web/workspaceView.ts",
               "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
               "apps/fractal-web/src/workbench-kit/IconButton.tsx",
@@ -3912,7 +4010,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && '{"shard":[0,1]}' || '{"shard":[0]}') }}
-    needs: [fractal-web-changes, genie-freshness]
+    needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -3930,12 +4028,13 @@ jobs:
         run: |
           cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
           printf 'Runner: name=%s region=%s cpu=%s cores=%s\n' "$CI_RUNNER_NAME" "${RUNNER_REGION:-${AWS_REGION:-${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 1
       - name: Fetch the whole history without evidence tags
-        if: github.event_name == 'pull_request'
+        if: (github.event_name == 'pull_request') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         env:
           FETCH_TOKEN: ${{ github.token }}
         run: |
@@ -3962,34 +4061,41 @@ jobs:
             ${{ runner.os == 'Linux' && 'sandbox = true' || '' }}
             ${{ runner.os == 'Linux' && 'sandbox-fallback = false' || '' }}
           summarize: true
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
         run: |
           nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Check web shell identity invariants
         run: python3 scripts/ci-web-shell-test
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Identify the web shell inputs
         id: web-shell-key
         shell: bash
         env:
           CI_WEB_SHELL_SOURCE_HASH: ${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}
         run: bash scripts/ci-web-shell key
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Restore the pnpm store
         id: pnpm-store
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Enable user namespaces for Buck TypeScript sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Restore the web shell closure
         id: web-shell
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/web-shell"
           key: ${{ steps.web-shell-key.outputs.key }}
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Run the fractal-web lanes and dependency license check
         id: run
         shell: bash
@@ -4008,14 +4114,15 @@ jobs:
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        if: needs.evidence-gate-fractal-web.outputs.skip != 'true'
       - name: Preserve kit shard receipt
-        if: always()
+        if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}"
-          path: "${{ runner.temp }}/kit-play-receipts/receipt.json"
+          path: "${{ runner.temp }}/kit-play-receipts/"
           if-no-files-found: ignore
-      - if: always()
+      - if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         continue-on-error: true
         name: Take the evidence signer from the base commit
         id: evidence-base
@@ -4025,7 +4132,7 @@ jobs:
           rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
           git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
           git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
-      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+      - if: (always() && steps.evidence-base.outcome == 'success') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         continue-on-error: true
         name: May this job use the signing key?
         id: evidence-guard
@@ -4035,7 +4142,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
-      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+      - if: (always() && steps.evidence-guard.outcome == 'success') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         continue-on-error: true
         name: Write the signer configuration and key
         id: evidence-configure
@@ -4044,7 +4151,7 @@ jobs:
         run: |
           set -o pipefail
           python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
-      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+      - if: (always() && steps.evidence-configure.outcome == 'success') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         continue-on-error: true
         name: Sign this job result
         env:
@@ -4052,7 +4159,7 @@ jobs:
           STEP_COMMAND: '["bash","scripts/ci-fractal-web"]'
           STEP_OUTCOMES: '{"run":"${{ steps.run.outcome }}"}'
           STEP_INPUTS: '{"kit_shard":"${{ matrix.shard }}","kit_shard_count":"${{ needs.fractal-web-changes.outputs.kit-inputs == ''true'' && github.event_name != ''pull_request'' && ''2'' || ''1'' }}","kit_play_set":"${{ github.event_name == ''pull_request'' && ''commit'' || ''all'' }}","app_test_set":"${{ github.event_name == ''pull_request'' && ''related'' || ''all'' }}"}'
-          GATE_SKIP: "false"
+          GATE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip == 'true' }}
           PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
@@ -4065,11 +4172,11 @@ jobs:
             --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
             --out "$RUNNER_TEMP/evidence-notes" \
             --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
-      - if: always()
+      - if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         continue-on-error: true
         name: Remove the key
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
-      - if: always()
+      - if: (always()) && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         continue-on-error: true
         name: Retain the signed note
         uses: actions/upload-artifact@v4
@@ -4078,6 +4185,11 @@ jobs:
           path: "${{ runner.temp }}/evidence-notes/"
           if-no-files-found: ignore
           retention-days: 7
+      - name: evidence covered by a trusted note
+        if: needs.evidence-gate-fractal-web.outputs.skip == 'true'
+        env:
+          RECORD: ${{ needs.evidence-gate-fractal-web.outputs.record }}
+        run: echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -4086,7 +4198,7 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   fractal-web:
     name: fractal-web
-    needs: [fractal-web-changes, fractal-web-execution]
+    needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 1
@@ -4145,14 +4257,20 @@ jobs:
 
           PY
       - uses: actions/checkout@v4
-        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'"
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v4
-        if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
+        id: cost-receipts
+        continue-on-error: true
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'"
         with:
           pattern: "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*"
           path: "${{ runner.temp }}/kit-play-receipts"
+      - name: Publish web lane costs as a public check annotation
+        continue-on-error: true
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && steps.cost-receipts.outcome == 'success'"
+        run: node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"
       - name: Require every kit shard and exact full-index coverage
         if: needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request' && needs.fractal-web-changes.outputs.relevant == 'true'
         run: node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" 2

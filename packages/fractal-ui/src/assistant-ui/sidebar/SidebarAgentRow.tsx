@@ -27,6 +27,8 @@ export type SidebarAgentRowProps = SidebarClock & {
   readonly glyph?: GlyphVariant
   readonly extraSignals?: readonly ExtraSignal[]
   readonly discRefinement?: DiscRefinement
+  /** Details omits unreported status values without changing sidebar defaults. */
+  readonly reportedStatusOnly?: boolean
   readonly active?: boolean
   /** Overrides `SidebarQueryContext` for this row and its nested rows. A per-row prop re-renders every row on each keystroke; prefer the context. */
   readonly query?: string
@@ -53,13 +55,25 @@ function usageText(usage: Extract<Row['usage'], { _tag: 'Known' }>): string {
   return `${usage.usd === undefined ? '' : `$${usage.usd} / `}${usage.tokens} tokens; ${usageScopeLabel(usage.scope).toLowerCase()}`
 }
 export const sidebarRowTitle = (row: Row): string => row.title
-/** Name for a focusable tree row whose host cannot attach a description (RAC TreeItem drops aria-describedby): the visible title first (label-in-name), then the status. */
-export const sidebarRowAccessibleName = (row: Row): string => `${row.title}, ${row.statusLabel}`
+/** Concise label-in-name for the tree host, which cannot attach a row description. */
+export const sidebarRowAccessibleName = (row: Row): string => {
+  const parts = [row.title, row.statusLabel]
+  if (row.missionContext?._tag === 'Mission') {
+    const { slug, progress, step } = row.missionContext
+    parts.push(`Mission ${slug}`)
+    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    if (step._tag === 'Step') parts.push(`Step ${step.name}`)
+    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    if (row.missionInfo !== undefined && row.missionInfo._tag !== 'Live') parts.push('mission info may be out of date')
+  }
+  if (row.missionContext?._tag === 'Unavailable') parts.push('mission info unavailable')
+  return parts.join(', ')
+}
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */
-export function sidebarRowDescription(row: Row): string {
+export function sidebarRowDescription(row: Row, reportedStatusOnly = false): string {
   const parts: string[] = [row.title]
   if (row.description !== undefined) parts.push(row.description)
-  parts.push(`Host: ${row.host}. Status: ${row.statusLabel}; ${row.freshness} observation`)
+  parts.push(`Host: ${row.host}.${reportedStatusOnly && row.status === 'unobserved' ? '' : ` Status: ${row.statusLabel};`} ${row.freshness} observation`)
   if (row.usage._tag === 'Known') parts.push(usageText(row.usage))
   if (row.duration._tag === 'Known') parts.push(`${row.duration.scope === '24h-activity-span' ? '24h activity span' : 'Lifetime duration'}: ${row.duration.ms} milliseconds`)
   if (row.lastTurn._tag === 'Known') parts.push(`${row.lastTurn.kind === 'activity' ? 'Since activity' : 'Last completed turn'}: ${new Date(row.lastTurn.at).toISOString()}`)
@@ -74,17 +88,24 @@ export function sidebarRowDescription(row: Row): string {
   if (row.pullRequest !== undefined) parts.push(`Pull request: #${row.pullRequest.number}, ${row.pullRequest.title}, ${row.pullRequest.state}, ${row.pullRequest.ref}`)
   if (row.terminal !== undefined) parts.push(`Terminal: ${row.terminal}`)
   if (row.mission !== undefined) parts.push(`Mission: ${row.mission}`)
+  if (row.missionContext?._tag === 'Mission') {
+    const { progress, step, queued } = row.missionContext
+    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    if (step._tag === 'Step') parts.push(`Step: ${step.name}`)
+    if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
+    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.slug).join(', ')}`)
+  }
   if (row.childrenKnown !== false) parts.push(`Subagents: ${row.children.length}`)
   parts.push(`ID: ${row.ref}`)
   return `${parts.join('. ')}.`
 }
 /** Complete reported facts stay accessible; unreported fields are omitted, never shown as placeholders. */
-export function AgentRowDetails({ row, ...clock }: { readonly row: Row } & SidebarClock) {
+export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
   return <dl {...stylex.props(styles.details)}>
     <dt {...stylex.props(styles.detailLabel)}>Name</dt><dd {...stylex.props(styles.detailValue)}>{sidebarRowTitle(row)}</dd>
     <dt {...stylex.props(styles.detailLabel)}>ID</dt><dd {...stylex.props(styles.detailValue)}>{row.ref}</dd>
     {row.description !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Description</dt><dd {...stylex.props(styles.detailValue)}>{row.description}</dd></>}
-    <dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{row.statusLabel}; {row.freshness} observation</dd>
+    {(!reportedStatusOnly || row.status !== 'unobserved') && <><dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{row.statusLabel}; {row.freshness} observation</dd></>}
     {row.statusSince !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Elapsed in status</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.statusSince} {...clock} />; since {new Date(row.statusSince).toISOString()}</dd></>}
     {row.lastActivityAt !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Last activity</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastActivityAt} {...clock} kind="activity" />; {new Date(row.lastActivityAt).toISOString()}</dd></>}
     <dt {...stylex.props(styles.detailLabel)}>Needs you</dt><dd {...stylex.props(styles.detailValue)}>{row.needsMe === undefined ? 'Unknown' : row.needsMe ? 'Yes' : 'No'}</dd><dt {...stylex.props(styles.detailLabel)}>Unread</dt><dd {...stylex.props(styles.detailValue)}>{row.unread ?? 'Unknown'}</dd>
@@ -99,6 +120,12 @@ export function AgentRowDetails({ row, ...clock }: { readonly row: Row } & Sideb
     {row.pullRequest !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Pull request</dt><dd {...stylex.props(styles.detailValue)}>#{row.pullRequest.number}: {row.pullRequest.title}; {row.pullRequest.state}; {row.pullRequest.ref}</dd></>}
     {row.terminal !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Terminal</dt><dd {...stylex.props(styles.detailValue)}>{row.terminal}</dd></>}
     {row.mission !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Mission</dt><dd {...stylex.props(styles.detailValue)}>{row.mission}</dd></>}
+    {row.missionContext?._tag === 'Mission' && <>
+      {row.missionContext.progress._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Steps</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.progress.done} of {row.missionContext.progress.total}</dd></>}
+      {row.missionContext.step._tag === 'Step' && <><dt {...stylex.props(styles.detailLabel)}>Step</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.name}</dd></>}
+      {row.missionContext.step._tag === 'Waiting' && <><dt {...stylex.props(styles.detailLabel)}>Waiting for you</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.handle === undefined ? '' : `${row.missionContext.step.handle} `}{row.missionContext.step.question}</dd></>}
+      {row.missionContext.queued.length > 0 && <><dt {...stylex.props(styles.detailLabel)}>Queued missions</dt><dd {...stylex.props(styles.detailValue)}><ul>{row.missionContext.queued.map(mission => <li key={mission.id}>{mission.slug}</li>)}</ul></dd></>}
+    </>}
     {row.subagent !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Subagent ID</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.id}</dd>
       {row.subagent.subagent_type !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Kind</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.subagent_type}</dd></>}
       {row.subagent.work_id !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Work</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.work_id}</dd></>}
@@ -109,10 +136,11 @@ export function AgentRowDetails({ row, ...clock }: { readonly row: Row } & Sideb
   </dl>
 }
 /** Only reported facts render; unknown or unavailable fields are omitted rather than shown as placeholders. */
-export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & SidebarClock) {
+export function AgentHoverCard({ row, reportedStatusOnly = false, ...clock }: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
+  const showStatus = !reportedStatusOnly || row.status !== 'unobserved'
   return <div data-testid="agent-hover-card" {...stylex.props(styles.card)}>
     <strong {...stylex.props(styles.cardTitle)}>{row.title}</strong>
-    <div {...stylex.props(styles.cardSummary)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span><Icon name="gear" size={12} /><span>{row.host}</span></div>
+    <div {...stylex.props(styles.cardSummary)}>{showStatus && <><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span></>}<Icon name="gear" size={12} /><span>{row.host}</span></div>
     {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} />{row.description}</p>}
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />{row.usage.usd === undefined ? 'Tokens' : 'Spend'}</dt><dd {...stylex.props(styles.detailValue)}>{row.usage.usd === undefined ? '' : `${spendCount.format(row.usage.usd)} · `}{tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : row.usage.scope === 'lifetime-incl-subagents' ? 'Lifetime · includes subagents' : 'Reported by agent'}</div></dd></>}
@@ -129,6 +157,7 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
 const openRow = (row: Row, actions: SidebarActions | undefined, onOpen: ((row: Row) => void) | undefined) => { actions?.select?.(row.id, row.parentRef?.replace(/^agent\//, '')); onOpen?.(row) }
 export interface AgentRowActionsProps extends SidebarClock {
   readonly row: Row
+  readonly reportedStatusOnly?: boolean
   readonly actions?: SidebarActions
   readonly onOpen?: (row: Row) => void
   readonly onMarkRead?: (ref: string) => void
@@ -142,25 +171,48 @@ export interface AgentRowActionsProps extends SidebarClock {
   readonly onDetailsPress?: () => void
   readonly onMenuOpenChange?: (isOpen: boolean) => void
 }
+// A 320px Agents sheet, the 340px details surface and its two 8px viewport gutters.
+const compactDetailsQuery = '(max-width: 676px), (pointer: coarse)'
+const subscribeDetailsLayout = (onChange: () => void) => {
+  const media = window.matchMedia(compactDetailsQuery)
+  media.addEventListener('change', onChange)
+  return () => media.removeEventListener('change', onChange)
+}
+const compactDetailsLayout = () => window.matchMedia(compactDetailsQuery).matches
 /**
  * The row's action menu (`[data-agent-menu]`) and its keyboard-reachable reported-details dialog. Shared by every sidebar
  * row so the actions stay one implementation; hosts own only the trigger's placement and visibility.
  */
-export function AgentRowActions({ row, now, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange }: AgentRowActionsProps) {
+export function AgentRowActions({ row, now, reportedStatusOnly = false, actions, onOpen, onMarkRead, anchorRef, menuTriggerRef, menuButtonStyle, wrapDetailsTrigger, onDetailsPress, onMenuOpenChange }: AgentRowActionsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
+  const compactDetails = React.useSyncExternalStore(subscribeDetailsLayout, compactDetailsLayout, () => false) || narrow
   const menuItemStyle = narrow ? styles.menuItemFocusNarrow : styles.menuItemFocus
-  const detailsTrigger = React.useRef<HTMLButtonElement>(null)
+  // Open from the real menu action: a synthetic click on the hidden trigger changes RAC's input modality and defers dialog focus.
+  const [detailsOpen, setDetailsOpen] = React.useState(false)
   const title = sidebarRowTitle(row)
   const ownerId = row.parentRef?.replace(/^agent\//, '') ?? row.id
   const canOpen = actions?.select !== undefined || onOpen !== undefined
-  const trigger = <VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden>
+  const trigger = <VisuallyHidden isFocusable><Button aria-label={`Reported details for ${title}`} onPress={onDetailsPress} {...stylex.props(styles.iconButton, narrow && styles.detailsTouchTarget)}><Icon name="message" /></Button></VisuallyHidden>
   return <>
-    <DialogTrigger>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover triggerRef={anchorRef} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} now={now} /></Dialog></Popover></DialogTrigger>
+    <DialogTrigger isOpen={detailsOpen} onOpenChange={open => {
+      setDetailsOpen(open)
+      // The menu item unmounts, so RAC falls back to its tree row. Restore the persistent trigger without stealing a newer focus.
+      if (!open) requestAnimationFrame(() => {
+        const trigger = menuTriggerRef.current
+        const active = trigger?.ownerDocument.activeElement
+        if (active === trigger?.ownerDocument.body || active === anchorRef.current || active === anchorRef.current?.closest('[role="row"]')) trigger?.focus()
+      })
+    }}>{wrapDetailsTrigger === undefined ? trigger : wrapDetailsTrigger(trigger)}<Popover
+      triggerRef={compactDetails ? menuTriggerRef : anchorRef}
+      placement={compactDetails ? 'bottom end' : 'right'}
+      shouldFlip containerPadding={8}
+      {...stylex.props(styles.hovercard, compactDetails && styles.detailsCompact)}
+    ><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={row} reportedStatusOnly={reportedStatusOnly} now={now} /></Dialog></Popover></DialogTrigger>
     <MenuTrigger onOpenChange={onMenuOpenChange}><Button ref={menuTriggerRef} data-agent-menu="true" aria-label={`Actions for ${title}`} className={state => stylex.props(menuButtonStyle(state), narrow && styles.menuNarrow).className ?? ''}><Icon name="chevron-right" /></Button><MenuPopover placement="bottom end"><Menu aria-label={`Actions for ${title}`}>
       <MenuItem id="open" textValue="Open conversation" isDisabled={!canOpen} onAction={() => openRow(row, actions, onOpen)} style={menuItemStyle}>Open conversation{!canOpen && <Text slot="description" {...stylex.props(styles.menuReason)}>{row.subagent !== undefined && row.subagent.session_id === undefined ? 'No session reported for this subagent' : 'Conversation opening is unavailable'}</Text>}</MenuItem>
       {actions?.split !== undefined && <MenuItem id="split-right" onAction={() => actions.split?.(row.ref, 'right')} style={menuItemStyle}>Open in split right</MenuItem>}
       {actions?.split !== undefined && <MenuItem id="split-below" onAction={() => actions.split?.(row.ref, 'below')} style={menuItemStyle}>Open in split below</MenuItem>}
-      <MenuItem id="reported-details" onAction={() => { requestAnimationFrame(() => detailsTrigger.current?.click()) }} style={menuItemStyle}>Reported agent details</MenuItem>
+      <MenuItem id="reported-details" onAction={() => { onDetailsPress?.(); setDetailsOpen(true) }} style={menuItemStyle}>Reported agent details</MenuItem>
       {actions?.details !== undefined && <MenuItem id="details" onAction={() => actions.details?.(row.ref)} style={menuItemStyle}>Agent details</MenuItem>}
       {actions?.declaration !== undefined && row.subagent === undefined && <MenuItem id="declaration" onAction={() => actions.declaration?.(row.ref)} style={menuItemStyle}>View KDL</MenuItem>}
       {actions?.declaration !== undefined && row.mission !== undefined && <MenuItem id="mission-declaration" onAction={() => actions.declaration?.(row.mission!)} style={menuItemStyle}>View mission definition</MenuItem>}
@@ -172,12 +224,13 @@ export function AgentRowActions({ row, now, actions, onOpen, onMarkRead, anchorR
     </Menu></MenuPopover></MenuTrigger>
   </>
 }
-export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query, now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
+export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', reportedStatusOnly = false, active = false, query, now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
   const title = sidebarRowTitle(item)
   // Phone: the actions menu and the subagent disclosure leave the dense row's corners for their own trailing 44px columns; the title truncates earlier instead.
   const narrow = React.useContext(NarrowLayoutContext)
   const host = item.host
-  const metadata = React.useMemo(() => sidebarRowDescription(item), [item])
+  const showStatus = !reportedStatusOnly || item.status !== 'unobserved'
+  const metadata = React.useMemo(() => sidebarRowDescription(item, reportedStatusOnly), [item, reportedStatusOnly])
   const titleId = React.useId()
   const statusWordId = React.useId()
   const descriptionId = React.useId()
@@ -209,13 +262,13 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const durationField = item.duration._tag === 'Unknown' ? null : <span data-row-field="total-duration"><SidebarDuration duration={item.duration} /></span>
   const lastTurnField = item.lastTurn._tag === 'Unknown' ? null : <span data-row-field="last-turn"><SidebarTime at={item.lastTurn.at} {...clock} kind={item.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>
   const content = <>
-    <span data-row-column="title" {...stylex.props(styles.title, !narrow && variant === 'SR-2' && item.children.length > 0 && styles.hasChildren)}>{rowGlyph === 'SG-2' && <span id={statusWordId} data-row-column="status-word" {...stylex.props(styles.statusWord)}>{item.statusLabel}</span>}<span id={titleId} data-row-column="title-text" {...stylex.props(styles.name)}><Highlight value={title} query={query} /></span></span>
+    <span data-row-column="title" {...stylex.props(styles.title, !narrow && variant === 'SR-2' && item.children.length > 0 && styles.hasChildren)}>{showStatus && rowGlyph === 'SG-2' && <span id={statusWordId} data-row-column="status-word" {...stylex.props(styles.statusWord)}>{item.statusLabel}</span>}<span id={titleId} data-row-column="title-text" {...stylex.props(styles.name)}><Highlight value={title} query={query} /></span></span>
   </>
   // The subtitle and SR-3 metadata are painted siblings of the row button, not its children: the button's visible text stays exactly its name (label-in-name) and every fact remains in the description.
   const subtitle = <>
     {variant !== 'SR-1' && <SidebarRowSignals>
-      {rowLayout === 'SR2-C' && <span data-row-field="status-label" data-row-retention="7">{item.statusLabel}</span>}
-      {extraSignals.includes('X-work') && item.description !== undefined && <span data-row-field="current-work" data-row-signal="X-work" data-row-retention="2">{item.description}</span>}
+      {showStatus && rowLayout === 'SR2-C' && <span data-row-field="status-label" data-row-retention="7">{item.statusLabel}</span>}
+      {extraSignals.includes('X-work') && item.description !== undefined && item.description.trim()!==title.trim() && <span data-row-field="current-work" data-row-signal="X-work" data-row-retention="2">{item.description}</span>}
       <span data-row-field="host" data-row-retention="3" aria-label={`Host ${host}`}>{host}</span>
       {rowLayout === 'SR2-A' && <span data-row-retention="5">{spendFields}</span>}
       {rowLayout !== 'SR2-B' && <span data-row-retention="4">{durationField}</span>}
@@ -228,17 +281,17 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const rowStyle = stylex.props(styles.row, narrow && styles.rowNarrow)
   return <div data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') setHoverOpen(false); if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); setHoverOpen(false); menuTrigger.current?.click() } }}>
     <div ref={rowAnchor} data-testid="taste-agent-row" data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-narrow={narrow || undefined} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} {...stylex.props(styles.rowWrap, variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, styles[variant], narrow && (item.children.length === 0 ? styles.rowWrapNarrowLeaf : styles.rowWrapNarrowParent), narrow && variant === 'SR-1' && styles.singleNarrow, active && styles.active)}>
-      <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
+      <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}>{showStatus && <SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly />}</span>
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
       <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>
       {/* The visible title is the whole name (label-in-name); status and every reported fact live in the hidden description. The custom hover card is the only hover disclosure, so no native title appears in this subtree. */}
-      {inTree ? <div aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} {...rowStyle}>{content}</div> : <Button aria-labelledby={rowGlyph === 'SG-2' ? `${statusWordId} ${titleId}` : titleId} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}
+      {inTree ? <div aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} {...rowStyle}>{content}</div> : <Button aria-labelledby={showStatus && rowGlyph === 'SG-2' ? `${statusWordId} ${titleId}` : titleId} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}
       {subtitle}
       <VisuallyHidden><span id={descriptionId} data-row-description>{metadata}</span></VisuallyHidden>
       <div {...stylex.props(styles.actions)}>
-        <AgentRowActions row={item} {...clock} actions={callbacks} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={tooltipAnchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHoverOpen(false)} onMenuOpenChange={isOpen => { menuOpen.current = isOpen; setHoverOpen(false) }}
+        <AgentRowActions row={item} reportedStatusOnly={reportedStatusOnly} {...clock} actions={callbacks} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={tooltipAnchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHoverOpen(false)} onMenuOpenChange={isOpen => { menuOpen.current = isOpen; setHoverOpen(false) }}
           menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle]}
-          wrapDetailsTrigger={trigger => <TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}>{trigger}<Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger>} />
+          wrapDetailsTrigger={trigger => <TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}>{trigger}<Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard, styles.passiveHovercard)}><AgentHoverCard row={item} reportedStatusOnly={reportedStatusOnly} {...clock} /></Tooltip></TooltipTrigger>} />
         {item.children.length > 0 && <Button data-row-column="children" slot={inTree ? 'chevron' : undefined} isDisabled={!inTree && onToggleChildren === undefined} aria-labelledby="" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${item.children.length} subagents`} aria-expanded={expanded} onPress={inTree ? undefined : () => onToggleChildren?.(item.ref)} {...stylex.props(styles.iconButton, styles.childrenToggle, variant === 'SR-2' && styles.childrenTop, variant === 'SR-1' && styles.childrenSingle, narrow && styles.childrenNarrow)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} />{extraSignals.includes('X-subs') && <span data-row-signal="X-subs" data-line1-drop="subs">{item.children.length}</span>}</Button>}
       </div>
     </div>
@@ -257,6 +310,7 @@ const styles = stylex.create({
   metadataNarrow: { gridColumn: '2 / 6' },
   // Touch has no hover, so the phone menu is always visible; both controls fill their own column across the row's lines.
   menuNarrow: { gridColumn: '-2 / -1', gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
+  detailsTouchTarget: { width: g.touchTarget, height: g.touchTarget },
   childrenNarrow: { gridColumn: '-3 / -2', gridRow: '1 / -1', width: g.touchTarget, minWidth: g.touchTarget, height: g.touchTarget },
   // The row is the containing block for its visually hidden details trigger; without it the
   // absolutely positioned trigger escapes every scroll clip and extends the document.
@@ -283,6 +337,9 @@ const styles = stylex.create({
   hasChildren: { paddingInlineEnd: g.icon },
   trailingSignals: { gridColumn: '5', gridRow: '1', display: 'inline-flex', alignItems: 'center', justifyContent: 'end', gap: s.xs, width: `var(--sidebar-signal-track, ${g.status})`, marginInlineStart: s.xs, minWidth: g.status },
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, width: g.specimenAside, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', maxHeight: g.commandMaxHeight, overflowY: 'auto', boxShadow: elevation.popover, zIndex: 30 },
+  // The informational tooltip never owns the divider underneath; explicit details popovers remain interactive.
+  passiveHovercard: { pointerEvents: 'none' },
+  detailsCompact: { maxWidth: 'calc(100vw - 16px)' },
   details: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', columnGap: s.md, rowGap: s.sm, margin: s.zero, overflowWrap: 'anywhere' },
   card: { display: 'flex', flexDirection: 'column', gap: s.md, width: g.specimenAside, maxWidth: '100%', boxSizing: 'border-box', overflowWrap: 'anywhere' },
   cardTitle: { fontSize: t.uiSize, lineHeight: t.uiLeading },

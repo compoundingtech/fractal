@@ -8,7 +8,7 @@ export type IconName =
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot' | 'info'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
-  | 'person' | 'checklist' | 'gauge' | 'filter' | 'sort' | 'bell'
+  | 'person' | 'checklist' | 'gauge' | 'filter' | 'sort' | 'bell' | 'sliders'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
@@ -43,6 +43,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   checklist: <><path d="m2 4 1 1 2-2M7 4h7m-12 6 1 1 2-2M7 10h7" /></>,
   gauge: <><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0" /><path d="m8 11.5 2.5-3" /></>,
   filter: <path d="M2 4h12M4 8h8M6 12h4" />,
+  sliders: <path d="M2 4h3m3 0h6M2 12h7m3 0h2M5 2h3v4H5zM9 10h3v4H9z" />,
   sort: <path d="M4 3v10l-2-2m2 2 2-2M8 4h6M8 8h4M8 12h2" />,
   bell: <><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z" /><path d="M6.75 14a1.4 1.4 0 0 0 2.5 0" /></>,
 }

@@ -70,6 +70,13 @@ fn pricing_period_delta(latest: Vec<Value>, baseline: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The next instant a presented declaration restart expires, so the roster window wakes then.
+pub fn declaration_restart_valid_until(queue: Option<u128>, items: &[Value], now: u128) -> Option<u128> {
+    queue.into_iter().chain(items.iter().filter(|item| item["state"] == "restarting")
+        .filter_map(|item| item["_restart_until_unix_ms"].as_u64().map(u128::from))
+        .filter(|deadline| *deadline > now)).min()
+}
+
 const SEAT_QUEUE_MOVE_HISTORY_LIMIT: usize = 20;
 
 #[allow(async_fn_in_trait)]
@@ -1097,7 +1104,9 @@ impl SeatsStore for Store {
                     crate::otel::record_roster("incremental", previous.items.len());
                     return Ok(runtime::AgentResourcesEntry {
                         index, local, history, covered,
-                        valid_until_unix_ms,
+                        valid_until_unix_ms: if refresh_queues {
+                            declaration_restart_valid_until(valid_until_unix_ms, &previous.items, now)
+                        } else { valid_until_unix_ms },
                         items: Arc::clone(&previous.items),
                         published_at_unix_ms: now_ms(),
                     });
@@ -1121,7 +1130,7 @@ impl SeatsStore for Store {
                 crate::otel::record_roster("incremental", items.len());
                 Ok(runtime::AgentResourcesEntry {
                     index, local, history, covered,
-                    valid_until_unix_ms,
+                    valid_until_unix_ms: declaration_restart_valid_until(valid_until_unix_ms, &items, now),
                     items: Arc::new(items),
                     published_at_unix_ms: now_ms(),
                 })
@@ -1141,7 +1150,7 @@ impl SeatsStore for Store {
                 crate::otel::roster_attribute("st.roster.publication_cut", index as i64);
                 Ok(runtime::AgentResourcesEntry {
                     index, local, history, covered: selected.cloned(),
-                    valid_until_unix_ms: self.agent_queue_valid_until(now, exact)?,
+                    valid_until_unix_ms: declaration_restart_valid_until(self.agent_queue_valid_until(now, exact)?, &items, now),
                     items: Arc::new(items),
                     published_at_unix_ms: now_ms(),
                 })

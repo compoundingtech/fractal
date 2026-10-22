@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""scripts/evidence-flip-ready on fixture decision lines (no network): each part of the flip trigger, the log cache, and the
+--propose path against a temporary copy of the repository with `gh` stubbed."""
+import contextlib
+import datetime
+import importlib.machinery
+import importlib.util
+import io
+import json
+import re
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('evidence_flip_ready', str(ROOT / 'scripts/evidence-flip-ready'))
+flip = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(flip)
+flip.time.sleep = lambda seconds: None  # the retries' back-off
+NOW = datetime.datetime(2026, 10, 22, 12, 0, tzinfo=datetime.timezone.utc)
+CHECK = 'genie-freshness'
+TEMPLATE = ('2026-10-22T05:58:31.4Z git show "$BASE_SHA:scripts/ci-evidence-gate" || { echo "evidence-decision v1 check=$CHECK '
+            'decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }')
+
+
+def trigger_reasons(entry):
+    """The trigger's own reasons, without a precondition read from the repository's current policy (it changes as PRs land)."""
+    return [why for why in entry['why_not'] if not why.startswith('the policy does not require')]
+
+
+def at(hours_ago, seconds=0):
+    return NOW - datetime.timedelta(hours=hours_ago, seconds=seconds)
+
+
+def stamp(moment):
+    return moment.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def decision(check=CHECK, **fields):
+    fields = {'decision': 'run', 'outcome': 'satisfied', 'observed_at': stamp(at(30)), 'log': 'ok', **fields}
+    return f'evidence-decision v1 check={check} ' + ' '.join(f'{key}={value}' for key, value in fields.items()) + ' gate_sha256=abc'
+
+
+class FakeGitHub:
+    """The `gh` calls the script makes, answered from fixtures; every other command runs for real (git)."""
+
+    def __init__(self):
+        self.runs, self.jobs, self.logs, self.calls, self.open_prs, self.broken = [], {}, {}, [], [], False
+        self.empty_window = False  # the created= listing answers an empty page whatever runs exist
+
+    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None):
+        """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
+        of other jobs in the same attempt (an aggregate's members)."""
+        if run_id not in self.jobs:
+            self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created)})
+            self.jobs[run_id] = []
+        job_id = run_id * 100 + len(self.jobs[run_id])
+        self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt})
+        if real:
+            self.jobs[run_id].append({'id': job_id + 50, 'name': check, 'status': 'completed', 'conclusion': real, 'run_attempt': attempt})
+        for offset, (name, conclusion) in enumerate((members or {}).items()):
+            self.jobs[run_id].append({'id': job_id + 60 + offset, 'name': name, 'status': 'completed', 'conclusion': conclusion,
+                                      'run_attempt': attempt})
+        self.logs[job_id] = '\x1b[36mnoise\x1b[0m\n' + TEMPLATE + '\n' + ''.join(f'2026-10-22T05:58:36.1Z \x1b[0m{text}\n' for text in lines)
+
+    def __call__(self, command, **kwargs):
+        if command[0] != 'gh':
+            return subprocess.run(command, capture_output=True, check=False, **kwargs)
+        self.calls.append(command[1:])
+        if self.broken:
+            return subprocess.CompletedProcess(command, 1, b'', b'HTTP 502')
+        path = command[-1]
+        if command[1:3] == ['pr', 'list']:
+            out = self.open_prs
+        elif command[1:3] == ['pr', 'create']:
+            return subprocess.CompletedProcess(command, 0, b'https://github.com/org/repo/pull/9\n', b'')
+        elif '/workflows/fleet.yml/runs' in path:
+            newest = sorted(self.runs, key=lambda run: run['created_at'], reverse=True)
+            out = [{'workflow_runs': [] if self.empty_window else self.runs}] if '&created=' in path else [{'workflow_runs': newest[:1]}]
+        elif path.endswith('/logs'):
+            return subprocess.CompletedProcess(command, 0, self.logs[int(path.split('/')[-2])].encode(), b'')
+        else:
+            out = [{'jobs': self.jobs[int(path.split('/runs/')[1].split('/')[0])]}]
+        return subprocess.CompletedProcess(command, 0, json.dumps(out).encode(), b'')
+
+
+def git(cwd, *args):
+    return subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, check=True).stdout.decode()
+
+
+class FlipReady(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = Path(self.tmp.name)
+        # A copy of the files the flip edits, committed and pushed to a local origin: --propose pushes there.
+        self.origin, self.repo = tmp / 'origin.git', tmp / 'repo'
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], check=True)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
+        for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS)):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / path, self.repo / path)
+        git(self.repo, 'config', 'user.name', 'Test')
+        git(self.repo, 'config', 'user.email', 'test@example.com')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-q', '-m', 'base')
+        git(self.repo, 'remote', 'add', 'origin', str(self.origin))
+        git(self.repo, 'push', '-q', 'origin', 'main')
+        self.gh = FakeGitHub()
+
+    def ready_history(self, count=30, first=25, check=CHECK):
+        """`count` satisfied log=ok lines: the first one `first` hours ago, the others over the last 23 hours."""
+        for i in range(count):
+            self.gh.run(1000 + i, at(first if i == 0 else 23 - i * 20 / count), [decision(check=check)], real='success', check=check)
+
+    def report(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = flip.main(['--repo', 'org/repo', '--cache', str(Path(self.tmp.name) / 'cache'), *args],
+                             runner=self.gh, now=NOW, root=self.repo)
+        self.err = err.getvalue()
+        text = out.getvalue()
+        return code, (json.loads(text[:text.index('\n}\n') + 2]) if text.startswith('{') else None), text
+
+    def check(self, *args):
+        return self.check_of(CHECK, *args)
+
+    def check_of(self, check, *args):
+        code, result, _ = self.report(*args)
+        self.assertEqual(code, 0, self.err)
+        return result['checks'][check]
+
+    def test_thirty_fresh_satisfied_lines_over_a_full_window_are_ready(self):
+        self.ready_history()
+        code, result, _ = self.report()
+        self.assertEqual((code, result['window_s'], result['as_of']), (0, 86400, '2026-10-22T12:00:00Z'))
+        entry = result['checks'][CHECK]
+        self.assertEqual(entry, {'enforce': False, 'lines': 29, 'satisfied_log_ok': 29, 'log_missing': 0, 'unlogged_pass_unexplained': 0,
+                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'ready': False,
+                                 'why_not': ['29 satisfied lines with log=ok, fewer than 30']})  # the first run is in the lookback, not the window
+        self.gh.run(2000, at(1), [decision()], real='success')
+        self.assertEqual(self.check()['why_not'], [])
+        self.assertTrue(result['checks']['typescript-client']['enforce'])  # reported though enforced
+        self.assertEqual(result['checks']['typescript-client']['lines'], 0)
+
+    def test_linux_gate_is_not_proposed_until_its_host_and_agent_notes_must_name_the_clippy_base(self):
+        ready = {'ready': True, 'why_not': []}
+        level = lambda *inputs: {'required_inputs': ['flake_lock_sha256', *inputs]}
+        entry = lambda **levels: {'kinds': {'wrapper': {'command': ['linux-gate'], 'by_level': levels}}}
+        self.assertEqual(flip.preconditions(ready, 'linux-gate', {'kinds': {}}),
+                         {'ready': False, 'why_not': ['the policy does not require clippy_base_sha of host and agent linux-gate notes']})
+        self.assertEqual(flip.preconditions(ready, 'linux-gate', entry(host=level('clippy_base_sha'), agent=level()))['why_not'],
+                         ['the policy does not require clippy_base_sha of agent linux-gate notes'])
+        self.assertEqual(flip.preconditions(ready, 'linux-gate', entry(host=level('clippy_base_sha'), agent=level('clippy_base_sha'))), ready)
+        # The trigger's own reasons stay, the precondition's are added; other checks have none.
+        self.assertEqual(flip.preconditions({'ready': False, 'why_not': ['x']}, 'linux-gate', {})['why_not'][0], 'x')
+        self.assertEqual(flip.preconditions(ready, CHECK, {}), ready)
+
+    def test_the_window_has_not_started_while_the_log_key_is_not_pinned(self):
+        self.ready_history(count=40)
+        self.gh.run(3000, at(20), [decision(log='-')])
+        entry = self.check()
+        self.assertFalse(entry['ready'])
+        self.assertEqual(entry['log_window_start'], stamp(at(23 - 7 * 20 / 40)))  # the first line after the last '-'
+        self.assertEqual(entry['why_not'], ['1 lines with log=-', f'log window started {entry["log_window_start"]}, less than 24 h ago'])
+
+    def test_a_gate_without_the_log_field_counts_as_unpinned_and_stale_absent_unsigned_block(self):
+        self.ready_history(count=40)
+        self.gh.run(3000, at(2), [decision(log='stale')])
+        self.gh.run(3001, at(2), [decision(log='unsigned', outcome='no_note')])
+        self.gh.run(3002, at(1), [decision(log='absent')])
+        self.assertEqual(self.check()['why_not'], ['1 lines with log=stale', '1 lines with log=absent', '1 lines with log=unsigned'])
+        gh = FakeGitHub()
+        gh.run(1, at(1), ['evidence-decision v1 check=genie-freshness decision=run outcome=unavailable reason=no-gate-at-base run=1'])
+        self.gh = gh
+        self.assertEqual(self.check()['why_not'][:2], ['1 lines with log=-', 'no line with a log value'])
+
+    def test_missing_and_unexplained_unlogged_passes_block_and_latency_explains_one(self):
+        self.ready_history(count=40)
+        self.gh.run(3000, at(3), [decision(log='unlogged_pass', observed_at=stamp(at(3, 200)))])  # 200 s before the run: log latency
+        self.gh.run(3001, at(3), [decision(log='unlogged_pass', observed_at=stamp(at(3, -60)))])  # observed after the run was created
+        entry = self.check()
+        self.assertEqual((entry['unlogged_pass_unexplained'], entry['ready']), (0, True))
+        self.gh.run(3002, at(2), [decision(log='unlogged_pass', observed_at=stamp(at(2, 300)))])
+        self.gh.run(3003, at(2), [decision(log='unlogged_pass', observed_at='-')])
+        self.gh.run(3004, at(1), [decision(log='missing', outcome='rejected')])
+        entry = self.check()
+        self.assertEqual((entry['unlogged_pass_unexplained'], entry['log_missing']), (2, 1))
+        self.assertEqual(entry['why_not'], ['1 lines with log=missing', '2 unexplained log=unlogged_pass'])
+
+    def test_a_satisfied_line_beside_a_failed_real_job_of_the_same_attempt_is_a_hidden_red(self):
+        self.ready_history(count=40)
+        self.gh.run(4000, at(5), [decision(decision='skip')], real='skipped')  # an enforced skip is evidence neither way
+        self.gh.run(4001, at(5), [decision()], real='failure', attempt=1)
+        self.gh.run(4001, at(5), [decision()], real='success', attempt=2)  # the rerun passes: attempt 1 still was a hidden red
+        self.gh.run(4002, at(4), [decision(outcome='no_note')], real='failure')  # a red the gate did not cover is not hidden
+        self.gh.run(4003, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate')  # another check's red
+        entry = self.check()
+        self.assertEqual((entry['hidden_red'], entry['why_not']), ([4001], ['1 runs with a hidden red']))
+
+    def test_an_aggregate_red_from_a_member_that_always_runs_is_visible_not_hidden(self):
+        # linux-gate failed only because upgrade-impact failed (run 39700185823: a missing release note). The gate never skips
+        # upgrade-impact, so under enforce the red would still show: reported, not blocking.
+        self.ready_history(count=40, check='linux-gate')
+        self.gh.run(5000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate',
+                    members={'upgrade-impact': 'failure', 'linux-tests': 'success', 'linux-clippy': 'skipped'})
+        self.gh.run(5001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate', attempt=1,
+                    members={'upgrade-impact': 'failure'})
+        self.gh.run(5001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate', attempt=2,
+                    members={'linux-tests': 'failure'})  # another attempt's member red does not make attempt 1's hidden
+        code, result, _ = self.report()
+        entry = result['checks']['linux-gate']
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], entry['ready'], trigger_reasons(entry)), ([5001], [5000], False,
+                                                                                                        ['1 runs with a hidden red']))
+        # (a run with a hidden red in any attempt is listed as hidden only)
+        self.gh = FakeGitHub()
+        self.ready_history(count=40, check='linux-gate')
+        self.gh.run(5000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate', members={'upgrade-impact': 'failure'})
+        entry = self.check_of('linux-gate')
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([], [5000], []))  # the trigger holds
+
+    def test_an_aggregate_red_from_a_member_the_skip_would_skip_is_hidden(self):
+        self.ready_history(count=40, check='linux-gate')
+        self.gh.run(6000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate',
+                    members={'linux-tests': 'failure', 'upgrade-impact': 'success'})
+        self.gh.run(6001, at(4), [decision(check='linux-gate')], real='failure', check='linux-gate',
+                    members={'linux-tests-shard-3': 'cancelled', 'upgrade-impact': 'failure'})
+        entry = self.check_of('linux-gate')
+        self.assertEqual((entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([6000, 6001], [], ['2 runs with a hidden red']))
+
+    def test_the_members_a_linux_gate_skip_skips_are_the_jobs_whose_condition_reads_its_skip_output(self):
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        gated = set()
+        for found in re.finditer(r'^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)', text, re.M):
+            condition = re.search(r'^    if: (.*(?:\n      .*)*)', found.group(2), re.M)  # the job's own if, not a step's
+            if condition and 'needs.evidence-gate-linux-gate.outputs.skip' in condition.group(1):
+                gated.add(found.group(1))
+        self.assertEqual(sorted(gated), sorted(flip.SKIPPED_MEMBERS['linux-gate']))
+        self.assertNotIn('upgrade-impact', gated)
+
+    def test_job_logs_are_cached_by_job_id_and_template_lines_are_ignored(self):
+        self.ready_history(count=31)
+        self.assertTrue(self.check()['ready'])
+        logs = [call for call in self.gh.calls if call[-1].endswith('/logs')]
+        self.assertEqual(len(logs), 31)
+        self.gh.calls.clear()
+        self.assertTrue(self.check()['ready'])
+        self.assertEqual([call for call in self.gh.calls if call[-1].endswith('/logs')], [])
+
+    def test_unreadable_github_exits_two_after_three_tries_and_prints_nothing(self):
+        self.gh.broken = True
+        code, result, text = self.report()
+        self.assertEqual((code, text), (2, ''))
+        self.assertEqual(len(self.gh.calls), 3)
+        self.assertIn('HTTP 502', self.err)
+
+    def test_an_empty_run_listing_while_a_run_is_in_the_window_is_unreadable_not_zero_lines(self):
+        self.ready_history()
+        self.gh.empty_window = True
+        code, result, text = self.report()
+        self.assertEqual((code, text), (2, ''))
+        self.assertIn('came back empty', self.err)
+        self.gh.runs = [{'id': 1, 'status': 'completed', 'created_at': stamp(at(40))}]  # quiet: the newest run is older
+        self.assertEqual(self.check()['lines'], 0)
+
+    def flipped(self, ref='evidence-flip/genie-freshness'):
+        return {path: git(self.origin, 'show', f'{ref}:{path}') for path in
+                (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS), f'release-notes/evidence-enforce-{CHECK}.json')}
+
+    def test_propose_pushes_exactly_the_flip_and_opens_a_pull_request_with_the_trigger(self):
+        self.ready_history(count=31)
+        code, result, _ = self.report('--propose')
+        self.assertEqual(code, 0, self.err)
+        files = self.flipped()
+        policy = json.loads(files[flip.POLICY])
+        before = json.loads((ROOT / flip.POLICY).read_text())
+        self.assertEqual(policy['checks'][CHECK], flip.flipped_entry(before['checks'][CHECK]))
+        self.assertEqual(list(policy['checks'][CHECK])[:4], ['trust_levels', 'enforce', 'events', 'sample_one_in'])
+        self.assertEqual((policy['checks'][CHECK]['enforce'], policy['checks'][CHECK]['events'], policy['checks'][CHECK]['sample_one_in']),
+                         (True, ['pull_request'], 5))
+        before['checks'][CHECK] = policy['checks'][CHECK]
+        self.assertEqual(policy, before)  # nothing else changed
+        self.assertIn(f'| `{CHECK}` | true | `pull_request` | 5 | 2026-10-22 |\n', files[flip.DOC])
+        self.assertIn('| `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |\n', files[flip.DOC])
+        self.assertIn("enforced = ('typescript-client', 'genie-freshness')\n", files['scripts/ci-evidence-gate-test'])
+        self.assertIn("ENFORCED = ('typescript-client', 'genie-freshness')\n", files['scripts/evidence-verify-test'])
+        notes_loader = importlib.machinery.SourceFileLoader('release_notes', str(ROOT / 'scripts/release_notes.py'))
+        notes = importlib.util.module_from_spec(importlib.util.spec_from_loader(notes_loader.name, notes_loader))
+        notes_loader.exec_module(notes)
+        notes.validate(json.loads(files[f'release-notes/evidence-enforce-{CHECK}.json']), 'release note')
+        changed = git(self.origin, 'diff', '--name-only', 'main', 'evidence-flip/genie-freshness').split()
+        self.assertEqual(sorted(changed), sorted(files))
+        for path in files:
+            if path not in (flip.POLICY, f'release-notes/evidence-enforce-{CHECK}.json'):
+                diff = git(self.origin, 'diff', 'main', 'evidence-flip/genie-freshness', '--', path).splitlines()
+                self.assertLessEqual(len([line for line in diff if line[:1] in '+-' and line[:3] not in ('+++', '---')]), 3, path)
+        created = [call for call in self.gh.calls if call[:2] == ['pr', 'create']]
+        self.assertEqual(len(created), 1)
+        body = created[0][created[0].index('--body') + 1]
+        trigger = json.loads(body.split('```json\n')[1].split('\n```')[0])
+        self.assertEqual((trigger['check'], trigger['ready'], trigger['satisfied_log_ok']), (CHECK, True, 30))
+        self.assertIn(['pr', 'list', '--repo', 'org/repo', '--head', 'evidence-flip/genie-freshness', '--state', 'open', '--json', 'number'], self.gh.calls)
+        self.assertEqual(git(self.repo, 'worktree', 'list').count('\n'), 1)  # the temporary worktree is gone
+
+    def test_propose_does_nothing_for_an_open_pull_request_and_dry_run_only_prints_the_diff(self):
+        self.ready_history(count=31)
+        self.gh.open_prs = [{'number': 7}]
+        code, _, _ = self.report('--propose')
+        self.assertEqual(code, 0)
+        self.assertIn('#7 is already open', self.err)
+        self.gh.open_prs = []
+        code, _, text = self.report('--propose', '--dry-run')
+        self.assertEqual(code, 0, self.err)
+        self.assertIn('+      "enforce": true,', text)
+        self.assertIn(f'+| `{CHECK}` | true | `pull_request` | 5 | 2026-10-22 |', text)
+        self.assertEqual(git(self.origin, 'branch', '--list', 'evidence-flip/*'), '')
+        self.assertFalse([call for call in self.gh.calls if call[:2] == ['pr', 'create']])
+
+    def test_propose_refuses_a_flip_it_cannot_make_mechanically_and_pushes_nothing(self):
+        self.ready_history(count=31)
+        doc = self.repo / flip.DOC
+        doc.write_text(doc.read_text().replace(f'`{CHECK}`, ', ''))  # the table no longer lists the check
+        git(self.repo, 'commit', '-qam', 'drop the row')
+        git(self.repo, 'push', '-q', 'origin', 'main')
+        code, _, _ = self.report('--propose')
+        self.assertEqual(code, 1)
+        self.assertIn('cannot be made mechanically', self.err)
+        self.assertEqual(git(self.origin, 'branch', '--list', 'evidence-flip/*'), '')
+
+    def test_a_policy_not_in_json_dumps_form_gets_a_minimal_textual_edit(self):
+        text = (ROOT / flip.POLICY).read_text().replace('"version": 1,', '"version":  1,')
+        new, entry = flip.flip_policy(text, 'isolation-vm')
+        self.assertEqual(entry['sample_one_in'], 5)
+        self.assertEqual(json.loads(new)['checks']['isolation-vm'], entry)
+        self.assertIn('"version":  1,', new)
+        new, entry = flip.flip_policy(text, 'linux-gate')  # sample_one_in is kept where it is
+        self.assertEqual(list(entry)[1:4], ['enforce', 'events', 'sample_one_in'])
+        with self.assertRaises(ValueError):
+            flip.flip_policy(text, 'typescript-client')  # already enforced
+
+
+if __name__ == '__main__':
+    unittest.main()

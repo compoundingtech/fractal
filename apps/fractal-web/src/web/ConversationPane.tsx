@@ -6,12 +6,11 @@ import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-u
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
-import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot } from '../data/react.tsx'
+import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
-import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
@@ -213,7 +212,6 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
-    <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
@@ -225,14 +223,19 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   </EmbraceRuntimeProvider>
 })
 
-/** Sync observations can change without rebuilding the runtime or its callbacks. */
+/**
+ * Sync observations can change without rebuilding the runtime or its callbacks. While live, only
+ * the transcript's time leaves tick; on transport loss they freeze at the last live sample.
+ */
 function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.ComponentProps<typeof Transcript>, 'sync' | 'now' | 'observedAt'> & {
   readonly agentRef: string
   readonly feed: Feed<ConversationPage>
 }) {
-  const now = useNowSnapshot()
+  const paused = usePausedNow()
+  const snapshot = useNowSnapshot()
+  const now = paused ?? snapshot
   const observation = useConversationSync(agentRef)
   const headerActionsHost = React.useContext(ThreadHeaderSlotContext)
-  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} />
+  return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerActionsHost} sync={transcriptSyncStatus(observation, feed, now)} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
 

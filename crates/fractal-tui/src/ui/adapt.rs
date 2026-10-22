@@ -43,6 +43,10 @@ pub struct Extras {
     pub summary: Option<fractal_client::Summary>,
     pub inventory_supported: Option<bool>,
     pub inventory_partial: Vec<String>,
+    /// Objectives and budgets read on demand while the Usage view shows, and the history of
+    /// each one that was selected.
+    pub slo: Load<Vec<fractal_client::SloRow>>,
+    pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
 }
 
 fn now() -> String {
@@ -118,15 +122,15 @@ fn short(id: &str) -> String {
         .to_owned()
 }
 
-fn missions(model: &Model) -> Vec<Mission> {
+fn missions(model: &Model, person: &str) -> Vec<Mission> {
     fractal_ui_model::missions::adapt(
         model.missions(),
         model.agents(),
         model.attention(),
+        person,
         &now(),
         &fractal_ui_model::missions::Display {
             mission_label: &crate::mission_display_label,
-            agent_label: &crate::agent_label,
             age_label: &crate::age_label,
             clean_text: &clean_message_text,
         },
@@ -167,13 +171,19 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .map(|host| host.trim_start_matches("host/").to_owned())
         .unwrap_or_else(|| "this machine".into());
     let attention = attention(model, extras);
-    let missions = missions(model);
+    let missions = missions(model, person);
     let quiet = missions
         .iter()
         .filter(|mission| {
             !matches!(
                 mission.word,
-                Word::Decision | Word::Done | Word::Failed | Word::Cancelled | Word::NotStarted
+                // A mission st serves no word for is not known to be quiet.
+                Word::Decision
+                    | Word::Done
+                    | Word::Failed
+                    | Word::Cancelled
+                    | Word::NotStarted
+                    | Word::Unknown
             ) && !mission.system
         })
         .count();
@@ -256,6 +266,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Ok(period)) => period.agent_messages.clone(),
             _ => None,
         },
+        slo: extras.slo.clone(),
+        slo_history: extras.slo_history.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items
