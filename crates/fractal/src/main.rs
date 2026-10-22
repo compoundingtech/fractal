@@ -5936,6 +5936,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
+    // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
+    store.trim_locally(config.trim.local);
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6240,9 +6242,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
             let activation_store = store.clone();
-            let checkpoint_context = config
-                .checkpoint
-                .enabled
+            // A member that trims locally still runs the pass, which only finishes a trim it had
+            // already committed.
+            let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
                 .then(|| fractal_daemon::store::CheckpointContext {
                     now_unix_ms: 0,
                     configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),

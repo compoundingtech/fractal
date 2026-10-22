@@ -793,6 +793,8 @@ pub struct Store {
     /// needs when they differ. Off unless the daemon's divergence check is on: a default
     /// install never compares, reports no divergence, and settles sync on claims alone.
     pub divergence_capture: std::sync::atomic::AtomicBool,
+    /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
+    trim_local: AtomicBool,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1102,6 +1104,7 @@ impl Store {
             replication_snapshot_build: Mutex::new(()),
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
+            trim_local: AtomicBool::new(false),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -8287,6 +8290,19 @@ impl Store {
     pub fn capture_divergences(&self, on: bool) {
         self.divergence_capture
             .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Trim on this member's own, without checkpoint agreement: the member's `[trim] local`
+    /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
+    /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
+    /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
+    /// on the other members until a person excuses this one.
+    pub fn trim_locally(&self, on: bool) {
+        self.trim_local.store(on, Ordering::Relaxed);
+    }
+
+    pub fn trims_locally(&self) -> bool {
+        self.trim_local.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.
