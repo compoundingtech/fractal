@@ -147,6 +147,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st agents rename-id": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st agents repos": {
         "actor": "none",
         "accepts_person": false,
@@ -1264,6 +1273,15 @@
         "ignores_actor": false
       },
       "st missions release": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions rename-id": {
         "actor": "required",
         "accepts_person": true,
         "can_carry_person": true,

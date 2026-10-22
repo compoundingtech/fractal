@@ -53,6 +53,11 @@ public struct ErrorEnvelope: Codable, Error, Sendable {
 
 public enum ErrorCode: Codable, Sendable, Equatable {
     case recipientRetired
+    case identityCycle
+    case identityOccupied
+    case identityRetiredSource
+    case identityCrossKind
+    case identityUnknown
     case lifecycleUnavailable
     case retirementUpgradeRequired
     case notFound
@@ -117,6 +122,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = switch raw {
         case "recipient-retired": .recipientRetired
+        case "identity-cycle": .identityCycle
+        case "identity-occupied": .identityOccupied
+        case "identity-retired-source": .identityRetiredSource
+        case "identity-cross-kind": .identityCrossKind
+        case "identity-unknown": .identityUnknown
         case "lifecycle-unavailable": .lifecycleUnavailable
         case "retirement-upgrade-required": .retirementUpgradeRequired
         case "attention-migrated": .attentionMigrated
@@ -181,6 +191,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     public func encode(to encoder: Encoder) throws {
         let raw = switch self {
         case .recipientRetired: "recipient-retired"
+        case .identityCycle: "identity-cycle"
+        case .identityOccupied: "identity-occupied"
+        case .identityRetiredSource: "identity-retired-source"
+        case .identityCrossKind: "identity-cross-kind"
+        case .identityUnknown: "identity-unknown"
         case .lifecycleUnavailable: "lifecycle-unavailable"
         case .retirementUpgradeRequired: "retirement-upgrade-required"
         case .attentionMigrated: "attention-migrated"

@@ -51,7 +51,8 @@ impl NativeCut {
 fn temporary_schema_safe(connection: &Connection) -> bool {
     // Compare the actual catalog definitions, not trusted names. SQLite stores the CREATE
     // text beginning at the object name (TEMP / IF NOT EXISTS are not retained); normalize
-    // whitespace only. A changed definition, trigger, view or index is ineligible.
+    // whitespace only. Only the exact native tables and body-free preparation
+    // queue notifiers are eligible; changed definitions or other objects are not.
     // https://www.sqlite.org/schematab.html and bundled sqlite3.c sqlite3EndTable.
     let check = || -> rusqlite::Result<bool> {
         let mut statement = connection.prepare("SELECT name, type, sql FROM temp.sqlite_schema")?;
@@ -61,17 +62,27 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
             let name: String = row.get(0)?;
             let kind: String = row.get(1)?;
             let sql: Option<String> = row.get(2)?;
-            let expected = match name.as_str() {
-                "write_clock" => {
-                    /* sqlite-large-value: allow-for-now lv-h914a6ef579dc owner=fractal_store::store::resource_preparation TODO=chunk-or-reference-variable-columns */ "CREATE TABLE write_clock(offset_ms INTEGER NOT NULL, at_ms INTEGER)"
-                }
+            let (expected_kind, expected) = match name.as_str() {
+                "write_clock" => (
+                    "table",
+                    /* sqlite-large-value: allow-for-now lv-h914a6ef579dc owner=fractal_store::store::resource_preparation TODO=chunk-or-reference-variable-columns */ "CREATE TABLE write_clock(offset_ms INTEGER NOT NULL, at_ms INTEGER)",
+                ),
                 "heal_replay_base_order" => {
                     replay = true;
-                    /* sqlite-large-value: allow-for-now lv-h2cb49569e962 owner=fractal_store::store::resource_preparation TODO=chunk-or-reference-variable-columns */ "CREATE TABLE heal_replay_base_order( ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)"
+                    ("table",
+                    /* sqlite-large-value: allow-for-now lv-h2cb49569e962 owner=fractal_store::store::resource_preparation TODO=chunk-or-reference-variable-columns */ "CREATE TABLE heal_replay_base_order( ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)")
                 }
+                "preparation_work_pending" => (
+                    "trigger",
+                    /* sqlite-large-value: allow-for-now lv-h51f4af8ed1b8 owner=fractal_store::store::resource_preparation TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER preparation_work_pending AFTER INSERT ON main.local_resource_preparation_pending BEGIN SELECT resource_preparation_work_pending(); END",
+                ),
+                "preparation_work_dirty" => (
+                    "trigger",
+                    /* sqlite-large-value: allow-for-now lv-h7676b0cc0ec9 owner=fractal_store::store::resource_preparation TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER preparation_work_dirty AFTER INSERT ON main.local_resource_preparation_dirty BEGIN SELECT resource_preparation_work_pending(); END",
+                ),
                 _ => return Ok(false),
             };
-            if kind != "table"
+            if kind != expected_kind
                 || sql
                     .as_deref()
                     .map(|sql| sql.split_ascii_whitespace().collect::<Vec<_>>().join(" "))
