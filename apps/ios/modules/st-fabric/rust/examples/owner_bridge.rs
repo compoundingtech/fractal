@@ -38,24 +38,24 @@ fn main() -> Result<()> {
         })?;
         let pointer = unsafe {
             match command["op"].as_str() {
-                Some("open") => st_fabric_bridge::st_fabric_open_target(
+                Some("open") => fractal_fabric_bridge::st_fabric_open_target(
                     key.as_ptr(),
                     key.len(),
                     argument.as_ptr(),
                 ),
-                Some("close") => st_fabric_bridge::st_fabric_close_target(argument.as_ptr()),
-                Some("stats") => st_fabric_bridge::st_fabric_target_stats(argument.as_ptr()),
+                Some("close") => fractal_fabric_bridge::st_fabric_close_target(argument.as_ptr()),
+                Some("stats") => fractal_fabric_bridge::st_fabric_target_stats(argument.as_ptr()),
                 _ => bail!("unknown bridge proof operation"),
             }
         };
         let result = unsafe { CStr::from_ptr(pointer).to_string_lossy().into_owned() };
-        unsafe { st_fabric_bridge::st_fabric_string_free(pointer) };
+        unsafe { fractal_fabric_bridge::st_fabric_string_free(pointer) };
         println!(
             "{}",
             json!({"id":command["id"], "result":serde_json::from_str::<Value>(&result)?})
         );
         std::io::stdout().flush()?;
     }
-    st_fabric_bridge::st_fabric_stop_all();
+    fractal_fabric_bridge::st_fabric_stop_all();
     Ok(())
 }
