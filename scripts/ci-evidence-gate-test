@@ -260,8 +260,11 @@ class EndToEnd(unittest.TestCase):
                               capture_output=True)
         self.assertEqual(done.returncode, 0, done.stderr.decode())  # the gate never fails the job
         fields = decision(done.stdout.decode())
-        outputs = dict(line.split('=', 1) for line in output.read_text().split())
+        outputs = dict(row.split('=', 1) for row in output.read_text().split('\n') if row)
         self.assertEqual(fields['decision'] == 'skip', outputs['skip'] == 'true')
+        # The decision line is an output too (for evidence-presign-notice), one line, written before the outputs a skip uses.
+        self.assertEqual(decision(outputs['line']), fields)
+        self.assertTrue(output.read_text().startswith('line=evidence-decision v1 '))
         self.assertIn('evidence-decision v1', summary.read_text())
         return fields, outputs
 
@@ -1208,7 +1211,7 @@ class EndToEnd(unittest.TestCase):
         env.update(overrides)
         done = subprocess.run(['bash', '-e', '-c', self.workflow_step()], cwd=work, env=env, capture_output=True)
         self.assertEqual(done.returncode, 0, done.stderr.decode())  # the step never fails the job
-        outputs = dict(line.split('=', 1) for line in output.read_text().split())
+        outputs = dict(row.split('=', 1) for row in output.read_text().split('\n') if row)
         return outputs, done.stdout.decode()
 
     def test_the_workflow_step_takes_the_gate_from_the_base_so_an_edited_gate_cannot_skip(self):

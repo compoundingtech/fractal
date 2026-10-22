@@ -431,7 +431,10 @@ def main():
     text = line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sha)
     print(text)
     record = (result or {}).get('record') if decision == 'skip' else None
-    for variable, body in (('GITHUB_OUTPUT', f'outcome={outcome}\nskip={"true" if decision == "skip" else "false"}\n'
+    # `line` is information only (evidence-presign-notice reads it). It goes first and without control characters, so
+    # nothing in it can stand in for the outputs below, the ones a skip is decided by.
+    single = re.sub(r'[\x00-\x1f\x7f]', '_', text)
+    for variable, body in (('GITHUB_OUTPUT', f'line={single}\noutcome={outcome}\nskip={"true" if decision == "skip" else "false"}\n'
                                              f'record={field(record)}\n'),
                            ('GITHUB_STEP_SUMMARY', text + '\n')):
         target = os.environ.get(variable)

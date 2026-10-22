@@ -1440,6 +1440,38 @@ collector reads the outcome from the jobs API: `evidence satisfied by existing n
 `evidence verifier unavailable`, plus `evidence skip taken` when the decision is skip. A note made for a pull request is reused by the merge queue's run
 only when the tree is identical, that is, when main has not moved in between.
 
+The gate step also writes the line as its output `line` (first, with control characters replaced, so it cannot stand in for
+`outcome`, `skip` or `record`), and each gate job passes it on as `outputs.line`. Only `evidence-presign-notice` reads it.
+
+### Not pre-signed: the notice (`scripts/ci-evidence-presign-notice`)
+
+Nothing rejects a pull request for a missing note. A pull request that is not pre-signed runs its checks, and CI signs them.
+The `evidence-presign-notice` job only says so. It runs on pull requests (not drafts) after the six gate jobs and takes
+`scripts/ci-evidence-presign-notice` from the accepted base, like the gate. It never fails, is not a required check, and nothing
+reads its result.
+
+It lists a check only when all of these hold:
+
+- `scripts/st-test` can sign it: the check is a lane of `.st/required-lanes.json` at the base.
+- Its gate ran it for lack of a note: `decision=run outcome=no_note` on a same-repository pull request.
+- The gate asked about the head's own tree (`tree_of=head head_tree=used`). After a fallback to the merge tree, a pre-signed
+  note could not have counted.
+- The pull request does not edit the lane's `definition_paths` (from the pull request's file list). `st-test` refuses to sign
+  such a tree.
+
+With a check listed, it writes one notice annotation and the job summary:
+
+> These jobs ran in full because no pre-signed note covered this head: genie-freshness, typescript-client. Run
+> `scripts/st-test --push origin` before marking the pull request ready, and CI can skip them. How: (#3621). This never fails a
+> check or blocks a merge.
+
+`--all` is added when `mail-redelivery-canaries` is listed. Every run also prints one counting line,
+`evidence-presign-notice v1 pr=… listed=…|- passed_over=check:reason,…|-`. If the lanes file or the file list cannot be read,
+the affected checks are passed over, never listed.
+
+This is phase A, a notice only. Phase B, from a date announced in #3621 first, adds one comment on the pull request, edited
+in place on later pushes. It still never blocks anything.
+
 ### Loops
 
 No workflow has an unfiltered `push` trigger (the `push` triggers are limited to `branches: [main]` or
