@@ -1,7 +1,7 @@
 import { githubRepoSettings, githubRuleset } from '../repos/effect-utils/genie/external.ts'
 
-// Landing goes through GitHub's merge queue. Apply the fifth required check only after
-// mail-redelivery-canaries has passed on main; keep the existing live checks until then.
+// Landing goes through GitHub's merge queue. This file declares the live ruleset: fractal-web
+// joined the required checks after both PR and merge-group runs had emitted it successfully.
 // Every required job must run on merge_group, or the queue never receives its checks and merges freeze.
 export default githubRepoSettings({
   repository: { allow_auto_merge: true, delete_branch_on_merge: true },
@@ -41,6 +41,7 @@ export default githubRepoSettings({
             { context: 'genie-freshness', integration_id: 15368 },
             { context: 'typescript-client', integration_id: 15368 },
             { context: 'mail-redelivery-canaries', integration_id: 15368 },
+            { context: 'fractal-web', integration_id: 15368 },
           ],
         },
       },

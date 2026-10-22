@@ -67,6 +67,10 @@
               {
                 "context": "mail-redelivery-canaries",
                 "integration_id": 15368
+              },
+              {
+                "context": "fractal-web",
+                "integration_id": 15368
               }
             ]
           }
