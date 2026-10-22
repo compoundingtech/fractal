@@ -3,6 +3,7 @@
 # .st/required-lanes.json). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
 #
 #   scripts/ci-local mail-redelivery-canaries
+#   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
 #
 # Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
 # first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
@@ -21,7 +22,7 @@ if [ "$#" -eq 0 ]; then
 fi
 for stage in "$@"; do
   case "$stage" in
-    mail-redelivery-canaries) ;;
+    tests|clippy|fleet-compat|mail-redelivery-canaries) ;;
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
@@ -64,6 +65,11 @@ export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_D
 export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP"
 touch "$GITHUB_STEP_SUMMARY"
+# clippy's ratchet compares with the base, as CI compares with the event's base: the base branch's tip unless named.
+if [ -z "${CLIPPY_BASE_SHA:-}" ]; then
+  CLIPPY_BASE_SHA=$(git rev-parse --verify --quiet origin/main || true)
+  export CLIPPY_BASE_SHA
+fi
 cargo build --locked -p fractal-drivers --bin ci-hooks-install
 bash scripts/ci-install-built-hooks
 # A build host is shared and test binaries run outside the build admission gate: the stages' tests run 6 at a time unless

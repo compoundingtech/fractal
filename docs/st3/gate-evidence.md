@@ -1304,8 +1304,8 @@ the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `genie-freshness`, `typescript-client` and
-`mail-redelivery-canaries`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+`scripts/st-test` runs each required check that has a local command (today `genie-freshness`, `typescript-client`,
+`mail-redelivery-canaries` and `linux-gate`; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
@@ -1356,9 +1356,15 @@ refuse when it is started with `LD_PRELOAD`.
 
 
 **Heavy checks and Linux gate stages (`scripts/ci-local`).** A check that builds and tests the Rust workspace
-(`mail-redelivery-canaries` today) is heavy: tens of minutes of a shared build host. st-test runs it only when it is named
-(`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its wait. Its local
-command is `nix develop -c bash scripts/ci-local STAGE`: the `scripts/ci-linux` stage as its CI job runs it, after building and
+(`mail-redelivery-canaries` and `linux-gate`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
+it is named (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its
+wait. **The author's seat runs `scripts/st-test --all --push origin` once, on the head it marks ready** (Factory, 2026-10-22),
+through the ordinary admission slot; it runs only code that seat wrote, so the trust is the light checks' own. The pre-push hook
+cannot know when a pull request is marked ready, so it reminds instead: after its own status it asks `st-test --status --all`,
+read only, and names the heavy checks not yet signed for the pushed tree, once per push. Their local command is
+`nix develop -c bash scripts/ci-local STAGE...`; `linux-gate`'s runs the four stages a `linux-gate` skip covers, `tests clippy
+fleet-compat mail-redelivery-canaries` (the test build with them; `upgrade-impact` is not skipped and runs in CI), with clippy's
+ratchet compared with the base branch's tip (`CLIPPY_BASE_SHA`, as CI compares with the event's base). Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's st state, harness
@@ -1370,9 +1376,11 @@ shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners u
 `CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
 default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
 pty first on PATH, which made every boot canary fail on that host (the seat launch passes environment names only). The lane in `.st/required-lanes.json`
-holds both the host and the agent level to its definition (`scripts`, `.st`, `.config/nextest.toml`, the flake), so a tree that
-edits the scripts that decide what the stage runs never skips on a local note; the host and agent levels cover pull requests
-only, and the merge queue runs the stage.
+holds both the host and the agent level to its definition (`scripts`, `.st`, `.config/nextest.toml`, the flake; for `linux-gate`
+also the clippy ratchet's baseline and splits and the pinned previous release fleet-compat runs against), so a tree that edits
+what decides what the stages run never skips on a local note. `linux-gate`'s tree inputs are the check's declared `inputs`, so an
+input-keyed note serves another tree with the same key. The host and agent levels cover pull requests only, and the merge
+queue runs the stages. Measured on the 16-core dev host: the canaries alone 345 s wall, build included.
 
 ### When the gate says skip
 

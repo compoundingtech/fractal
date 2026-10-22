@@ -116,6 +116,19 @@ class CiLocal(unittest.TestCase):
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
+    def test_the_linux_gate_stages_run_in_order_against_the_base_tip_for_clippy(self):
+        subprocess.run(['git', 'init', '-q', str(self.work)], check=True)
+        subprocess.run(['git', '-C', str(self.work), '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q',
+                        '--allow-empty', '-m', 'base'], check=True)
+        tip = subprocess.run(['git', '-C', str(self.work), 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(['git', '-C', str(self.work), 'update-ref', 'refs/remotes/origin/main', tip], check=True)
+        done, calls = self.run_local('tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([call['argv'] for call in calls][2:], [['tests'], ['clippy'], ['fleet-compat'], ['mail-redelivery-canaries']])
+        self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], tip)
+        done, calls = self.run_local('clippy', CLIPPY_BASE_SHA='f' * 40)
+        self.assertEqual(calls[-1]['env']['CLIPPY_BASE_SHA'], 'f' * 40, 'a named base wins')
+
     def test_a_failed_hook_install_runs_no_stage(self):
         (self.work / 'scripts/ci-install-built-hooks').write_text('exit 9\n')
         done, calls = self.run_local('mail-redelivery-canaries')
@@ -123,7 +136,7 @@ class CiLocal(unittest.TestCase):
         self.assertEqual([call['argv'] for call in calls], [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install']])
 
     def test_no_stage_or_a_stage_without_a_local_lane_is_refused_before_anything_runs(self):
-        for stages in ((), ('tests',), ('mail-redelivery-canaries', 'clippy')):
+        for stages in ((), ('conversation-model',), ('mail-redelivery-canaries', 'nonesuch')):
             with self.subTest(stages):
                 done, calls = self.run_local(*stages)
                 self.assertEqual((done.returncode, calls), (2, []), done.stderr)
