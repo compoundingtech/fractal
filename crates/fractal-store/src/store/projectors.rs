@@ -78,7 +78,14 @@ pub const APPEND: &[AppendProjector] = &[
     AppendProjector {
         name: "resource-preparation",
         takes: Takes::Every,
-        project: |transaction, _| resources::flush_preparation(transaction),
+        project: |transaction, claim| {
+            // Non-resource appends (notably work renewals) must not acquire SQL work
+            // for this projection. Resource observations also support legacy subjects.
+            if claim.subject.starts_with("resource/") || claim.kind == "resource.observed" {
+                resources::flush_preparation(transaction)?;
+            }
+            Ok(())
+        },
     },
     AppendProjector {
         name: "glass-heads",

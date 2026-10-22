@@ -54,6 +54,12 @@ pub fn preparation_observation(connection: &Connection, subject: &str) -> Result
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-he1e45213e1dd owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ PREPARATION_SCHEMA)?;
+    Ok(())
+}
+
+// Canonical position and repair-membership tables are installed after runtime DDL.
+// Install their dependent triggers in the open transaction, before replay or writes.
+fn create_tracking_triggers(connection: &Connection) -> Result<()> {
     let relevant = RELEVANT;
     // Keep notifications body-free. An unchanged canonical key (for example sealing a local
     // batch) is discarded at flush rather than needlessly refolding that subject's history.
@@ -136,12 +142,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
          AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_dirty dirty WHERE dirty.subject=claims.subject)
          GROUP BY subject; END;"
     ))?;
-    // Fresh-store runtime DDL precedes creation of the canonical repair-membership table.
-    let repairs: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='projection_digest_repaired_claims' AND type='table')",
-        [], |row| row.get(0),
-    )?;
-    if repairs { create_repair_triggers(connection)?; }
+    create_repair_triggers(connection)?;
     Ok(())
 }
 
@@ -166,7 +167,7 @@ fn create_repair_triggers(connection: &Connection) -> Result<()> {
 }
 
 pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
-    create_repair_triggers(transaction)?;
+    create_tracking_triggers(transaction)?;
     let version: Option<String> = transaction.query_row(
         "SELECT value FROM meta WHERE key='resource_preparation_version'", [], |row| row.get(0),
     ).optional()?;
