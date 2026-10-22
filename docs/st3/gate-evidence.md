@@ -1181,7 +1181,8 @@ protected file differs between the branch point and the head, the base, or the c
 keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
 `merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
 it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
-says `notes_fetch=ok|failed` and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), then the evidence
+says `notes_fetch=ok|none|failed` (`none`: the remote has no record under the tree's own prefix, which git reports by
+exiting 1 without a word; `failed`: the fetch could not reach or read the remote) and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), then the evidence
 log's shadow view (`log`, `log_head`, `log_age_s`, `log_missing`, `log_fetch`; `-` until the base pins `.st/evidence-log-key`, see "The evidence log"), and input-keyed lookups use
 the key of the tree the run asks about (the head's, in head mode). The signer is not checked against the author list: signers are the keys of
 `.st/evidence-keys` (the trust root, read from the base), authors are GitHub accounts; the two answer different questions and a host key has no login. **Time
@@ -1349,7 +1350,7 @@ values and `-` for none:
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
 reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false match=tree|inputs source_inputs=…
-tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… notes_fetch=ok|failed
+tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… notes_fetch=ok|none|failed
 policy_sha256=… keys_sha256=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 
