@@ -83,8 +83,12 @@ def validate(pin, label):
         raise BaselineError(f'{label}: bundles must cover both native release targets')
     for target, bundle in pin['bundles'].items():
         expected = f'https://github.com/{repository()}/releases/download/{pin["tag"]}/smalltalk-{target}.tar.gz'
+        # Retained v0.3.17 pins are immutable historical release URLs, not live API targets.
+        historical = (repository() == 'compoundingtech/fractal' and pin['tag'] == 'v0.3.17'
+                      and isinstance(bundle, dict)
+                      and bundle.get('url') == f'https://github.com/compoundingtech/smalltalk/releases/download/v0.3.17/smalltalk-{target}.tar.gz')
         if (not isinstance(bundle, dict) or set(bundle) != {'url', 'sha256'}
-                or bundle['url'] != expected or not isinstance(bundle['sha256'], str)
+                or (bundle['url'] != expected and not historical) or not isinstance(bundle['sha256'], str)
                 or not DIGEST.fullmatch(bundle['sha256'])):
             raise BaselineError(f'{label}: {target} needs the tagged archive URL and hex SHA256')
 
