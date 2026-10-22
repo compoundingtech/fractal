@@ -528,8 +528,11 @@
       "kinds": {
         "wrapper": {
           "command": [
-            "bash",
-            "scripts/ci-fractal-web"
+            "fractal-web",
+            "aggregate",
+            "fractal-web",
+            "fractal-web-changes",
+            "fractal-web-execution"
           ],
           "required_inputs": [
             "flake_lock_sha256",
@@ -537,11 +540,9 @@
             "wrapper_sha256",
             "system",
             "attempt",
-            "job",
-            "steps",
-            "step_outcomes",
-            "kit_shard",
             "kit_shard_count",
+            "shard_results",
+            "kit_inputs",
             "kit_play_set",
             "app_test_set"
           ],
