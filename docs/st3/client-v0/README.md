@@ -338,6 +338,26 @@ different from fleet replication secrets. A remote client is always online: v0 h
 mutation queue, push notification sender, cached graph authority, or multi-master replication.
 A paired phone may register a push token ([push registration](push.md)), but nothing sends to it.
 
+### Native Fabric carrier
+
+The CLI and native generated-client transports accept
+`fabric://<node-or-name>/st3-client-v0`. The local Fabric daemon dials the remote
+client gateway protocol directly. An explicit NodeID needs no name lookup;
+otherwise the target must match one trusted Fabric peer name, ignoring ASCII
+case. Ambiguous names fail instead of selecting a peer arbitrarily.
+
+Only `/v1/client/` and `/v1/health` may use this transport. Private routes,
+absolute URLs, and path traversal fail before a Fabric dial. Requests do not
+inherit the trusted-local Unix person's authority merely because Fabric returns
+a local tunnel socket. The gateway still authenticates the paired client and
+checks its scopes and device signatures.
+
+For CLI requests, `FRACTAL_CLIENT_CREDENTIAL` explicitly supplies the remote
+bearer credential. It is never part of the endpoint URL. The reusable Rust client
+uses `Client::fabric(endpoint).with_credential(credential)`.
+Browser and phone runtimes cannot directly invoke a host-local Fabric daemon;
+their existing authenticated HTTP(S) gateway transport remains available.
+
 ### Tailnet carrier
 
 `st up` listens on two different Unix sockets. `st3.sock` is the privileged trusted-local API;

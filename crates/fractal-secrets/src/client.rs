@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use fractal_client::fabric::FabricEndpoint;
 use futures_util::{SinkExt as _, StreamExt as _};
 use pty_client::tty::{FdWriter, is_tty};
 use pty_client::{
@@ -26,17 +27,20 @@ use crate::model::{
 pub enum Endpoint {
     Unix(PathBuf),
     Http(String),
+    Fabric(FabricEndpoint),
 }
 
 impl Endpoint {
-    pub fn parse(value: impl AsRef<str>) -> Self {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
-        if value.starts_with("http://") || value.starts_with("https://") {
-            Self::Http(value.trim_end_matches('/').into())
+        if value.starts_with("fabric:") {
+            Ok(Self::Fabric(FabricEndpoint::parse(value)?))
+        } else if value.starts_with("http://") || value.starts_with("https://") {
+            Ok(Self::Http(value.trim_end_matches('/').into()))
         } else if let Some(path) = value.strip_prefix("unix://") {
-            Self::Unix(PathBuf::from(format!("/{path}").replace("//", "/")))
+            Ok(Self::Unix(PathBuf::from(format!("/{path}").replace("//", "/"))))
         } else {
-            Self::Unix(PathBuf::from(value))
+            Ok(Self::Unix(PathBuf::from(value)))
         }
     }
 }
@@ -460,7 +464,7 @@ impl Client {
     pub fn socket_path(&self) -> Option<&std::path::Path> {
         match &self.endpoint {
             Endpoint::Unix(path) => Some(path),
-            Endpoint::Http(_) => None,
+            Endpoint::Http(_) | Endpoint::Fabric(_) => None,
         }
     }
 
@@ -577,6 +581,9 @@ impl Client {
         path: &str,
         body: Option<&I>,
     ) -> Result<O> {
+        if matches!(self.endpoint, Endpoint::Fabric(_)) {
+            FabricEndpoint::validate_path(path)?;
+        }
         let bytes = body
             .map(serde_json::to_vec)
             .transpose()?
@@ -678,6 +685,30 @@ impl Client {
                     self.deadlines.connect,
                     deadline,
                     self.person.as_deref(),
+                    None,
+                )
+                .await?
+            }
+            Endpoint::Fabric(endpoint) => {
+                let credential = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL")
+                    .map(|value| {
+                        let value = value.into_string().map_err(|_| {
+                            anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL must contain valid UTF-8")
+                        })?;
+                        reqwest::header::HeaderValue::from_str(&format!("Bearer {value}"))
+                            .map_err(|_| anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL is not a valid bearer credential"))
+                    })
+                    .transpose()?;
+                let socket = endpoint.dial().await?;
+                unix_request(
+                    &socket,
+                    method,
+                    path,
+                    bytes,
+                    self.deadlines.connect,
+                    deadline,
+                    None,
+                    credential.as_ref(),
                 )
                 .await?
             }
@@ -833,6 +864,9 @@ impl Client {
 
     async fn open_terminal_bridge(&self, path: &str) -> Result<StdUnixStream> {
         match &self.endpoint {
+            Endpoint::Fabric(_) => {
+                anyhow::bail!("native Fabric endpoints do not support WebSocket requests");
+            }
             Endpoint::Unix(socket) => {
                 let endpoint = socket.display().to_string();
                 let stream = tokio::time::timeout(
@@ -1202,6 +1236,7 @@ async fn unix_request(
     connect_deadline: Duration,
     deadline: Duration,
     person: Option<&str>,
+    authorization: Option<&reqwest::header::HeaderValue>,
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -1224,6 +1259,11 @@ async fn unix_request(
             body.len()
         )
         .into_bytes();
+        if let Some(authorization) = authorization {
+            request.extend_from_slice(b"Authorization: ");
+            request.extend_from_slice(authorization.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        }
         fractal_client::propagation::inject_current_context(|key, value| {
             request.extend_from_slice(key.as_bytes());
             request.extend_from_slice(b": ");
@@ -1647,6 +1687,89 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fabric_unix_http_roundtrip_carries_bearer_without_local_authority() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fabric.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let byte = stream.read_u8().await.unwrap();
+                request.push(byte);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /v1/client/capabilities HTTP/1.1\r\n"));
+            assert!(request.contains("\r\nAuthorization: Bearer paired-test-token\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("x-st3-person:"));
+            let body = br#"{"api_version":"st3.client.v0","value":{"accepted":true}}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let credential = reqwest::header::HeaderValue::from_static("Bearer paired-test-token");
+        let bytes = unix_request(
+            &socket, "GET", "/v1/client/capabilities", &[],
+            Duration::from_secs(1), Duration::from_secs(1), None, Some(&credential),
+        ).await.unwrap();
+        assert_eq!(decode_api_response::<Value>(&bytes).unwrap(), json!({"accepted": true}));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn endpoint_parsing_preserves_local_and_http_and_roundtrips_fabric() {
+        assert!(matches!(Endpoint::parse("/run/fractal.sock").unwrap(),
+            Endpoint::Unix(path) if path == Path::new("/run/fractal.sock")));
+        assert!(matches!(Endpoint::parse("unix:///run/fractal.sock").unwrap(),
+            Endpoint::Unix(path) if path == Path::new("/run/fractal.sock")));
+        assert!(matches!(Endpoint::parse("https://example.invalid/").unwrap(),
+            Endpoint::Http(base) if base == "https://example.invalid"));
+        for target in ["devbox", "DEVBOX", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"] {
+            let value = format!("fabric://{target}/st3-client-v0");
+            let Endpoint::Fabric(endpoint) = Endpoint::parse(&value).unwrap() else {
+                panic!("a Fabric URI must not become a Unix socket");
+            };
+            assert_eq!(endpoint.to_string(), value);
+            assert!(matches!(Endpoint::parse(endpoint.to_string()).unwrap(),
+                Endpoint::Fabric(parsed) if parsed == endpoint));
+        }
+        for value in [
+            "fabric:", "fabric://", "fabric://devbox", "fabric://devbox/",
+            "fabric://devbox/other", "fabric://devbox/st3-client-v0/extra",
+            "fabric://devbox/st3-client-v0?token=secret",
+            "fabric://devbox/st3-client-v0#fragment",
+        ] {
+            assert!(Endpoint::parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_refuses_private_paths_and_websockets_before_dialing() {
+        let client = Client::new(Endpoint::parse("fabric://unresolved/st3-client-v0").unwrap());
+        assert!(client.socket_path().is_none());
+        assert!(client.local_terminal("agent/test").await.unwrap().is_none());
+        for path in [
+            "/v1/status", "/v1/backup", "/v1/mailbox", "/v1/claims",
+            "/v1/internal/client-read/forward", "/v1/clientish/actions",
+            "/v1/client/../claims", "/v1/client/%2e%2e/claims",
+            "/v1/client/%252e%252e/claims", "/v1/client/%2f..%2fclaims",
+            "//v1/client/actions", "https://example.invalid/v1/client/actions",
+        ] {
+            let error = client.get::<Value>(path).await.unwrap_err();
+            assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{path}: {error:#}");
+            assert!(daemon_unreachable(&error).is_none(), "{path}: {error:#}");
+        }
+        let error = client.open_terminal_bridge("/v1/client/terminal/stream").await.unwrap_err();
+        assert!(error.to_string().contains("do not support WebSocket"));
+        let error = client.open_mailbox(&Fence::default()).await.unwrap_err();
+        assert!(error.to_string().contains("require a local Unix socket"));
+    }
 
     #[test]
     fn local_api_transport_envelopes_accept_old_and_fractal_versions() {

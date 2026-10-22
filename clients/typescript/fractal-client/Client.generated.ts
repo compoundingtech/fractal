@@ -65,6 +65,8 @@ export type ClientOptions = {
     /** Read the active span's W3C context once per request, stream open, or collection subscribe. */
     traceContext?: () => TraceContext | undefined;
     fetchImpl?: typeof fetch;
+    /** Default native WebSocket carrier; per-stream factories still take precedence. */
+    socket?: CollectionSocketFactory;
     /** The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
      * reported (clients.list); it is never identity or authority. */
     client?: string;
@@ -219,17 +221,22 @@ export class FractalClient {
     private readonly traceContext?: ClientOptions['traceContext'];
     private readonly client?: string;
     private readonly fetchImpl: typeof fetch;
+    private readonly socket?: CollectionSocketFactory;
     private readonly messagesPaging: boolean;
     /** Shared with every `withTraceContext` view so they discover once. */
     private discoveryCache: { value?: EnvelopeOf<Capabilities> } = {};
 
     constructor(options: ClientOptions) {
+        if (/^fabric:/i.test(options.baseUrl)) {
+            throw new Error('Use createFabricClient from @fractal/client/fabric for native Fabric endpoints; browser and React Native runtimes cannot dial the local daemon');
+        }
         this.baseUrl = options.baseUrl.replace(/\/+$/, '');
         this.credential = options.credential;
         this.traceContext = options.traceContext;
         this.messagesPaging = options.messagesPaging ?? false;
         if (options.client !== undefined) this.client = options.client;
         this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+        if (options.socket !== undefined) this.socket = options.socket;
     }
 
     async capabilities(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
@@ -253,6 +260,7 @@ export class FractalClient {
             fetchImpl: this.fetchImpl,
             traceContext,
             messagesPaging: this.messagesPaging,
+            ...(this.socket === undefined ? {} : { socket: this.socket }),
             ...(this.credential === undefined ? {} : { credential: this.credential }),
             ...(this.client === undefined ? {} : { client: this.client }),
         });
@@ -468,7 +476,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
+        const socket = (options.socket ?? this.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
         let ended = false;
         const stop = () => { ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
         const end = (error?: Error) => { if (ended) return; stop(); options.onEnd?.(error); };
@@ -497,7 +505,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
+        const socket = (options.socket ?? this.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
         let ended = false;
         const end = (error?: Error) => { if (ended) return; ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; options.onEnd?.(error); };
         socket.onmessage = event => {
@@ -524,7 +532,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
+        const socket = (options.socket ?? this.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
         let ended = false, open = false, opening = false;
         const waiting: Record<string, unknown>[] = [];
         const stop = () => { ended = true; waiting.length = 0; socket.onopen = null; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };

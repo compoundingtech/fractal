@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --test contract.test.cjs schema.test.cjs",
+    "test": "node --test contract.test.cjs schema.test.cjs fabric.test.cjs",
     "test:contract": "node --test contract.test.cjs",
     "test:schema": "node --test schema.test.cjs",
     "typecheck": "pnpm run typecheck:client && pnpm run typecheck:schema",
@@ -14,18 +14,24 @@
   },
   "exports": {
     ".": "./index.ts",
-    "./schema": "./Schema.generated.ts"
+    "./schema": "./Schema.generated.ts",
+    "./fabric": "./fabric.mjs"
   },
   "peerDependencies": {
-    "effect": "4.0.0"
+    "effect": "4.0.0",
+    "ws": "8.22.0"
   },
   "peerDependenciesMeta": {
     "effect": {
+      "optional": true
+    },
+    "ws": {
       "optional": true
     }
   },
   "devDependencies": {
     "effect": "4.0.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "ws": "8.22.0"
   }
 }
