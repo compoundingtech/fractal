@@ -17,6 +17,10 @@ export type { Draft, DraftToken, MentionToken, CommandToken, SerializedDraft, Sl
 /** Reusable round-2 live composition primitives; transport stays application-owned. */
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit } from './composition/Shell.tsx'
+export { DockedSplit, dockedSplitBounds, dockedSplitStorageKey, readDockedSize } from './composition/DockedSplit.tsx'
+export type { DockedSplitProps } from './composition/DockedSplit.tsx'
+export { Pane, PaneHeader, PaneHeaderButton, PaneHeaderToggle } from './composition/Pane.tsx'
+export type { PaneProps, PaneTabItem } from './composition/Pane.tsx'
 export { DiffPanel } from './composition/DiffPanel.tsx'
 export type { DiffPanelProps, DiffFile, DiffTurn, DiffRevealRequest } from './composition/DiffPanel.tsx'
 export { Markdown, ResourceChip, HighlightedSource, completeStreamingTail } from './composition/Markdown.tsx'
@@ -37,10 +41,17 @@ export { Button as CompositionButton, IconButton as CompositionIconButton, Menu,
 export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProps, TooltipSurfaceProps } from './composition/Controls'
 
 /** Controlled sidebar row; the host owns clock and data. */
-export { SidebarAgentRow, AgentHoverCard, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
-export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
+export { SidebarAgentRow, AgentHoverCard, AgentRowActions, type AgentRowActionsProps, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
+export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
-export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export { usageScopeLabel } from './sidebar/model.ts'
+export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export { SidebarTree } from './sidebar/SidebarTree.tsx'
+export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
+/** Read-only declaration source (KDL, or a labelled structured fallback) with copy-all. */
+export { DeclarationPanel } from './declaration/DeclarationPanel.tsx'
+export type { DeclarationPanelProps, DeclarationPanelState, DeclarationLanguage } from './declaration/DeclarationPanel.tsx'
 
 export { ResourceCardV1, ResourceChipV1 } from './resources/ResourceCardV1.tsx'
 export type { ResourceData, ResourceFile, ResourceMetadata } from './resources/resource-model.ts'

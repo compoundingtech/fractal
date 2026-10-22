@@ -1,0 +1,32 @@
+{
+  "summary": "Repair persisted terminal mission dates and canonical carried blocker reasons",
+  "version": 1,
+  "replay": {
+    "status": "changed",
+    "detail": "Carried blocker reasons follow the referenced source step at the carry canonical cut, including historical carries without reason fields. Persistent store open repairs old terminal dates from matching own terminal claims and reconciles carried rows once, without appending claims or replaying the entire graph. Reasons are carried for every carried status, including ready or working, matching the originating revision adoption; they are not restricted to blocked steps."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, database storage-version or claim-schema change. A local meta marker records the one-time projection repair."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint retention rules, rules version, envelopes, seals or trim permission changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Mission-run, run-generation and step projection definition versions advance to 2. Mixed old/new peers continue signed-log admission while withholding comparisons for those changed projection definitions."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "Ordinary daemon restart performs one-time indexed terminal-source lookups and carried-row reconciliation. Production startup duration is not yet measured."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual graph reset or peer projection copy is required. Deploy through the normal reviewed rollout."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Roll forward to the corrected projection definition on every member. Old binaries do not reproduce the corrected carried-reason reducer; reverting a binary is not a projection repair."
+  }
+}

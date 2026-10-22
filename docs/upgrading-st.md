@@ -73,14 +73,19 @@ and migrates its input: use an additional consistent SQLite copy, never the unto
 
 Choose a tag from [releases](https://github.com/compoundingtech/smalltalk/releases). Run this on **each machine**, entering the same tag; it downloads without touching running services:
 
+For releases shipping the rename, use the canonical `fractal-*` archives. The
+`smalltalk-*` copies remain available through 2026-11-01; when deliberately
+installing a retained pre-rename tag (such as v0.3.17), use that historical prefix
+in the two archive names below instead. Historical release bytes are unchanged.
+
 ```sh
-printf 'Release tag to install (for example v0.3.16): '
+printf 'Release tag to install: '
 read -r st_tag
 mkdir -p "$HOME/smalltalk-install/$st_tag"
 cd "$HOME/smalltalk-install/$st_tag"
 case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) archive=smalltalk-x86_64-unknown-linux-gnu.tar.gz ;;
-  Darwin-arm64) archive=smalltalk-aarch64-apple-darwin.tar.gz ;;
+  Linux-x86_64) archive=fractal-x86_64-unknown-linux-gnu.tar.gz ;;
+  Darwin-arm64) archive=fractal-aarch64-apple-darwin.tar.gz ;;
   *) echo 'This guide covers Linux x86_64 and Apple Silicon only'; exit 1 ;;
 esac
 release="https://github.com/compoundingtech/smalltalk/releases/download/$st_tag"
@@ -105,6 +110,66 @@ cat "${archive%.tar.gz}/BUILD.json"
 `st doctor --json` and client capabilities expose the responding daemon's `machine_version`,
 so an installed CLI and a running daemon can be compared. All versions use metadata baked at
 compile time, independent of the caller's directory or environment.
+
+## Per-host Fractal name cutover
+
+This is an explicit, default-host-only operation, not part of a normal installation or
+Home Manager activation. Coordinate **one host at a time**, while checkpoints and sync
+are idle. Preserve the backups above. Do not move named instances or workspace roots.
+
+1. Install the migration-capable build without restarting the running daemon. For native
+   services, run `fractal service install --stage-fractal`; the macOS installer also accepts
+   `--stage-fractal`. For Home Manager, select
+   `services.smalltalk.fractalMigration.phase = "stage"` and activate the same package and
+   service settings as the running generation. Staging writes disabled Fractal definitions;
+   legacy definitions, state, memory drop-ins, sockets and running processes stay in place.
+2. Run `fractal migrate host --dry-run`. It requires a running legacy daemon, disabled and
+   stopped target definitions, idle checkpoint/replication status, free destinations, and
+   same-filesystem renames. Both service families running is a hard error. A populated
+   `~/.config/fractal` or `~/.local/state/fractal` is never merged or overwritten, even if it
+   has a receipt. Move the unrelated dotfiles Fractal TUI data to `fractalite` first.
+   For Home Manager, preflight also reads every retained `home-manager-N-link` in the
+   XDG/default user and legacy per-user Nix profiles. It refuses forced targets that
+   raw-prefix-match legacy `config.toml` or the state root, listing the generation
+   numbers to prune. This includes sibling prefixes such as `st3/config`, not just
+   containing directories. Prune the reported generations before retrying; no generation
+   is removed automatically. Unreadable or unrecognized collision scripts also refuse
+   cutover. Activation scripts are inspected, never executed by preflight.
+   Inspection accepts only the pinned checker's single `forcedPaths` initializer and
+   read-only loop; extra references, including append/indexed assignments, are refused
+   with their retained generation number rather than trusting the initial array.
+3. Run `fractal migrate host --json` and retain its host receipt. It persistently disables
+   legacy boot/login activation **before** stopping services and waiting for their state lock.
+   Atomic directory/bridge exchanges move config/state without ever leaving an absent legacy
+   root; each **whole** service `.d` directory is renamed. Both destinations receive an
+   atomically published `.fractal-migration-completed` containing exactly
+   `arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` and a newline.
+4. The target daemon must answer the local health API as the same node: `Type=simple` alone
+   is not readiness. The receipt reports **local API listening**, the measured gap and,
+   on Linux, effective `memory.swap.max` and `MemoryLow` read from the daemon's cgroup.
+   Changed memory protection or failure before readiness triggers automatic rollback.
+   Only after readiness are legacy definitions removed and target workers enabled.
+5. For Home Manager, select `fractalMigration.phase = "completed"` before the next
+   activation. Legacy and staging generations reject receipt-bearing roots. A persistent
+   foreign `config.toml -> config.home-manager.toml` symlink also blocks immutable older
+   generations at their normal collision check, including backup modes. Completed activation
+   updates only the guarded backing TOML, including consumer-added TOML settings.
+   Stage turns off `force` for the module-managed legacy config entry; completed disables
+   that linker entry. Other forced legacy config/state prefixes remain rejected by the
+   module. Retained generation preflight still rejects every unsafe forced generation,
+   including older generations created before staging.
+
+The write-ahead journal lives at
+`${XDG_CONFIG_HOME:-$HOME/.config}/.fractal-host-cutover.json`, recording the service plan,
+moves, original service enablement, readiness commit and before/after memory protection.
+If interrupted before readiness, use `fractal migrate host --rollback` and then retry.
+Rollback persists reverse progress before recreating empty destinations, so recovery can
+itself be interrupted and retried; it restores the original Home Manager config object.
+If readiness already committed, rerun `fractal migrate host` to finish retirement; rollback
+is refused.
+The gap has a five-minute startup budget (individual manager calls are bounded at 30 seconds,
+and the API probe at 30 seconds); an exhausted pre-start budget restores legacy state.
+The old-path symlinks remain for already-running seats during the migration bridge.
 
 ## Config keys and clients on an old PATH
 
@@ -168,6 +233,38 @@ these are observations, not an outage bound. See the [v0.3.15 release notes](htt
 full replay trigger. Backups and restart windows must accommodate the release's stated impact.
 
 Check that local delivery becomes `current`, and read an `outdated` or `stale` reason before deciding a seat needs a restart.
+
+### Retained subject-reference rejections
+
+An older build can retain a signed envelope as `invalid-replicated-claim` because a
+field names a subject family that its schema does not recognize. Installing a newer
+binary alone does not revisit that historical verdict. Normal daemon startup runs
+replication admission before projecting its backlog. It revalidates retained
+`invalid-subject-reference` failures once per local schema digest, including one
+pass for stores without the retry completion marker.
+
+Use the pinned installation and normal service activation above, then check
+`st replication status` and read the existing message and its receipt. Admission
+checks the original envelope's signature and current fleet membership, its hashes
+and every claim field again. Only claims passing normal validation can be admitted;
+unknown or malformed references remain rejected, and unverified signatures remain held.
+The original record reference, claim ID, envelope hash, raw bytes and writer
+provenance are preserved. No resend, replacement record, SQLite edit, marker
+deletion or manual replay is required or supported for this recovery.
+
+The indexed retry is restricted to that historical error class and uses the normal
+bounded admission transactions. Completion is durable, so ordinary receive loops
+and restarts at the same schema do not repeatedly revalidate invalid references.
+An interrupted pass can safely finish at the next startup. A later local schema
+change schedules a new pass; the schema digest is only a retry trigger, never
+authority to admit a claim.
+An eligible historical receipt held by fleet/signature validation returns to the
+ordinary pending admission lifecycle before schema retry completes. A later verified
+signature can therefore unblock it after a restart without another schema change.
+This transition does not change the invalid record's bytes or admit it provisionally.
+Selection retains the existing whole-backlog payload materialization; bounded writer
+transactions do not imply bounded-memory backlog selection.
+
 
 After all members are upgraded and caught up, compare replication digests as [two machines](two-machines.md#check-what-arrived) describes. Mixed builds can exchange signed history while an older member has claims waiting for an upgrade; that does not prove equal projections. Check a real conversation and its message receipt too. The example uses the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat); substitute your own existing seat when upgrading:
 
