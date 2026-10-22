@@ -19,8 +19,8 @@ each other holds.
 
 This document explains how a checkpoint works and what trimming drops, with examples. It describes
 the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim),
-`crates/st3-schema/retention.toml` (the retention policy, which names the rules for st's own claim
-kinds; see [Retention](retention.md)) and `crates/st3/src/store/checkpoint_rules.rs` (the planner
+`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for st's own claim
+kinds; see [Retention](retention.md)) and `crates/fractal-store/src/store/checkpoint_rules.rs` (the planner
 functions those rules name). Operating commands
 are in [Fleet replication](replication.md#checkpoints). Read this before changing a rule, the
 agreement, or the trim.
@@ -130,7 +130,8 @@ only for a kind that was audited against every reader of that kind. Everything e
 A **slot** is the part of a claim that one reader answer depends on, such as (subject, incarnation)
 for a harness observation, or (subject, request) for a subscription deferral. Within a slot the
 claims form a sequence in **canonical order**: accepted time, writer, batch sequence, position in
-the batch, claim ID. The order never depends on when a claim reached a node.
+the batch, claim ID. The order never depends on when a claim reached a node, and removing a claim
+or record never renumbers a survivor's position (see `claim_positions` in schema.md).
 
 For each slot the rule names the claims to keep. Everything else in the slot is a candidate. A
 candidate is dropped only if it has a **witness**: a later claim of the slot that is kept and sets
@@ -141,8 +142,12 @@ what the fold ends with only by replacing the witness, which is also what it wou
 dropped claim. A kind that clears all of its fields on every update (a state transition) is
 witnessed by any later kept claim of its slot.
 
-Every rule of every kind except `loop.state` also keeps the newest claim carrying each field, so a
-field set only once still has its last value.
+The harness question rule compacts only redundant observations a day after resolution.
+The newest observation and resolution remain indefinitely, so the compact record and receipt
+continue to answer readers and prevent re-observation from reopening the question.
+
+Every rule of every kind except `loop.state` and the harness question rule also keeps the newest
+claim carrying each field, so a field set only once still has its last value.
 
 ### Guards
 
@@ -171,7 +176,7 @@ what lets every node compute the same plan.
 
 ### The rules
 
-The `[[rules]]` of `crates/st3-schema/retention.toml` are the canonical list. Each renders one line
+The `[[rules]]` of `crates/fractal-schema/retention.toml` are the canonical list. Each renders one line
 of the rules description (`rules_description` in `checkpoint_rules.rs`), followed by the engine's
 own terms. Its hash, with the rule engine version, is the `rules_digest` in every seal, so nodes
 agree on a checkpoint only when they run the same rules. In summary:
@@ -190,6 +195,7 @@ agree on a checkpoint only when they run the same rules. In summary:
 | `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |
 | `harness.todo.observed` | subject | the newest (a rule that predates its description line) |
 | `runtime.reconcile-decision` | subject, decision key | the newest of each key; the reconciler asks whether a key was recorded, reads the newest member-reconcile decision and the subject's newest |
+| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut (rules version 18, following #1473's allocated 17); the resolution is durable (see [Harness questions](harness-questions.md)) |
 | `harness.usage`, response rollups | subject, incarnation, model, account, run, step, host | the last snapshot of each UTC hour in the seven days before the cut, the newest snapshot before that window, and the newest of all |
 | `harness.usage`, session cumulative | subject, incarnation | the newest and the last claim of the largest total |
 | `harness.usage`, context occupancy | subject, incarnation | the newest |
@@ -213,7 +219,7 @@ A later claim is not a witness that makes these facts dispensable. No special re
 rule-version change is needed.
 
 The regression `first_native_launch_receipt_binding_and_acknowledgement_survive_checkpoint_trim`
-in `crates/st3/src/store/checkpoint_tests.rs` proves the plan and applies the real tombstone and
+in `crates/fractal-store/src/store/checkpoint_tests.rs` proves the plan and applies the real tombstone and
 row-deletion path: old observations are removed while the receipt, acknowledgement, binding and
 incomplete-launch notice retain their IDs and bodies, and native continuation still selects the
 bound session.
@@ -239,7 +245,7 @@ holds for every arrival order, and the step-timing fold needs every renewal. Eve
 ## Worked examples
 
 The names here are invented. Each example's outcome is checked against the planner by a test in
-`crates/st3/src/store/checkpoint_tests.rs`: `the_documented_examples_drop_what_the_document_says`
+`crates/fractal-store/src/store/checkpoint_tests.rs`: `the_documented_examples_drop_what_the_document_says`
 for the harness observation, the renewals and the guard, and
 `usage_rollups_keep_hourly_ends_in_the_window_and_one_baseline_before_it` for the usage rollup.
 
@@ -404,10 +410,12 @@ A trim shares the store with live writes. Recording tombstones and deleting rows
 to a transaction after 20 ms (`TRIM_CHUNK_BUDGET`); the commit then writes and syncs the changed pages.
 Cursors carry each tombstone scan across chunks. Every foreign key column leads an index, because
 deleting a claim looks up every row that references it. `every_foreign_key_column_leads_an_index` in
-`crates/st3/src/store.rs` fails otherwise, so add the index in the same change as the foreign key.
+`crates/fractal-store/src/store/tests.rs` fails otherwise, so add the index in the same change as the foreign key.
 
-`a_trim_never_makes_a_write_wait_long` in `crates/st3/src/store/tombstones_tests.rs` trims a production-sized
-history (150,000 claims and operations) with every row made slow and fails without the budget;
+`a_trim_never_makes_a_write_wait_long` in `crates/fractal-store/src/store/tombstones_tests.rs` trims a production-sized
+history (150,000 claims and operations) with every row made slow and fails without the budget: no
+chunk deletes more than budget / row cost envelopes, however loaded the machine, and writes run
+throughout the trim;
 `production_history_has_bounded_journal_writes` bounds that setup's journal writes; and
 `a_trim_that_stops_anywhere_finishes_the_same_after_a_restart` in `checkpoint_agreement_tests.rs` stops
 part way through recording and deleting.
@@ -427,13 +435,13 @@ quadruples. Restart resumes the saved capture rather than loading the sealed his
 | The staging file: capture, cursor, plan marks, tombstone pages | `crates/smallclaims/src/store/checkpoint_staging.rs` |
 | Participants, seals, verifications, stability, excusal, attention timing | `crates/smallclaims/src/store/checkpoint_agreement.rs` |
 | Tombstones, trim, manifest adoption | `crates/smallclaims/src/store/checkpoint_trim.rs` |
-| The rules, each kind's class and window | `crates/st3-schema/retention.toml` |
-| The guards, the planner, the reader digest | `crates/st3/src/store/checkpoint_rules.rs` |
-| The planner over a staging file | `crates/st3/src/store/checkpoint_rules/staged.rs` |
-| A pass's memory budget | `crates/st3/tests/checkpoint_memory.rs` |
-| Rule examples as tests | `crates/st3/src/store/checkpoint_tests.rs` |
-| Trim, tombstone and replication tests | `crates/st3/src/store/tombstones_tests.rs` |
-| Agreement and convergence tests | `crates/st3/src/store/checkpoint_agreement_tests.rs` |
+| The rules, each kind's class and window | `crates/fractal-schema/retention.toml` |
+| The guards, the planner, the reader digest | `crates/fractal-store/src/store/checkpoint_rules.rs` |
+| The planner over a staging file | `crates/fractal-store/src/store/checkpoint_rules/staged.rs` |
+| A pass's memory budget | `crates/fractal/tests/checkpoint_memory.rs` |
+| Rule examples as tests | `crates/fractal-store/src/store/checkpoint_tests.rs` |
+| Trim, tombstone and replication tests | `crates/fractal-store/src/store/tombstones_tests.rs` |
+| Agreement and convergence tests | `crates/fractal-store/src/store/checkpoint_agreement_tests.rs` |
 
 What a checkpoint pass may hold in memory, and how the capture resumes after a restart, is in
 [Checkpoint capture in bounded memory](checkpoint-capture.md).

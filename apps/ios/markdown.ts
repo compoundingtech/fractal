@@ -1,8 +1,10 @@
-// Block markdown the way stui renders an assistant reply (crates/stui/src/ui/text.rs markdown
+// Block markdown the way stui renders an assistant reply (crates/fractal-tui/src/ui/text.rs markdown
 // and inline): headings, bullets with a hanging marker, fenced code, quotes, rules, and tables
-// kept as monospace rows. Anything else is a plain line.
+// kept as monospace rows. Anything else is a plain line. A `doc/…` reference is a link that opens
+// the document (docs/clients/ui-contract.md#documents).
+import { documentLinks, parseDocumentReference } from '@fractal/views';
 
-export type Run = { text: string; style: 'plain' | 'bold' | 'code' | 'link'; url?: string; path?: string };
+export type Run = { text: string; style: 'plain' | 'bold' | 'code' | 'link'; url?: string; path?: string; document?: string };
 export type Block =
   | { kind: 'blank' }
   | { kind: 'text'; runs: Run[] }
@@ -36,6 +38,13 @@ export function filePath(target: string): string | undefined {
   return /^(\/|~\/)[^\s]/.test(value) ? value : undefined;
 }
 
+// The document reference `rest` starts with, found the way the shared view finds links.
+function leadingDocument(rest: string): string | undefined {
+  if (!rest.startsWith('doc/')) return undefined;
+  const first = documentLinks(rest.split(/\s/, 1)[0])[0];
+  return first && rest.startsWith(first.reference) ? first.reference : undefined;
+}
+
 export function inline(text: string): Run[] {
   const runs: Run[] = [];
   let plain = '';
@@ -52,7 +61,12 @@ export function inline(text: string): Run[] {
     } else if ((match = /^\[([^\]]*)\]\(([^)]*)\)/.exec(rest))) {
       // An address opens; a path names a file on the machine the writer works on (an agent's
       // `[spec](/home/…/spec.md)`), which this phone cannot read but can copy.
-      flush(); runs.push({ text: match[1], style: 'link', url: /^https?:\/\//.test(match[2]) ? match[2] : undefined, ...(filePath(match[2]) ? { path: filePath(match[2]) } : {}) }); rest = rest.slice(match[0].length);
+      const document = parseDocumentReference(match[2].trim()) ? match[2].trim() : undefined;
+      flush(); runs.push({ text: match[1], style: 'link', url: /^https?:\/\//.test(match[2]) ? match[2] : undefined, ...(filePath(match[2]) ? { path: filePath(match[2]) } : {}), ...(document ? { document } : {}) }); rest = rest.slice(match[0].length);
+    } else if (!/[A-Za-z0-9/._~+@-]$/.test(plain) && leadingDocument(rest)) {
+      // A written-out document reference opens the document, as stui follows it.
+      const document = leadingDocument(rest)!;
+      flush(); runs.push({ text: document, style: 'link', document }); rest = rest.slice(document.length);
     } else if ((match = /^https?:\/\//.exec(rest)) && (plain === '' || /[\s(\["'*]$/.test(plain)) && address(rest)) {
       const url = address(rest)!;
       flush(); runs.push({ text: url, style: 'link', url }); rest = rest.slice(url.length);

@@ -22,7 +22,7 @@ step it names. SCENARIO is one of
                     and restart, while a stale copy exists in the daemon's default environment
     utf8            Codex recovers a receipt from a split UTF-8 transcript and keeps delivering
                     through discovery I/O failures, with private, rate-limited warnings.
-    idle-hold       Codex/OpenCode make zero hold calls during a real idle minute, then deliver
+    idle-hold       Codex/OpenCode make zero hold calls during a real idle window, then deliver
                     fresh mail and retain native consumption across hold, release and expiry.
 
 Every seat must, within the time bound, claim its step with its current incarnation and read an
@@ -45,8 +45,10 @@ import traceback
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.dont_write_bytecode = True
+from script_process import signal_private
 from st_boundary import fresh_seat_findings, isolated_path, output_findings
 from st3_test_evidence import register, capture, write_json
+from st3_events import Events, claim, fields
 
 HARNESSES = ("claude", "codex", "pi", "omp", "opencode")
 SCENARIOS = ("claim-socket-denied", "access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
@@ -54,6 +56,12 @@ MISSION = "canary/boot"
 RUN_ID = f"{MISSION}/c1"
 LETTERS = "abcde"
 IMPORTED_SUBJECT = None
+# Production waits 20 s for the channel to attach and then backs off 10/20/40 s between recovery
+# restarts. The channel scenarios shorten the window, and channel-parked also the backoff, through
+# the shorten-only overrides so the schedule is exercised, not waited out. The window stays well
+# above a healthy stand-in's attach time.
+CHANNEL_ATTACH_WINDOW_MS = 6000
+CHANNEL_BACKOFF_MS = 1000
 
 
 class Failure(Exception):
@@ -149,8 +157,14 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         until(lambda: self.api("/v1/health"), 60, "the daemon did not answer: " + self.tail("daemon.log"),
               lambda: self.daemon.poll() is None or fail("daemon exited: " + self.tail("daemon.log")))
 
+    def events(self):
+        """The daemon's event log: take a mark before an action, then await what it causes."""
+        return Events(self.endpoint, fail=fail,
+                      alive=lambda: self.daemon.poll() is None or fail("daemon exited: " + self.tail("daemon.log")))
+
     def kill_daemon(self):
-        os.killpg(self.daemon.pid, signal.SIGKILL)
+        if self.daemon.poll() is None:
+            os.killpg(self.daemon.pid, signal.SIGKILL)
         self.daemon.wait()
 
     def tail(self, name):
@@ -217,7 +231,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid, _ in self.seat_processes():
                 try:
-                    os.kill(pid, sig)
+                    signal_private(pid, sig, endpoint=self.endpoint)
                 except ProcessLookupError:
                     pass
             time.sleep(0.3)
@@ -717,22 +731,23 @@ def claude_attachment(node, seats, mode):
     control = node.root / "ws/claude-channel-mode"
     control.write_text("missing-once" if mode == "missing" else mode)
     old = seats.incarnations["a"]
+    # The blocked state lasts from the driver's detection until the automatic recovery restart,
+    # about 10 s later. A snapshot poll can miss it; the event log keeps it. Mark before the
+    # restart, then await the diagnostic the seat's view folds into "blocked" (code
+    # claude-channel-unattached, status blocked, for the new incarnation).
+    mark = node.events().mark()
     node.cli("agents", "restart", seat_subject("a"), "--now", "--as", "person/eval", check=False)
     early = node.json("conversations", "send", seat_subject("a"), "--from", "person/eval",
                       "--subject", "early attachment probe", "--body", "mail immediately after restart")["subject"]
 
-    def blocked():
-        agent, _ = seats.view("a")
-        return (agent.get("incarnation_id") != old and agent.get("harness_state") == "blocked"
-                and agent.get("reason") == "claude-channel-unattached")
-
-    until(blocked, 45, "idle hooks hid an unattached Claude channel")
+    blocked = claim("harness.diagnostic", seat_subject("a"), code="claude-channel-unattached",
+                    status="blocked", incarnation_id=lambda incarnation: incarnation != old)
+    blocked_incarnation = fields(mark.wait(blocked, 45, "idle hooks hid an unattached Claude channel"))["incarnation_id"]
     delivery = (node.api("/v1/messages/delivery/" + early) or {}).get("delivery")
     if not delivery or delivery.get("state") != "waiting" or "channel" not in delivery.get("reason", ""):
         fail(f"unattached channel did not visibly hold early mail: {delivery}")
     if native_mention_count(node, early) != 0:
         fail("an unattached channel offered early mail")
-    blocked_incarnation = seats.view("a")[0].get("incarnation_id")
     if mode == "uninitialized":
         control.unlink()
     seats.prove("channel-recovered", fresh_incarnation=mode == "missing")
@@ -744,8 +759,15 @@ def claude_attachment(node, seats, mode):
         if recovered_incarnation == blocked_incarnation or len(automatic) != 1:
             fail(f"the missing channel did not recover with one automatic restart: {automatic}")
         continued_session(node, "automatic channel recovery")
-    elif recovered_incarnation != blocked_incarnation or automatic:
-        fail("a channel initialized during recheck was unnecessarily restarted")
+    else:
+        # A slow store can delay the attach report past the recheck. The reconciler then
+        # finds the channel attached before stopping anything, settles its own request as
+        # retained, and keeps the incarnation (channel_recovery.rs). That is not a restart.
+        retained = {(row.get("body", {}).get("evidence") or [None])[0] for row in recovery_claims
+                    if row.get("kind") == "runtime.action.succeeded"
+                    and row.get("body", {}).get("fields", {}).get("incarnation_id") == blocked_incarnation}
+        if recovered_incarnation != blocked_incarnation or any(row.get("id") not in retained for row in automatic):
+            fail("a channel initialized during recheck was unnecessarily restarted")
     until(lambda: (node.api("/v1/messages/read/" + early) or {}).get("status") in ("read", "closed"),
           seats.bound, "early mail did not recover after channel attachment")
     until(lambda: native_offer_count(node, early) == 1, seats.bound, "early mail was not offered once")
@@ -808,7 +830,9 @@ def claude_channel_parked(node, seats):
           20, "parked channel did not stop its provider")
     node.kill_daemon()
     node.start()
-    time.sleep(30)
+    # A lost budget would charge a fourth attempt after one detection window and the largest
+    # backoff of the schedule; wait out both with margin.
+    time.sleep((CHANNEL_ATTACH_WINDOW_MS + 4 * CHANNEL_BACKOFF_MS) / 1000 + 2)
     if len(attempts()) != 3 or len([row for row in receipts(node, "a") if row.get("event") == "started"]) != starts:
         fail("parked channel restarted after the daemon lost its in-memory budget")
     if native_mention_count(node, early) != 0:
@@ -866,7 +890,7 @@ def prove_codex_import(node, seats, native, origin):
 
 
 def idle_delivery_control(node, seats):
-    """Count real API calls for an idle minute, then prove hold/release/expiry on native mail."""
+    """Count real API calls for an idle window, then prove hold/release/expiry on native mail."""
     if node.harness not in ("codex", "opencode"):
         fail("the idle hold canary requires Codex or OpenCode")
     subject = seat_subject("a")
@@ -905,14 +929,17 @@ def idle_delivery_control(node, seats):
         return counts() == first
 
     until(quiet, seats.bound, "the driver kept reading delivery hold after boot mail was read")
+    # Ten idle seconds are ten driver ticks: a hold read on any tick shows here. That each idle
+    # tick reads no delivery control, for both transports and both mailbox sources, is proved per
+    # tick by driver_cli's native_delivery_control_reads_hold_only_while_mail_waits.
     original = set(driver_processes(node))
     before = calls()
     start = time.monotonic()
-    time.sleep(60)
+    time.sleep(10)
     after = calls()
     measured = {"idle_seconds": round(time.monotonic() - start, 3),
                 "hold_calls_before": before, "hold_calls_after": after,
-                "calls_per_idle_minute": after - before}
+                "calls_while_idle": after - before}
     node.idle_delivery_control = measured
     if after != before:
         fail(f"idle provider polled delivery hold: {measured}")
@@ -924,7 +951,7 @@ def idle_delivery_control(node, seats):
                          "--subject", label, "--body", label)["subject"]
 
     # Each delivery waits on its event within the phase bound. That the first mail after the
-    # minute gets its permit at once, not after a poll, now rests on the idle minute alone (no
+    # idle window gets its permit at once, not after a poll, rests on the idle window alone (no
     # hold poll runs); after_idle_seconds records the latency. The hold below outlasts the
     # bound, so only its release can deliver the held message, and only expiry the last one.
     def finish(reference, label):
@@ -1093,6 +1120,20 @@ def prove_claim_socket_denied(node, seats, evidence):
 def run(args, root, evidence):
     register(root, evidence)
     node = Node(root, args.binary, args.harness)
+    if args.scenario.startswith("channel-"):
+        shorten = {"ST3_CLAUDE_ATTACH_WINDOW_MS": str(CHANNEL_ATTACH_WINDOW_MS)}
+        # channel-uninitialized must initialize the channel inside the first backoff window, after
+        # the stand-in's poll and the daemon's attach report (measured up to about 2 s), so it
+        # keeps the production backoff; channel-missing keeps it too. Only channel-parked, which
+        # counts attempts, takes the short backoff.
+        if args.scenario == "channel-parked":
+            shorten["ST3_CLAUDE_CHANNEL_BACKOFF_MS"] = str(CHANNEL_BACKOFF_MS)
+        node.env.update(shorten)
+        # Seats take their environment from the daemon's login shell, so export it there too.
+        for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshenv"):
+            with (root / "home" / name).open("a") as profile:
+                for key, value in shorten.items():
+                    profile.write(f"export {key}={value}\n")
     if args.scenario == "access-auto":
         with (root / "config.toml").open("a") as config:
             config.write('access_mode = "auto"\n')

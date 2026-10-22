@@ -13,7 +13,7 @@ or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
 `run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
 back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
 mail exactly once. The Rust wrapper
-`crates/st3/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
+`crates/fractal/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
 
 The boot, no-st2 and subagent fixtures put their private bin directory first, followed by
 inherited `PATH` entries that neither contain an `st2` executable nor name an `st2` path.
@@ -43,11 +43,13 @@ warnings must stay rate-limited in its private `driver.log`, outside the PTY.
 
 Claude's `channel-missing` and `channel-uninitialized` scenarios restart with healthy hooks
 but no usable channel. They require `claude-channel-unattached` with a blocked seat within
-45 seconds, a visible hold for early mail, and recovery with exactly one native offer and one
+45 seconds (awaited in the daemon's event log from a cursor taken before the restart, so the
+roughly ten-second blocked window cannot be missed; see `scripts/st3_events.py`), a visible hold for early mail, and recovery with exactly one native offer and one
 staged/delivered/read receipt. Two further restarts must deliver fresh startup mail once without
 replaying recovered mail. The missing-channel seat must restart automatically, continuing its
 native session. The uninitialized channel attaches during the recheck window and must keep its
-incarnation. Automatic recovery waits 10, 20 and 40 seconds after detection before each of three
+incarnation; a recovery request that its attachment overtook must settle as retained, with no
+restart. Automatic recovery waits 10, 20 and 40 seconds after detection before each of three
 restarts; a channel still missing after the third replacement parks the seat with a visible
 failure and holds mail until an operator restart or a new declaration. The fault controls live
 only in each isolated workspace.

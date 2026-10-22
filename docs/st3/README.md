@@ -16,10 +16,12 @@ Use these documents for implementation details:
   runs the fleet may do, as itself, until principals and grants land.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
+- [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.
 - [Schema registry](schema.md) lists the generated public subject, resource, and claim vocabulary.
 - [Typed custom subjects](custom-subjects.md) defines immutable registrations, generic reads and replies, and derived-state freshness,
   and the decision-tree manifest.
 - [Data authority](data-authority.md) separates durable facts from projections and caches.
+- [Large SQLite values](large-values.md) records variable-value storage debt and the source-site guard.
 - [0.x compatibility](compatibility.md) states upgrade baselines, independent contracts and current platform proof.
 - [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
@@ -60,6 +62,8 @@ Use these documents for implementation details:
   stopping a seat ends every process the seat started, and what a host without systemd misses.
 - [Subagents](subagents.md) explains how st records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
+- [Harness questions](harness-questions.md) explains how st records the questions a seat's harness
+  asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
