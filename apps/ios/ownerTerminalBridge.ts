@@ -1,5 +1,5 @@
-import { St3Client, type TerminalRoute } from '../../clients/typescript/st3-client';
-import { TerminalRouteMemory } from '@smalltalk/st3-views';
+import { FractalClient, type TerminalRoute } from '../../clients/typescript/fractal-client';
+import { TerminalRouteMemory } from '@fractal/views';
 import { gatewayFetch } from './gatewayFetch';
 import { closeFabricTarget, fabricTargetStats, openFabricTarget } from './modules/st-fabric';
 import type { FabricTarget } from './fabricTarget';
@@ -14,7 +14,7 @@ export function ownerTerminalRouting(options: {
   built(): boolean; fallback(): boolean; gatewayFabric(): FabricTarget | null;
   memory?: TerminalRouteMemory;
 }): TerminalRouting {
-  const create = (url: string, signal?: AbortSignal, cleanup = false) => new St3Client({
+  const create = (url: string, signal?: AbortSignal, cleanup = false) => new FractalClient({
     baseUrl: url, credential: () => options.credential, client: options.clientName,
     fetchImpl: gatewayFetch(async (input, init) => {
       if (!cleanup) return fetch(input, { ...init, signal });

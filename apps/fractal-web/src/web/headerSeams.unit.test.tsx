@@ -1,9 +1,9 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ThreadHeader } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { ResourceCardV1, ResourceChipV1, type ResourceData, type ResourceFile } from '@smalltalk/fractal-ui/assistant-ui/resources'
-import { SyncLine } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import { ThreadHeader } from '@fractal/ui/assistant-ui/shell'
+import { ResourceCardV1, ResourceChipV1, type ResourceData, type ResourceFile } from '@fractal/ui/assistant-ui/resources'
+import { SyncLine } from '@fractal/ui/assistant-ui/sync'
 import type { Agent } from '../data/source.ts'
 import { sidebarRow } from './sidebarRow.ts'
 
@@ -49,15 +49,14 @@ describe('thread header seam', () => {
     expect(bound).not.toMatch(/Needs you/)
   })
   it.each([
-    ['waiting', 'Native waiting for tool response', false],
-    ['errored', 'Native tool execution errored', false],
-    ['working', 'Native working before connection loss', true],
-  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale) => {
+    ['waiting', 'Native waiting for tool response', false, 'Needs you'],
+    ['errored', 'Native tool execution errored', false, 'Stale observation'],
+    ['working', 'Native working before connection loss', true, 'Last verified · Working'],
+  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale, canonical) => {
     const row = sidebarRow({ agent: { ...agent, activity, status: reported }, stale })
     const output = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: row.status, statusLabel: row.statusLabel, statusSince: row.statusSince, freshness: row.freshness, now: 2000 }))
-    const expected = stale ? 'Last verified · Not observed' : 'Not observed'
-    expect(output).toContain(`aria-label="${expected}; Status boundary unavailable; ${row.freshness} observation"`)
-    expect(output).not.toMatch(/Needs you|aria-label="Stale observation;/)
+    expect(output).toContain(`aria-label="${canonical}; Status boundary unavailable; ${row.freshness} observation${stale ? '; last-observed snapshot' : ''}"`)
+    expect(output).not.toContain(reported)
   })
 })
 

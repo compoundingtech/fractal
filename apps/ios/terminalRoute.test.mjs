@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
-import { TerminalRouteMemory } from '@smalltalk/st3-views';
+import { TerminalRouteMemory } from '@fractal/views';
 import { fakeClient } from './fakeFeed.mjs';
 const id = 'terminal/agent/demo/worker';
 const descriptor = { terminal_id: id, runtime_incarnation: 'runtime:one', owner_host_id: 'host/owner-a', fabric: { node: 'a'.repeat(64), service: 'st3/client/demo-fleet' } };

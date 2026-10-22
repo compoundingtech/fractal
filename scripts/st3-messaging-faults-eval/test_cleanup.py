@@ -19,6 +19,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from script_process import signal_private
 loader = importlib.machinery.SourceFileLoader('cleanup_eval', str(HERE / 'run'))
 runner = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(runner)
@@ -61,6 +63,31 @@ class StartupGraceTests(unittest.TestCase):
 
 
 class CleanupTests(unittest.TestCase):
+    def test_stop_preserves_a_detached_process_with_the_inherited_marker(self):
+        async def exercise():
+            command = (sys.executable, '-c', 'import time; time.sleep(60)')
+            owned = await runner.spawn(*command, start_new_session=True)
+            # A detached provider inherits the daemon's marker, but owns a new
+            # session/group and is meant to outlive a daemon restart.
+            detached = await asyncio.create_subprocess_exec(*command,
+                env={**os.environ, 'SCRIPT_TEST_PROCESS': owned.signal_marker},
+                start_new_session=True)
+            try:
+                candidates = [Path(f'/proc/{owned.pid}'), Path(f'/proc/{detached.pid}')]
+                with patch.object(runner.Path, 'glob', return_value=candidates):
+                    await runner.stop(owned)
+                self.assertEqual(owned.returncode, -signal.SIGTERM)
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(detached.wait()), 0.05)
+                self.assertIsNone(detached.returncode)
+                self.assertTrue(Path(f'/proc/{detached.pid}').exists())
+            finally:
+                for process in (owned, detached):
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+        asyncio.run(exercise())
+
     def test_evidence_failure_still_cleans_both_nodes_and_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
@@ -139,7 +166,7 @@ export default api => {
                     provider = rows[0]['pid']
                     child = int((root / 'child.pid').read_text())
                     self.assertEqual(os.getpgid(child), child)
-                    os.kill(provider, signal.SIGTERM)
+                    signal_private(provider, signal.SIGTERM, root=root)
                     launcher.wait(timeout=3)
                     self.assertEqual(launcher.returncode, 1, (root / 'provider.log').read_text())
                     wait_for(lambda: not Path(f'/proc/{child}').exists(), 2)
@@ -217,7 +244,11 @@ export default api => {
                                 fds.append(os.pidfd_open(pid))
                             except ProcessLookupError:
                                 pass
-                        os.kill(controller if target == 'controller' else launcher.pid, sig)
+                        if target == 'controller':
+                            signal_private(controller, sig,
+                                environment={'ST3_MESSAGING_ROOT': str(root)})
+                        else:
+                            launcher.send_signal(sig)
                         launcher.wait(timeout=10)
                         wait_for(lambda: all(not Path(f'/proc/{pid}').exists() for pid in pids), 5)
                         wait_for(lambda: not Path(f'/proc/{guardian}').exists(), 5)

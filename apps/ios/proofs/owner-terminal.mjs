@@ -5,8 +5,8 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { performance } from 'node:perf_hooks';
 import WebSocket from 'ws';
-import { St3Client } from '../../../clients/typescript/st3-client/index.ts';
-import { TerminalRouteMemory } from '../../../clients/typescript/st3-views/terminalRoute.ts';
+import { FractalClient } from '../../../clients/typescript/fractal-client/index.ts';
+import { TerminalRouteMemory } from '../../../clients/typescript/fractal-views/terminalRoute.ts';
 import { RoutedTerminalFollow } from '../terminalRoute.ts';
 const fixture = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 assert.equal(fixture.kind, 'isolated-owner-terminal-pair');
@@ -24,7 +24,7 @@ let action = 0;
 const actionId = () => `action/owner-terminal-proof-${++action}`;
 const socketFactory = (url, protocols, headers) => new WebSocket(url, protocols, { headers });
 function client(url, mark) {
-  const value = new St3Client({ baseUrl: url, credential: () => fixture.credential, client: 'isolated-owner-proof' });
+  const value = new FractalClient({ baseUrl: url, credential: () => fixture.credential, client: 'isolated-owner-proof' });
   const stream = value.collectionStream.bind(value), attach = value.terminalAttach.bind(value), detach = value.terminalDetach.bind(value);
   value.collectionStream = options => stream({ ...options, socket: socketFactory,
     onFrame: frame => { if (frame.kind === 'screen') mark?.('screen', frame); options.onFrame(frame); } });

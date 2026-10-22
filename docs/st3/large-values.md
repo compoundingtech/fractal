@@ -83,6 +83,56 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Conversation-owner inventory review (PR #3116)
+
+The [owner-once change](https://github.com/compoundingtech/smalltalk/pull/3116)
+retains the existing inline claim representation. The responsible maintainers
+are the maintainers of the producer modules named below; ownership does not
+transfer to the offline command or this inventory. All entries remain
+`allow-for-now`, including conservative read sinks and the empty schema probe.
+An indexed seek or a bounded row count does not bound TEXT keys, decoded JSON,
+or returned claim bytes.
+
+- `smallclaims::store`: `lv-h9722d4635b44` adds the transport-pair index
+  over origin, subject and accepted-time TEXT; `lv-h93965131ebb0` and
+  `lv-hb4ef462c895d` split the existing core schema around that shared index.
+  Existing claim bodies, predecessors, metadata, blobs and variable index keys
+  remain inline with unchanged logical semantics. The module maintainer owns
+  `chunk-or-reference-variable-columns`: qualify bounded units or references,
+  including index keys and old-value release. `lv-h5a3d29781577` replaces the
+  transport scan with recursive pair seeks; origin/subject, status and timestamp
+  values still come from historical claims. Its
+  `trace-statement-and-value-representation` work must connect the canonical
+  query expansion and extracted values to that representation.
+- `fractal_store::store`: `lv-hd02768fb2b9c` and `lv-ha749c7998d2f` install
+  runtime, actual-state and identity indexes. Runtime identifiers, subjects,
+  origins and accepted-time keys remain variable; registry-derived predicates
+  do not bound their bytes. The module maintainer owns
+  `chunk-or-reference-variable-columns` while preserving canonical ordering,
+  transition resets and historical identity semantics.
+  `lv-hb05e486c0515` reads one canonical runtime claim per origin, including
+  its body; `lv-h5b2f62a33993` and `lv-h884c57c5eacf` prepare and bind the
+  fallback source query returning claim ID/origin. Their
+  `trace-statement-and-value-representation` work must account for formatted
+  predicates, subject bindings, variable identities and full claim bodies;
+  these reads introduce no physical size guarantee.
+- `fractal_store::owner_indexes`: `lv-h735c5d58ef79` and `lv-h0f440b8d87b1`
+  execute the shared transport/runtime DDL against an explicitly stopped store.
+  The command retains existing key representations to match startup exactly.
+  Its maintainer owns `trace-statement-and-value-representation`, linking those
+  execution sinks to the schema producers above and their eventual conversion.
+  `lv-h3ad40afefaf0` creates the empty in-memory claims table used to compare
+  expected definitions. No claim is inserted there, but its TEXT declarations
+  remain catalog candidates, not a general size exemption; the maintainer owns
+  `chunk-or-reference-variable-columns` if that probe acquires value producers.
+- `fractal_store::store::conversation_reads`: `lv-h81c8d6a2e0f8` binds the
+  subject/existence query; `lv-h07dae6c16278` and `lv-h2752cd7a95e2` prepare
+  and bind registry-derived identity reads. The module maintainer owns
+  `trace-statement-and-value-representation`: trace subject parameters, JSON
+  extraction and returned runtime/incarnation strings to bounded physical
+  storage without changing historical identity semantics. A boolean existence
+  result does not establish a bound on its subject/index inputs.
+
 ## What the static guard checks
 
 Run these lightweight source controls; neither opens SQLite or compiles Rust:

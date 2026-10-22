@@ -1,10 +1,10 @@
-import type { CollectionStream, Snapshot, St3Client, TerminalRoute, TerminalScreen } from '../../clients/typescript/st3-client';
-import { plainError } from '../../clients/typescript/st3-client';
-import { daemonRouteLabel, fabricRouteLabel, terminalRoute, TerminalRouteMemory } from '@smalltalk/st3-views';
+import type { CollectionStream, Snapshot, FractalClient, TerminalRoute, TerminalScreen } from '../../clients/typescript/fractal-client';
+import { plainError } from '../../clients/typescript/fractal-client';
+import { daemonRouteLabel, fabricRouteLabel, terminalRoute, TerminalRouteMemory } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type TerminalFollowHandlers } from './terminalControls';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 
-export type TerminalClient = Pick<St3Client, 'capabilities' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach' | 'terminalInput' | 'terminalResize' | 'collectionStream'>;
+export type TerminalClient = Pick<FractalClient, 'capabilities' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach' | 'terminalInput' | 'terminalResize' | 'collectionStream'>;
 export type OwnerTarget = {
   client: TerminalClient;
   /** Detach through this issuer even after the attempt's HTTP reads were cancelled. */

@@ -1,4 +1,4 @@
-import type { ConversationRuntimeOptions } from '@smalltalk/fractal-ui/assistant-ui'
+import type { ConversationRuntimeOptions } from '@fractal/ui/assistant-ui'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import type { AttachmentSendRequest, DataSource, Grants } from '../data/source.ts'
 
@@ -38,6 +38,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const dispatch = async (content: string, attachments: AttachmentSendRequest['parameters']['attachments'], retryKey?: string) => {
     if (source.attachments === undefined || grants.messageSend !== 'granted') return
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     const request = {
       api_version: 'st3.client.v0', type: 'message.send', id: `action/${crypto.randomUUID()}`,
       parameters: { to: agentRef, content, tags: [], attachments },

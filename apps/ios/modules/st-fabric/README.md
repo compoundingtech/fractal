@@ -32,7 +32,7 @@ node apps/ios/modules/st-fabric/proof-member.mjs grant /tmp/st-fabric-proof-exam
 
 The grant is `fabric add PHONE_NODE_ID demo-phone --inbound-only --allow demo-client/0`: the member serves the phone when it connects and never dials, probes or announces to it, and `fabric status` shows it as `inbound-only`. Start the helper with `FABRIC_PROOF_APP=separate` to write links for the separate offline Debug app.
 
-Open the privately written `pair-link.txt` in the app. The temporary `St3Client` completes pairing and reads capabilities through fabric. Pairing uses its own temporary device key value, independent of the iroh identity; no action-signing key or bearer is reused as a transport key. Do not publish the link or put its code in logs. Use an isolated, localhost Metro server if injecting a pairing link through an environment variable.
+Open the privately written `pair-link.txt` in the app. The temporary `FractalClient` completes pairing and reads capabilities through fabric. Pairing uses its own temporary device key value, independent of the iroh identity; no action-signing key or bearer is reused as a transport key. Do not publish the link or put its code in logs. Use an isolated, localhost Metro server if injecting a pairing link through an environment variable.
 
 After verification, remove `demo-phone` using `fabric --home TEST_HOME remove demo-phone`, run `reload-peers`, and stop the helper. At the proof's pinned fabric 0.2.41+84c3208, a successful reload ends the admitted sessions whose grant or peer was removed, attached or detached ([trust after admission](https://github.com/compoundingtech/fabric/blob/v0.2.41/docs/tunnel-wire.md#trust-after-admission)), closing direct connections with code 403 and the corresponding admission refusal reason. Treat that as a refusal; a failed reload ends no sessions. Stopping the app bridge and the isolated daemon closes anything left. The test daemon uses a 30 second detached-session TTL, while the pinned daemon's default is 15 minutes.
 
@@ -98,7 +98,7 @@ all active endpoints. No tunnel resumption or mutation replay is added.
 
 The Linux `owner_bridge` example drives the exact Swift FFI as JSON lines for the
 isolated daemon-pair proof. Build it with `cargo build --example owner_bridge` in
-this crate. The `st3-daemon` test `terminal_route_phone_client_isolated_owner_pair` is
+this crate. The `fractal-daemon` test `terminal_route_phone_client_isolated_owner_pair` is
 ignored by default and requires `FABRIC_BIN` pinned to `0.2.41+84c3208`,
 `OWNER_BRIDGE_BIN`, Node with the app's dependencies, and `pty`. It creates private
 stores, a terminal, pairing and grants, runs the phone's TypeScript routing class,
@@ -108,6 +108,6 @@ All processes and stores are isolated from member daemons and configuration.
 Run it explicitly:
 
 ```sh
-cargo nextest run -p st3-daemon --lib --run-ignored all \
+cargo nextest run -p fractal-daemon --lib --run-ignored all \
   -E 'test(terminal_route_phone_client_isolated_owner_pair)' --no-capture
 ```
