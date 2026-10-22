@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS local_resource_preparation_dirty (
 // savepoint can restore queue rows that an earlier flush removed.
 mod work_signal {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const NAME: &std::ffi::CStr = c"smalltalk.resource-preparation-work";
 
