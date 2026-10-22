@@ -9,3 +9,4 @@ record a3fb5ad44ff8c4d9a2047cb861f15d45ab0b0c2d linux-tests-shard-2 0 fleet/ci 2
 record c48245fb2e779b0b008546d3fd689d93bda8c893 linux-clippy 0 fleet/ci 2026-10-19T02:01:25Z
 record e48182a512aca7dad67a76668529c86c9c9db134 typescript-client 0 fleet/ci 2026-10-19T02:04:45Z
 record fc0a030dbf0afb0a85ad9b8bf3d2a4d9aa7516bd linux-gate 0 fleet/ci 2026-10-19T02:12:52Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

@@ -8,3 +8,4 @@ record 7c3d2fcb56a180736c458a52a08df8f4e4ce98b5 linux-tests 0 fleet/ci 2026-10-2
 record 8e78e03eeca2aff108c951802684311036375ff3 linux-fleet-compat 0 fleet/ci 2026-10-20T19:23:22Z
 record c646095d19d3f3fad4eda1ec490d1481f231e685 typescript-client 0 fleet/ci 2026-10-20T19:23:51Z
 record cb5fbf654c3dbd89e3eb1f0fd5ee2aed4c22417f isolation-vm 0 fleet/ci 2026-10-20T19:26:37Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

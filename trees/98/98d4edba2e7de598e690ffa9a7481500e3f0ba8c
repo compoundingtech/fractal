@@ -10,3 +10,4 @@ record d07277a3c40c0c2e9cedf0cd5adea0853e078720 fractal-web 0 fleet/ci 2026-10-2
 record d7eac889d67e4323f5adee607457c6be10fc5f9b genie-freshness 0 fleet/ci 2026-10-20T13:06:39Z
 record ebbd19e3aa851ab77d12a345e78777b1f8593384 linux-clippy 0 fleet/ci 2026-10-20T13:09:22Z
 record f8144ac431daf64c24b98852d58d6cb0c759a449 mail-redelivery-canaries 0 fleet/ci 2026-10-20T13:13:51Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

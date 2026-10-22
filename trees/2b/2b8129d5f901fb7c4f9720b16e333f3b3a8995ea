@@ -7,3 +7,4 @@ record 7ddf3ef7abf879c127d8e97804f7d434aa7ff785 linux-gate 0 fleet/ci 2026-10-21
 record 8086effe36e856780a6951c899d7f2090c054ca3 mail-redelivery-canaries 0 fleet/ci 2026-10-21T12:35:49Z
 record bded431454749d64f09e52aa4542b10dac3bdacc genie-freshness 0 fleet/ci 2026-10-21T12:28:22Z
 record e13fa4b6ffc099058eada932747ecf23009c02c9 linux-fleet-compat 0 fleet/ci 2026-10-21T12:26:59Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

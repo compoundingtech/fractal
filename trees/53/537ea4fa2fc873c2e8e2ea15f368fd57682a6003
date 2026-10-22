@@ -19,3 +19,4 @@ record e97c1cc42cde18d86060097d4de3776f15973138 mail-redelivery-canaries 0 fleet
 record ed0c4611a28c82c7cdd24acfefdd84a2bf4e5a72 genie-freshness 0 host/forge 2026-10-18T14:14:20Z
 record f22529c468f60a0f486657a7c09aae0bf49ff030 linux-tests-shard-3 0 fleet/ci 2026-10-18T14:49:25Z
 record f9cc6b5fa3cc0d208bd91d8bbf91825d668ef308 linux-tests 0 fleet/ci 2026-10-18T14:49:47Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

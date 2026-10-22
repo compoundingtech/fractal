@@ -8,3 +8,4 @@ record b77936bd7294514f1a1b0a2fb3dff2342dfdafe0 linux-fleet-compat 0 fleet/ci 20
 record b89dc9303cdbddcad241cde74bb9843bb6499247 typescript-client 0 host/anvil 2026-10-16T15:38:29Z
 record d7fede57e0519214318129b5dd09804dfd1d05d9 isolation-vm 0 fleet/ci 2026-10-16T16:47:32Z
 record f4f01fefef7166cb81eb200e52b79a41e0a71ecb linux-tests 0 fleet/ci 2026-10-16T16:35:57Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

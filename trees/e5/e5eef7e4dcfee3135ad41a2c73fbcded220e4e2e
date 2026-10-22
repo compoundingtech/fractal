@@ -10,3 +10,4 @@ record a82f9d17daa6e13a76c92f26ea01349dd1a37bc4 linux-tests-shard-2 0 fleet/ci 2
 record aa677d59380c3444fa4cb81e3cbd1182e1d21c41 typescript-client 0 fleet/ci 2026-10-20T10:47:25Z
 record accecae99ff0ccde84321d5defb5e37fe2141db3 linux-clippy 0 fleet/ci 2026-10-20T10:42:43Z
 record d93a54ab5d24f831d8a31aef5c92ce0c86d36e29 typescript-client 0 host/anvil 2026-10-20T10:39:30Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

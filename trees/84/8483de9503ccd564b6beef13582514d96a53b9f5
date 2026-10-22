@@ -7,3 +7,4 @@ record 8d6f0246376907de7e86be0d8f883d124c0139f6 mail-redelivery-canaries 0 fleet
 record dfe45f8dccf20f96492fc528adb68ae42db75086 linux-gate 0 fleet/ci 2026-10-21T23:23:11Z
 record ee75c52f416f3b66dd3e3dcff4793ec666392423 linux-clippy 0 fleet/ci 2026-10-21T23:12:00Z
 record f857fa82a0fa4b2c03386ef20cce6b9a54d9f7df isolation-vm 0 fleet/ci 2026-10-21T23:15:30Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

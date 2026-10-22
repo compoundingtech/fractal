@@ -9,3 +9,4 @@ record b2b5b78e0aa41701958498bfdd373adbbe175705 linux-clippy 0 fleet/ci 2026-10-
 record d56c091ff679e7725ea7be6f9434e0feb065a199 typescript-client 0 host/forge 2026-10-21T00:02:15Z
 record e1273ff1d740bd4ac58ae2937a6c16dcf02ef45d genie-freshness 0 fleet/ci 2026-10-21T00:09:13Z
 record e39bcd312b83ac727a61d2166106ded4fd6bd582 linux-fleet-compat 0 fleet/ci 2026-10-21T00:13:16Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

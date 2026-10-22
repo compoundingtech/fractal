@@ -9,3 +9,4 @@ record c2c15e517cbe65eb366f71746a971724140799f5 linux-fleet-compat 0 fleet/ci 20
 record c421fca2fce7b50b47208ca1426fa5f018720ff1 linux-gate 0 fleet/ci 2026-10-18T05:44:10Z
 record c6347bc1055803f51599ebb5c6299dc4b1cdcce6 mail-redelivery-canaries 0 fleet/ci 2026-10-18T05:39:53Z
 record eae4774000520cad1749b608b083b792d7fde077 isolation-vm 0 fleet/ci 2026-10-18T05:39:54Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

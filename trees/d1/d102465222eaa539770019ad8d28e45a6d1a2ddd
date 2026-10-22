@@ -8,3 +8,4 @@ record 8b4e5aacd7e53c2e590d789da17f169a6f6272b4 linux-fleet-compat 0 fleet/ci 20
 record a527563dceb59f7b9a730de62b77eb668f1d0e38 linux-gate 0 fleet/ci 2026-10-19T18:13:14Z
 record a6350e606b31f9413a8bc98c2ba8d68b5beb36f8 typescript-client 0 host/forge 2026-10-19T17:40:46Z
 record cf4083e48c59e4855af29db29cc6ecd0c8f060ca mail-redelivery-canaries 0 fleet/ci 2026-10-19T18:05:10Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

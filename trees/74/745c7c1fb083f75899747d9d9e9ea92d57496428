@@ -9,3 +9,4 @@ record dad3add00f1b4647e190de079e20f5c8818e942e linux-fleet-compat 0 fleet/ci 20
 record e1192d020e44a121ce00f22952217b989bee1239 linux-tests-shard-2 0 fleet/ci 2026-10-18T02:04:10Z
 record f014407f8858b36d5a557195b67d33cc3d3d5386 isolation-vm 0 fleet/ci 2026-10-18T02:00:23Z
 record f3eb5645cebb9463998acb83c91436af32df7ac1 linux-tests-shard-4 0 fleet/ci 2026-10-18T02:04:27Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

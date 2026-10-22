@@ -9,3 +9,4 @@ record 91d0ce48e9ccfaf0fc5930cc52743c95d1f22786 mail-redelivery-canaries 0 fleet
 record ad65ff887fd5c68bff5821c71689cbfa25051657 linux-clippy 0 fleet/ci 2026-10-21T19:48:00Z
 record b611c9a3d65a824cb78c0bc5e09862f391a8471a linux-fleet-compat 0 fleet/ci 2026-10-21T19:50:19Z
 record bdfef0e59c996c336e5dacb319a7cb8bff19d4ec linux-tests-shard-2 0 fleet/ci 2026-10-21T19:56:06Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

@@ -8,3 +8,4 @@ record 98c179e1f7d1035d3b20ab6220e13b476df2c59f typescript-client 0 host/forge 2
 record db285a5ce612d46bf530104ae3e8b968a9961a9f linux-gate 0 fleet/ci 2026-10-19T17:53:29Z
 record e405a3dd7ff32af407b75eea17cfb478f6bfce43 linux-fleet-compat 0 fleet/ci 2026-10-19T17:29:47Z
 record f77d4905c9743d042d5e74c276af1893cf6b0255 genie-freshness 0 host/forge 2026-10-19T17:18:57Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0

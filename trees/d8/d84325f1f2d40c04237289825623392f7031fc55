@@ -8,3 +8,4 @@ record 51204cd3e24d8cca48beaf55850c791e91e2380e mail-redelivery-canaries 0 fleet
 record 763acbbf38ed105e6d532213e2a66fb926285be2 isolation-vm 0 fleet/ci 2026-10-16T16:00:09Z
 record bbceab9c66202fbe99f94daa299d3f886888add4 genie-freshness 0 fleet/ci 2026-10-16T15:00:36Z
 record fa46f54fa2e68f8acef726f45e93503a7abae2ec genie-freshness 0 host/anvil 2026-10-16T14:54:23Z
+gc 2026-10-22T03:41:25+00:00 8dd137d80329f115d7e6b2fb92257eddb86c384ca4e570b71e943939aa8446a0
