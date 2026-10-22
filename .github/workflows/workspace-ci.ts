@@ -931,7 +931,7 @@ export const fractalWebJobs = {
         uses: 'actions/upload-artifact@v4',
         with: {
           name: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}',
-          path: '${{ runner.temp }}/kit-play-receipts/receipt.json',
+          path: '${{ runner.temp }}/kit-play-receipts/',
           'if-no-files-found': 'ignore',
         },
       },
@@ -967,17 +967,25 @@ export const fractalWebJobs = {
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },
-      // A successful matrix result alone cannot prove all expected shards ran.
+      // Publish costs for single-shard runs too; exact full-index coverage remains merge-group-only.
       {
         uses: 'actions/checkout@v4',
-        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'",
         with: { 'persist-credentials': false },
       },
       {
         uses: 'actions/download-artifact@v4',
-        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        id: 'cost-receipts',
+        'continue-on-error': true,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'",
         // Include older attempts only from this exact run/head, for rerun-failed-jobs.
         with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
+      },
+      {
+        name: 'Publish web lane costs as a public check annotation',
+        'continue-on-error': true,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && steps.cost-receipts.outcome == 'success'",
+        run: 'node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"',
       },
       {
         name: 'Require every kit shard and exact full-index coverage',
