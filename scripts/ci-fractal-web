@@ -42,8 +42,8 @@ production_build() (
 
 
 kit_receipt_dir=${KIT_RECEIPT_DIRECTORY:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/kit-play-receipts}
-# Retain the whole lane duration even when it fails before a strict-play receipt exists.
-trap 'mkdir -p "$kit_receipt_dir"; echo "$SECONDS" > "$kit_receipt_dir/lane-seconds"' EXIT
+# Retain duration and CPU identity even when the lane fails before strict plays.
+trap 'mkdir -p "$kit_receipt_dir"; echo "$SECONDS" > "$kit_receipt_dir/lane-seconds"; node packages/fractal-ui/scripts/kit-runner-cpu.mjs > "$kit_receipt_dir/runner-cpu.json"' EXIT
 
 kit_storybook() (
   # The module graph proves every bundled repository file is a declared kit input. The build's

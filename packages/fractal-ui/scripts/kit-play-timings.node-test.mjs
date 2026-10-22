@@ -9,6 +9,50 @@ import { shardArtifactName, shardStories } from './kit-play-shards.mjs'
 import { fullCases } from './kit-play-commit-set.mjs'
 import { fileURLToPath } from 'node:url'
 import config from '../.storybook/main.ts'
+import { runnerCpu, readRunnerCpu } from './kit-runner-cpu.mjs'
+
+test('runner CPU mapping preserves model names and classifies only known models', () => {
+  for (const [modelName, cpuClass] of [
+    ['AMD EPYC 7763 64-Core Processor', 'epyc-7763'],
+    ['AMD EPYC 9V74 96-Core Processor', 'epyc-9v74'],
+    ['Intel(R) Xeon(R) Platinum 8573C', 'xeon-8573c'],
+    ['AMD EPYC 7763X 64-Core Processor', 'unknown'],
+    ['unrecognised CPU', 'unknown'],
+  ]) {
+    assert.deepEqual(runnerCpu(`processor\t: 0\nmodel name\t: ${modelName}\nprocessor\t: 1\nmodel name\t: ${modelName}\n`), { modelName, cpuClass })
+  }
+  for (const cpuinfo of [undefined, '', 'processor : 0\n', 'model name : \n']) {
+    assert.deepEqual(runnerCpu(cpuinfo), { modelName: '', cpuClass: 'unknown' })
+  }
+})
+
+test('missing and empty cpuinfo files explicitly report unknown', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kit-runner-cpu-test-'))
+  try {
+    const path = join(directory, 'cpuinfo')
+    assert.deepEqual(await readRunnerCpu(path), { modelName: '', cpuClass: 'unknown' })
+    await writeFile(path, '')
+    assert.deepEqual(await readRunnerCpu(path), { modelName: '', cpuClass: 'unknown' })
+    await writeFile(path, 'model name : AMD EPYC 7763 64-Core Processor\n')
+    assert.equal((await readRunnerCpu(path)).cpuClass, 'epyc-7763')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('cost summary shows each shard model and a sorted distinct CPU class set', () => {
+  const table = costTable([
+    { shardIndex: 0, runnerCpu: { modelName: 'AMD EPYC 9V74', cpuClass: 'epyc-9v74' } },
+    { shardIndex: 1, runnerCpu: { modelName: 'AMD EPYC 7763', cpuClass: 'epyc-7763' } },
+    { shardIndex: 2, runnerCpu: { modelName: 'odd|model\nname', cpuClass: 'unknown' } },
+    { shardIndex: 3 },
+  ])
+  assert.match(table, /Runner CPU classes: epyc-7763, epyc-9v74, unknown\./)
+  assert.match(table, /\| epyc-9v74 \| AMD EPYC 9V74 \|/)
+  assert.match(table, /\| unknown \| odd\\\|model name \|/)
+  assert.match(table, /\| unknown \| unavailable \|/)
+  assert.match(costTable([]), /Runner CPU classes: unavailable\./)
+})
 
 test('Storybook 10.6.1 a11y annotation path and accepted entry shapes stay pinned', async () => {
   for (const name of ['storybook', '@storybook/addon-a11y']) {
@@ -77,6 +121,10 @@ test('publisher selects the newest attempt, handles no-kit lanes and writes the 
       const path = join(artifacts, `kit-play-123-${sha}-shard-${shard}-attempt-${attempt}`)
       await mkdir(path)
       await writeFile(join(path, 'lane-seconds'), String(lane))
+      if (shard === 0) await writeFile(join(path, 'runner-cpu.json'), JSON.stringify({
+        modelName: attempt === 1 ? 'obsolete CPU' : 'AMD EPYC 7763 64-Core Processor',
+        cpuClass: attempt === 1 ? 'unknown' : 'epyc-7763',
+      }))
       if (receipt) await writeFile(join(path, 'receipt.json'), JSON.stringify(receipt))
     }
     await writeFile(join(artifacts, `kit-play-123-${sha}-shard-0-attempt-1`, 'receipt.json'), '{"rows":')
@@ -87,6 +135,10 @@ test('publisher selects the newest attempt, handles no-kit lanes and writes the 
     const table = await readFile(summary, 'utf8')
     assert.match(table, /\| 0 \| 42.00 \| 3.00 \| 2.00 \| 1 \|/)
     assert.match(table, /\| 1 \| 37.00 \| unavailable \| unavailable \| not run \|/)
+    assert.match(table, /Runner CPU classes: epyc-7763, unknown\./)
+    assert.match(table, /\| epyc-7763 \| AMD EPYC 7763 64-Core Processor \|/)
+    assert.match(table, /\| unknown \| unavailable \|/)
+    assert.doesNotMatch(table, /obsolete CPU/)
     assert.doesNotMatch(table, /999/)
     assert.equal(run.stdout.trimEnd(), notice(table))
     await writeFile(join(artifacts, `kit-play-123-${sha}-shard-0-attempt-2`, 'receipt.json'), '{"rows":')

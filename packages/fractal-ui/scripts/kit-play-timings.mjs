@@ -50,8 +50,9 @@ export function costTable(shards) {
   const lines = [
     '## Fractal web cost', '',
     'Lane seconds cover ci-fractal-web (including install), not job provisioning. Case totals are worker-seconds, not runner-seconds.', '',
-    '| Shard | Lane s | Plays s | Storybook s | Cases |', '| --- | ---: | ---: | ---: | ---: |',
-    ...shards.map(({ shardIndex, laneSeconds, receipt }) => `| ${shardIndex} | ${number(laneSeconds)} | ${number(receipt?.elapsedSeconds)} | ${number(receipt?.storybookBuildSeconds)} | ${receipt?.cases ?? 'not run'} |`),
+    `Runner CPU classes: ${[...new Set(shards.map(shard => shard.runnerCpu?.cpuClass ?? 'unknown'))].sort().join(', ') || 'unavailable'}.`, '',
+    '| Shard | Lane s | Plays s | Storybook s | Cases | CPU class | CPU model |', '| --- | ---: | ---: | ---: | ---: | --- | --- |',
+    ...shards.map(({ shardIndex, laneSeconds, receipt, runnerCpu }) => `| ${shardIndex} | ${number(laneSeconds)} | ${number(receipt?.elapsedSeconds)} | ${number(receipt?.storybookBuildSeconds)} | ${receipt?.cases ?? 'not run'} | ${cell(runnerCpu?.cpuClass ?? 'unknown')} | ${cell(runnerCpu?.modelName || 'unavailable')} |`),
     '', '| Phase | Mean ms | p95 ms | Samples |', '| --- | ---: | ---: | ---: |',
   ]
   const rows = shards.flatMap(shard => shard.receipt?.rows ?? [])
