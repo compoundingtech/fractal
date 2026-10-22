@@ -51,7 +51,7 @@ while IFS='=' read -r -d '' name value; do
   case "$name" in
     # The dev shell's own test settings (flake.nix): the collector CI's OTLP export tests run against. Kept when they name a store
     # path, so a seat's own setting of the same name still leaves.
-    ST2_OTELITE_BIN|ST3_OTELITE_BIN|FRACTAL_OTELITE_BIN) [[ "$value" == /nix/store/* ]] || unset "$name" ;;
+    ST2_OTELITE_BIN|ST3_OTELITE_BIN|FRACTAL_OTELITE_BIN) [[ "$value" == /nix/store/* && "$value" != *..* ]] || unset "$name" ;;
     ST_*|ST2_*|ST3_*|FRACTAL_*|GH_*|GITHUB_*|SSH_AUTH_SOCK|SSH_AGENT_PID|EVIDENCE_*|SEKRETS_*) unset "$name" ;;
   esac
 done < <(env -0)
