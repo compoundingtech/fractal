@@ -52,6 +52,8 @@ class CiLocal(unittest.TestCase):
         recorder = self.home / '.local/state/st3/recorder/bin'
         env = {'PATH': f'{recorder}:{self.bin}:{self.home}/.local/bin:{self.devshell}:{os.environ["PATH"]}:{self.home}/.local/state/st3', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'XDG_RUNTIME_DIR': '/run/user/test', 'ST_AGENT': 'agent/x', 'ST3_ENDPOINT': 'unix:/x',
+               # The names a seat carries since the rename: the live daemon's endpoint and the seat's identity.
+               'FRACTAL_ENDPOINT': '/run/user/test/live.sock', 'FRACTAL_AGENT': 'agent/x', 'ST2_HOME': '/x',
                'GH_TOKEN': 'secret', 'GITHUB_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x', 'EVIDENCE_PUSH_TOKEN': 'secret',
                'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'), **extra}
         done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True)
@@ -70,7 +72,8 @@ class CiLocal(unittest.TestCase):
             self.assertTrue(str(scratch).startswith(self.tmp.name), scratch)
             for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
                 self.assertTrue(env[name].startswith(str(scratch.parent)), (name, env[name]))
-            for name in ('ST_AGENT', 'ST3_ENDPOINT', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE'):
+            for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
+                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE'):
                 self.assertNotIn(name, env)
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
             # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
