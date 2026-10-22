@@ -106,7 +106,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     const index = await response.json()
     fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
     validateCaseOverrides(index.entries, overrides)
-    storyFiles = Object.fromEntries(fullIds.map(id => [id, index.entries[id].importPath]))
+    storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
     if (set === 'commit') {
