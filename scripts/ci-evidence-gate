@@ -74,7 +74,7 @@ LOG_KEY = '.st/evidence-log-key'
 LOG_REF = 'refs/evidence-log/main'
 POLICY = '.st/evidence-skip-policy.json'
 MISSING = ('no_record', 'stale_tree', 'wrong_check')
-UNAVAILABLE = ('error', 'no_policy')
+UNAVAILABLE = ('error', 'no_policy', 'log_absent', 'log_unsigned', 'log_stale')
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 TOKEN = re.compile(r'^[A-Za-z0-9._:/@+=-]+$')
 
@@ -420,6 +420,11 @@ def main():
         gate_sha = hashlib.sha256(handle.read()).hexdigest()
     text = line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sha)
     print(text)
+    if isinstance(result, dict) and result.get('log') == 'missing':
+        # A record the evidence log lists is gone from the remote: deleted outside GC, or never fetched. It never skips (under an
+        # enforced log rule), and in either mode it is an alarm someone must read, not a line in a log.
+        print(f'::error title=Evidence log::{field(result.get("log_missing"))} logged record(s) for {context["check"]} on tree {field(tree)} '
+              f'are missing from the remote; see the decision line and scripts/evidence-log --restore')
     record = (result or {}).get('record') if decision == 'skip' else None
     for variable, body in (('GITHUB_OUTPUT', f'outcome={outcome}\nskip={"true" if decision == "skip" else "false"}\n'
                                              f'record={field(record)}\n'),

@@ -1847,6 +1847,105 @@ class EvidenceLogView(unittest.TestCase):
         self.assertEqual((code, result['log'], result['log_missing']), (0, 'ok', 0), result)
 
 
+def enforced_policy(log='enforce', **overrides):
+    """A policy for check unit with one kind (nix, `make test`) and the given `log` mode."""
+    entry = {'trust_levels': ['machine'], 'kinds': {'nix': {'command': ['make', 'test']}}, 'log': log}
+    entry.update(overrides)
+    return json.dumps({'version': 1, 'checks': {'unit': entry}})
+
+
+class EvidenceLogEnforced(unittest.TestCase):
+    """`"log": "enforce"`: the evidence log's view decides. A pass counts only when the log is present, signed, fresh, lists the
+    chosen record and has lost none of this tree's records; anything else is a refusal with its own reason, so the check runs."""
+
+    setUp = EvidenceLogView.setUp
+    log = EvidenceLogView.log
+
+    def rules(self, log='enforce'):
+        return evidence_verify.policy_rules(enforced_policy(log), 'unit', 'org/repo')
+
+    def view(self, log='enforce', with_keys=True):
+        options = {'log_keys': str(self.log_keys)} if with_keys else {}
+        return self.f.verify(self.tree, rules=self.rules(log), now=NOW + timedelta(seconds=30), **options)
+
+    def test_log_is_shadow_unless_the_policy_says_enforce_and_is_validated_strictly(self):
+        doc = json.loads(enforced_policy())
+        del doc['checks']['unit']['log']
+        self.assertEqual(evidence_verify.policy_rules(json.dumps(doc), 'unit', 'org/repo')['log'], 'shadow')
+        for mode in ('shadow', 'enforce'):
+            self.assertEqual(self.rules(mode)['log'], mode)
+        for bad in ('on', True, False, None, 'Enforce', ['enforce'], '', 'reject'):
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.policy_rules(enforced_policy(bad), 'unit', 'org/repo')
+            self.assertEqual(caught.exception.reason, 'error', repr(bad))
+
+    def test_a_logged_pass_counts(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        head = self.log([(passed, 0)])
+        code, result = self.view()
+        self.assertEqual((code, result['satisfied'], result['record'], result['log'], result['log_head']), (0, True, passed, 'ok', head), result)
+
+    def test_a_pass_the_log_does_not_list_does_not_count_and_in_shadow_it_still_does(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.log([])
+        code, result = self.view()
+        self.assertEqual((code, result['reason'], result['record'], result['log']), (1, 'log_unlogged', passed, 'unlogged_pass'), result)
+        self.assertEqual(self.view(log='shadow')[0], 0, 'the same tree under shadow: unchanged')
+
+    def test_a_deleted_logged_failure_stops_the_older_pass(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=-600)
+        failed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=-60)
+        self.log([(passed, 0), (failed, 1)])
+        self.f.git('update-ref', '-d', self.f.ref_of[failed])  # the attack the log exists for
+        code, result = self.view()
+        self.assertEqual((code, result['reason'], result['log_missing']), (1, 'log_missing', 1), result)
+        self.assertEqual(self.view(log='shadow')[1]['record'], passed, 'shadow: the older pass still decides')
+
+    def test_an_absent_unsigned_or_stale_log_backs_no_pass(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.assertEqual(self.view()[1]['reason'], 'log_absent')
+        self.log([(passed, 0)], key=self.f.key('not-the-log-key'))
+        self.assertEqual(self.view()[1]['reason'], 'log_unsigned')
+        self.log([(passed, 0)], at=NOW - timedelta(minutes=11))
+        self.assertEqual(self.view()[1]['reason'], 'log_stale')
+
+    def test_with_no_log_key_nothing_passes_but_a_record_s_own_refusal_comes_first(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.log([(passed, 0)])
+        code, result = self.view(with_keys=False)
+        self.assertEqual((code, result['reason'], result['log']), (1, 'log_absent', 'absent'), result)
+        _, other_tree = self.f.commit('a tree with no record\n')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.verify(str(self.f.repo), other_tree, 'unit', str(self.f.keys), None, rules=self.rules(), now=NOW)
+        self.assertEqual(caught.exception.reason, 'no_record')
+
+    def test_a_reject_lane_is_not_held_to_the_log(self):
+        # Queue-entry rejection asks whether the tree is signed at all; an unlogged pass is still a signed tree there.
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        result = evidence_verify.require_all(str(self.f.repo), self.tree, str(self.f.keys), enforced_policy(require='reject'), 'org/repo')
+        self.assertEqual((result['decision'], result['lanes']['unit']['record']), ('ok', passed), result)
+
+    def test_the_cli_with_an_enforcing_policy_and_no_pinned_log_key_refuses(self):
+        passed = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.log([(passed, 0)], at=datetime.now(timezone.utc))
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        (self.f.repo / '.st/evidence-skip-policy.json').write_text(enforced_policy())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'keys and an enforcing policy, no log key')
+        base = self.f.git('rev-parse', 'HEAD')
+        args = ('--tree', self.tree, '--check', 'unit', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo',
+                '--log-keys-from', base)
+        code, out, _ = self.f.cli(*args)
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'log_absent'), out)
+        (self.f.repo / '.st/evidence-log-key').write_text(self.log_keys.read_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'pin the log key')
+        base = self.f.git('rev-parse', 'HEAD')
+        code, out, _ = self.f.cli(*args[:-1], base)
+        self.assertEqual((code, json.loads(out)['log']), (0, 'ok'), out)
+
+
 class Sha256Repository(unittest.TestCase):
     def test_sha256_object_ids_work_in_both_layouts_including_the_stale_tree_scan(self):
         for layout, missing in (('legacy', 'stale_tree'), ('tree', 'no_record')):

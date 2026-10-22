@@ -254,9 +254,19 @@ to its answer, and changes nothing else. `log` is the first of:
 - `ok`.
 
 A failure counts whether or not the log lists it, as the verdict already does. Once the base pins the key, the gate
-fetches the one log ref (one commit deep) and prints the view on its decision line. Enforcing it, so that skipping
-requires `ok`, is a later change, after the shadow shows what it would refuse. Every read of the log is made with
+fetches the one log ref (one commit deep) and prints the view on its decision line. Every read of the log is made with
 `GIT_NO_LAZY_FETCH`.
+
+**Enforcing the log rule (`"log": "enforce"`).** Each check in `.st/evidence-skip-policy.json` takes `"log"`: `shadow`
+(the default: the view is reported and changes nothing) or `enforce`. Under `enforce` a pass stands only when the view is
+`ok`; otherwise the verifier refuses it with `log_absent`, `log_unsigned`, `log_stale`, `log_missing` or `log_unlogged`,
+and the check runs. A base with no `.st/evidence-log-key` gives no view, so under `enforce` nothing skips there
+(`log_absent`), although a record's own refusal (no record, a failure) is reported first. A record the log lists that the
+remote has lost (`missing`) is also an `::error` annotation on the run, in either mode: it changes no exit code, since the
+gate never fails a job, but it is the alarm that a record was deleted outside GC. Queue-entry rejection (`require`) is not
+held to the log: it asks whether the tree is signed at all. The switch is flipped per check, on the measured trigger in
+the skip plan (24 h of a fresh published log, at least 30 decision lines with `log=ok`, no `missing` and no unexplained
+`unlogged_pass`); a pass signed just before the push is logged at the next pull, which `st-test --push` asks for at once.
 
 The copy never becomes a partial clone, and no git call may fetch lazily (`GIT_NO_LAZY_FETCH`): in a partial clone a
 presence check of a missing record fetches it with no negotiation, that is with its whole history (3.4 GB before the

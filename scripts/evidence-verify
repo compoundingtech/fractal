@@ -75,8 +75,12 @@ def git(repo, *args, stdin=None, config=(), env=None):
 
 
 POLICY_KEYS = {'version', 'checks'}
-CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require', 'events'}
+CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require', 'events', 'log'}
 REQUIRE_MODES = ('off', 'shadow', 'reject')
+LOG_MODES = ('shadow', 'enforce')
+# Under `"log": "enforce"`, the reason a pass is refused for each log view other than ok (docs/st3/gate-evidence.md, "The evidence log").
+LOG_REFUSALS = {'absent': 'log_absent', 'unsigned': 'log_unsigned', 'stale': 'log_stale', 'missing': 'log_missing',
+                'unlogged_pass': 'log_unlogged'}
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
 MAX_INPUTS = 300
@@ -141,6 +145,11 @@ def policy_rules(text, check, repository):
     check_events = entry.get('events')
     if check_events is not None and not valid_events(check_events):
         raise Failure('error', f'skip policy for {check}: events must be a nonempty list of {", ".join(EVENTS)}')
+    # `log`: shadow (default) reports the evidence log's view and changes nothing; enforce makes a pass count only when the log is
+    # fresh, signed, lists the chosen record and has lost none of this tree's records.
+    log = entry.get('log', 'shadow')
+    if not isinstance(log, str) or log not in LOG_MODES:
+        raise Failure('error', f'skip policy for {check}: log must be one of {", ".join(LOG_MODES)}')
 
     def fill(value):
         return value.replace('{repository}', repository).replace('{check}', check)
@@ -187,7 +196,7 @@ def policy_rules(text, check, repository):
                        # may cover pull requests only), whatever the rest of the kind says.
                        'by_level': by_level}
     return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age, 'enforce': enforce,
-            'inputs': inputs, 'sample_one_in': sample, 'require': require,
+            'inputs': inputs, 'sample_one_in': sample, 'require': require, 'log': log,
             'events': list(check_events) if check_events is not None else None}
 
 
@@ -549,7 +558,12 @@ def log_view(repo, log_keys, tree, check, input_key, chosen, now=None, max_age=L
 
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
            trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None):
-    """verified(...) and, with log_keys, the evidence log's shadow view of the same decision (docs/st3/gate-evidence.md)."""
+    """verified(...) and, with log_keys, the evidence log's view of the same decision (docs/st3/gate-evidence.md). Under a policy
+    whose `log` is enforce the view decides too: a pass stands only when it is ok, and with no log key at all nothing passes."""
+    enforced = rules is not None and rules.get('log') == 'enforce'
+    if enforced and not log_keys:
+        verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane)
+        raise Failure('log_absent', 'the skip policy enforces the evidence log, but no log key is pinned at the base', log='absent')
     if not log_keys:
         return verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane)
     input_key = None
@@ -564,6 +578,9 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
         failure.extra.update(log_view(repo, log_keys, tree, check, input_key, None, now))
         raise
     result.update(log_view(repo, log_keys, tree, check, input_key, result.get('record'), now))
+    if enforced and result['log'] != 'ok':
+        raise Failure(LOG_REFUSALS[result['log']], f'the evidence log does not back this pass ({result["log"]})',
+                      **{name: result.get(name) for name in ('record', 'signer', 'log', 'log_head', 'log_age_s', 'log_missing')})
     return result
 
 
@@ -774,7 +791,8 @@ def require_all(repo, tree, keys, policy_text, repository, lane_file=None):
                             'decision': 'reject' if mode == 'reject' else 'would-reject'}
             continue
         try:
-            result = verify(repo, tree, check, keys, None, rules=rules, lane=definition)
+            # A reject lane asks whether the tree is signed at all, not whether a check may be skipped: the log rule is not applied here.
+            result = verify(repo, tree, check, keys, None, rules=dict(rules, log='shadow'), lane=definition)
             lane = {'require': mode, 'satisfied': True, 'decision': 'ok', 'record': result.get('record'),
                     'signer': result.get('signer'), 'tier': result.get('tier')}
         except Failure as failure:
