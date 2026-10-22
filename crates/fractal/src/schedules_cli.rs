@@ -43,7 +43,7 @@ fn describe_error(error: fractal_client::ClientError) -> anyhow::Error {
     match error {
         fractal_client::ClientError::Api(fractal_client::ErrorCode::Forbidden,message,_) if message.contains("read.declarations") =>
             anyhow::anyhow!("st schedules ls requires the read.declarations scope; the authenticated session does not have it"),
-        fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound | fractal_client::ErrorCode::Unsupported | fractal_client::ErrorCode::UnsupportedCapability,_,_) =>
+        fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound | fractal_client::ErrorCode::UnsupportedCapability,_,_) =>
             anyhow::anyhow!("this server does not support schedules.list; upgrade the server to list replicated schedule declarations"),
         error=>anyhow::Error::new(error),
     }
