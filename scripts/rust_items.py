@@ -19,6 +19,8 @@ import module_layers as ml  # noqa: E402
 
 KEYWORDS = ("fn", "struct", "enum", "union", "trait", "type", "static", "const", "mod", "impl", "use", "extern")
 _VIS = re.compile(r"pub(?:\s*\([^)]*\))?\s+")
+# the same, then any block comments (the SQLite large-value inventory puts its markers there)
+_VIS_COMMENTED = re.compile(r"pub(?:\s*\([^)]*\))?(?:\s+(?:/\*.*?\*/\s*)*|\s*(?:/\*.*?\*/\s*)+)", re.S)
 _MODS = re.compile(r"(?:(?:default|async|unsafe|safe)\s+|const\s+(?=(?:async|unsafe|extern|fn)\b))*(?:extern\s+(?:\"[^\"]*\"\s+)?)?")
 
 
@@ -186,7 +188,7 @@ def parse_items(s, a=0, b=None, in_impl=False):
             i = code + 1
             continue
         rest_start = code
-        m = _VIS.match(s, rest_start)
+        m = _VIS_COMMENTED.match(s, rest_start)
         is_pub = bool(m)
         p = m.end() if m else rest_start
         m2 = _MODS.match(s, p)
