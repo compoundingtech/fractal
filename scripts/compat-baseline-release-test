@@ -40,7 +40,7 @@ def release(tag, day, **kwargs):
 def pin(tag='v0.3.17', reason=None):
     return {'commit': SOURCE, 'tag': tag, 'why': baseline.POLICY, 'exception_reason': reason,
             'bundles': {target: {
-                'url': f'https://github.com/compoundingtech/smalltalk/releases/download/{tag}/smalltalk-{target}.tar.gz',
+                'url': f'https://github.com/compoundingtech/fractal/releases/download/{tag}/smalltalk-{target}.tar.gz',
                 'sha256': 'b' * 64} for target in baseline.TARGETS}}
 
 
@@ -212,7 +212,7 @@ class Publication(unittest.TestCase):
             if endpoint.endswith('/pulls'):
                 self.assertTrue(payload['draft'])
                 self.assertEqual(payload['base'], 'main')
-                return {'html_url': 'https://github.com/compoundingtech/smalltalk/pull/123', 'number': 123}
+                return {'html_url': 'https://github.com/compoundingtech/fractal/pull/123', 'number': 123}
             if endpoint.endswith('/issues/123/labels'):
                 self.assertEqual(payload['labels'], ['type:chore', 'area:ci', 'origin:agent'])
                 return []
