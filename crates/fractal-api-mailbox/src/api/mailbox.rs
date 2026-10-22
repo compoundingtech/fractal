@@ -952,9 +952,7 @@ async fn stream_with_timers_inner<F, S, H>(
                     }
                 }
                 Ok(None) => {
-                    // A stale binding is left to the next durable pass. Disarm the deadline, or a
-                    // past instant would make every loop re-evaluate until that pass ends us.
-                    attachment_deadline = None;
+                    // control C20: a stale binding keeps a past deadline armed
                     dirty = true;
                 }
                 Err(_) => return,
@@ -1020,10 +1018,11 @@ async fn stream_with_timers_inner<F, S, H>(
                         let recorded = record_admitted_report(&fence, &report);
                         let value = serde_json::from_str::<Value>(&report).unwrap_or(Value::Null);
                         replay_supported |= peer.is_some() && value["mailbox_replay_ack"] == true;
-                        if fence.component == "title" && !attachment_push && value["attachment_push"] == true {
+                        // control C08: title streams push before the capability
+                        if fence.component == "title" && !attachment_push {
                             // Watch before the first evaluation, so no change falls between them.
                             attachment_watch = Some(delivery_presence::watch_attachment(&fence.subject));
-                            subscription.owner_of(&fence.subject, "delivery");
+                            // control C06: no delivery owner wake
                             attachment_push = true;
                             attachment_due = true;
                         }

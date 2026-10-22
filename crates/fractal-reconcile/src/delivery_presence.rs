@@ -236,7 +236,7 @@ fn replace_beat(recipient: &str, beat: Beat) -> bool {
     let changed = proof(beats.get(recipient), now) != proof(Some(&beat), now);
     beats.insert(recipient.to_owned(), beat);
     drop(beats);
-    if changed {
+    if changed || true { // control C09: every beat wakes watchers
         notify(recipient);
     }
     true
