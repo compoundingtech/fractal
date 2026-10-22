@@ -223,16 +223,35 @@ fn observe(unit: &str) -> Result<ScopeRetirementProof> {
 /// Independent physical worker only. The same original request is checked
 /// before each scope signal, never while holding a Store writer. Scope stop
 /// grace/escalation use the existing shutdown budget, not a start timeout.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "end_scope_with_proof",
+        recorded_scope = unit,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn end_scope_with_proof(
     unit: &str,
     guard: &dyn Fn() -> Result<()>,
 ) -> Result<Option<ScopeRetirementProof>> {
     if mode() != Isolation::Scope || !is_work_scope(unit) {
+        tracing::debug!(caller = "end_scope_with_proof", recorded_scope = unit, guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope retirement skipped");
         return Ok(None);
     }
     let before = observe(unit)?;
     if before.validate(unit).is_ok() {
-        guard()?;
+        tracing::debug!(guard_decision = "skip", reason = "scope_already_retired", "scope retirement needs no signal");
+        retirement_guard(unit, guard, "already_retired")?;
         return Ok(Some(before));
     }
     let cgroup = before
@@ -245,11 +264,36 @@ pub fn end_scope_with_proof(
     );
     let path = group_path(unit, &before.control_group)?;
     let mut events = PopulationEvents::open(&path)?;
-    guard()?;
-    kill_unit(unit, libc::SIGTERM)?;
+    retirement_guard(unit, guard, "before_sigterm")?;
+    tracing::info!(
+        caller = "end_scope_with_proof",
+        reason = "retire_populated_scope",
+        recorded_scope = unit,
+        scope_load_state = %before.load_state,
+        scope_active_state = %before.active_state,
+        control_group = %before.control_group,
+        cgroup_device = cgroup.device,
+        cgroup_inode = cgroup.inode,
+        cgroup_events = %cgroup.events,
+        guard_decision = "allow",
+        signal = libc::SIGTERM,
+        "retiring verified work scope"
+    );
+    kill_unit(unit, libc::SIGTERM, ScopeSignalCaller::Retirement)?;
     if !events.wait_empty(SCOPE_GRACE)? {
-        guard()?;
-        kill_unit(unit, libc::SIGKILL)?;
+        retirement_guard(unit, guard, "before_sigkill")?;
+        tracing::info!(
+            caller = "end_scope_with_proof",
+            reason = "retirement_grace_expired",
+            recorded_scope = unit,
+            control_group = %before.control_group,
+            cgroup_device = cgroup.device,
+            cgroup_inode = cgroup.inode,
+            guard_decision = "allow",
+            signal = libc::SIGKILL,
+            "escalating work scope retirement"
+        );
+        kill_unit(unit, libc::SIGKILL, ScopeSignalCaller::Retirement)?;
         ensure!(
             events.wait_empty(SCOPE_KILL_WAIT)?,
             "work scope survived retirement"
@@ -264,8 +308,22 @@ pub fn end_scope_with_proof(
             "work scope identity changed during retirement"
         );
     }
-    guard()?;
+    retirement_guard(unit, guard, "after_retirement")?;
     Ok(Some(after))
+}
+
+fn retirement_guard(unit: &str, guard: &dyn Fn() -> Result<()>, phase: &str) -> Result<()> {
+    guard().inspect_err(|error| {
+        tracing::debug!(
+            caller = "end_scope_with_proof",
+            recorded_scope = unit,
+            phase,
+            guard_decision = "skip",
+            reason = "retirement_guard_rejected",
+            %error,
+            "scope retirement guard rejected"
+        );
+    })
 }
 
 #[cfg(test)]

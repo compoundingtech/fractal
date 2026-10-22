@@ -368,6 +368,58 @@ pub struct RuntimeObservation {
     pub incarnation_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RuntimeStopCaller {
+    Reconcile,
+    RevokedStartCleanup,
+}
+
+/// Reconcile evidence is not a fresh registry read; native retirement owns that guard.
+struct RuntimeStopEvidence<'a> {
+    caller: RuntimeStopCaller,
+    subject: &'a str,
+    runtime_id: &'a str,
+    terminal: bool,
+    operation_id: Option<&'a str>,
+    expected_incarnation: Option<&'a str>,
+    observation: Option<&'a RuntimeObservation>,
+}
+
+impl RuntimeStopEvidence<'_> {
+    fn record(&self, action: &str, guard_decision: &str, destructive: bool) {
+        macro_rules! record {
+            ($level:ident) => {
+                tracing::$level!(
+                    caller = ?self.caller,
+                    subject = self.subject,
+                    runtime_id = self.runtime_id,
+                    terminal = self.terminal,
+                    operation_id = self.operation_id.unwrap_or("unavailable"),
+                    expected_incarnation = self.expected_incarnation.unwrap_or("unavailable"),
+                    observed_incarnation = self.observation.and_then(|o| o.incarnation_id.as_deref()).unwrap_or("unavailable"),
+                    observation_source = "existing_reconcile_observation",
+                    fresh_observed_incarnation = "unavailable_at_reconcile_boundary",
+                    registry_status = self.observation.map_or("unavailable", |o| o.status.as_str()),
+                    registry_exit_code = ?self.observation.and_then(|o| o.exit_code),
+                    registry_pid = "unavailable_at_reconcile_boundary",
+                    registry_created_at = "unavailable_at_reconcile_boundary",
+                    recorded_scope = "unavailable_at_reconcile_boundary",
+                    tagged_scope = "unavailable_at_reconcile_boundary",
+                    spawn_lock_outcome = "not_applicable_at_reconcile_boundary",
+                    action,
+                    guard_decision,
+                    "reconcile runtime stop boundary"
+                );
+            };
+        }
+        if destructive {
+            record!(info);
+        } else {
+            record!(debug);
+        }
+    }
+}
+
 /// Read-only pass evidence; provenance is keyed by the exact observed incarnation.
 #[derive(Default)]
 pub struct PtyRegistrySnapshot {
@@ -6633,6 +6685,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             false
         };
+        RuntimeStopEvidence {
+            caller: RuntimeStopCaller::Reconcile,
+            subject,
+            runtime_id,
+            terminal,
+            operation_id: operation.as_ref().map(|o| o.id.as_str()),
+            expected_incarnation: incarnation,
+            observation,
+        }
+        .record(
+            "select_retirement",
+            if retirement {
+                "retirement_provenance_matched"
+            } else {
+                "retirement_not_authorized_use_normal_stop"
+            },
+            false,
+        );
         self.reconcile_runtime_stop_inner(
             subject,
             runtime_id,
@@ -6644,6 +6714,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .as_ref()
                 .filter(|_| retirement)
                 .map(|o| o.id.as_str()),
+            RuntimeStopCaller::Reconcile,
+            operation.as_ref().map(|o| o.id.as_str()),
         )
     }
 
@@ -6657,16 +6729,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         timeout_ms: u64,
         observation: Option<&RuntimeObservation>,
         retirement_operation: Option<&str>,
+        caller: RuntimeStopCaller,
+        operation_id: Option<&str>,
     ) -> Result<bool> {
+        let evidence = RuntimeStopEvidence {
+            caller,
+            subject,
+            runtime_id,
+            terminal,
+            operation_id,
+            expected_incarnation: incarnation,
+            observation,
+        };
         self.revoke_start(subject)?;
         if observation.is_none() && self.store.runtime_start_for(subject)?.is_some() {
             // Absence during launch is not verified stop. Completion/observation wakes this path.
+            evidence.record("stop", "skip_absent_during_launch", false);
             return Ok(false);
         }
         // A runtime whose state could not be read may still run. Wait for a readable observation.
         if observation.is_some_and(|observation| {
             matches!(observation.status.as_str(), "unknown" | "indeterminate")
         }) {
+            evidence.record("stop", "skip_unreadable_observation", false);
             let now = now_ms();
             let (due, report, episode_started_at) = {
                 let mut retries = self
@@ -6736,10 +6821,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A root's primary process has ended, but its tasks are its processes too: it is
             // not stopped while one still runs. Their own stops report the failure.
             if !self.running_root_tasks(subject)?.is_empty() {
+                evidence.record("end_leftovers", "skip_running_root_tasks", false);
                 return Ok(false);
             }
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
+            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", true);
             self.runtime.end_leftovers(runtime_id, terminal);
             let mut fields = BTreeMap::from([
                 ("status".into(), Value::String("stopped".into())),
@@ -6809,6 +6896,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("stop:{subject}"),
                 deadline.min(now_ms().saturating_add(100)),
             );
+            evidence.record(
+                if retirement_operation.is_some() {
+                    "stop_with_retirement_proof"
+                } else {
+                    "stop"
+                },
+                "allow_terminate_request",
+                true,
+            );
             let stopped = if retirement_operation.is_some() {
                 self.runtime
                     .stop_with_retirement_proof(runtime_id, terminal, incarnation)
@@ -6836,6 +6932,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if verified {
+                evidence.record("apply_retirement", "allow_native_retirement_verified", true);
                 let operation =
                     retirement_operation.context("retirement proof has no operation")?;
                 anyhow::ensure!(
@@ -6849,6 +6946,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.start_changed(subject);
                 return Ok(true);
             }
+            evidence.record("stop", "await_stop_verification", false);
             return Ok(false);
         };
         let deadline = request
@@ -6862,6 +6960,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .saturating_add(timeout_ms as u128),
             );
         if now_ms() < deadline {
+            evidence.record("kill", "skip_shutdown_deadline_pending", false);
             self.arm_restart(&format!("stop:{subject}"), deadline);
             return Ok(false);
         }
@@ -6890,6 +6989,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     == Some(deadline_key.as_str())
             })
         {
+            evidence.record("kill", "skip_already_recorded_kill", false);
             let report_survivor = {
                 let mut reported = self
                     .reported_kill_survivors
@@ -6937,6 +7037,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(false);
         }
+        evidence.record("kill", "allow_shutdown_deadline_reached", true);
         self.runtime.kill(runtime_id, terminal, Some(incarnation))?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),

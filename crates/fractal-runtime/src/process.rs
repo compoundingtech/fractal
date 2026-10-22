@@ -64,6 +64,72 @@ pub struct ExecRuntime {
     owned_children: Arc<Mutex<BTreeMap<u32, Child>>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExecTeardownCaller {
+    EndIf,
+    SignalIf,
+    EndLeftovers,
+    EndLeftoversLater,
+    SpawnReplacement,
+    Remove,
+}
+
+fn teardown_span(
+    id: &str,
+    caller: ExecTeardownCaller,
+    expected_generation: Option<&str>,
+    observation: Option<&ExecObservation>,
+) -> tracing::Span {
+    let (status, generation) = match observation {
+        Some(ExecObservation::Running(generation)) => ("running", Some(generation)),
+        Some(ExecObservation::Exited(generation)) => ("exited", Some(generation)),
+        Some(ExecObservation::Indeterminate(_)) => ("indeterminate", None),
+        None => ("missing", None),
+    };
+    let span = tracing::info_span!(
+        "exec_teardown",
+        ?caller,
+        runtime_id = id,
+        expected_incarnation = expected_generation.unwrap_or("not_applicable"),
+        observed_incarnation = "unavailable",
+        operation_id = "unavailable",
+        start_operation_id = "unavailable",
+        registry_status = status,
+        registry_pid = tracing::field::Empty,
+        registry_created_at = tracing::field::Empty,
+        registry_exit_code = tracing::field::Empty,
+        registry_exit_signal = tracing::field::Empty,
+        registry_group_exited = tracing::field::Empty,
+        recorded_scope = "unavailable",
+        tagged_scope = "not_applicable",
+        spawn_lock = "not_applicable",
+        start_token = tracing::field::Empty,
+    );
+    if let Some(generation) = generation {
+        span.record("observed_incarnation", generation.generation_id.as_str());
+        span.record("start_operation_id", generation.start_operation.as_deref().unwrap_or("unavailable"));
+        span.record("registry_pid", generation.pid);
+        span.record("registry_created_at", tracing::field::display(generation.created_at_unix_ms));
+        span.record("registry_exit_code", tracing::field::debug(generation.exit_code));
+        span.record("registry_exit_signal", tracing::field::debug(generation.exit_signal));
+        span.record("registry_group_exited", generation.group_exited);
+        span.record("recorded_scope", generation.scope_unit.as_deref().unwrap_or("not_applicable"));
+        span.record("start_token", generation.start_token);
+    } else {
+        for field in [
+            "registry_pid",
+            "registry_created_at",
+            "registry_exit_code",
+            "registry_exit_signal",
+            "registry_group_exited",
+            "start_token",
+        ] {
+            span.record(field, "unavailable");
+        }
+    }
+    span
+}
+
 impl ExecRuntime {
     pub fn new(state_dir: PathBuf, log_dir: PathBuf) -> Self {
         crate::warn_if_degraded("st3");
@@ -129,7 +195,7 @@ impl ExecRuntime {
         fs::create_dir_all(&self.log_dir)?;
         // What the previous generation left running ends before its replacement starts. Each
         // launch has a scope of its own, so this never reaches the replacement.
-        if let Err(error) = self.end_leftovers(id) {
+        if let Err(error) = self.end_leftovers_for(id, ExecTeardownCaller::SpawnReplacement) {
             eprintln!(
                 "st3: WARN what the last generation of {id} left running did not end: {error:#}"
             );
@@ -193,7 +259,17 @@ impl ExecRuntime {
             });
         }
         if let Some(guard) = guard {
-            guard()?;
+            guard().inspect_err(|error| {
+                tracing::debug!(
+                    caller = "spawn_inner",
+                    runtime_id = id,
+                    operation_id = env.get("ST3_START_OPERATION").map_or("unavailable", String::as_str),
+                    guard_decision = "skip",
+                    reason = "spawn_guard_rejected",
+                    %error,
+                    "exec spawn guard rejected"
+                );
+            })?;
         }
         let child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
@@ -314,7 +390,10 @@ impl ExecRuntime {
     /// its process group and every process that left that group, so the scope gets the signal
     /// where there is one. Once the group has ended, what it left in its scope ends.
     fn end_if(&self, id: &str, expected_generation: Option<&str>, signal: i32) -> Result<()> {
-        let generation = match self.observe(id)? {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, ExecTeardownCaller::EndIf, expected_generation, observation.as_ref());
+        let _entered = span.enter();
+        let generation = match observation {
             Some(ExecObservation::Running(generation)) => generation,
             Some(ExecObservation::Exited(generation)) => {
                 if let Some(unit) = &generation.scope_unit {
@@ -323,19 +402,33 @@ impl ExecRuntime {
                     } else {
                         crate::SCOPE_GRACE
                     };
+                    tracing::info!(signal, guard_decision = "allow", reason = "exited_generation_leftovers", incarnation_guard = "not_applied_to_exited_generation", "ending exited exec work scope");
                     crate::end_scope(unit, grace)?;
+                } else {
+                    tracing::debug!(signal, guard_decision = "skip", reason = "exited_generation_without_scope", "exec teardown needs no signal");
                 }
                 return Ok(());
             }
-            Some(ExecObservation::Indeterminate(_)) | None => return Ok(()),
+            Some(ExecObservation::Indeterminate(error)) => {
+                tracing::debug!(guard_decision = "skip", reason = "indeterminate_generation", %error, "exec teardown skipped");
+                return Ok(());
+            }
+            None => {
+                tracing::debug!(guard_decision = "skip", reason = "missing_generation", "exec teardown skipped");
+                return Ok(());
+            }
         };
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
+            tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec teardown rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         if let Some(unit) = &generation.scope_unit {
+            tracing::info!(signal, guard_decision = "allow", reason = "running_generation_scope", "signalling exec work scope");
             match crate::signal_scope(unit, signal) {
                 Ok(true) => return Ok(()),
-                Ok(false) => {}
+                Ok(false) => {
+                    tracing::debug!(signal, reason = "scope_signal_not_sent", "falling back to exec process group");
+                }
                 Err(error) => eprintln!(
                     "st3: WARN exec {id}'s scope missed signal {signal}, so only its group gets it: {error:#}"
                 ),
@@ -350,10 +443,15 @@ impl ExecRuntime {
         expected_generation: Option<&str>,
         signal: i32,
     ) -> Result<()> {
-        let Some(ExecObservation::Running(generation)) = self.observe(id)? else {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, ExecTeardownCaller::SignalIf, expected_generation, observation.as_ref());
+        let _entered = span.enter();
+        let Some(ExecObservation::Running(generation)) = observation else {
+            tracing::debug!(signal, guard_decision = "skip", reason = "generation_not_running", "exec signal skipped");
             return Ok(());
         };
         if expected_generation.is_some_and(|expected| expected != generation.generation_id) {
+            tracing::debug!(signal, guard_decision = "skip", reason = "incarnation_mismatch", "exec signal rejected");
             anyhow::bail!("exec `{id}` changed incarnation before signal {signal}");
         }
         signal_group(id, generation.pid, signal)
@@ -379,8 +477,20 @@ impl ExecRuntime {
     /// Ends what an ended exec left running in its work scope. A running exec keeps everything:
     /// [`Self::stop_if`] ends it.
     pub fn end_leftovers(&self, id: &str) -> Result<()> {
-        if let Some(unit) = self.leftover_scope(id)? {
-            crate::end_scope(&unit, crate::SCOPE_GRACE)?;
+        self.end_leftovers_for(id, ExecTeardownCaller::EndLeftovers)
+    }
+
+    fn end_leftovers_for(&self, id: &str, caller: ExecTeardownCaller) -> Result<()> {
+        let observation = self.observe(id)?;
+        let span = teardown_span(id, caller, None, observation.as_ref());
+        let _entered = span.enter();
+        if let Some(ExecObservation::Exited(generation)) = observation
+            && let Some(unit) = &generation.scope_unit
+        {
+            tracing::info!(guard_decision = "allow", reason = "exited_generation_leftovers", "ending exec leftover scope");
+            crate::end_scope(unit, crate::SCOPE_GRACE)?;
+        } else {
+            tracing::debug!(guard_decision = "skip", reason = "no_exited_generation_scope", "exec leftover teardown skipped");
         }
         Ok(())
     }
@@ -388,17 +498,36 @@ impl ExecRuntime {
     /// [`Self::end_leftovers`] on a background worker. A scope already seen empty costs one read
     /// of the exec's record.
     pub fn end_leftovers_later(&self, id: &str) {
-        let Ok(Some(unit)) = self.leftover_scope(id) else {
+        let observation = self.observe(id);
+        let span = teardown_span(id, ExecTeardownCaller::EndLeftoversLater, None, observation.as_ref().ok().and_then(Option::as_ref));
+        if observation.is_err() {
+            span.record("registry_status", "unavailable");
+        }
+        let _entered = span.enter();
+        if let Err(error) = &observation {
+            tracing::debug!(guard_decision = "skip", reason = "generation_observation_failed", %error, "deferred exec leftover observation failed");
+        }
+        let Ok(Some(ExecObservation::Exited(generation))) = observation else {
+            tracing::debug!(guard_decision = "skip", reason = "no_verified_exited_generation", "deferred exec leftover teardown skipped");
+            return;
+        };
+        let Some(unit) = generation.scope_unit else {
+            tracing::debug!(guard_decision = "skip", reason = "no_recorded_scope", "deferred exec leftover teardown skipped");
             return;
         };
         if crate::isolate::has_ended(&unit) {
+            tracing::debug!(guard_decision = "skip", reason = "scope_already_ended", "deferred exec leftover teardown skipped");
             return;
         }
         let id = id.to_owned();
+        let worker_span = span.clone();
         crate::isolate::end_later(unit.clone(), move || {
-            crate::end_scope(&unit, crate::SCOPE_GRACE)
-                .map(|_| ())
-                .with_context(|| format!("end what exec `{id}` left running"))
+            worker_span.in_scope(|| {
+                tracing::info!(guard_decision = "allow", reason = "deferred_exited_generation_leftovers", "ending exec leftover scope");
+                crate::end_scope(&unit, crate::SCOPE_GRACE)
+                    .map(|_| ())
+                    .with_context(|| format!("end what exec `{id}` left running"))
+            })
         });
     }
 
@@ -426,7 +555,7 @@ impl ExecRuntime {
 
     pub fn remove(&self, id: &str) -> Result<()> {
         // The record is the last place that names the exec's work scope.
-        self.end_leftovers(id)?;
+        self.end_leftovers_for(id, ExecTeardownCaller::Remove)?;
         for path in [
             self.record_path(id),
             self.previous_record_path(id),
@@ -507,13 +636,23 @@ fn observe_exited_group(generation: ExecGeneration) -> Result<ExecObservation> {
 }
 
 fn signal_group(id: &str, group: u32, signal: i32) -> Result<()> {
+    tracing::info!(
+        runtime_id = id,
+        process_group = group,
+        signal,
+        guard_decision = "allow",
+        reason = "signal_process_group",
+        "signalling exec process group"
+    );
     let result = unsafe { libc::kill(-(group as i32), signal) };
     if result != 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::debug!(runtime_id = id, process_group = group, signal, %error, "exec process group signal failed");
             return Err(error)
                 .with_context(|| format!("signal {signal} to exec `{id}`'s process group"));
         }
+        tracing::debug!(runtime_id = id, process_group = group, signal, guard_decision = "skip", reason = "process_group_absent", "exec process group already absent");
     }
     Ok(())
 }

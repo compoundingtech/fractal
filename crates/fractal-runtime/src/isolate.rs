@@ -312,23 +312,44 @@ fn mark_ended(unit: &str) {
 ///
 /// Returns whether the scope is now empty. It is false, and nothing is signalled, on a host
 /// without systemd user scopes or for a unit that is not a work scope.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "end_scope",
+        recorded_scope = unit,
+        grace_ms = grace.as_millis() as u64,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn end_scope(unit: &str, grace: Duration) -> Result<bool> {
     if mode() != Isolation::Scope || !is_work_scope(unit) {
+        tracing::debug!(guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope teardown skipped");
         return Ok(false);
     }
     if has_ended(unit) {
+        tracing::debug!(guard_decision = "skip", reason = "already_ended", "scope teardown skipped");
         return Ok(true);
     }
     let Some(cgroup) = control_group(unit)? else {
+        tracing::debug!(guard_decision = "skip", reason = "scope_not_loaded", "scope teardown needs no signal");
         mark_ended(unit);
         return Ok(true);
     };
     if !grace.is_zero() && populated(&cgroup) {
-        kill_unit(unit, libc::SIGTERM)?;
+        kill_unit(unit, libc::SIGTERM, ScopeSignalCaller::EndScope)?;
         wait_until_empty(&cgroup, grace);
     }
     if populated(&cgroup) {
-        kill_unit(unit, libc::SIGKILL)?;
+        kill_unit(unit, libc::SIGKILL, ScopeSignalCaller::EndScope)?;
         anyhow::ensure!(
             wait_until_empty(&cgroup, SCOPE_KILL_WAIT),
             "processes in {unit} survived SIGKILL for {}s",
@@ -360,6 +381,7 @@ static LATER: Mutex<Later> = Mutex::new(Later {
 pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + 'static) {
     let mut later = LATER.lock().unwrap_or_else(PoisonError::into_inner);
     if !later.keys.insert(key.clone()) {
+        tracing::debug!(recorded_scope = %key, guard_decision = "skip", reason = "already_queued", "scope teardown queue skipped");
         return;
     }
     later.queue.push_back((key, Box::new(job)));
@@ -392,11 +414,30 @@ pub(crate) fn end_later(key: String, job: impl FnOnce() -> Result<()> + Send + '
 
 /// Sends `signal` to every process in the work scope `unit`. Returns whether it was sent: it is
 /// not where [`end_scope`] would do nothing, or once the scope has ended.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "signal_scope",
+        recorded_scope = unit,
+        signal,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
     if mode() != Isolation::Scope || !is_work_scope(unit) || has_ended(unit) {
+        tracing::debug!(recorded_scope = unit, signal, caller = "signal_scope", guard_decision = "skip", reason = "scope_mode_work_scope_or_ended_guard", "scope signal skipped");
         return Ok(false);
     }
-    kill_unit(unit, signal)
+    kill_unit(unit, signal, ScopeSignalCaller::SignalScope)
 }
 
 /// The cgroup directory of `unit`, or none once the unit is not loaded.
@@ -454,9 +495,16 @@ fn wait_until_empty(cgroup: &Path, within: Duration) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScopeSignalCaller {
+    EndScope,
+    SignalScope,
+    Retirement,
+}
+
 /// `systemctl kill` signals every process in the unit's cgroup. Returns false when the unit was
 /// no longer loaded.
-fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
+fn kill_unit(unit: &str, signal: i32, caller: ScopeSignalCaller) -> Result<bool> {
     let name = match signal {
         libc::SIGTERM => "SIGTERM".to_owned(),
         libc::SIGKILL => "SIGKILL".to_owned(),
@@ -467,6 +515,24 @@ fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
         .args(["--user", "kill"])
         .arg(format!("--signal={name}"))
         .arg(unit);
+    tracing::info!(
+        ?caller,
+        reason = "signal_work_scope",
+        recorded_scope = unit,
+        signal,
+        guard_decision = "allow",
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable",
+        "signalling work scope"
+    );
     let output = crate::pty::output_within(command, SYSTEMCTL_TIMEOUT)
         .with_context(|| format!("ask the systemd user manager to signal {unit}"))?;
     if output.status.success() {
@@ -474,6 +540,7 @@ fn kill_unit(unit: &str, signal: i32) -> Result<bool> {
     }
     let error = String::from_utf8_lossy(&output.stderr);
     if error.contains("not loaded") {
+        tracing::debug!(?caller, recorded_scope = unit, signal, guard_decision = "skip", reason = "scope_not_loaded", "scope signal found no loaded unit");
         mark_ended(unit);
         return Ok(false);
     }
