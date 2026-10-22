@@ -1095,6 +1095,10 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   `linux-clippy`, `linux-fleet-compat`) failed or was cancelled; a red from a member that always runs (`upgrade-impact`) would show
   under enforce too, and is reported as `visible_red`, which does not block.
 
+A check can also carry preconditions on its own policy entry at origin/main, whatever its decision lines say. `linux-gate` has one:
+its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
+notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
+
 It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
 and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read. Enforced checks are reported too.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
