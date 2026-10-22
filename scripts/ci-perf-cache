@@ -17,10 +17,27 @@ def api(path):
     return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
 
 
+# Main's load runs: once a day in the daily long lanes (daily-long.yml, job check name daily-perf-load), and
+# perf.yml's main runs, which ran on every push until it became manual-dispatch only and still hold
+# recent reports and snapshots.
+MAIN_WORKFLOWS = {'.github/workflows/daily-long.yml': 'daily-perf-load', '.github/workflows/perf.yml': None}
+
+
 def trusted(run):
     return (run.get('head_branch') == 'main' and run.get('conclusion') == 'success'
             and run.get('event') in ('push', 'schedule', 'workflow_dispatch')
-            and run.get('path') == '.github/workflows/perf.yml')
+            and run.get('path') in MAIN_WORKFLOWS)
+
+
+def load_conclusion(repo, run):
+    """The run as seen by its load job. A daily run's own conclusion covers every lane, so a red lane
+    elsewhere must not discard a passing load report, nor may a green run hide a skipped load."""
+    job = MAIN_WORKFLOWS.get(run.get('path'))
+    if not job:
+        return run
+    jobs = api(f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100")['jobs']
+    conclusion = next((item.get('conclusion') for item in jobs if item.get('name') == job), None)
+    return dict(run, conclusion=conclusion)
 
 
 def trusted_snapshot(run):
@@ -223,8 +240,19 @@ def restore():
             if len(found) == 2:
                 break
     # Bound discovery; seven days of snapshots and thirty days of reports fit comfortably.
-    runs = api(f'repos/{repo}/actions/workflows/perf.yml/runs?branch=main&status=completed&per_page=100')
-    for run in runs['workflow_runs']:
+    runs, seen = [], set()
+    for path in MAIN_WORKFLOWS:
+        workflow = path.rsplit('/', 1)[1]
+        for run in api(f'repos/{repo}/actions/workflows/{workflow}/runs?branch=main&status=completed&per_page=100')['workflow_runs']:
+            if run['id'] not in seen:
+                seen.add(run['id'])
+                runs.append(run)
+    runs.sort(key=lambda run: run.get('created_at') or '', reverse=True)
+    for run in runs:
+        # Main's provenance first, then the load job's own conclusion (one jobs read per daily run).
+        if not trusted(dict(run, conclusion='success')):
+            continue
+        run = load_conclusion(repo, run)
         if not trusted_snapshot(run):
             continue
         names = artifact_names(run)

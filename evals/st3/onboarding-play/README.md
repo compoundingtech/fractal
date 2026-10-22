@@ -1,6 +1,6 @@
 # Onboarding play
 
-This eval measures the first-run play with real harnesses: the Smalltalk Assistant greets a person,
+This eval measures the first-run play with real harnesses: the Fractal Assistant greets a person,
 shows two agents messaging each other, runs a small mission, raises an alert that appears above the
 message input, and interviews the person about what they want to do. It checks what the person experiences and what the graph recorded, never only what
 the Assistant claims.
@@ -35,7 +35,7 @@ problem stops the whole eval; a paid run is never retried. Reports go to `report
 ## What is judged (`judge.sh`)
 
 The judge is pure: it scores one evidence bundle, so it is tested without a harness
-(`self-test.sh`, and `cargo test -p st3 --test integration onboarding_eval`).
+(`self-test.sh`, and `cargo test -p fractal --test integration onboarding_eval`).
 
 - **Time to the first agent-to-agent message**, from the graph (default budget 180 s, reported).
 - **Acts one and two complete**, from the graph and the demo folder: the second agent is declared,

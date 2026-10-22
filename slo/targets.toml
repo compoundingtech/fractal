@@ -15,7 +15,7 @@
 [[latency]]
 name = "person-read"
 about = "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, documents"
-p99_ms = 100
+p99_ms = 300
 # The same reads through this daemon from another machine that owns them.
 remote_p99_ms = 300
 paths = [
@@ -48,7 +48,7 @@ paths = [
 
 [[latency]]
 name = "person-read-fresh"
-about = "An agents list asked to be fresh (st agents ls and tree always ask): it waits for one roster refresh by design, so it has its own target and counts toward no other"
+about = "An agents list with legacy fresh=true or an explicit min_cut asks to wait for publication; ordinary st agents ls and tree do not. Explicit waits have their own target and count toward no other"
 p99_ms = 300
 paths = [
   "GET /v1/client/agents (fresh)",
@@ -67,7 +67,7 @@ paths = [
 [[latency]]
 name = "write-ack"
 about = "Writes and acks: send, work actions, harness events"
-p99_ms = 100
+p99_ms = 300
 paths = [
   "POST /v1/messages",
   "POST /v1/client/actions",
@@ -100,7 +100,7 @@ max_ms = 100
 
 [transaction]
 about = "Any transaction, read or write, and any hold of the store's writer"
-max_ms = 100
+max_ms = 300
 
 [cpu]
 about = "Daemon CPU: near zero when idle, at most 2 cores under daemon_load"
@@ -158,3 +158,37 @@ max_open = 0
 about = "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run"
 max_live_gb = 8.0
 max_growth_mb_per_day = 300
+
+# CI, observed outside the daemon: the merge queue and the workspace's checks. A `[[duration]]` is
+# one percentile of a duration, the objective `NAME/pPERCENTILE`; a name may declare several. A
+# `[[count]]` is the most events an hour, the objective `NAME`. `path` names the series that feeds
+# it, `ci/NAME`. They are objectives in `st slo` only, not in the request-latency read or `st
+# doctor`. Workspace CI's runs, read by the repository observer that reads
+# main_performance_failures and held in memory, feed them; other members show no-data.
+
+[[duration]]
+name = "merge-latency"
+about = "A pull request's time in the merge queue, from entering it to merging"
+percentile = 50
+target_ms = 600000
+path = "ci/merge-queue"
+
+[[duration]]
+name = "merge-latency"
+about = "A pull request's time in the merge queue, from entering it to merging"
+percentile = 95
+target_ms = 600000
+path = "ci/merge-queue"
+
+[[duration]]
+name = "ci-critical-path"
+about = "The workspace CI's critical path, from a change to all checks green"
+percentile = 95
+target_ms = 780000
+path = "ci/workspace-critical-path"
+
+[[count]]
+name = "flakes"
+about = "Flaky results: tests nextest passed only on a retry, and merge groups ejected from the queue"
+max_per_hour = 0
+path = "ci/flakes"

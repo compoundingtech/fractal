@@ -191,7 +191,7 @@ roster-control output mechanism; the exact configuration delta requires Intake
 review before publication. No numeric result is available before that cohort.
 
 The 17 new complete control bodies live in
-`crates/st3/src/store/resource_preparation/tests.rs`; the four original negative
+`crates/fractal/src/store/resource_preparation/tests.rs`; the four original negative
 fence/attempt bodies remain in `resource_preparation_fence_tests.rs`. They cover
 quiet versus two injected unrelated writes/fallback, history-width 2 versus 64,
 ordinary REPLACE/trigger/FK/view/WITHOUT ROWID/delete/rollback, raw repair/order/
