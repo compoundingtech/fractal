@@ -1682,6 +1682,11 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             claude_attachment_reconciled: false,
             claude_attachment_terminal: None,
             claude_readiness_fallback: ClaudeReadinessFallback::default(),
+            claude_attachment_admissions: AdmissionBucket {
+                binding: Some(("incarnation".into(), 4, "token".into())),
+                tokens: 0,
+                refilled_at_ms: 1_234,
+            },
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1693,6 +1698,13 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert_eq!(back.loop_state.delivery_episode, 2);
     assert_eq!(back.loop_state.claude_attachment_phase, "blocked");
     assert_eq!(back.loop_state.claude_attachment_episode, 3);
+    // An empty admission bucket survives re-exec: a re-exec grants no fresh burst.
+    let admissions = &back.loop_state.claude_attachment_admissions;
+    assert_eq!(
+        admissions.binding,
+        Some(("incarnation".into(), 4, "token".into()))
+    );
+    assert_eq!((admissions.tokens, admissions.refilled_at_ms), (0, 1_234));
     assert_eq!(
         back.loop_state.published_timeline,
         resume.loop_state.published_timeline
@@ -7824,4 +7836,53 @@ async fn reading_the_outbox_does_not_wake_an_idle_driver() {
         "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
     })).unwrap();
     tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
+}
+
+#[test]
+fn native_identity_rename_commands_preserve_full_ids_and_fences() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/robin", "--reason", "Clarify responsibility",
+            "--if-naming-revision", "claim/example", "--idempotency-key", "example-rename", "--json",
+        ]).unwrap();
+        assert!(cli.json);
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected identity rename"),
+        };
+        assert_eq!(args.from, "agent/example-old");
+        assert_eq!(args.to, "agent/example-new");
+        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
+        assert_eq!(args.expected_declaration, None);
+        assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
+    }
+}
+
+#[test]
+fn native_identity_rename_requires_actor_and_reason() {
+    for missing in ["--as", "--reason"] {
+        let mut arguments = vec!["st", "agents", "rename-id", "agent/example-old", "agent/example-new"];
+        for (flag, value) in [("--as", "person/robin"), ("--reason", "Clarify responsibility"),
+            ("--idempotency-key", "example-rename")] {
+            if flag != missing {
+                arguments.extend([flag, value]);
+            }
+        }
+        assert!(Cli::try_parse_from(arguments).is_err(), "{missing}");
+    }
+}
+
+#[test]
+fn native_identity_rename_allows_generated_idempotency_key() {
+    let cli = Cli::try_parse_from([
+        "st", "agents", "rename-id", "agent/example-old", "agent/example-new",
+        "--as", "person/robin", "--reason", "Clarify responsibility",
+    ]).unwrap();
+    let Command::Agents { command: AgentsCommand::RenameId(args) } = cli.command else {
+        panic!("expected identity rename");
+    };
+    assert_eq!(args.idempotency_key, None);
 }

@@ -46,6 +46,8 @@ PROTECTED = (
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
     # What an agent-level note is held to (by_level "lane": true reads it from the base).
     '.st/required-lanes.json',
+    # The evidence log's key: which log heads the verifier reads at all.
+    '.st/evidence-log-key',
 )
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
@@ -70,6 +72,8 @@ def input_refspecs(check, key):
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
 KEYS = '.st/evidence-keys'
+LOG_KEY = '.st/evidence-log-key'
+LOG_REF = 'refs/evidence-log/main'
 POLICY = '.st/evidence-skip-policy.json'
 MISSING = ('no_record', 'stale_tree', 'wrong_check')
 UNAVAILABLE = ('error', 'no_policy')
@@ -113,7 +117,7 @@ def decide(context, outcome, result, tree):
         (not sampled(context, result, tree), 'sampled: the real job runs anyway, to compare it with the note'),
         (result.get('enforce') is True, 'shadow: the note would cover this check, but the skip policy has not turned skipping on for it'),
         (result.get('events') is None or context['event'] in result['events'],
-         'the policy does not let this signer level cover this event (a host key covers pull requests only)'),
+         'the policy does not let this note cover this event (the check\'s events, or a signer level that covers pull requests only)'),
         (result.get('satisfied') is True, 'verifier did not report satisfied'),
         (result.get('policy') is True, 'the skip policy was not applied'),
         (result.get('tier') == 'full', 'tier is not full'),
@@ -169,6 +173,14 @@ def protected_changes(base):
     return [p for p in paths if p in PROTECTED]
 
 
+def fetch_state(done):
+    """ok, none or failed for a quiet fetch of glob refspecs. git exits 1 and prints nothing when no remote ref matches any of
+    them (the tree has no record of its own); a fetch that could not reach or read the remote prints a fatal line."""
+    if done.returncode == 0:
+        return 'ok'
+    return 'none' if done.returncode == 1 and not done.stderr.strip() else 'failed'
+
+
 def observe(context, revision='HEAD'):
     """(outcome, result dict or None, detail, verifier sha256) without ever raising."""
     base, check, repository = context['base'], context['check'], context['repository']
@@ -182,7 +194,7 @@ def observe(context, revision='HEAD'):
     tree = run('git', 'rev-parse', '--verify', '--quiet', f'{revision}^{{tree}}')
     tree_id = tree.stdout.decode().strip() if tree.returncode == 0 else ''
     if OID.match(tree_id):
-        context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)).returncode == 0 else 'failed'
+        context['notes_fetch'] = fetch_state(run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', *record_refspecs(tree_id)))
     else:
         context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
@@ -203,9 +215,16 @@ def observe(context, revision='HEAD'):
             empty = os.path.join(scratch, 'empty-keys')
             open(empty, 'w').close()
             keys = ['--keys', empty]
+        # The evidence log's shadow view (docs/st3/gate-evidence.md, "The evidence log"), once the base pins the log key and its
+        # verifier reads it: one ref, one commit deep. It is reported on the decision line and changes no decision.
+        log = []
+        if b'--log-keys-from' in script.stdout and run('git', 'cat-file', '-e', f'{base}:{LOG_KEY}').returncode == 0:
+            fetched = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{LOG_REF}:{LOG_REF}')
+            context['log_fetch'] = 'ok' if fetched.returncode == 0 else 'failed'
+            log = ['--log-keys-from', base]
         fetch_input_notes(path, base, check, repository, revision)
         done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check,
-                   '--policy-from', base, '--repository', repository, *keys, timeout=VERIFIER_TIMEOUT)
+                   '--policy-from', base, '--repository', repository, *keys, *log, timeout=VERIFIER_TIMEOUT)
     try:
         result = json.loads(done.stdout)
     except ValueError:  # includes output that is not valid UTF-8
@@ -247,6 +266,8 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('pr_head', context.get('pr_head')), ('merge_tree', context.get('merge_tree')), ('head_tree', context.get('head_tree')),
         ('behind', context.get('behind')),
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
+        ('log', result.get('log')), ('log_head', result.get('log_head')), ('log_age_s', result.get('log_age_s')),
+        ('log_missing', result.get('log_missing')), ('log_fetch', context.get('log_fetch')),
         ('head', context['head']),
         ('base', context['base']), ('event', context['event']), ('pr', context['pr']),
         ('repo', context['repository']), ('run', context['run']), ('attempt', context['attempt']),

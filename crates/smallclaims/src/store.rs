@@ -3775,7 +3775,7 @@ fn next_batch_rowid(transaction: &Connection) -> Result<i64> {
         |row| row.get(0),
     )?;
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-he34560861a22 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
+        /* sqlite-large-value: allow-for-now lv-h98644aa0fd08 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('batch_rowid_high_water',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [rowid.to_string()],
     )?;
     Ok(rowid)
@@ -6092,7 +6092,7 @@ impl Store {
                 .load(Ordering::Acquire)
                 .min(missing - 1);
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hb4d97131e1c7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid',?1)",
+                /* sqlite-large-value: allow-for-now lv-h3cc85704f207 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [through.to_string()],
             )?;
             transaction.commit()?;
@@ -6136,7 +6136,7 @@ impl Store {
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if self.seal_prepared_tx(&transaction, &prepared)? {
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h8ea276cf2ab7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid', ?1)",
+                    /* sqlite-large-value: allow-for-now lv-h0497b81f01fb owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('seeded_batch_rowid', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     [prepared.through.to_string()],
                 )?;
                 transaction.commit()?;
@@ -6752,22 +6752,22 @@ impl Store {
                     )
                     .map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h0d87f9048268 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h53cc4b4e8c5e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_digests:{relay}"),
                         serde_json::to_string(&input.projection_digests).map_err(internal)?],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hccba8721529c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h7b01d2bde73b owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_versions:{relay}"),
                         serde_json::to_string(&input.projection_versions).map_err(internal)?],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h4d225ce0999e owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h7821b58b8774 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_registry:{relay}"),
                         input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest)],
                 ).map_err(internal)?;
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hd6af5bf00958 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    /* sqlite-large-value: allow-for-now lv-h5e1e6fd8e43d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value IS NOT excluded.value",
                     params![format!("peer_projection_inventory:{relay}"), input.inventory.digest],
                 ).map_err(internal)?;
                 // A response to our own dial proves the outbound grants now permit it.

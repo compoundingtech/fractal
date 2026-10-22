@@ -3,7 +3,7 @@
 
   scripts/evidence-log pull --repo DIR --signer JSON_ARGV --log-keys FILE [--remote origin] [--main origin/main]
                             [--publish] [--restore] [--now UNIX]
-  scripts/evidence-log gc   --repo DIR --signer JSON_ARGV --log-keys FILE --plan FILE [--now UNIX]
+  scripts/evidence-log gc   --repo DIR --signer JSON_ARGV --log-keys FILE --plan FILE [--remote origin] [--publish] [--now UNIX]
 
 GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it every 2 minutes):
   1. fetches main (for `.st/evidence-keys`), every evidence record and index ref (into `refs/evidence-seen/`, pruned, so it is
@@ -17,7 +17,11 @@ GitHub is only the transport. One `pull` (scripts/evidence-log.timer runs it eve
   5. with --publish, pushes the head to `refs/evidence-log/main` on the remote; with --restore, pushes back any logged record
      the remote no longer has (and reports it: `missing`).
 `gc` appends a GC line for every tree and input key of an evidence-gc plan (`--plan-out`) and drops their copies: run it BEFORE
-the plan's deletions, so a pull does not restore what GC removed.
+the plan's deletions (evidence-gc --before-delete), so a pull does not restore what GC removed. It also keeps the names of the
+plan's refs as PENDING DELETIONS: a pull that runs between the GC lines and the deletions does not log them again after the GC
+line, which would make their deletion "missing" and a restore push them back. A pending name is dropped once the remote no longer
+has it, or after TOMBSTONE_HOURS if GC never deleted it, and is then logged again like any record. With --publish it pushes the
+new head at once, so a verifier does not see the deletions as missing until the next pull.
 
 THE LOG is a chain of commits signed with the log key (`--signer` signs stdin to an SSH signature on stdout, for example
 ["ssh-keygen", "-Y", "sign", "-n", "git", "-f", KEY], or the same through `st sekrets`, so no seat reads the key). Its tree:
@@ -55,6 +59,8 @@ REMOTE_LOG = 'refs/evidence-log/remote'
 IDENTITY = 'evidence-log <evidence-log@invalid>'
 LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
 LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')
+PENDING = 'evidence-log.gc-pending.json'  # {ref name: unix time gc wrote its line}, in the repository directory
+TOMBSTONE_HOURS = 24
 
 
 class Refused(Exception):
@@ -234,6 +240,34 @@ def lines_after_gc(lines):
     return 0
 
 
+def pending(repo):
+    try:
+        with open(os.path.join(repo, PENDING)) as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except ValueError as error:
+        raise Refused(f'{PENDING} is not JSON ({error}): refusing to log what GC may be deleting')
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, int) for k, v in value.items()):
+        raise Refused(f'{PENDING} must map ref names to unix times')
+    return value
+
+
+def write_pending(repo, value):
+    path = os.path.join(repo, PENDING)
+    with open(path + '.new', 'w') as handle:
+        json.dump(value, handle, indent=0, sort_keys=True)
+    os.replace(path + '.new', path)
+
+
+def publish(repo, remote, summary):
+    done = git(repo, 'push', '--porcelain', remote, f'+{LOG}:{LOG}', check=False)
+    summary['published'] = done.returncode == 0
+    if done.returncode != 0:
+        summary['publish_failed'] = (done.stdout + done.stderr).decode(errors='replace').strip()[-300:]
+    return done.returncode == 0
+
+
 def locked(repo):
     handle = open(os.path.join(repo, 'evidence-log.lock'), 'w')
     fcntl.flock(handle, fcntl.LOCK_EX)
@@ -272,12 +306,18 @@ def pull(args):
         git(repo, 'fetch', '--no-tags', '-q', remote, f'+{LOG}:{REMOTE_LOG}', check=False)
     seen = {original(ref, SEEN): oid for ref, oid in refs(repo, SEEN).items()}
     copied = {original(ref, COPY): oid for ref, oid in refs(repo, COPY).items()}
+    # GC's pending deletions: kept while the remote still has the ref and the deadline has not passed, and not logged meanwhile.
+    held = pending(repo)
+    still = {name: at for name, at in held.items() if name in seen and args.now - at < TOMBSTONE_HOURS * 3600}
+    if still != held:
+        write_pending(repo, still)
+    summary['gc_pending'] = len(still)
     additions, rejected, new_copies = {}, {}, []
     with tempfile.NamedTemporaryFile() as keys, tempfile.NamedTemporaryFile() as revocations:
         keys.write(keys_text)
         keys.flush()
         for name, oid in sorted(seen.items()):
-            if name is None or copied.get(name) == oid:
+            if name is None or copied.get(name) == oid or name in still:
                 continue
             lines, why = accept(repo, module, keys.name, revocations.name, name, oid)
             if why:
@@ -303,20 +343,17 @@ def pull(args):
             summary['restore_failed'] = (pushed.stdout + pushed.stderr).decode(errors='replace').strip()[-300:]
     if summary['missing']:
         status = 4
-    if args.publish:
-        done = git(repo, 'push', '--porcelain', remote, f'+{LOG}:{LOG}', check=False)
-        summary['published'] = done.returncode == 0
-        if done.returncode != 0:
-            summary['publish_failed'] = (done.stdout + done.stderr).decode(errors='replace').strip()[-300:]
-            status = status or 1
+    if args.publish and not publish(repo, remote, summary):
+        status = status or 1
     return status, summary
 
 
 def gc(args):
     with open(args.plan) as handle:
         plan = json.load(handle)
-    if not isinstance(plan.get('trees'), list) or not isinstance(plan.get('keys'), list) or not isinstance(plan.get('plan_sha256'), str):
-        raise Usage('--plan must be the output of evidence-gc --plan-out (trees, keys, plan_sha256)')
+    if (not isinstance(plan.get('trees'), list) or not isinstance(plan.get('keys'), list) or not isinstance(plan.get('plan_sha256'), str)
+            or not isinstance(plan.get('delete'), list) or not all(isinstance(name, str) for name in plan['delete'])):
+        raise Usage('--plan must be the output of evidence-gc --plan-out (trees, keys, delete, plan_sha256)')
     line = f'gc {iso(args.now)} {plan["plan_sha256"]}'
     removals = {}
     for tree in plan['trees']:
@@ -326,6 +363,12 @@ def gc(args):
         if CHECK.match(check) and OID.match(key):
             removals[path_of(('index', check, key))] = line
     summary = {'mode': 'gc', 'gc_paths': len(removals)}
+    # The pending names go first: if the log commit then fails, GC deletes nothing (its hook failed) and they expire unlogged-again
+    # at worst a day later; the other order would leave a window where a pull logs them after the GC line.
+    held = pending(args.repo)
+    held.update({name: args.now for name in plan['delete'] if parse(name)})
+    write_pending(args.repo, held)
+    summary['gc_pending'] = len(held)
     extend(args.repo, {}, removals, args.signer_argv, args.log_keys, args.now, summary)
     # Drop the copies of what GC removes, so a pull does not restore them and the copy stays as bounded as the remote.
     doomed = []
@@ -336,6 +379,8 @@ def gc(args):
     if doomed:
         git(args.repo, 'update-ref', '--stdin', stdin=''.join(f'delete {ref}\n' for ref in doomed).encode())
     summary['copies_dropped'] = len(doomed)
+    if args.publish and not publish(args.repo, args.remote, summary):
+        return 1, summary
     return 0, summary
 
 

@@ -38,13 +38,33 @@ impl ArrangementsStore for Store {
 
     fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {
         if input.kind != "arrangement.edited" { return Err(St3Error::new("invalid-arrangement-operations","edit_arrangement requires arrangement.edited")); }
+        let expected_subjects = {
+            let connection = self.readers.get();
+            let mut stable = BTreeMap::new();
+            for (subject, revision) in expected_subjects {
+                let identity = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
+                if stable.insert(identity, revision.clone()).is_some_and(|previous| previous != *revision) {
+                    return Err(St3Error::new("stale-fence", "alias references have conflicting declaration fences"));
+                }
+            }
+            stable
+        };
+        let mut stable_input;
+        let actor = input.actor.as_deref().map(|actor|
+            fractal_store::store::identities::resolve_reference_conn(&self.readers.get(), actor)
+        ).transpose()?;
+        let input = if actor == input.actor { input } else {
+            stable_input = input.clone();
+            stable_input.actor = actor;
+            &stable_input
+        };
         if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }
         if input.expected_subject.is_some() {
             let mut merging = input.clone();
             merging.expected_subject = None;
-            return append_claim_with_subject_fences(&self.graph,&merging,None,None,Some(expected_subjects),None).map(|(claim,_)| claim);
+            return append_claim_with_subject_fences(&self.graph,&merging,None,None,Some(&expected_subjects),None).map(|(claim,_)| claim);
         }
-        append_claim_with_subject_fences(&self.graph,input,None,None,Some(expected_subjects),None).map(|(claim,_)| claim)
+        append_claim_with_subject_fences(&self.graph,input,None,None,Some(&expected_subjects),None).map(|(claim,_)| claim)
     }
 }
 
