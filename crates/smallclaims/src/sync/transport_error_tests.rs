@@ -1,8 +1,6 @@
 //! What the replication HTTP client reports for each way an exchange can fail, at the pinned
-//! reqwest 0.12.28, hyper 1.11.0 and hyper-util 0.1.20 (Cargo.lock). Retry policy reads none of
-//! this yet. These controls pin the phase each failure reaches (none, connected, response head,
-//! body) and how reqwest reports it, so a policy that tells an unreachable peer from a refusing or
-//! stalled one can rest on observed behaviour rather than on an error's speed.
+//! reqwest 0.12.28, hyper 1.11.0 and hyper-util 0.1.20 (Cargo.lock). These controls pin
+//! each failure phase and exercise the typed context used by route advancement.
 //!
 //! A failure with no response head says only that this node saw no response. The peer may have
 //! accepted the request and acted on it before the connection was lost.
@@ -117,7 +115,9 @@ async fn a_refused_connection_is_a_connect_error() {
     let socket = TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = socket.local_addr().unwrap();
-    let seen = Phase::of(&exchange(address, None).await.unwrap_err());
+    let error = exchange(address, None).await.unwrap_err();
+    let seen = Phase::of(&error);
+    assert_transport_advances(request_route_failure(error), RouteFailure::Connect);
     assert!(
         seen.connect && !seen.timeout && !seen.body && !seen.decode,
         "{seen:#?}"
@@ -143,7 +143,9 @@ async fn a_link_that_accepts_and_closes_is_not_a_connect_error() {
     });
     let mut seen = Vec::new();
     for _ in 0..8 {
-        seen.push(Phase::of(&exchange(address, None).await.unwrap_err()));
+        let error = exchange(address, None).await.unwrap_err();
+        seen.push(Phase::of(&error));
+        assert_transport_advances(request_route_failure(error), RouteFailure::Stream);
     }
     link.abort();
     for one in &seen {
@@ -239,7 +241,9 @@ async fn a_peer_that_stalls_before_its_response_head_is_a_timeout() {
     let result = exchange(address, Some(Duration::from_secs(2))).await;
     peer.abort();
     let length = request_read.await;
-    let seen = Phase::of(&result.unwrap_err());
+    let error = result.unwrap_err();
+    let seen = Phase::of(&error);
+    assert_transport_advances(request_route_failure(error), RouteFailure::Timeout);
     assert_eq!(
         length,
         Ok(64 * 1024),
@@ -276,9 +280,182 @@ async fn a_response_cut_off_after_its_head_fails_reading_the_body() {
         "the peer read the whole request"
     );
     assert_eq!(status, reqwest::StatusCode::OK);
-    let seen = Phase::of(&result.unwrap_err());
+    let error = result.unwrap_err();
+    let seen = Phase::of(&error);
+    assert_transport_advances(response_route_failure(error), RouteFailure::Stream);
     assert!(
         seen.decode && !seen.body && !seen.connect && !seen.timeout,
         "{seen:#?}"
     );
+}
+
+fn assert_transport_advances(error: anyhow::Error, expected: RouteFailure) {
+    let error = exchange_failure(
+        error, ReplicationFailurePhase::RequestHeaders, std::time::Instant::now(), None,
+    );
+    let error = error.context("outer exchange context");
+    assert_eq!(route_failure(&error), expected);
+    let mut route = 0;
+    assert!(advance_failed_route(&mut route, &error));
+    assert_eq!(route, 1);
+}
+
+#[test]
+fn only_transport_classes_advance_routes() {
+    for class in [
+        RouteFailure::Connect,
+        RouteFailure::Stream,
+        RouteFailure::Timeout,
+        RouteFailure::CarrierUnavailable,
+    ] {
+        assert_transport_advances(anyhow::Error::new(class), class);
+    }
+    let errors = [
+        anyhow::anyhow!("replication-exchange-metadata-too-large"),
+        anyhow::anyhow!("backend connect timeout stream carrier-unavailable"),
+        anyhow::anyhow!("signature or protocol mismatch"),
+        anyhow::Error::new(PeerOverloaded {
+            retry_after: OVERLOAD_RETRY,
+        }),
+        anyhow::Error::new(FabricGrantRefusal {
+            node: "peer".into(),
+            protocol: "st3-peer-v1".into(),
+            code: "peer_not_permitted_for_service".into(),
+        }),
+    ];
+    for error in errors {
+        let error = exchange_failure(
+            error, ReplicationFailurePhase::Verify, std::time::Instant::now(), None,
+        );
+        let error = error.context("exchange failed");
+        let mut route = 2;
+        assert_eq!(route_failure(&error), RouteFailure::Application);
+        assert!(!advance_failed_route(&mut route, &error));
+        assert_eq!(route, 2, "{error:#}");
+    }
+}
+
+#[test]
+fn fabric_faults_advance_but_refusal_usage_and_unknown_errors_do_not() {
+    for class in [
+        FabricErrorClass::Fault,
+        FabricErrorClass::Refusal,
+        FabricErrorClass::Usage,
+    ] {
+        let error = anyhow::Error::new(FabricError {
+            code: "not-a-hardcoded-code".into(),
+            class,
+            message: "message does not determine policy".into(),
+            peer: None,
+            service: None,
+        })
+        .context("dial");
+        let mut route = 0;
+        let transport = class == FabricErrorClass::Fault;
+        assert_eq!(advance_failed_route(&mut route, &error), transport);
+        assert_eq!(route, usize::from(transport));
+    }
+    let mut route = 0;
+    assert!(!advance_failed_route(
+        &mut route,
+        &anyhow::anyhow!("fabric unavailable")
+    ));
+    assert_eq!(route, 0);
+}
+
+#[tokio::test]
+async fn request_builder_errors_and_unmarked_backend_network_errors_stay_on_route() {
+    let malformed = replication_http_client()
+        .post("not a URL")
+        .send()
+        .await
+        .unwrap_err();
+    let error = request_route_failure(malformed);
+    let mut route = 0;
+    assert!(!advance_failed_route(&mut route, &error));
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let error = anyhow::Error::new(exchange(socket.local_addr().unwrap(), None).await.unwrap_err())
+        .context("local backend request failed");
+    assert!(!advance_failed_route(&mut route, &error));
+    assert_eq!(route, 0);
+}
+
+#[tokio::test]
+async fn malformed_http_response_heads_are_application_not_stream_failures() {
+    for answer in [
+        &b"NOTHTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"[..],
+        &b"HTTP/1.1 XYZ Invalid\r\ncontent-length: 0\r\n\r\n"[..],
+        &b"HTTP/1.1 200 OK\r\ninvalid header: value\r\n\r\n"[..],
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_request(&mut stream).await;
+            stream.write_all(answer).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let error = exchange(address, None).await.unwrap_err();
+        peer.await.unwrap();
+        assert!(
+            error.is_request(),
+            "control must reach the broad request category"
+        );
+        let error = request_route_failure(error);
+        let mut route = 0;
+        assert_eq!(route_failure(&error), RouteFailure::Application, "{error:#}");
+        assert!(!advance_failed_route(&mut route, &error));
+        assert_eq!(route, 0);
+    }
+}
+
+#[tokio::test]
+async fn malformed_chunk_framing_is_application_not_stream_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nnot-a-chunk-size\r\n")
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let response = exchange(address, None).await.unwrap();
+    let error = response.bytes().await.unwrap_err();
+    peer.await.unwrap();
+    assert!(
+        error.is_decode(),
+        "control must reach the broad decode category"
+    );
+    let error = response_route_failure(error);
+    let mut route = 0;
+    assert_eq!(route_failure(&error), RouteFailure::Application, "{error:#}");
+    assert!(!advance_failed_route(&mut route, &error));
+    assert_eq!(route, 0);
+}
+
+#[test]
+fn post_handshake_tls_alert_and_bad_record_causes_advance_the_route() {
+    for error in [
+        rustls::Error::DecryptError,
+        rustls::Error::AlertReceived(rustls::AlertDescription::BadRecordMac),
+    ] {
+        let class = stream_route_failure(&error);
+        assert_transport_advances(anyhow::Error::new(error).context(class), RouteFailure::Stream);
+    }
+    for error in [
+        rustls::Error::DecryptError,
+        rustls::Error::AlertReceived(rustls::AlertDescription::BadRecordMac),
+    ] {
+        // Tokio-rustls wraps post-handshake TLS errors in InvalidData. Retain the
+        // typed cause: InvalidData alone also describes application framing errors.
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, error);
+        let class = stream_route_failure(&error);
+        assert_transport_advances(anyhow::Error::new(error).context(class), RouteFailure::Stream);
+    }
+    let error = std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid application framing");
+    assert_eq!(stream_route_failure(&error), RouteFailure::Application);
 }

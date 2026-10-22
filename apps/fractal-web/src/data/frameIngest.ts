@@ -1,4 +1,5 @@
 import * as Atom from 'effect/reactivity/Atom'
+import { beforeInputPaintFrameIngest } from '../telemetry/inputPaint.ts'
 
 /** One keyed snapshot handed to a frame ingest. */
 export interface FrameEntry<K, V> {
@@ -24,6 +25,7 @@ export const makeFrameIngest = <K, V>({
     if (frame !== undefined) cancelAnimationFrame(frame)
     frame = undefined
     if (pending.size === 0) return
+    beforeInputPaintFrameIngest()
     const values = pending
     pending = new Map()
     batch(() => {
