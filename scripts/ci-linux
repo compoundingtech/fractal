@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Run one Linux gate stage inside the pinned devShell: tests, clippy, or fleet-compat.
 # Each stage is its own GitHub Actions job on its own runner; `linux-gate` requires all three.
 set -euo pipefail
+. "$(dirname "$0")/script-test-supervisor"
 stage=${1:?usage: scripts/ci-linux tests|clippy|fleet-compat|mail-redelivery-canaries|conversation-model}
 # Logs stay outside the checkout: the public-content test scans untracked files.
 logs="$RUNNER_TEMP/ci-logs"
@@ -9,28 +11,13 @@ mkdir -p "$logs"
 
 fleet_compat() {
   local baseline
-  baseline=$(jq -er .commit .github/fleet-compat-baseline.json) || return
-  # The pinned baseline never changes: after the first run its Nix output is substituted from the
-  # keyed local binary cache (scripts/ci-nix-cache) instead of being built again.
-  # Building the baseline also runs the pinned pty's own unit tests, and two of its process-table
-  # tests are timing-sensitive on a loaded runner (different ones failed on different runs). A
-  # failed build leaves nothing behind, so a retry rebuilds only what failed.
-  local attempt
-  for attempt in 1 2 3; do
-    BASELINE="$baseline" nix build --impure --out-link "$RUNNER_TEMP/baseline" --print-build-logs --expr '
-      ((builtins.getFlake "github:compoundingtech/smalltalk/${builtins.getEnv "BASELINE"}")
-        .packages.${builtins.currentSystem}.st3).overrideAttrs (_: { doCheck = false; })' && break
-    [ "$attempt" -lt 3 ] || return 1
-    echo "baseline build attempt $attempt failed; retrying" >&2
-  done
-  export ST3_COMPAT_BIN="$RUNNER_TEMP/baseline/bin/st3"
-  test -x "$ST3_COMPAT_BIN" || return
-  if "$ST3_COMPAT_BIN" fleet --help > /dev/null 2>&1; then
-    echo "the baseline must predate fleet membership" >&2
-    return 1
-  fi
-  cargo test -p st3 --locked --test integration -- --ignored --exact \
-    fleet::an_old_build_config_peer_replicates_with_new_members 2>&1 | tee "$logs/compat-result.log" || return
+  baseline=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/baseline") || return
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  export FRACTAL_COMPAT_BIN="$baseline" ST3_COMPAT_BIN="$baseline"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  test -x "${FRACTAL_COMPAT_BIN-${ST3_COMPAT_BIN-}}" || return
+  cargo test -p fractal --locked --test integration -- --ignored --exact \
+    fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-result.log"
 }
 
@@ -45,21 +32,21 @@ clippy_and_codegen() {
   cargo clippy --workspace --all-targets --locked --message-format=json \
     | tee "$logs/clippy-workspace.jsonl" | python3 scripts/clippy_ratchet.py --render || return
   # Workspace consumers enable drawing; check the standalone model separately.
-  cargo clippy -p st3-conversation-ui --no-default-features --all-targets --locked --message-format=json \
+  cargo clippy -p fractal-conversation-ui --no-default-features --all-targets --locked --message-format=json \
     | tee "$logs/clippy-model.jsonl" | python3 scripts/clippy_ratchet.py --render || return
   local base_args=()
   if [[ -n "${CLIPPY_BASE_SHA:-}" && "$CLIPPY_BASE_SHA" != 0000000000000000000000000000000000000000 ]]; then
     base_args=(--base-ref "$CLIPPY_BASE_SHA")
   fi
   python3 scripts/clippy_ratchet.py --logs "$logs" "${base_args[@]}" || return
-  cargo run --locked -p st3-client-codegen -- --check
+  cargo run --locked -p fractal-client-codegen -- --check
 }
 
 conversation_model() {
   # A workspace build unifies stui/st's ratatui feature, which would hide model dependencies.
-  cargo test -p st3-conversation-ui --no-default-features --locked || return
+  cargo test -p fractal-conversation-ui --no-default-features --locked || return
   local dependencies
-  dependencies=$(cargo tree -p st3-conversation-ui --no-default-features --locked -e normal --prefix none) || return
+  dependencies=$(cargo tree -p fractal-conversation-ui --no-default-features --locked -e normal --prefix none) || return
   if [[ "$dependencies" == *ratatui* ]]; then
     echo "the standalone conversation model must not depend on ratatui" >&2
     return 1
@@ -93,8 +80,7 @@ scratch_diagnostic_start() {
 }
 scratch_diagnostic_finish() {
   # The poller holds no pipe of the stage (its output is /dev/null), so the stage never waits for it.
-  pkill -P "$scratch_poller" 2>/dev/null || true
-  kill "$scratch_poller" 2>/dev/null || true
+  python3 scripts/script_process.py "$scratch_poller" 15 --parent "$BASHPID"
   echo "Test scratch: TMPDIR=$scratch on $(stat -f -c %T "$scratch"), filesystem $(df -Pm "$scratch" | awk 'NR==2 {print $2}') MiB, peak du of TMPDIR $(cat "$scratch_peak_file") MiB; /dev/shm $(stat -f -c %T /dev/shm 2>/dev/null || echo absent), $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $2}') MiB, $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $3}') MiB used at the end; memory $(awk '/MemTotal/ {printf "%d", $2 / 1024}' /proc/meminfo) MiB, peak RSS of the tests not measured"
   rm -f "$scratch_peak_file"
 }
@@ -126,6 +112,12 @@ case "$stage" in
   mail-redelivery-canaries) python3 scripts/ci-mail-redelivery-canaries 2>&1 | tee "$logs/$stage.log" || status=$? ;;
   *) echo "unknown stage: $stage" >&2; exit 2 ;;
 esac
+# The tests nextest passed only on a retry: `flaky=N` for the step output, and the file Workspace CI
+# uploads as `nextest-flaky-<lane>-<N>` for `st slo`'s flakes. Counting never changes the result.
+if [[ "$stage" == tests ]]; then
+  python3 scripts/ci-nextest-flaky "$logs/$stage.log" "${RUNNER_TEMP:-$logs}/nextest-flaky.txt" \
+    || echo "::warning::could not count nextest's flaky tests"
+fi
 # `tee` hides the stage's exit status behind a pipeline; pipefail restores it above.
 result=passed
 [ "$status" -eq 0 ] || result=failed

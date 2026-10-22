@@ -27,6 +27,19 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
           ? { _tag: 'Document', ref: pane.ref }
         : { _tag: 'ViewUnavailable', ref: pane.ref, reason: 'This web client does not render this view yet.' }
 
+// App screens opened from the sidebar footer: their tabs read as the buttons that opened them.
+const SCREEN_LABELS: Readonly<Record<string, string | undefined>> = { [MISSIONS_REF]: 'Missions', 'monitor/quota': 'Usage' }
+
+/**
+ * A workspace tab's label: the subject's own title verbatim (agent names keep their case), else the
+ * screen's name, else the ref's last segment in sentence case like "Thread".
+ */
+export const paneTabLabel = (ref: string, title: string | undefined): string => {
+  if (title !== undefined) return title
+  const label = SCREEN_LABELS[ref] ?? ref.split('/').at(-1) ?? ref
+  return label.charAt(0).toUpperCase() + label.slice(1)
+}
+
 /** A conversation pane kept mounted after it was opened; `used` is its logical recency. */
 export interface RetainedPane {
   readonly ref: string
@@ -50,3 +63,12 @@ export const retainPane = ({ panes, ref, name, limit }: {
   return next.filter(pane => pane !== evicted)
 }
 
+/** All in-app workspace navigation keeps the dev replay signal visible for reload/early connect. */
+export const workspaceHref = (ref: string, pane: string, search: string): string => {
+  const path = `/w/${ref.split('/').map(encodeURIComponent).join('/')}?open=${encodeURIComponent(pane)}`
+  if (import.meta.env.DEV) {
+    const scenario = new URLSearchParams(search).get('scenario')
+    if (scenario !== null) return `${path}&scenario=${encodeURIComponent(scenario)}`
+  }
+  return path
+}

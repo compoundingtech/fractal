@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>webfractal</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzE4MTgxYiIvPjxwYXRoIGQ9Ik05IDhoMTV2NEgxM3Y0aDl2NGgtOXY2SDl6IiBmaWxsPSIjZmFmYWZhIi8+PC9zdmc+" />
     <script data-wf-theme-bootstrap>
@@ -38,7 +38,7 @@
     </style>
     <script data-wf-early-connect>
       // Early roster connect: open the collections socket and subscribe to the fleet roster while
-      // the main bundle loads. The SDK (`@st3/sdk/effect` early.ts) takes this handle, adopts the
+      // the main bundle loads. The SDK (`@fractal/sdk/effect` early.ts) takes this handle, adopts the
       // socket, and answers its own identical roster subscribe from it. Memory only; bounded
       // buffer; closes itself on overflow, socket end, pagehide, or 15 s without being taken.
       ;(() => {

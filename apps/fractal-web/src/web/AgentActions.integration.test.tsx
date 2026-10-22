@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
-import type { St3Client } from '@smalltalk/st3-client'
+import type { FractalClient } from '@fractal/client'
 
 const data = vi.hoisted(() => {
   const control = vi.fn(async (_agent: string, _control: string) => ({ _tag: 'Sent' as const }))
@@ -48,7 +48,7 @@ describe('gatewayAgentControls', () => {
       terminalScreen: vi.fn(async () => envelope({ runtime_incarnation: 'incarnation/7', next_sequence: 42 }, 'snapshot/screen')),
       agentStop: record('agent.stop'), agentStart: record('agent.start'), agentSuspend: record('agent.suspend'), agentResume: record('agent.resume'), terminalInput: record('terminal.input'),
     }
-    return { calls, client, port: gatewayAgentControls(client as unknown as St3Client) }
+    return { calls, client, port: gatewayAgentControls(client as unknown as FractalClient) }
   }
 
   it('restarts as a stop and then a start, each fenced on the declaration st selects then', async () => {
@@ -104,7 +104,8 @@ describe('AgentActions', () => {
     const root = createRoot(container)
     await act(async () => root.render(<AgentActions agent={{ ref: 'agent/example/atlas', name: 'atlas', state, activity: 'idle' }} />))
     const press = async (label: string) => act(async () => {
-      const target = [...document.querySelectorAll<HTMLElement>('button, [role="menuitem"]')].find((each) => each.textContent?.startsWith(label))
+      // Icon-only buttons are found by their accessible name; text buttons and menu items by their text.
+      const target = [...document.querySelectorAll<HTMLElement>('button, [role="menuitem"]')].find((each) => (each.getAttribute('aria-label') ?? each.textContent)?.startsWith(label))
       if (target === undefined) throw new Error(`no ${label}`)
       target.click()
     })
@@ -114,13 +115,13 @@ describe('AgentActions', () => {
   it('asks before restarting, and keeping it sends nothing', async () => {
     data.control.mockClear()
     const view = await mount('running')
-    await view.press('Agent')
+    await view.press('Actions for atlas')
     await view.press('Restart')
     expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('Restart atlas?')
     expect(data.control).not.toHaveBeenCalled()
     await view.press('Keep it')
     expect(document.querySelector('[role="alertdialog"]')).toBeNull()
-    await view.press('Agent')
+    await view.press('Actions for atlas')
     await view.press('Restart')
     await act(async () => [...document.querySelectorAll<HTMLElement>('[role="alertdialog"] button')].find((each) => each.textContent === 'Restart')!.click())
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'restart')
@@ -131,7 +132,7 @@ describe('AgentActions', () => {
   it('starts a stopped seat without asking', async () => {
     data.control.mockClear()
     const view = await mount('stopped')
-    await view.press('Agent')
+    await view.press('Actions for atlas')
     await view.press('Start')
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'start')
     expect(document.querySelector('[role="alertdialog"]')).toBeNull()

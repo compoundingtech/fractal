@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show agent messages per merged pull request in st usage",
+  "replay": { "status": "none", "detail": "No graph replay or projection invalidation. The count reads the existing coordination_sends metadata and the existing resource_observations projection." },
+  "schema": { "status": "none", "detail": "No table, index, trigger, claim kind or schema registry change. No new store." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "changed", "detail": "GET /v1/usage/messages (st usage --messages-only) adds merged_pull_requests, the pull requests this daemon observed merging in the period (by vcs.pull-request merged_at, each counted once), and agent_to_agent_per_merged_pull_request, null while counts are incomplete or nothing merged. Existing fields are unchanged. st usage text output adds a MESSAGES line with both. A new CLI against an older daemon prints the message counts without the per-PR figure, or omits the line when the daemon has no count read; an older CLI ignores the new fields. Message delivery is unchanged: an old peer or old daemon that does not know the silent kind wakes the recipient as today." },
+  "downtime": { "status": "none", "detail": "Normal binary swap; no migration." },
+  "manual": { "status": "none", "detail": "No action required. A pull request merged in a repository this daemon does not observe is not counted." },
+  "recovery": { "status": "none", "detail": "Read-only addition; no recovery change. The count scans vcs.pull-request observations through the existing kind index (about 20 ms over a week on a daemon holding about 4,000 pull requests)." }
+}
