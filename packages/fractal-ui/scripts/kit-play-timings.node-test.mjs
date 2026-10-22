@@ -42,11 +42,13 @@ test('readiness phases partition one document clock, including lifecycle overhea
 
 const rows = Array.from({ length: 21 }, (_, index) => ({
   id: `${index % 2 ? 'family-a' : 'family-b'}--story-${index}`, scheme: 'dark', width: 440,
+  storyFile: `./${index % 2 ? 'a' : 'b'}.stories.tsx`,
   elapsedSeconds: index + 1, pass: true, timings: { playMilliseconds: (index + 1) * 10 },
 }))
 test('summary reports nearest-rank p95, mean, deterministic top 20 and family totals', () => {
   const result = summarizeTimings(rows)
   assert.deepEqual(result.phaseMilliseconds.playMilliseconds, { samples: 21, mean: 110, p95: 200 })
+  assert.deepEqual(result.phaseMeanMilliseconds, { playMilliseconds: 110 })
   assert.equal(result.topCases.length, 20)
   assert.equal(result.topCases[0].elapsedSeconds, 21)
   assert.equal(result.topCases.at(-1).elapsedSeconds, 2)
@@ -54,7 +56,11 @@ test('summary reports nearest-rank p95, mean, deterministic top 20 and family to
     { family: 'family-b', cases: 11, elapsedSeconds: 121 },
     { family: 'family-a', cases: 10, elapsedSeconds: 110 },
   ])
-  assert.deepEqual(summarizeTimings([]), { phaseMilliseconds: {}, topCases: [], storyFamilies: [] })
+  assert.deepEqual(result.storyFiles, [
+    { storyFile: './b.stories.tsx', cases: 11, elapsedSeconds: 121 },
+    { storyFile: './a.stories.tsx', cases: 10, elapsedSeconds: 110 },
+  ])
+  assert.deepEqual(summarizeTimings([]), { phaseMilliseconds: {}, phaseMeanMilliseconds: {}, topCases: [], storyFamilies: [], storyFiles: [] })
   assert.deepEqual(summarizeTimings([{ ...rows[0], timings: { a: NaN, b: Infinity, c: -1 } }]).phaseMilliseconds, {})
 })
 

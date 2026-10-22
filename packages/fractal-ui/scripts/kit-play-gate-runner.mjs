@@ -65,7 +65,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const busyStarted = busyMilliseconds(), loadStarted = loadavg()
   const rows = []
   const workers = Math.min(6, availableParallelism())
-  let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError
+  let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
     const elapsedSeconds = (performance.now() - started) / 1000
@@ -106,6 +106,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     const index = await response.json()
     fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
     validateCaseOverrides(index.entries, overrides)
+    storyFiles = Object.fromEntries(fullIds.map(id => [id, index.entries[id].importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
     if (set === 'commit') {
@@ -129,7 +130,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
       const guard = await strictStoryGuard(page, base)
       const guardReady = performance.now()
       const row = {
-        id, scheme, width, height: 900, pass: false,
+        id, storyFile: storyFiles[id], scheme, width, height: 900, pass: false,
         timings: {
           resetMilliseconds, pageCreateMilliseconds: pageCreated - createStarted,
           guardMilliseconds: guardReady - pageCreated,
