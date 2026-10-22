@@ -10,11 +10,18 @@ module.exports = () => {
   const daily = variant === 'daily';
   return {
     ...base,
+    ...(process.env.ST_IOS_PUSH === '1' ? { extra: { ...base.extra, stIosPush: true } } : {}),
+    plugins: [
+      ...(base.plugins ?? []),
+      process.env.ST_IOS_PUSH === '1'
+        ? ['expo-notifications', { mode: 'development' }]
+        : './plugins/withoutPush',
+    ],
     icon: daily ? './assets/icon.png' : './assets/icon-dev.png',
     ios: {
       ...base.ios,
       bundleIdentifier: daily ? 'com.compoundingtech.smalltalk' : 'com.compoundingtech.smalltalk.starter',
-      infoPlist: { ...base.ios.infoPlist, CFBundleDisplayName: daily ? 'Smalltalk' : 'Smalltalk Dev' },
+      infoPlist: { ...base.ios.infoPlist, CFBundleDisplayName: daily ? 'Fractal' : 'Fractal Dev' },
     },
   };
 };

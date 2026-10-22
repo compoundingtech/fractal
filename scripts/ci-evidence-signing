@@ -178,8 +178,9 @@ def add_source_inputs(facts, check):
     The key is the git tree of the tested tree reduced to the declared paths, computed by evidence-verify
     (--project) from the same base scripts the rest of the signing uses; a record signed with it can be found
     by another tree whose declared paths are the same. No declaration, no base commit, a base whose
-    evidence-verify has no --project yet, or any error: no key, and the record stays an exact-tree record."""
-    base, repository = env('PROJECT_BASE_SHA'), env('GITHUB_REPOSITORY')
+    evidence-verify has no --project yet, or any error: no key, and the record stays an exact-tree record.
+    The base is PROJECT_BASE_SHA when the step sets it, else the same choice taken from the event payload (event_base_sha)."""
+    base, repository = env('PROJECT_BASE_SHA') or event_base_sha(), env('GITHUB_REPOSITORY')
     verify = Path(__file__).resolve().parent / 'evidence-verify'
     if not (check and base and repository and verify.exists()):
         return
@@ -197,6 +198,25 @@ def add_source_inputs(facts, check):
         facts['inputs']['source_inputs'] = key
 
 
+def event_base_sha():
+    """The base the workflow's PROJECT_BASE_SHA expression names (merge group base, else pull request base, else the
+    commit itself), read from the runner's event payload, for a step that does not set the variable (the aggregate
+    note job). Only selects which base's policy declares the inputs; anything unreadable is no base, so no key."""
+    try:
+        with open(env('GITHUB_EVENT_PATH')) as handle:
+            event = json.load(handle)
+        sha = (event.get('merge_group') or {}).get('base_sha') or (event.get('pull_request') or {}).get('base', {}).get('sha') \
+            or env('GITHUB_SHA')
+    except (OSError, ValueError, AttributeError, TypeError):
+        return ''
+    return sha if isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha) else ''
+
+
+# Required checks with their own notes that the aggregate note job waits for only to publish those notes: their
+# results are not in the linux-gate note and their gates' decisions do not stop it (docs/st3/gate-evidence.md).
+SEPARATE_CHECKS = ('genie-freshness', 'typescript-client')
+
+
 def aggregate(path):
     """What an aggregate job honestly knows: which jobs it needed, what each reported, its verdict.
 
@@ -204,15 +224,21 @@ def aggregate(path):
     """
     needs = json.loads(env('NEEDS_JSON') or '{}')
     # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
-    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items()) if not name.startswith('evidence-gate-')}
+    # Neither is a job of the path-sensitive fractal-web lane: it is its own lane with its own notes, and it is
+    # skipped whenever a change touches no web path, which must not stop the linux-gate verdict being recorded.
+    # Nor are the separate checks (SEPARATE_CHECKS): the note job waits for them only to publish their own notes.
+    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())
+               if not name.startswith(('evidence-gate-', 'fractal-web-')) and name not in SEPARATE_CHECKS}
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
     # An evidence gate that decided to skip says so in its output, set only by its marker step. Required
     # checks whose gate skipped still end in success with their steps skipped, so their own result
-    # cannot show it: this output can. No note then, whatever the other results say.
+    # cannot show it: this output can. No note then, whatever the other results say. Every gate counts except
+    # those of the separate checks, which decide nothing this note records: a gate added later counts by default.
     taken = sorted(name for name, entry in needs.items()
-                   if name.startswith('evidence-gate-') and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
+                   if name.startswith('evidence-gate-') and name.removeprefix('evidence-gate-') not in SEPARATE_CHECKS
+                   and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
     if taken:
         raise Refused(f'not recording: the evidence gate skipped work in this run ({", ".join(taken)}), so it did not test this tree itself')
     # A needed job that did not run (skipped by the evidence gate, or for any other reason) means this
@@ -234,6 +260,8 @@ def aggregate(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    # The aggregate is what the linux-gate skip rests on, so it carries the input key its policy declares, like a stage note.
+    add_source_inputs(facts, gate)
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 
@@ -286,8 +314,9 @@ def step_facts(path):
     """What a job honestly knows about steps it already ran: which command they stand for and how each ended.
 
     STEP_CHECK is the check name, STEP_COMMAND a JSON array naming the command, STEP_OUTCOMES a JSON
-    object {step id: outcome} taken from the steps context. The note is a success only if every step
-    succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
+    object {step id: outcome} taken from the steps context. STEP_INPUTS, if set, is a JSON object of extra
+    named string inputs (a shard number, a test set) recorded next to the fixed ones; it can add names but
+    never replace one. The note is a success only if every step succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
     example it was covered by a trusted note), so no note is made, not even a failure.
     """
     gate_skipped()
@@ -316,6 +345,17 @@ def step_facts(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    try:
+        extra = json.loads(env('STEP_INPUTS') or '{}')
+    except ValueError:
+        raise Refused('STEP_INPUTS must be JSON')
+    if not (isinstance(extra, dict) and all(re.fullmatch(r'[a-z][a-z0-9_]{0,40}', k) and isinstance(v, str) and 0 < len(v) <= 200
+                                            for k, v in extra.items())):
+        raise Refused('STEP_INPUTS must be an object of short lower-case names with nonempty string values')
+    clash = sorted(set(extra) & set(facts['inputs']))
+    if clash:
+        raise Refused(f'STEP_INPUTS cannot replace the fixed input(s) {", ".join(clash)}')
+    facts['inputs'].update(extra)
     add_source_inputs(facts, check)
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 

@@ -11,7 +11,7 @@
  *   family  `resource`, optionally kind glob `vcs.*`
  *   generic fact-bag / typed reference — always present, renders anything
  */
-import { Id } from '@smalltalk/st3-client/schema'
+import { Id } from '@fractal/client/schema'
 import { Schema } from 'effect'
 
 import { Family, parseSchemaId } from './envelope.ts'

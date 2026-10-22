@@ -8,11 +8,11 @@ answered once for the pane; they are not forwarded to the outer screen.
 
 The regression test runs the production Ui, crossterm decoder, attachment and
 painter in a real outer PTY, with an invented raw program in a second real PTY.
-[`copper_probe.py`](../crates/stui/tests/copper_probe.py) logs every input byte and
-SIGWINCH. [`terminal_tab_probe.py`](../crates/stui/tests/terminal_tab_probe.py)
-records the [current matrix](../crates/stui/tests/fixtures/terminal-tab-current.json).
-The [original matrix](../crates/stui/tests/fixtures/terminal-tab-baseline.json) and
-[program receipts](../crates/stui/tests/fixtures/terminal-tab-program-baseline.json)
+[`copper_probe.py`](../crates/fractal-tui/tests/copper_probe.py) logs every input byte and
+SIGWINCH. [`terminal_tab_probe.py`](../crates/fractal-tui/tests/terminal_tab_probe.py)
+records the [current matrix](../crates/fractal-tui/tests/fixtures/terminal-tab-current.json).
+The [original matrix](../crates/fractal-tui/tests/fixtures/terminal-tab-baseline.json) and
+[program receipts](../crates/fractal-tui/tests/fixtures/terminal-tab-program-baseline.json)
 retain the reproduction before fixes.
 
 The top bar's bottom border occupies one row in both layouts. Terminal panes begin
@@ -49,7 +49,7 @@ The optional real-program checks use disposable configuration and a local 200-li
 document. Chawan 0.4.4, Helix 25.07.1, Vim 9.2.1001 and less 710 receive wheel input
 and change their screen. Chawan/Helix/Vim receive mouse wheel reports; less receives
 application-cursor down arrows. No display server, window or person's graph is used.
-The [current receipts](../crates/stui/tests/fixtures/terminal-tab-program-current.json)
+The [current receipts](../crates/fractal-tui/tests/fixtures/terminal-tab-program-current.json)
 record the wheel and keyboard bytes.
 
 ## Keyboard, paste, focus and selection
@@ -81,8 +81,8 @@ It requires the pinned PTY version; older daemons ignore the extension. The
 [dependency decision](https://github.com/compoundingtech/pty/blob/main/docs/decisions/0016-embedded-surfaces-can-recover-input-modes.md)
 records this boundary.
 
-Ctrl+\ always detaches, including through the palette, and is never sent to the
-child. Legacy Ctrl+4 is its crossterm alias. Ctrl+K (or Command+K) opens the palette.
+Ctrl+\ is the leader, including through the palette, and is never sent to the
+child: it lists what to press next, and Ctrl+\ then c detaches (Ctrl+\ twice closes the tab). Legacy Ctrl+4 is its crossterm alias. Ctrl+K (or Command+K) opens the palette.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception
@@ -142,7 +142,7 @@ For hosted positive/negative controls, keep the same resolved pty f8388fe7
 derivation on PATH and the same stui unit-test worker executable for both runs:
 
 ```sh
-python3 crates/stui/tests/terminal_tab_probe.py --worker "$STUI_TEST_WORKER" --check
+python3 crates/fractal-tui/tests/terminal_tab_probe.py --worker "$STUI_TEST_WORKER" --check
 ```
 
 The positive run must pass all three rows and retain its stdout/stderr. In an
@@ -180,14 +180,14 @@ a local HTML document, isolated storage and no display connection. Its medium
 probes are refused and it automatically falls back to inline compressed frames.
 The fixed path emits image APCs into the outer PTY, forwards pixel mouse wheel
 reports and preserves Ctrl+Alt+Shift+A as CSI 97;8u. Counts vary with frame duration.
-The optional [runner](../crates/stui/tests/terminal_browser_probe.py) records the
+The optional [runner](../crates/fractal-tui/tests/terminal_browser_probe.py) records the
 actual bytes. Its [release source](https://github.com/zenbu-labs/terminal-browser/blob/v0.13.4/pixel/engine/crates/pixel-core/src/terminal.rs)
 requests graphics, mouse 1003/1006/1016, focus, paste, enhanced keyboard, resize,
 colors and extended clipboard; the byte matrix independently covers these requests.
-The [current browser receipt](../crates/stui/tests/fixtures/terminal-browser-current.json)
+The [current browser receipt](../crates/fractal-tui/tests/fixtures/terminal-browser-current.json)
 shows both child and outer graphics. Chawan with `buffer.images=true` on
 `https://new.space` also emits inline PNG frames that reach the outer PTY and produce
-pane-contained image cells; its [image receipt](../crates/stui/tests/fixtures/terminal-tab-chawan-images.json)
+pane-contained image cells; its [image receipt](../crates/fractal-tui/tests/fixtures/terminal-tab-chawan-images.json)
 records that check. Network content and frame counts can change.
 
 ## Remaining gaps
@@ -209,9 +209,9 @@ Use the Nix development shell, whose PTY package and Python are CI inputs, and r
 outside an agent seat environment:
 
 ```sh
-cargo nextest run -p stui --lib -E 'test(terminal_tab_protocols)'
-python3 crates/stui/tests/terminal_tab_probe.py --worker TEST_EXECUTABLE --record /tmp/tab.json
-python3 crates/stui/tests/terminal_browser_probe.py --worker TEST_EXECUTABLE \
+cargo nextest run -p fractal-tui --lib -E 'test(terminal_tab_protocols)'
+python3 crates/fractal-tui/tests/terminal_tab_probe.py --worker TEST_EXECUTABLE --record /tmp/tab.json
+python3 crates/fractal-tui/tests/terminal_browser_probe.py --worker TEST_EXECUTABLE \
   --app /path/to/terminal-browser-bundle --record /tmp/browser.json
 ```
 

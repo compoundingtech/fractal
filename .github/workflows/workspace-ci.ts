@@ -151,6 +151,41 @@ export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${names
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
 export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled() }}' } as const
 
+/**
+ * What `actions/checkout` with `fetch-depth: 0` fetches (every branch, every tag, the whole history) except evidence records.
+ * Signed evidence records are to become tags under refs/tags/evidence/ (docs/st3/gate-evidence.md, "Records as tags"), one per
+ * record up to the GC cap, and `fetch-depth: 0` fetches every tag: 5,000 of them added 81.5 MiB and 16 s to a full fetch
+ * (measured 2026-10-19), mostly source objects of tested commits that no branch holds. So check out one commit, then fetch the
+ * rest with a negative refspec (git 2.29 or later). Deepening the shallow clone (`--unshallow`) took 21 s against 11 s for a
+ * full fetch (2026-10-20, from hetz2): the server cannot reuse its packs for it. So the shallow marker goes and the history is
+ * fetched as a fresh clone would (`--refetch`, git 2.36 or later), then checked: the whole history is here or the step fails.
+ * The job token is used only when checkout did not persist its own.
+ */
+export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regexp '^http\\..*\\.extraheader$' || true)" ]; then
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\\n')"
+  export GIT_CONFIG_VALUE_0
+fi
+head=$(git rev-parse HEAD)
+rm -f "$(git rev-parse --git-path shallow)"
+git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+git fsck --connectivity-only --no-dangling --no-progress`
+
+/**
+ * The checkout step (its own keys, such as `name`, and its `with`), shallow, then the fetch above with the same
+ * `continue-on-error`; `fetchIf` limits the fetch (a job that needs the history on pull requests only).
+ */
+export const fullHistoryCheckoutSteps = (checkout: Record<string, unknown> = {}, step: Record<string, unknown> = {}, fetchIf?: string) => [
+  { ...step, uses: 'actions/checkout@v4', with: { ...checkout, 'fetch-depth': 1 } },
+  {
+    name: 'Fetch the whole history without evidence tags',
+    ...(fetchIf ? { if: fetchIf } : {}),
+    ...('continue-on-error' in step ? { 'continue-on-error': step['continue-on-error'] } : {}),
+    env: { FETCH_TOKEN: '${{ github.token }}' },
+    run: fullHistoryFetchScript,
+  },
+]
+
 /** The public, read-only effect-utils cache supplies genie and other pinned effect-utils packages. */
 export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 
@@ -207,7 +242,7 @@ export const saveMainDependencyCaches = (setup: readonly unknown[]) => setup
  * HOME/XDG. `pull_request` checks out GitHub's merge ref: the PR head merged with the latest base.
  */
 export const commonSetupSteps = [
-  { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+  ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
   // ci1 keeps its own caches warm on the machine (a Cargo home and build directory per runner, a
   // shared sccache and the Nix store) and names its Cargo home in CI_LOCAL_CARGO_HOME. Restoring
   // the archives below there would only cost time.
@@ -251,8 +286,9 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
-printf 'ST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" >> "$GITHUB_ENV"`,
+printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
   },
   {
     name: 'Prepare provider component fixtures',
@@ -308,6 +344,124 @@ export const testArchiveConsumerSetup = [
 /** Everything a job that runs the workspace tests needs. */
 export const workspacePreparationSteps = [...commonSetupSteps, ...testBuildSteps]
 
+// Namespace offers nested virtualization on linux/amd64. Prove /dev/kvm can create a VM before
+// anything else; QEMU is also forbidden to fall back to emulation (nix/transport-isolation-vm.nix).
+const kvmProbe = `if [ ! -e /dev/kvm ]; then
+  echo "::error::/dev/kvm is missing: this runner profile offers no nested virtualization"
+  exit 1
+fi
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then sudo chmod 0666 /dev/kvm; fi
+python3 - <<'EOF'
+import fcntl, os
+fd = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+version = fcntl.ioctl(fd, 0xAE00)  # KVM_GET_API_VERSION
+vm = fcntl.ioctl(fd, 0xAE01, 0)  # KVM_CREATE_VM
+assert version == 12, f"unexpected KVM API version {version}"
+os.close(vm)
+print(f"KVM API {version}: created a VM")
+EOF
+printf 'KVM: \\x60%s\\x60, CPU virtualization flag %s, VM creation succeeded\\n\\n| Phase | Elapsed |\\n| --- | --- |\\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"`
+
+/**
+ * The shared test producer (job id `linux-test-build`, which its consumers name in `needs`): compile each
+ * selected target group once and publish this run attempt's exact-source archives.
+ */
+export const testArchiveProducer = {
+  env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
+  outputs: {
+    'artifact-id': '${{ steps.upload.outputs.artifact-id }}',
+    'manifest-sha256': '${{ steps.archive.outputs.manifest-sha256 }}',
+    'producer-attempt': '${{ steps.archive.outputs.producer-attempt }}',
+  },
+  steps: [
+    ...workspacePreparationSteps.slice(0, -2).map((step: any) =>
+      step.id === 'cargo-cache' || step.id === 'nix-cache'
+        ? { ...step, with: { ...step.with, key: step.with.key.replace('${{ github.job }}', 'linux-tests'),
+            'restore-keys': step.with['restore-keys'].replaceAll('${{ github.job }}', 'linux-tests') } }
+        : step),
+    { ...nixDevelopStep({ name: 'Compile and archive each selected target group once',
+      command: ['bash', '-c', 'python3 scripts/ci-build-memory before || echo "::warning::build memory baseline unavailable"; exec python3 scripts/ci-test-archive build'] }), id: 'archive' },
+    { name: 'Report test-build memory after success',
+      env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
+      run: 'python3 scripts/ci-build-memory after',
+      if: "${{ success() && steps.archive.outcome == 'success' }}", 'continue-on-error': true },
+    {
+      name: 'Publish this run attempt’s exact-source test archives', id: 'upload',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: 'linux-test-archives-${{ github.run_attempt }}',
+        path: '${{ runner.temp }}/ci-test-archives', 'if-no-files-found': 'error',
+        'compression-level': 0, 'retention-days': 3 },
+    },
+    ...buildSnapshotSave,
+    { name: 'Report test-build memory after failure',
+      env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
+      run: 'mkdir -p "$RUNNER_TEMP/ci-build-memory"; (free -m || echo "::warning::free unavailable") | tee "$RUNNER_TEMP/ci-build-memory/free.txt"; python3 scripts/ci-build-memory failure',
+      if: "${{ failure() && steps.archive.outcome == 'failure' }}", 'continue-on-error': true },
+    { name: 'Retain test-build memory evidence',
+      if: "${{ always() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}", 'continue-on-error': true,
+      uses: 'actions/upload-artifact@v4', with: { name: 'test-build-memory-${{ github.run_attempt }}',
+        path: '${{ runner.temp }}/ci-build-memory', 'if-no-files-found': 'warn', 'retention-days': 3 } },
+  ],
+}
+
+/**
+ * isolation-vm's work: st2's transport-isolation cascade tests need a real systemd user manager, which the
+ * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
+ * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
+ */
+export const isolationVmSteps = [
+  // The VM's own warm cache also contains its driver; keep that primary entry.
+  ...testArchiveConsumerSetup.map((step: any) => step.id === 'nix-cache' ? nixCacheStep : step),
+  { name: 'Probe KVM', id: 'kvm', run: kvmProbe },
+  {
+    name: 'Build the NixOS VM test driver',
+    id: 'driver',
+    run: `start=$SECONDS
+nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
+printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  {
+    name: 'Run all three systemd-scope tests in the VM',
+    id: 'vmtest',
+    env: {
+      // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      FRACTAL_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
+      FRACTAL_ISOLATION_WORKSPACE: '${{ github.workspace }}',
+      FRACTAL_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
+      FRACTAL_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
+      ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
+      ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
+      ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
+      ST_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
+    },
+    run: `start=$SECONDS
+mkdir -p "$RUNNER_TEMP/vm-out"
+"$RUNNER_TEMP/vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/vm-out"
+jq -r '"| VM boot | \\(.boot_seconds)s |\\n| systemd-scope tests in VM (extract and run) | \\(.test_seconds)s |"' "\${FRACTAL_ISOLATION_TIMINGS-\${ST_ISOLATION_TIMINGS}}" >> "$GITHUB_STEP_SUMMARY"
+printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  // The sekrets gateway needs real Unix users, a login session and a user manager: a second
+  // VM runs it with this st binary (nix/sekrets-vm.nix).
+  {
+    name: 'Build the sekrets VM test driver',
+    id: 'sekrets-driver',
+    run: `start=$SECONDS
+nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
+printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  {
+    name: 'Run the sekrets gateway test in the VM',
+    id: 'sekrets-test',
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    env: { FRACTAL_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}', ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
+    run: `start=$SECONDS
+mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
+"$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
+printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+  },
+  { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+]
+
 /**
  * The stage jobs of `linux-gate` sign their own result. Every step is fail-soft and runs after the
  * stage's logs are retained, so signing can never change a stage's outcome. The signer scripts come
@@ -337,12 +491,18 @@ export const evidenceStageJob = (name: string) =>
  * not run (for example because the job was covered by a trusted note) makes no note.
  */
 export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
+/**
+ * A lane that is skipped whenever its paths are untouched (fractal-web), so it has no evidence gate of its own and a
+ * run that did not execute it makes no note for it. It is signed shard by shard (scripts/ci-evidence-signing STEP_INPUTS).
+ */
+export const evidenceLaneNames = ['fractal-web'] as const
 export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 
 // The evidence gate(s) that can cover a job's work. A job that took such a skip must not sign a note for a run in
 // which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
 // job's log or step outcomes say. Every gate named here must be in that job's `needs`.
 export const gateSkipExpression = (name: string): string => {
+  if ((evidenceLaneNames as readonly string[]).includes(name)) return 'false'
   const gates = name === 'mail-redelivery-canaries'
     ? ['linux-gate', 'mail-redelivery-canaries']
     : (evidenceStepNames as readonly string[]).includes(name) ? [name] : ['linux-gate']
@@ -351,7 +511,7 @@ export const gateSkipExpression = (name: string): string => {
 
 const signingCore = (
   name: string,
-  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean },
+  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean; artifact?: string },
 ): unknown[] => {
   const soft = { if: 'always()', 'continue-on-error': true } as const
   // Without a toolchain override the wrapper asks nix for the dev shell derivation; jobs without a
@@ -416,7 +576,7 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
       ...soft,
       name: 'Retain the signed note',
       uses: 'actions/upload-artifact@v4',
-      with: { name: `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+      with: { name: facts.artifact ?? `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
     },
   ]
 }
@@ -427,16 +587,116 @@ export const evidenceStageSteps = (name: string, stage: string): unknown[] =>
     : []
 
 /** Signing steps for a job made of steps: `command` names what they stand for, `steps` maps step ids to outcomes. */
-export const evidenceStepSteps = (name: string, command: string[], stepIds: string[]): unknown[] =>
+export const evidenceStepSteps = (
+  name: string,
+  command: string[],
+  stepIds: string[],
+  /** `inputs`: extra named inputs for the note (values may be expressions); `artifact`: a distinct name per matrix shard. */
+  options: { inputs?: Record<string, string>; artifact?: string } = {},
+): unknown[] =>
   signingCore(name, {
     helper: 'step-facts',
     env: {
       STEP_CHECK: name,
       STEP_COMMAND: JSON.stringify(command),
       STEP_OUTCOMES: '{' + stepIds.map((id) => `"${id}":"\${{ steps.${id}.outcome }}"`).join(',') + '}',
+      ...(options.inputs ? { STEP_INPUTS: '{' + Object.entries(options.inputs).map(([key, value]) => `"${key}":"${value}"`).join(',') + '}' } : {}),
     },
     toolchain: true,
+    artifact: options.artifact,
   })
+
+/**
+ * Signing steps for the Nix path: build the check derivation (`nix build .#checks.<system>.NAME`), then sign a `nix`
+ * record for it as `nix-NAME`. The facts script, the signer and the helper all come from the base commit; the build runs
+ * before the key is written, as every signing job's work does. The note is retained as the artifact
+ * `nix-evidence-note-NAME`, which the aggregate gate's `evidence-note-*` collection does not match: nothing publishes or
+ * reads it until gate-evidence's verifier accepts the `nix` kind. Without the Nix daemon's `secret-key-files` on the
+ * runner the path carries no Nix signature and the record says `nix_unsigned`, which a verifier rejects.
+ */
+export const nixEvidenceSteps = (name: string): unknown[] => {
+  const soft = { if: 'always()', 'continue-on-error': true } as const
+  const record = `nix-${name}`  // the ledger name only: one signature per job
+  return [
+    {
+      name: 'Take the evidence signer from the base commit',
+      id: 'evidence-base',
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+    },
+    {
+      // A failing build is a record too: the facts script exits 1 after writing it, so this step does not stop the signing.
+      name: `Build checks.${name} and record the facts`,
+      id: 'nix-build',
+      'continue-on-error': true,
+      run: `python3 "$RUNNER_TEMP/evidence-base/scripts/nix-check-facts" --check ${name} --out "$RUNNER_TEMP/nix-facts.json"`,
+    },
+    {
+      ...soft,
+      name: 'May this job use the signing key?',
+      id: 'evidence-guard',
+      if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
+      run: `python3 ${evidenceHelper} guard`,
+    },
+    {
+      ...soft,
+      name: 'Write the signer configuration and key',
+      id: 'evidence-configure',
+      if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
+      env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+      run: `set -o pipefail
+python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+    },
+    {
+      ...soft,
+      name: `Sign the nix record for ${name}`,
+      if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
+      env: { PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `helper=${evidenceHelper}
+python3 "$helper" once ${record}
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${name} \\
+  --aggregate "$RUNNER_TEMP/nix-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\
+  --out "$RUNNER_TEMP/evidence-notes" \\
+  --toolchain-sha256 "$(printf '%s|%s' "$(nix --version 2>/dev/null)" "$RUNNER_ARCH" | sha256sum | cut -d' ' -f1)"`,
+    },
+    { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
+    {
+      ...soft,
+      name: 'Retain the signed note',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: `nix-evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+    },
+  ]
+}
+
+/**
+ * A test lane's count of tests nextest passed only on a retry, as the name of a tiny artifact
+ * (`nextest-flaky-<lane>-<N>`), so `st slo` reads it with one artifacts listing per run and no
+ * download. `scripts/ci-linux tests` writes `flaky=N` and the file; nothing is uploaded for 0.
+ */
+export const nextestFlakyUpload = (name: string) => ({
+  name: 'Name the flaky test count',
+  if: "${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}",
+  'continue-on-error': true,
+  uses: 'actions/upload-artifact@v4',
+  with: {
+    name: `nextest-flaky-${name}-\${{ steps.nextest.outputs.flaky }}`,
+    path: '${{ runner.temp }}/nextest-flaky.txt',
+    'if-no-files-found': 'ignore',
+    'retention-days': 1,
+  },
+})
 
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
@@ -514,12 +774,23 @@ export const perfStoresCache = (stage: string) => ({
   uses: 'actions/cache@v4',
   with: {
     path: '${{ runner.temp }}/st-bench',
-    key: `perf-${stage}-stores-\${{ hashFiles('crates/st3/tests/daemon_bench.rs', 'docs/st3/schema.md') }}`,
+    key: `perf-${stage}-stores-\${{ hashFiles('crates/fractal/tests/daemon_bench.rs', 'docs/st3/schema.md') }}`,
   },
 })
 
 /** pnpm's store under the runner's temporary directory, which only step-level env can name. */
 export const pnpmStoreEnv = { pnpm_config_store_dir: '${{ runner.temp }}/pnpm-store' } as const
+
+/**
+ * Materializes megarepo.lock's members under repos/ before any shell that reads them. `mr`
+ * comes from the flake's effect-utils pin; later steps resolve locks in the same job-local store.
+ */
+export const megarepoApplyStep = {
+  name: 'Materialize megarepo members',
+  env: { MEGAREPO_STORE: '${{ runner.temp }}/megarepo' },
+  run: `nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
+} as const
 
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
@@ -527,13 +798,51 @@ export const fractalWebStoreCache = {
   key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
 } as const
 
+/**
+ * The web lane's complete devShell closure and `print-dev-env` script. Hash its isolated
+ * definition and declared transitive lock inputs; only upkeep evaluates/verifies its derivation.
+ * No prefix restore: a different identity is always a miss. Only protected-main upkeep fills it.
+ */
+export const fractalWebShellEnv = {
+  CI_WEB_SHELL_DIR: '${{ runner.temp }}/web-shell',
+  CI_WEB_SHELL_KEY: '${{ steps.web-shell-key.outputs.key }}',
+} as const
+export const fractalWebShellCache = {
+  path: fractalWebShellEnv.CI_WEB_SHELL_DIR,
+  key: '${{ steps.web-shell-key.outputs.key }}',
+} as const
+
+export const fractalWebShellKeyStep = {
+  name: 'Identify the web shell inputs',
+  id: 'web-shell-key',
+  shell: 'bash',
+  env: {
+    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}",
+  },
+  run: 'bash scripts/ci-web-shell key',
+} as const
+
+export const fractalWebRunnerStep = {
+  name: 'Identify runner hardware',
+  shell: 'bash',
+  env: { CI_RUNNER_NAME: '${{ runner.name }}' },
+  run: `cpu=$(awk -F ': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)
+printf 'Runner: name=%s region=%s cpu=%s cores=%s\\n' "$CI_RUNNER_NAME" "\${RUNNER_REGION:-\${AWS_REGION:-\${AZURE_REGION:-unknown}}}" "$cpu" "$(nproc)"`,
+} as const
+
 const embeddedPython = (script: string) =>
   `python3 - <<'PY'\n${readFileSync(new URL(`../../scripts/${script}`, import.meta.url), 'utf8')}\nPY`
 
+// SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
+// full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
+// per-commit set unsharded on shard 0.
+const kitShardCount = 2
+const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
+
 /**
- * The path-sensitive fractal-web gate. Detection and the gate always run on GitHub-hosted
- * capacity without a checkout; execution runs only for web-relevant changes, after generated
- * files are fresh. Workflow-level path filters would leave a required check pending forever.
+ * The path-sensitive fractal-web gate always runs on GitHub-hosted capacity. Detection
+ * needs no checkout; the gate checks out only to aggregate sharded kit receipts. Execution
+ * runs after generated files are fresh. Workflow path filters would leave checks pending.
  */
 export const fractalWebJobs = {
   'fractal-web-changes': {
@@ -546,6 +855,7 @@ export const fractalWebJobs = {
       'kit-inputs': '${{ steps.detect.outputs.kit-inputs }}',
     },
     steps: [
+      fractalWebRunnerStep,
       {
         name: 'Detect web-relevant changes',
         id: 'detect',
@@ -561,30 +871,81 @@ export const fractalWebJobs = {
   },
   'fractal-web-execution': {
     name: 'fractal-web-execution',
+    strategy: {
+      'fail-fast': false,
+      matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
+    },
     needs: ['fractal-web-changes', 'genie-freshness'],
     if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
+    // Signs its own shard's result in shadow (the evidence-signing environment is for the merge queue, main and
+    // same-repository pull requests only); the steps after the run are fail-soft.
+    ...evidenceStepJob(),
     defaults: { run: { shell: 'bash' } },
     steps: [
-      { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+      fractalWebRunnerStep,
+      // A pull request needs its history: the signing guard lists the commits between the base and the head to
+      // check their authors, and without them a web-relevant run is never signed and its lane reads as not run.
+      ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+      megarepoApplyStep,
+      { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },
+      fractalWebShellKeyStep,
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
+      // GitHub-hosted Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+      // effect-utils Buck TypeScript actions need them for bwrap (effect-utils #1784).
+      // This runner VM is ephemeral; the bwrap sandbox itself is unchanged.
+      { name: 'Enable user namespaces for Buck TypeScript sandbox', run: 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0' },
+      { name: 'Restore the web shell closure', id: 'web-shell', uses: 'actions/cache/restore@v4', with: fractalWebShellCache },
       {
-        ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
+        name: 'Run the fractal-web lanes and dependency license check',
+        id: 'run',
+        shell: 'bash',
+        // Falls back to `nix develop .#web` when the closure is not cached.
+        run: 'bash scripts/ci-web-shell run bash scripts/ci-fractal-web',
         env: {
           ...pnpmStoreEnv,
+          ...fractalWebShellEnv,
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
-          // Pull requests run the stories tagged critical without axe, within the 7-minute budget;
-          // merge groups (observed and signed) and manual runs keep every story with axe.
-          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'critical' || 'all' }}",
+          KIT_SHARD_INDEX: '${{ matrix.shard }}',
+          KIT_SHARD_COUNT: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
+          KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
+          // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
+          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
-          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '420' || '' }}",
+          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
+          // placed in the import graph); merge groups and manual runs run every test file.
+          APP_TEST_SET: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
       },
+      {
+        name: 'Preserve kit shard receipt',
+        if: 'always()',
+        uses: 'actions/upload-artifact@v4',
+        with: {
+          name: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}',
+          path: '${{ runner.temp }}/kit-play-receipts/',
+          'if-no-files-found': 'ignore',
+        },
+      },
+      // One note per shard: the test sets it ran and which shard of how many are recorded, so a later policy can
+      // require the whole set. The note says only that this shard's run step ended as it did.
+      ...evidenceStepSteps('fractal-web', ['bash', 'scripts/ci-fractal-web'], ['run'], {
+        artifact: 'evidence-note-fractal-web-shard-${{ matrix.shard }}',
+        inputs: {
+          kit_shard: '${{ matrix.shard }}',
+          kit_shard_count: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
+          kit_play_set: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
+          app_test_set: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
+        },
+      }),
     ],
   },
   'fractal-web': {
@@ -594,8 +955,9 @@ export const fractalWebJobs = {
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
-    permissions: {},
+    permissions: { contents: 'read' },
     steps: [
+      fractalWebRunnerStep,
       {
         name: 'Require detection and, for web changes, execution',
         env: {
@@ -604,6 +966,31 @@ export const fractalWebJobs = {
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
+      },
+      // Publish costs for single-shard runs too; exact full-index coverage remains merge-group-only.
+      {
+        uses: 'actions/checkout@v4',
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'",
+        with: { 'persist-credentials': false },
+      },
+      {
+        uses: 'actions/download-artifact@v4',
+        id: 'cost-receipts',
+        'continue-on-error': true,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'",
+        // Include older attempts only from this exact run/head, for rerun-failed-jobs.
+        with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
+      },
+      {
+        name: 'Publish web lane costs as a public check annotation',
+        'continue-on-error': true,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && steps.cost-receipts.outcome == 'success'",
+        run: 'node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"',
+      },
+      {
+        name: 'Require every kit shard and exact full-index coverage',
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        run: `node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" ${kitShardCount}`,
       },
     ],
   },
