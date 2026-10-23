@@ -3721,7 +3721,7 @@ mod tests {
     #[test]
     fn attach_deadline_retry_key_reopens_the_same_terminal() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut ui = Ui::new(crate::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::world());
         ui.live = true;
         let agent = "terminal/attach-deadline-test";
         ui.open_in_glass(

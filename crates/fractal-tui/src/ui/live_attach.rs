@@ -244,7 +244,7 @@ mod tests {
     }
 
     fn selected(agent: &str) -> (State, Ui, mpsc::UnboundedSender<Command>, mpsc::UnboundedReceiver<Command>) {
-        let mut ui = Ui::new(crate::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::world());
         ui.live = true;
         ui.open_in_glass(Pane::Terminal(agent.into()), Open::Here);
         ui.terminal = Some(view(agent));
@@ -471,12 +471,12 @@ mod tests {
             impl Drop for Guard { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); } }
             for attempt in 0..8 {
                 let (_, _, serial) = state.begin(&mut ui, "terminal/A");
-                let active = active.clone();
+                let worker_active = active.clone();
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let task = tokio::spawn(async move {
                     let _permit = serial.acquire_owned().await.unwrap();
-                    assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
-                    let _guard = Guard(active);
+                    assert_eq!(worker_active.fetch_add(1, Ordering::SeqCst), 0);
+                    let _guard = Guard(worker_active);
                     let _ = ready_tx.send(());
                     std::future::pending::<()>().await;
                 });
