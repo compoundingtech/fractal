@@ -273,6 +273,8 @@ pub fn admit_prepared_envelope_tx(
     } = content?;
     let batch = &payload.batch;
     let now = now_ms().to_string();
+    // Record timestamps track semantic changes, not repeated validation attempts.
+    // Compare the effective assignments below so repaired states and errors keep their meaning.
     let mut degraded = false;
     for (blob, (hash, bytes)) in blobs.iter().zip(&payload.blobs) {
         let PreparedBlob {
@@ -283,20 +285,20 @@ pub fn admit_prepared_envelope_tx(
         let previous_state = transaction
             .prepare_cached("SELECT state FROM replica_records WHERE record_ref=?1")
             .map_err(internal)?
-            .query_row([record_ref], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hd6a8db95b2e0 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ [record_ref], |row| row.get::<_, String>(0))
             .optional()
             .map_err(internal)?;
         if *valid {
             transaction
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
+                    /* sqlite-large-value: allow-for-now lv-h2f7c5050108a owner=smallclaims::store::prepared_envelope TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
                 )
                 .map_err(internal)?
-                .execute(params![hash, bytes, bytes.len() as u64])
+                .execute(/* sqlite-large-value: allow-for-now lv-h68968259fe58 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![hash, bytes, bytes.len() as u64])
                 .map_err(internal)?;
             transaction
                 .prepare_cached(
-                    "INSERT INTO replica_records(
+                    /* sqlite-large-value: allow-for-now lv-h7939496efe9d owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          subject_hint, kind_hint, updated_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, 'blob', ?8)
@@ -305,10 +307,13 @@ pub fn admit_prepared_envelope_tx(
                             kind_hint='blob',
                             error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
                             error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
-                        updated_at_unix_ms=excluded.updated_at_unix_ms",
+                        updated_at_unix_ms=excluded.updated_at_unix_ms
+                     WHERE subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT 'blob'
+                        OR (state IS NOT 'repaired' AND
+                            (state IS NOT 'valid' OR error_code IS NOT NULL OR error_message IS NOT NULL))",
                 )
                 .map_err(internal)?
-                .execute(params![
+                .execute(/* sqlite-large-value: allow-for-now lv-h9e12c55895ff owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![
                         record_ref,
                         envelope.writer,
                         envelope.sequence,
@@ -325,17 +330,20 @@ pub fn admit_prepared_envelope_tx(
             degraded = true;
             transaction
                 .prepare_cached(
-                    "INSERT INTO replica_records(
+                    /* sqlite-large-value: allow-for-now lv-h81aeff40e613 owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                          record_ref, writer, sequence, envelope_hash, position, raw, state,
                          subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'invalid', ?7, 'blob',
                                'blob-hash-mismatch', ?8, ?9)
                      ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'invalid' END,
                         subject_hint=excluded.subject_hint, kind_hint='blob', error_code=excluded.error_code,
-                        error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms",
+                        error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms
+                     WHERE (state IS NOT 'repaired' AND state IS NOT 'invalid')
+                        OR subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT 'blob'
+                        OR error_code IS NOT excluded.error_code OR error_message IS NOT excluded.error_message",
                 )
                 .map_err(internal)?
-                .execute(params![
+                .execute(/* sqlite-large-value: allow-for-now lv-h7c659cf4b3f9 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![
                         record_ref,
                         envelope.writer,
                         envelope.sequence,
@@ -361,11 +369,11 @@ pub fn admit_prepared_envelope_tx(
         .map_or_else(|| next_batch_rowid(transaction).map_err(internal), Ok)?;
     transaction
         .prepare_cached(
-            "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
+            /* sqlite-large-value: allow-for-now lv-h63cb2ef6f8ed owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .map_err(internal)?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h9094840a3d43 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![
                 batch.id,
                 batch.origin,
                 batch.replica_sequence,
@@ -388,7 +396,7 @@ pub fn admit_prepared_envelope_tx(
         let previous_state = transaction
             .prepare_cached("SELECT state FROM replica_records WHERE record_ref=?1")
             .map_err(internal)?
-            .query_row([&record_ref], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h4f435980b2ce owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ [&record_ref], |row| row.get::<_, String>(0))
             .optional()
             .map_err(internal)?;
         let started = std::time::Instant::now();
@@ -398,18 +406,20 @@ pub fn admit_prepared_envelope_tx(
             Ok(ReplicatedClaimAdmission::Valid) => {
                 // A checkpoint dropped this claim here, and another envelope carries it again.
                 // A node that still held it would ignore the copy as already stored.
-                let inserted = if checkpoint::claim_tombstoned(transaction, &claim.id)
-                    .map_err(internal)?
-                {
+                let tombstoned = checkpoint::claim_tombstoned(transaction, &claim.id)
+                    .map_err(internal)?;
+                let inserted = if tombstoned {
                     0
                 } else {
+                    super::canonical::record_position_tx(transaction, &claim.id, position)
+                        .map_err(internal)?;
                     transaction
                     .prepare_cached(
-                        "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
+                        /* sqlite-large-value: allow-for-now lv-h3dde60a662ef owner=smallclaims::store::prepared_envelope TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     )
                     .map_err(internal)?
-                    .execute(params![
+                    .execute(/* sqlite-large-value: allow-for-now lv-h04a372fa726c owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![
                         claim.id,
                         claim.batch_id,
                         claim.subject,
@@ -422,13 +432,18 @@ pub fn admit_prepared_envelope_tx(
                     ])
                     .map_err(internal)?
                 };
-                if let Some(signature) = payload.claim_signatures.get(&claim.id) {
-                    principals::store_claim_signature_tx(transaction, &claim.id, signature)
-                        .map_err(internal)?;
+                if !tombstoned && let Some(signature) = payload.claim_signatures.get(&claim.id) {
+                    principals::store_carried_signature_tx(
+                        transaction,
+                        &claim.id,
+                        signature,
+                        &envelope.writer,
+                    )
+                    .map_err(internal)?;
                 }
                 transaction
                     .prepare_cached(
-                        "INSERT INTO replica_records(
+                        /* sqlite-large-value: allow-for-now lv-h0f58f2e5f02b owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                              record_ref, writer, sequence, envelope_hash, position, raw, state,
                              claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
@@ -437,10 +452,14 @@ pub fn admit_prepared_envelope_tx(
                             subject_hint=excluded.subject_hint, kind_hint=excluded.kind_hint,
                             error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
                             error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            updated_at_unix_ms=excluded.updated_at_unix_ms
+                         WHERE claim_id IS NOT excluded.claim_id
+                            OR subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT excluded.kind_hint
+                            OR (state IS NOT 'repaired' AND
+                                (state IS NOT 'valid' OR error_code IS NOT NULL OR error_message IS NOT NULL))",
                     )
                     .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
+                    .execute(/* sqlite-large-value: allow-for-now lv-h31c9cb563400 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
                     .map_err(internal)?;
                 outcome.valid += 1;
                 outcome.changed |= inserted != 0 || previous_state.as_deref() != Some("valid");
@@ -462,17 +481,20 @@ pub fn admit_prepared_envelope_tx(
                 };
                 transaction
                     .prepare_cached(
-                        "INSERT INTO replica_records(
+                        /* sqlite-large-value: allow-for-now lv-h64a7d8ba07a0 owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                              record_ref, writer, sequence, envelope_hash, position, raw, state,
                              claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unknown', ?7, ?8, ?9, ?10, ?11, ?12)
                          ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'unknown' END,
                             error_code=CASE WHEN state='repaired' THEN error_code ELSE excluded.error_code END,
                             error_message=CASE WHEN state='repaired' THEN error_message ELSE excluded.error_message END,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            updated_at_unix_ms=excluded.updated_at_unix_ms
+                         WHERE state IS NOT 'repaired' AND
+                            (state IS NOT 'unknown' OR error_code IS NOT excluded.error_code
+                                OR error_message IS NOT excluded.error_message)",
                     )
                     .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error_code, error_message, now])
+                    .execute(/* sqlite-large-value: allow-for-now lv-h6e04a363047a owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error_code, error_message, now])
                     .map_err(internal)?;
                 outcome.unknown += 1;
             }
@@ -480,16 +502,18 @@ pub fn admit_prepared_envelope_tx(
                 degraded = true;
                 transaction
                     .prepare_cached(
-                        "INSERT INTO replica_records(
+                        /* sqlite-large-value: allow-for-now lv-hf8f20d5c0aa4 owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                              record_ref, writer, sequence, envelope_hash, position, raw, state,
                              claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'invalid', ?7, ?8, ?9, ?10, ?11, ?12)
                          ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'invalid' END,
                             error_code=excluded.error_code, error_message=excluded.error_message,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            updated_at_unix_ms=excluded.updated_at_unix_ms
+                         WHERE (state IS NOT 'repaired' AND state IS NOT 'invalid')
+                            OR error_code IS NOT excluded.error_code OR error_message IS NOT excluded.error_message",
                     )
                     .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error.code, error.message, now])
+                    .execute(/* sqlite-large-value: allow-for-now lv-hb34a419c3ad8 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error.code, error.message, now])
                     .map_err(internal)?;
                 outcome.invalid += 1;
             }
@@ -497,11 +521,12 @@ pub fn admit_prepared_envelope_tx(
     }
     transaction
         .prepare_cached(
-            "UPDATE replica_envelopes SET receipt_state=?4, validation_error=NULL, batch_id=?5
-             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+            /* sqlite-large-value: allow-for-now lv-h60b77d512cb4 owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state=?4, validation_error=NULL, batch_id=?5
+             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+                AND (receipt_state IS NOT ?4 OR validation_error IS NOT NULL OR batch_id IS NOT ?5)",
         )
         .map_err(internal)?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h545c74fd49cf owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![
             envelope.writer,
             envelope.sequence,
             envelope.hash,

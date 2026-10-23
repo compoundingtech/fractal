@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, type FractalClient } from '@fractal/client'
+import type * as Native from '@fractal/client/schema'
 
 // Node rendering exercises the real composition, not the CSS compiler.
 vi.mock('@stylexjs/stylex', () => ({
@@ -141,7 +141,7 @@ describe('gatewayPromptAnswers', () => {
         sent.push(request)
         return { value: { id: 'action/a', status: 'accepted', targets: [seat] }, snapshot }
       },
-    } as unknown as St3Client
+    } as unknown as FractalClient
     const port = gatewayPromptAnswers(client)
     const result = await port.respond({ alert: promptAlert as never, answer: '{"Which?":"Blue"}' })
     expect(sent).toHaveLength(1)
@@ -156,7 +156,7 @@ describe('gatewayPromptAnswers', () => {
       promptRespond: async () => {
         throw new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'stale-fence', message: 'that prompt is no longer waiting: it was answered or replaced', retryable: false, details: {} }, 422)
       },
-    } as unknown as St3Client)
+    } as unknown as FractalClient)
     expect(await gone.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
       _tag: 'Refused',
       detail: 'that prompt is no longer waiting: it was answered or replaced.',
@@ -167,7 +167,7 @@ describe('gatewayPromptAnswers', () => {
       const answered = gatewayPromptAnswers({
         capabilities: async () => capabilities(true),
         promptRespond: async () => ({ value: { id: 'action/b', status, targets: [seat] }, snapshot }),
-      } as unknown as St3Client)
+      } as unknown as FractalClient)
       expect((await answered.respond({ alert: promptAlert as never, answer: 'allow' }))._tag, status).toBe(tag)
     }
 
@@ -175,7 +175,7 @@ describe('gatewayPromptAnswers', () => {
     const ungranted = gatewayPromptAnswers({
       capabilities: async () => capabilities(false),
       promptRespond: async () => { called = true },
-    } as unknown as St3Client)
+    } as unknown as FractalClient)
     expect((await ungranted.respond({ alert: promptAlert as never, answer: 'allow' }))._tag).toBe('Refused')
     expect(called).toBe(false)
   })

@@ -1,8 +1,8 @@
-// What the Usage tab shows, as stui's Usage tab shows it (crates/stui/src/ui/usage.rs): each
+// What the Usage tab shows, as stui's Usage tab shows it (crates/fractal-tui/src/ui/usage.rs): each
 // account's spend and limits, a summary, then every group, the largest first. Row ids are the
 // subject a group names (agent/…, mission/…, step-run/…, machine/…) or account/…, model/… and
 // usage/no-… for what st has no subject for, so a detail screen can be opened by id alone.
-import type { UsageLimit, UsageRow } from '../../clients/typescript/st3-client';
+import type { UsageLimit, UsageRow } from '../../clients/typescript/fractal-client';
 
 export const BY = ['agent', 'mission', 'step', 'model', 'account', 'host'] as const;
 export type By = typeof BY[number];
