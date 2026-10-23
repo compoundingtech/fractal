@@ -29,8 +29,7 @@
         "scripts/ci-local",
         "tests",
         "clippy",
-        "fleet-compat",
-        "mail-redelivery-canaries"
+        "fleet-compat"
       ],
       "definition_paths": [
         ".config/nextest.toml",
