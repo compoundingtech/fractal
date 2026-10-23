@@ -832,7 +832,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
-        enforced = ('typescript-client',)
+        enforced = ('typescript-client', 'fractal-web')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
