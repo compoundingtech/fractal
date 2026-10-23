@@ -714,6 +714,13 @@ class StTest(unittest.TestCase):
         self.assertIn('/usr/bin', first.split(':'))
         self.assertEqual(len(set(first.split(':'))), len(first.split(':')))
 
+    def test_the_fixed_path_keeps_cargo_s_bin_because_the_clippy_ratchet_s_toolchain_string_depends_on_it(self):
+        (self.home / '.cargo/bin').mkdir(parents=True)
+        (self.home / '.local/bin').mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+            entries = st_test.check_path().split(':')
+        self.assertEqual(entries[:2], [str(self.home / '.local/bin'), str(self.home / '.cargo/bin')])
+
     def test_the_callers_path_is_kept_when_asked(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
