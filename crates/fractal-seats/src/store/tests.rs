@@ -1282,6 +1282,7 @@ agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
                 "claim",
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(actor.into()),
                     incarnation: Some(format!("{key}-incarnation")),
                     summary: None,
@@ -1630,6 +1631,7 @@ version 2
     );
     let request = |incarnation: &str, key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some(incarnation.into()),
         summary: None,
@@ -1640,6 +1642,7 @@ version 2
 
     let missing = WorkRequest {
         wait_ms: None,
+        wait_on: None,
         incarnation: None,
         ..request("one", "claim-without-incarnation")
     };

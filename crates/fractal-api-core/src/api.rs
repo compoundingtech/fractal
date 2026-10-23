@@ -2661,6 +2661,8 @@ fn client_work_values(
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
+                "waiting_on": work.waiting_on.as_ref().map(crate::store::describe_wait),
+                "waiting_since_unix_ms": work.waiting_on.as_ref().map(|wait| wait.since_unix_ms),
                 "execution_elapsed_ms": work.execution_elapsed_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,

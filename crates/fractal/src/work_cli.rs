@@ -322,7 +322,25 @@ pub(super) async fn run_work(
         WorkCommand::Wait(args) => {
             let actor = args.actor.context("a work wait needs explicit --as")?;
             reject_foreign_agent_actor(&actor)?;
-            let wait_ms = fractal_daemon::graph::parse_duration(&args.wait_for, true)?;
+            let wait_ms = args
+                .wait_for
+                .as_deref()
+                .map(|wait_for| fractal_daemon::graph::parse_duration(wait_for, true))
+                .transpose()?;
+            let reason = args
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty());
+            let summary = match (&args.on, reason) {
+                (Some(on), Some(reason)) => format!("Waiting on {}: {reason}.", on.trim()),
+                (Some(on), None) => format!("Waiting on {}.", on.trim()),
+                (None, reason) => format!(
+                    "Waiting for {}; the execution clock is stopped for at most {}.",
+                    reason.unwrap_or_default(),
+                    args.wait_for.as_deref().unwrap_or_default()
+                ),
+            };
             let subject = if args.subject.starts_with("step-run/") {
                 args.subject.clone()
             } else {
@@ -339,14 +357,11 @@ pub(super) async fn run_work(
                     &WorkRequest {
                         actor: Some(actor.clone()),
                         incarnation,
-                        summary: Some(format!(
-                            "Waiting for {}; the execution clock is stopped for at most {}.",
-                            args.reason.trim(),
-                            args.wait_for
-                        )),
-                        reason: Some(args.reason),
+                        summary: Some(summary),
+                        reason: args.reason.clone(),
                         evidence: Vec::new(),
-                        wait_ms: Some(wait_ms),
+                        wait_ms,
+                        wait_on: args.on.clone(),
                         idempotency_key: format!("work:wait:{subject}:{actor}:{nonce}"),
                     },
                 )
@@ -647,6 +662,7 @@ async fn post_work(
                 &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(actor.clone()),
                     incarnation,
                     summary: args.summary,

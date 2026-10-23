@@ -1138,6 +1138,7 @@ version 2
     }
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("worker-one".into()),
         summary: None,
@@ -2114,6 +2115,7 @@ version 2
                 action,
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: Some("the remote work is complete".into()),
@@ -2202,6 +2204,7 @@ fn worker_work(worker: &Store, step: &str, action: &str, summary: Option<&str>, 
             action,
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some("agent/worker.one".into()),
                 incarnation: Some("worker-generation".into()),
                 summary: summary.map(str::to_owned),
@@ -2220,6 +2223,7 @@ fn worker_extend(worker: &Store, step: &str) -> StepRunView {
             "extend",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some("agent/worker.one".into()),
                 incarnation: Some("worker-generation".into()),
                 summary: None,
@@ -3155,6 +3159,7 @@ fn quiet_renewals_preserve_the_shared_step_reason_and_projection_digest() {
         let (controller, worker, step) = replicated_step_pair();
         let request = |reason: Option<&str>, key: &str| WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/worker.one".into()),
             incarnation: Some("worker-generation".into()),
             summary: None, reason: reason.map(str::to_owned), evidence: Vec::new(),
@@ -4925,6 +4930,7 @@ version 2
 
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/source.worker".into()),
         incarnation: Some("worker-one".into()),
         summary: None,
@@ -5030,6 +5036,7 @@ mission "external-blocker" state="ready" {
     store.set_step_state(&subject, "ready", None).unwrap();
     let request = |key: &str, reason: Option<&str>| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/source.ios-owner".into()),
         incarnation: Some("ios-owner-one".into()),
         summary: None,
@@ -5417,6 +5424,7 @@ version 2
         .collect::<BTreeMap<_, _>>();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/source.worker".into()),
         incarnation: Some("worker-one".into()),
         summary: None,
@@ -5789,6 +5797,7 @@ fn operational_repair_closes_expired_claims_and_wake_contradictions() {
             "claim",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("worker-one".into()),
                 summary: None,
@@ -6157,6 +6166,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
         .unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.planner".into()),
         incarnation: Some("current".into()),
         summary: None,
@@ -6253,6 +6263,7 @@ mission "nested-work" state="ready" {
         .unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: None,
@@ -6328,6 +6339,7 @@ fn routine_lease_renewal_updates_local_projection_without_replica_envelope() {
     store.set_step_state(subject, "ready", None).unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: None,
@@ -6791,6 +6803,7 @@ mission "retry" state="ready" {
     let subject = &run.steps[0].subject;
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: None,
@@ -6929,6 +6942,7 @@ fn retention_expired_quiet_renewal_cannot_extend_a_released_lease() {
             "renew",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some("agent/worker.one".into()),
                 incarnation: Some("worker-generation".into()),
                 summary: None,
@@ -8182,6 +8196,7 @@ mission "summaries" state="ready" {
     let subject = &run.steps[0].subject;
     let request = |key: &str, summary: Option<&str>| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: summary.map(str::to_owned),
@@ -8409,6 +8424,7 @@ version 2
     store.set_step_state(&submitted, "ready", None).unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(worker.clone()),
         incarnation: Some("worker-one".into()),
         summary: Some("the result is ready for verification".into()),
@@ -8512,6 +8528,7 @@ version 2
     store.set_step_state(&active, "ready", None).unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(worker.clone()),
         incarnation: Some("worker-one".into()),
         summary: None,
@@ -8621,6 +8638,7 @@ version 2
     assert_eq!(carried.claim_incarnation.as_deref(), Some("worker-one"));
     let stranger = WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(format!("agent/{}/stranger", run.id)),
         ..request("stale-generation-complete")
     };
@@ -9545,6 +9563,7 @@ version 2
         .unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(worker.clone()),
         incarnation: Some("worker-one".into()),
         summary: None,
@@ -9554,6 +9573,7 @@ version 2
     };
     let child_request = |key: &str| WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("worker-one".into()),
         summary: None,
@@ -9776,6 +9796,7 @@ version 2
             "claim",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("worker-incarnation".into()),
                 summary: None,

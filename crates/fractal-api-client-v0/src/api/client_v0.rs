@@ -7783,6 +7783,7 @@ async fn dispatch_action(
                     action.trim_start_matches("work."),
                     &WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some(authority_actor.clone()),
                         incarnation: request.fence.runtime_incarnation.clone(),
                         summary: p.get("summary").and_then(Value::as_str).map(str::to_owned),
@@ -15456,6 +15457,7 @@ mission "example/steps" state="ready" {
             if run == 0 {
                 let request = |summary: Option<&str>, key: &str| crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: summary.map(str::to_owned),
@@ -15562,6 +15564,7 @@ mission "example/steps" state="ready" {
         // Renewing the operational lease does not prove the claimant made progress.
         state.store.work_action(&progressed.subject, "renew", &crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: progressed.claimant.clone(),
             incarnation: Some("builder-1".into()),
             summary: None,

@@ -4,6 +4,7 @@ use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
 use crate::SeatsStoreCore;
 use super::*;
+use crate::WatchesStore;
 
 /// Only a locally bound harness may recover a missing work fence from its own runtime.
 /// Explicit fences are retained so the action's validation can refuse stale callers.
@@ -528,6 +529,7 @@ pub async fn handoff_work(
     )?;
     let request = WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(input.actor.clone()),
         incarnation: input.incarnation.clone(),
         summary: Some(input.note.clone()),
@@ -561,7 +563,33 @@ pub async fn post_work_action(
         request.actor.as_deref(),
         &mut request.incarnation,
     )?;
-    work_action_response(state, action, subject, request, None, None).await
+    // A wait on a pull request sets the holder's watch first, so its wake cannot be missed; only
+    // the step's holder gets one, and a wait that is still refused ends the watch it set.
+    let mut watched = None;
+    if action == "wait"
+        && let Some(target) = request.wait_on.as_deref()
+        && let crate::store::WaitTarget::PullRequest(thread) =
+            crate::store::WaitTarget::parse(target, smallclaims::store::now_ms()).map_err(ApiError::bad)?
+    {
+        let actor = request.actor.clone().unwrap_or_default();
+        let store = state.store.clone();
+        let (step, holder, incarnation) =
+            (subject.clone(), actor.clone(), request.incarnation.clone());
+        blocking_action(move || store.check_work_holder(&step, &holder, incarnation.as_deref()))
+            .await?;
+        if github_watch::watch_for_wait(&state, &actor, &thread).await? {
+            watched = Some(thread.watch(&actor));
+        }
+    }
+    let response = work_action_response(state.clone(), action, subject, request, None, None).await;
+    if response.is_err()
+        && let Some(watch) = watched
+    {
+        let store = state.store.clone();
+        blocking_action(move || store.end_watch(&watch, "unwatched", None)).await?;
+        signal_changed(&state);
+    }
+    response
 }
 
 /// Add time to the execution budget of the step attempt this seat holds.
@@ -580,6 +608,7 @@ pub async fn extend_work(
     let extend_ms = request.by_ms;
     let request = WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: request.actor,
         incarnation: request.incarnation,
         summary: None,

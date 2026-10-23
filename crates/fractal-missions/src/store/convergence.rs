@@ -293,6 +293,7 @@ impl Simulation {
                                 work,
                                 &WorkRequest {
                                     wait_ms: None,
+                                    wait_on: None,
                                     actor: Some("agent/sim.worker".into()),
                                     incarnation: Some(format!("{name}-incarnation")),
                                     summary,

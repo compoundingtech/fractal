@@ -187,6 +187,7 @@ fn a_renewal_answers_what_the_writer_answered_when_it_enriched_the_view() {
             "extend",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 reason: Some("more to do".into()),
                 ..request("renewal-extend", None)
             },
@@ -241,6 +242,7 @@ fn a_renewal_answers_what_the_writer_answered_when_it_enriched_the_view() {
                 "renew",
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     incarnation: Some("old".into()),
                     ..request("parity-stale", None)
                 },

@@ -5589,6 +5589,7 @@ impl MissionsStore for Store {
             "release",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some(input.actor.clone()),
                 incarnation: input.incarnation.clone(),
                 summary: Some(input.note.clone()),
@@ -5632,27 +5633,36 @@ impl MissionsStore for Store {
                 "only an extension adds time",
             ));
         }
+        let wait_target = request
+            .wait_on
+            .as_deref()
+            .map(|target| WaitTarget::parse(target, now_ms()))
+            .transpose()?;
         if action == "wait" {
-            if !request
+            // A wait on a target may leave its length to the target: it stops the clock for
+            // what is left of the wait budget, or until a time target.
+            if !(request
                 .wait_ms
                 .is_some_and(|by| (1..=MAX_STEP_WAIT_MS).contains(&by))
+                || request.wait_ms.is_none() && wait_target.is_some())
             {
                 return Err(St3Error::new(
                     "invalid-wait",
                     "a wait stops the execution clock for between 1 millisecond and 12 hours",
                 ));
             }
-            if request
-                .reason
-                .as_deref()
-                .is_none_or(|reason| reason.trim().is_empty())
+            if wait_target.is_none()
+                && request
+                    .reason
+                    .as_deref()
+                    .is_none_or(|reason| reason.trim().is_empty())
             {
                 return Err(St3Error::new(
                     "wait-needs-reason",
-                    "a wait records what the step waits for; pass --reason",
+                    "a wait records what the step waits for; pass --on TARGET or --reason",
                 ));
             }
-        } else if request.wait_ms.is_some() {
+        } else if request.wait_ms.is_some() || wait_target.is_some() {
             return Err(St3Error::new(
                 "invalid-work-action",
                 "only a wait stops the execution clock",
@@ -5917,6 +5927,27 @@ impl MissionsStore for Store {
                     .clone()
                     .or_else(|| Some(requested_incarnation.to_owned()));
                 let actor_incarnation = effective_incarnation.clone();
+                if let Some(WaitTarget::Step(target)) = &wait_target {
+                    if *target == subject {
+                        return Err(St3Error::new(
+                            "invalid-wait-target",
+                            "a step cannot wait on itself",
+                        ));
+                    }
+                    let exists = transaction
+                        .prepare_cached("SELECT 1 FROM step_runs WHERE subject=?1")
+                        .and_then(|mut statement| statement.exists([target]))
+                        .map_err(internal)?;
+                    if !exists {
+                        return Err(St3Error::new(
+                            "invalid-wait-target",
+                            format!("there is no step `{target}`"),
+                        ));
+                    }
+                }
+                // How long this wait stops the clock; none when a target wait finds the budget
+                // spent, which still declares the wait.
+                let mut pause_ms = request.wait_ms.map(u128::from);
                 if action == "wait" {
                     // Waits draw on one budget per attempt, so a seat that keeps declaring them
                     // cannot hide a hung step from the execution timeout. The budget is time
@@ -5926,7 +5957,14 @@ impl MissionsStore for Store {
                         .map_err(internal)?
                         .waited;
                     let left = u128::from(MAX_STEP_WAIT_MS).saturating_sub(spent);
-                    if u128::from(request.wait_ms.unwrap_or_default()) > left {
+                    if pause_ms.is_none() {
+                        let until = wait_target
+                            .as_ref()
+                            .and_then(WaitTarget::until_unix_ms)
+                            .map_or(left, |until| until.saturating_sub(now).min(left));
+                        pause_ms = (until > 0).then_some(until);
+                    }
+                    if request.wait_ms.is_some_and(|wait_ms| u128::from(wait_ms) > left) {
                         return Err(St3Error::new(
                             "wait-budget-exhausted",
                             format!(
@@ -6055,10 +6093,16 @@ impl MissionsStore for Store {
                 }
                 match action {
                     "wait" => {
-                        body["fields"]["clock"] = json!("paused");
-                        body["fields"]["wait_until_unix_ms"] = json!(
-                            now.saturating_add(u128::from(request.wait_ms.unwrap_or_default()))
-                        );
+                        if let Some(pause_ms) = pause_ms {
+                            body["fields"]["clock"] = json!("paused");
+                            body["fields"]["wait_until_unix_ms"] =
+                                json!(now.saturating_add(pause_ms));
+                        } else {
+                            body["fields"]["clock"] = json!("running");
+                        }
+                        if let Some(target) = &wait_target {
+                            body["fields"]["wait_on"] = target.field();
+                        }
                     }
                     "resume" => body["fields"]["clock"] = json!("running"),
                     _ => {}

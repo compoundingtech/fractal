@@ -2957,6 +2957,7 @@ mission "reported-work" state="ready" {
     let seat = build.assigned_to.clone().unwrap();
     let request = |key: &str, summary: &str| fractal_daemon::model::WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(seat.clone()),
         incarnation: Some("reporter:1".into()),
         summary: Some(summary.into()),

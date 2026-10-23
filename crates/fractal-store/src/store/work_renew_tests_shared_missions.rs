@@ -10,6 +10,7 @@ pub struct Renewal {
 pub fn request(key: &str, summary: Option<&str>) -> WorkRequest {
     WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: summary.map(Into::into),

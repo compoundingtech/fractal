@@ -389,6 +389,7 @@ assert_eq!(
 source.set_write_clock_at(initial_time + 2_000).unwrap();
 let request = |key: &str| WorkRequest {
     wait_ms: None,
+    wait_on: None,
     actor: Some("person/operator".into()),
     incarnation: Some("date-control-worker".into()),
     summary: Some("The actual child work is complete.".into()),
