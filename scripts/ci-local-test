@@ -106,7 +106,9 @@ class CiLocal(unittest.TestCase):
                              (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
-        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
+            # Last, so cargo finds the dev shell's clippy before the rustup proxy there.
+            self.assertEqual(env['PATH'].split(':')[-1], f'{self.home}/.cargo/bin')
+        self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '12', 'a shared host: twelve test threads, not nproc')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
     def test_every_time_is_printed_and_each_stage_s_output_is_kept(self):
@@ -156,6 +158,20 @@ class CiLocal(unittest.TestCase):
         self.assertNotIn('run-20200100T000000Z-0', kept)  # the oldest went
         self.assertTrue(any(not name.startswith('run-2020') for name in kept))  # this run's
 
+    def test_the_tmpdir_is_in_ram_when_dev_shm_has_room_and_on_disk_otherwise(self):
+        if not (os.path.isdir('/dev/shm') and os.access('/dev/shm', os.W_OK)):
+            self.skipTest('no writable /dev/shm here')
+        for free_kb, root in ((30 * 1024 * 1024, '/dev/shm'), (19 * 1024 * 1024, '/var/tmp')):
+            with self.subTest(free_kb=free_kb):
+                (self.bin / 'df').write_text(f'#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "tmpfs 1 1 {free_kb} 1% /dev/shm"\n')
+                (self.bin / 'df').chmod(0o755)
+                self.log.unlink(missing_ok=True)
+                done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TMP_ROOT='')
+                self.assertEqual(done.returncode, 0, done.stderr)
+                tmpdir = Path(calls[-1]['env']['TMPDIR'])
+                self.assertEqual((str(tmpdir.parent), tmpdir.name[:3]), (root, 'cl.'))
+                self.assertFalse(tmpdir.exists(), 'removed when the run ends')
+
     def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -199,7 +215,7 @@ class CiLocal(unittest.TestCase):
         (self.devshell / 'cargo').unlink()
         self.log.unlink()
         # The tools the script needs, from directories that hold no cargo.
-        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'touch', 'env', 'python3')}
+        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'chmod', 'grep', 'touch', 'env', 'python3')}
         tools = [entry for entry in sorted(tools) if not (Path(entry) / 'cargo').exists()]
         done, calls = self.run_local('mail-redelivery-canaries', PATH=':'.join([str(self.bin), f'{self.home}/.local/bin', *tools]))
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)

@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
+    let plan = OperationalRepairPlan {
+        api_version: "st3.operational-repair.v0".into(),
+        token: format!("orpv0:{}", "0".repeat(64)),
+        snapshot_index: 0,
+        status: "clean".into(),
+        items: Vec::new(),
+    };
+    assert!(validate_repair_plan_filters(&plan, &[], &[]).is_ok());
+    assert!(validate_repair_plan_filters(&plan, &["agent/example-first".into()], &[]).is_err());
+    assert!(validate_repair_plan_filters(&plan, &[], &["revoked-legacy-runtime-start".into()]).is_err());
+}
+
+#[test]
+fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
+    let cli = Cli::try_parse_from([
+        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
+    ]).unwrap();
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+        panic!("expected filtered repair dry-run");
+    };
+    assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
+    assert_eq!(classes, ["revoked-legacy-runtime-start"]);
+    let path = repair_plan_path(&subjects, &classes).unwrap();
+    assert!(path.contains(&format!("subjects={}",
+        urlencoding::encode(r#"["agent/example-first","agent/example-second"]"#))));
+    assert!(path.contains(&format!("classes={}",
+        urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
+    assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
     assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([
