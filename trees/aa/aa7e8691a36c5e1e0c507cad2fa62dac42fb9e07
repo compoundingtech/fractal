@@ -10,3 +10,4 @@ record d2ec3375589cb368e7a4608fe5850f16ba1f4994 mail-redelivery-canaries 0 fleet
 record e41d757a17f62cea431c00dd65839b77388caabb linux-tests-shard-3 0 fleet/ci 2026-10-23T18:55:18Z
 record f49bc6819535f958d9e0d8afc7f0a09b2a944e69 isolation-vm 0 fleet/ci 2026-10-23T18:52:36Z
 record 3dcc91ad4a190db0996cb24ee1f307516017670a typescript-client 0 host/anvil 2026-10-23T19:17:31Z
+record 525f558d82ffb7125d46c2c535461ad48cfbbbca genie-freshness 0 host/anvil 2026-10-23T19:21:45Z
