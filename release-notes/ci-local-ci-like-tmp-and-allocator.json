@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local (the local Linux gate stages st-test signs) gives the stages a CI-like temporary directory and allocator: the scratch and TMPDIR are on the account's disk under ~/.cache/ci-local instead of the dev shell's /tmp, and LD_PRELOAD is dropped. A full local linux-gate on main failed before this on both build hosts (a /tmp tmpfs too small for the checkpoint tests, a stray /tmp/.git, a preloaded jemalloc).",
+  "replay": {
+    "status": "none",
+    "detail": "scripts/ci-local's environment for the Linux gate stages only; no protocol, schema, policy or workflow change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "scripts/ci-local's environment for the Linux gate stages only; no protocol, schema, policy or workflow change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "scripts/ci-local's environment for the Linux gate stages only; no protocol, schema, policy or workflow change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "scripts/ci-local's environment for the Linux gate stages only; no protocol, schema, policy or workflow change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "scripts/ci-local's environment for the Linux gate stages only; no protocol, schema, policy or workflow change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None. The scratch needs the free space the tests need (about 20 GB at peak) on the account's disk."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "CI_LOCAL_SCRATCH_ROOT names another scratch root; reverting restores the old environment."
+  }
+}

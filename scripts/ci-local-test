@@ -68,7 +68,7 @@ class CiLocal(unittest.TestCase):
         return done, calls
 
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
-        done, calls = self.run_local('mail-redelivery-canaries')
+        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls],
                          [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install'], [], ['mail-redelivery-canaries']])
@@ -77,8 +77,12 @@ class CiLocal(unittest.TestCase):
             scratch = Path(env['HOME'])
             self.assertNotEqual(scratch, self.home)
             self.assertTrue(str(scratch).startswith(self.tmp.name), scratch)
-            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
+            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'TMPDIR'):
                 self.assertTrue(env[name].startswith(str(scratch.parent)), (name, env[name]))
+            # The scratch and the stages' TMPDIR are on the account's disk, never the caller's TMPDIR (a dev shell's, under /tmp).
+            self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/run.'), scratch)
+            self.assertEqual(env['TMPDIR'], str(scratch.parent / 'tmp'))
+            self.assertNotIn('LD_PRELOAD', env)  # a host's preloaded allocator: CI preloads nothing
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
                          'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
@@ -91,7 +95,7 @@ class CiLocal(unittest.TestCase):
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
         self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
-        self.assertEqual(list(Path(self.tmp.name).glob('ci-local.*')), [], 'the scratch home is removed afterwards')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
     def test_ci_local_cargo_names_the_cargo_and_without_a_dev_shell_cargo_nothing_runs(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_CARGO='/chosen/cargo')
