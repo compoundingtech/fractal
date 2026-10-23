@@ -502,8 +502,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
 ENFORCED = ('typescript-client',)
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries', 'linux-gate'})
-HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries', 'linux-gate'})
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries', 'linux-gate', 'fractal-web'})
+HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries', 'linux-gate', 'fractal-web'})
 
 
 def policy_text(**overrides):
@@ -1482,8 +1482,14 @@ class CommittedPolicy(unittest.TestCase):
         # job, which passes without running the lane when no web path changed against that run's base, so it is no evidence.
         web = self.rules('fractal-web')
         self.assertEqual(sorted(web['kinds']), ['wrapper'])
-        self.assertIsNone(web['kinds']['wrapper']['trust_levels'])
-        self.assertEqual(web['kinds']['wrapper']['by_level'], {})
+        self.assertEqual(web['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent'))
+        # A host or agent note is one local run of every kit play and app test (scripts/ci-local-web), recorded as one shard of a
+        # pull request, so the shard-count and input-order rules below apply to it as to CI's.
+        host = web['kinds']['wrapper']['by_level']['host']
+        self.assertEqual(list(host['command']), ['nix', 'develop', '.#web', '-c', 'bash', 'scripts/ci-local-web'])
+        self.assertEqual(sorted(host['required_inputs']), sorted([
+            'attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256',
+            'app_test_set', 'kit_inputs', 'kit_play_set', 'kit_shard_count', 'shard_results', 'event_name']))
         self.assertEqual(web['kinds']['wrapper']['command'], ['fractal-web', 'aggregate', 'fractal-web', 'fractal-web-changes', 'fractal-web-execution'])
         self.assertEqual(web['kinds']['wrapper']['required_inputs'], sorted([
             'attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256',
