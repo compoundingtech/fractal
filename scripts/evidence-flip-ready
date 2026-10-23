@@ -161,6 +161,17 @@ def skipped_members(workflow, policy):
     return members
 
 
+def lines_of(github, job):
+    """A gate job's decision lines. A job cancelled before it wrote a log (a push replaced its run) has none: GitHub answers 404 for
+    its log, which is not a failure to read but the absence of a decision. Every other job's log must be read."""
+    try:
+        return github.decision_lines(job['id'])
+    except Unreadable:
+        if job.get('conclusion') == 'cancelled':
+            return []
+        raise
+
+
 def collect(github, checks, since, until, members):
     """One row per gate job that printed a line for a known check: the run, its creation time, the line's fields and
     the conclusion of the check's own job in the same attempt."""
@@ -186,7 +197,7 @@ def collect(github, checks, since, until, members):
                            superseded(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()),
                                       newer)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        logs = list(pool.map(lambda item: github.decision_lines(item[1]['id']), wanted))
+        logs = list(pool.map(lambda item: lines_of(github, item[1]), wanted))
     rows = []
     for (run, job, check, conclusion, members_red, was_superseded), lines in zip(wanted, logs):
         for text in lines:
@@ -416,8 +427,10 @@ def flip_doc(text, check, entry, today):
     for i in table[2:]:
         cells = [cell.strip() for cell in lines[i].strip('|').split('|')]
         names = [part.strip() for part in cells[0].split(',')]
-        if name in names and len(cells) == 5 and cells[1] == 'false':
-            row, rest = i, [part for part in names if part != name]
+        # A name may carry a note after it: "`fractal-web` (whole-check note; ...)". The note moves with the name.
+        mine = [part for part in names if part == name or part.startswith(name + ' (')]
+        if mine and len(cells) == 5 and cells[1] == 'false':
+            row, rest, name = i, [part for part in names if part not in mine], mine[0]
     if row is None:
         raise ValueError(f'{DOC}: {check} is not in a row of the table with enforce false')
     cells = [cell.strip() for cell in lines[row].strip('|').split('|')]

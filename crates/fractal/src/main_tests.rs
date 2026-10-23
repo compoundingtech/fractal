@@ -2599,6 +2599,7 @@ fn fixture_product_page(kinds: &[&str], has_more: bool) -> ClientPage {
             has_more,
             next_cursor: has_more.then(|| "cursor/next".into()),
             cursor_expires_at: None,
+            omitted_items: None,
         },
         sync: None,
         replicated: None,

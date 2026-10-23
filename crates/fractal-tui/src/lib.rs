@@ -211,45 +211,7 @@ fn watch_terminal_hangup() {
     });
 }
 fn agent_label(agent: &fractal_client::Agent) -> String {
-    let slug = agent.name.rsplit('/').next().unwrap_or(&agent.name);
-    // `st agents new NAME` names a seat HOST.NAME; the host shows beside it, so the label is
-    // NAME ("harbor.image-sorter" reads as Image Sorter).
-    let host = agent
-        .host_id
-        .as_deref()
-        .map(|host| host.trim_start_matches("host/"));
-    let slug = host
-        .and_then(|host| {
-            slug.split_once('.')
-                .filter(|(prefix, rest)| prefix.eq_ignore_ascii_case(host) && !rest.is_empty())
-        })
-        .map_or(slug, |(_, rest)| rest);
-    let label = |slug: &str| {
-        slug.split('-')
-            .map(|word| match word.to_ascii_lowercase().as_str() {
-                "st3" => "ST".to_string(),
-                "cos" => "COS".to_string(),
-                "ios" => "iOS".to_string(),
-                "tui" => "TUI".to_string(),
-                "pty" => "PTY".to_string(),
-                "omp" => "OMP".to_string(),
-                _ => {
-                    let mut chars = word.chars();
-                    chars
-                        .next()
-                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                        .unwrap_or_default()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    if slug.eq_ignore_ascii_case("omp") {
-        if let Some(parent) = agent.name.rsplit('/').nth(1) {
-            return format!("{} · OMP", label(parent));
-        }
-    }
-    label(slug)
+    fractal_ui_model::agents::label(&agent.name, agent.host_id.as_deref())
 }
 fn key_input(key: KeyEvent) -> Option<String> {
     match key.code {
@@ -577,6 +539,7 @@ async fn act_on_card(
                     idem,
                     fence,
                     fractal_client::PromptRespondParameters {
+                        delegation: None,
                         target_id: source,
                         episode: attention.episode.clone(),
                         answer,
@@ -737,11 +700,12 @@ pub struct Args {
     #[arg(skip)]
     playback: Option<ui::playback::Playback>,
     /// Open a named space instead of the last space used on this device.
-    #[arg(long, alias = "glass", conflicts_with = "classic")]
+    #[arg(long, alias = "glass")]
     pub space: Option<String>,
-    /// Use the layout from before spaces.
-    #[arg(long)]
-    pub classic: bool,
+    /// The layout from before spaces is gone. The flag stays hidden so an old script that
+    /// passes it is told what to run instead of failing to parse.
+    #[arg(long, hide = true)]
+    classic: bool,
     /// Show invented data without connecting to a daemon.
     #[arg(long)]
     pub demo: bool,
@@ -829,7 +793,6 @@ impl Args {
     fn render_args(&self) -> Vec<String> {
         let mut args = vec!["st ui".to_owned()];
         for (enabled, flag) in [
-            (self.classic, "--classic"),
             (self.demo, "--demo"),
             (self.local, "--local"),
             (self.client, "--client"),
@@ -856,6 +819,10 @@ impl Args {
         args
     }
 }
+
+/// What `st ui --classic` says now that spaces are stui's only layout.
+const CLASSIC_GONE: &str =
+    "The classic layout is gone: run plain `st ui`, or `st ui --space NAME` to open a named space";
 
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
@@ -900,7 +867,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             Ok(())
         }
         Some(Answer::NotShown) => anyhow::bail!(
-            "{} was not opened: that terminal interface uses the classic layout, or the person is typing or asked to keep their focus. Ask again without --keep-focus when they are not typing",
+            "{} was not opened: that terminal interface could not show it without moving the person's focus. Ask again without --keep-focus when they are not typing",
             open.subject
         ),
         Some(Answer::NotFound) => anyhow::bail!(
@@ -922,6 +889,7 @@ pub fn run(mut options: Args) -> Result<()> {
     if let Some(Action::Open(open)) = options.action.take() {
         return open_in_terminal_ui(&open);
     }
+    anyhow::ensure!(!options.classic, CLASSIC_GONE);
     let process_started = std::time::Instant::now();
     if options.slo {
         ui::slo::print_history();
@@ -1017,9 +985,9 @@ pub fn run(mut options: Args) -> Result<()> {
     runtime.spawn(feed::run_members_with_sidebar(
         clients,
         profile.is_some(),
-        ui::glass_request(&args).is_some(),
+        true,
         false,
-        ui::glass_request(&args).is_some().then(|| person.clone()).flatten(),
+        person.clone(),
         updates,
         command_receiver,
     ));
@@ -1035,7 +1003,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person: person.unwrap_or_default(),
         cache_path,
         cached,
-        glass: ui::glass_request(&args),
+        space: ui::space_request(&args),
         open_timing,
         process_started,
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
@@ -1049,6 +1017,20 @@ pub fn run(mut options: Args) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn the_classic_layout_is_refused_with_what_to_run_instead() {
+        let error = run(Args {
+            classic: true,
+            ..Args::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("plain `st ui`") && error.contains("`st ui --space NAME`"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {

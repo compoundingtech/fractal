@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scripts/evidence-flip-ready on fixture decision lines (no network): each part of the flip trigger, the log cache, and the
 --propose path against a temporary copy of the repository with `gh` stubbed."""
+import ast
 import contextlib
 import datetime
 import importlib.machinery
@@ -52,9 +53,10 @@ class FakeGitHub:
         self.runs, self.jobs, self.logs, self.calls, self.open_prs, self.broken = [], {}, {}, [], [], False
         self.empty_window = 0  # the created= listing answers an empty page this many times (True: always)
         self.short_window = 0  # ... or a page one run short of its total_count
+        self.missing_logs = set()
 
     def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None, actor='otter-bot', base=None,
-            conclusion='success', branch=None, sha=None, ended=None):
+            conclusion='success', branch=None, sha=None, ended=None, gate='success', no_log=False):
         """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
         of other jobs in the same attempt (an aggregate's members)."""
         if run_id not in self.jobs:
@@ -64,7 +66,9 @@ class FakeGitHub:
                               'head_sha': sha or f'{run_id:040x}'})
             self.jobs[run_id] = []
         job_id = run_id * 100 + len(self.jobs[run_id])
-        self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt})
+        self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': gate, 'run_attempt': attempt})
+        if no_log:  # GitHub keeps no log for it: its log URL answers 404
+            self.missing_logs.add(job_id)
         if real:
             self.jobs[run_id].append({'id': job_id + 50, 'name': check, 'status': 'completed', 'conclusion': real, 'run_attempt': attempt})
         for offset, (name, conclusion) in enumerate((members or {}).items()):
@@ -93,6 +97,8 @@ class FakeGitHub:
                 self.short_window -= 1  # ... or one run short
                 listed = listed[1:]
             return subprocess.CompletedProcess(command, 0, json.dumps({'total_count': len(self.runs), 'workflow_runs': listed}).encode(), b'')
+        elif path.endswith('/logs') and int(path.split('/')[-2]) in self.missing_logs:
+            return subprocess.CompletedProcess(command, 1, b'', b'gh: HTTP 404')
         elif path.endswith('/logs'):
             return subprocess.CompletedProcess(command, 0, self.logs[int(path.split('/')[-2])].encode(), b'')
         else:
@@ -361,6 +367,28 @@ class FlipReady(unittest.TestCase):
         entry = run({'linux-tests': 'cancelled', 'linux-clippy': 'failure'})  # a member the skip would skip failed
         self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([], [8000], ['1 runs with a hidden red']))
 
+    def test_a_cancelled_gate_job_without_a_log_has_no_decision_and_any_other_missing_log_is_unreadable(self):
+        # Run 39919725399: a push replaced the run while its gates were starting; GitHub answers 404 for those cancelled jobs' logs.
+        self.ready_history(count=40)
+        before = self.check()
+        self.gh.run(9500, at(1), [], gate='cancelled', no_log=True, conclusion='cancelled')
+        entry = self.check()
+        self.assertEqual((entry['ready'], entry['lines'], entry['why_not']), (True, before['lines'], []))
+        self.gh.run(9501, at(1), [], no_log=True)  # a finished gate whose log cannot be read: never taken as no decision
+        code, result, _ = self.report()
+        self.assertEqual((code, result), (2, None))
+        self.assertIn('could not read GitHub', self.err)
+
+    def test_a_doc_row_name_may_carry_a_note_that_moves_with_it(self):
+        text = (f'{flip.DOC_SECTION}\n\n| Check | `enforce` | `events` | `sample_one_in` | Since |\n| --- | --- | --- | --- | --- |\n'
+                '| `typescript-client` | true | `pull_request` | 5 | this change |\n'
+                '| `web` (whole-check note; one shard never counts) | false | - | 5 | - |\n\nAfter.\n')
+        flipped = flip.flip_doc(text, 'web', {'events': ['pull_request'], 'sample_one_in': 5}, '2026-10-23')
+        self.assertIn('| `web` (whole-check note; one shard never counts) | true | `pull_request` | 5 | 2026-10-23 |\n', flipped)
+        self.assertNotIn('| false |', flipped)
+        with self.assertRaises(ValueError):
+            flip.flip_doc(text, 'we', {'events': ['pull_request'], 'sample_one_in': 5}, '2026-10-23')  # a prefix is not a name
+
     def test_job_logs_are_cached_by_job_id_and_template_lines_are_ignored(self):
         self.ready_history(count=31)
         self.assertTrue(self.check()['ready'])
@@ -441,8 +469,10 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(policy, before)  # nothing else changed
         self.assertIn(f'| `{CHECK}` | true | `pull_request` | 5 | 2026-10-22 |\n', files[flip.DOC])
         self.assertIn('| `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |\n', files[flip.DOC])
-        self.assertIn("enforced = ('typescript-client', 'genie-freshness')\n", files['scripts/ci-evidence-gate-test'])
-        self.assertIn("ENFORCED = ('typescript-client', 'genie-freshness')\n", files['scripts/evidence-verify-test'])
+        # The check is appended to each pinned tuple as it stands (it grows with every flip).
+        for path, name in flip.TEST_LISTS:
+            current = ast.literal_eval(re.search(r'^ *' + name + r' = (\(.*\))$', (ROOT / path).read_text(), re.M).group(1))
+            self.assertIn(f'{name} = {current + (CHECK,)!r}\n', files[path])
         notes_loader = importlib.machinery.SourceFileLoader('release_notes', str(ROOT / 'scripts/release_notes.py'))
         notes = importlib.util.module_from_spec(importlib.util.spec_from_loader(notes_loader.name, notes_loader))
         notes_loader.exec_module(notes)

@@ -187,6 +187,7 @@ pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
 
 pub mod adhoc_work;
+pub mod attention_history;
 pub mod attention_snapshot;
 pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
@@ -212,6 +213,8 @@ pub mod database_size;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
+mod slo_breaches;
+pub use slo_breaches::{PreparedSloMission, Check as SloCheck, Observation as SloObservation, HealthyWitness as SloHealthyWitness};
 
 pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
@@ -5052,18 +5055,7 @@ impl Store {
     ) -> Result<Option<(DesiredSubject, Option<String>)>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT desired.subject, desired.kind, desired.body, desired.member,
-                        desired.owner_run, desired.owner_generation, desired.owner_step,
-                        claims.actor
-                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
-                 WHERE desired.subject = ?1",
-                [subject],
-                |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
-            )
-            .optional()
-            .map_err(Into::into)
+        desired_subject_with_writer_at(&connection, subject)
     }
 
     /// Among `subjects`, each declaration whose member this build cannot read, with the reason.
@@ -5744,6 +5736,9 @@ impl Store {
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
         smallclaims::touched::note_read(|| subject.to_owned());
+        if subject.starts_with("resource/slo-breach/") {
+            return slo_breaches::fact(&self.readers.get(), subject);
+        }
         let connection = self.readers.get();
         // The actual state folds only this subject's append-only claims, so the subject's newest
         // claim identifies it. A write elsewhere in the graph must not make every reconcile pass
@@ -5889,7 +5884,8 @@ impl Store {
     fn simple_replication_kind(kind: &str) -> bool {
         matches!(
             kind,
-            "lane.approved"
+            "slo.breach-transition"
+                | "lane.approved"
                 | "arrangement.edited"
                 | "lane.joined"
                 | "lane.left"
@@ -9527,6 +9523,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::slo_breaches::validate_claim(subject, kind, body, origin, actor)
+        .map_err(anyhow::Error::msg)?;
     fractal_schema::accountable::validate_claim(subject, kind, body, actor).map_err(anyhow::Error::new)?;
     fractal_schema::owned_terminals::validate_declaration_owner(subject, kind, actor)
         .map_err(anyhow::Error::new)?;
@@ -9541,6 +9539,9 @@ pub fn append_claim_tx_with_assistant_answer(
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
         || (kind == "work.person-done" && actor.is_some_and(|actor| actor.starts_with("agent/")))
+        || (kind == "harness.diagnostic"
+            && fields.get("code") == Some(&json!("native-prompt-answered"))
+            && actor.is_some_and(|actor| actor.starts_with("agent/")))
     {
         let evidence = serde_json::from_value::<Vec<String>>(
             body.get("evidence").cloned().unwrap_or_else(|| json!([])),
@@ -9816,10 +9817,13 @@ fn event_tail_sql(migrating: bool) -> &'static str {
 pub /* sqlite-large-value-flow: allow-for-now flow-hae49bfcdc951 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ fn insert_event(
     transaction: &Transaction<'_>,
     store_index: u64,
-    _kind: &str,
+    kind: &str,
     subject: &str,
     _body: &Value,
 ) -> Result<()> {
+    if kind == fractal_schema::slo_breaches::KIND {
+        slo_breaches::project_index(transaction, store_index)?;
+    }
     if subject.starts_with("glass/") {
         return Ok(());
     }
@@ -10173,6 +10177,9 @@ pub fn latest_actual_at(
     at_index: Option<u64>,
 ) -> Result<Option<Value>> {
     let at_index = at_index.unwrap_or(i64::MAX as u64);
+    if subject.starts_with("resource/slo-breach/") && at_index == i64::MAX as u64 {
+        return slo_breaches::fact(connection, subject);
+    }
     if subject.starts_with("arrangement/") {
         return arrangements::arrangement_at(connection, subject, at_index);
     }
@@ -11409,6 +11416,108 @@ pub fn mission_definition_token_tx(
         .optional()?
         .into_iter()
         .collect())
+}
+
+fn desired_subject_with_writer_at(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<(DesiredSubject, Option<String>)>> {
+    smallclaims::touched::note_read(|| subject.to_owned());
+    connection
+        .query_row(
+            "SELECT desired.subject, desired.kind, desired.body, desired.member,
+                        desired.owner_run, desired.owner_generation, desired.owner_step,
+                        claims.actor
+                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
+                 WHERE desired.subject = ?1",
+            [subject],
+            |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+/// The new writer's ownership lookup stays on its transaction. Its requester
+/// query uses the same authoritative header join as the existing public view.
+pub fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    agent_person_walk(
+        agent,
+        |subject| desired_subject_with_writer_at(connection, subject),
+        |run| {
+            smallclaims::touched::note_read(|| {
+                format!(
+                    "mission-run/{}",
+                    run.strip_prefix("mission-run/").unwrap_or(run)
+                )
+            });
+            connection
+                    .query_row(
+                        // Match mission_run_header_tx's current-generation join: a
+                        // header with no generation has no requester to follow.
+                        "SELECT mission_runs.requester FROM mission_runs
+                         JOIN run_generations ON run_generations.id=mission_runs.current_generation_id
+                         WHERE mission_runs.id=?1",
+                        [run.strip_prefix("mission-run/").unwrap_or(run)],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional().map_err(Into::into)
+        },
+    )
+}
+
+/// One bounded ownership precedence/cycle walk. Public reads retain their original
+/// full-view resolver; writer admission supplies its same-transaction resolver.
+fn agent_person_walk<D, R>(
+    agent: &str,
+    mut lookup_desired: D,
+    mut lookup_requester: R,
+) -> Result<Option<String>>
+where
+    D: FnMut(&str) -> Result<Option<(DesiredSubject, Option<String>)>>,
+    R: FnMut(&str) -> Result<Option<String>>,
+{
+    let mut actor = agent.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..16 {
+        if actor.starts_with("person/") {
+            return Ok(Some(actor));
+        }
+        if !seen.insert(actor.clone()) {
+            return Ok(None);
+        }
+        let Some((desired, writer)) = lookup_desired(&actor)? else {
+            return Ok(None);
+        };
+        if actor == agent {
+            let owner = match crate::accounts::harness_binding(&desired.desired)
+                .map(|binding| binding.binding)
+            {
+                Some(crate::accounts::Binding::Pool(person)) => Some(person),
+                Some(crate::accounts::Binding::Account(account)) => {
+                    lookup_desired(&format!("account/{account}"))?
+                        .and_then(|(account, _)| {
+                            crate::accounts::parse_account(&account.subject, &account.desired)
+                        })
+                        .and_then(|account| account.owner)
+                }
+                None => None,
+            };
+            if let Some(owner) = owner.filter(|owner| owner.starts_with("person/")) {
+                return Ok(Some(owner));
+            }
+        }
+        let requester = desired
+            .owner_run
+            .as_deref()
+            .map(&mut lookup_requester)
+            .transpose()?
+            .flatten();
+        let Some(next) = requester.or(writer) else {
+            return Ok(None);
+        };
+        actor = next;
+    }
+    Ok(None)
 }
 
 pub fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
@@ -13598,6 +13707,8 @@ pub fn classify_replicated_claim_with_registry(
         ));
     }
     assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), claim.body.get("fields").unwrap_or(&claim.body))?;
+    fractal_schema::slo_breaches::validate_claim(&claim.subject, &claim.kind, &claim.body,
+        &claim.origin, claim.actor.as_deref()).map_err(|message| St3Error::new("invalid-replicated-claim", message))?;
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     fractal_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
@@ -15143,6 +15254,7 @@ fn replay_graph_from_nothing_with_progress_tx(
             total: None,
         })
     };
+    slo_breaches::rebuild(transaction).map_err(internal)?;
     stage("full-replay/mission-runs");
     project_replicated_mission_runs(transaction)?;
     for replay in projectors::GRAPH_REPLAY {
@@ -18456,6 +18568,13 @@ pub fn apply_effective_step_state_with_owner(
             view.claim_expires_at_unix_ms = None;
         }
     }
+    if view.status == "ready" && view.step == "fix"
+        && !slo_breaches::execution_admitted(connection, &view.run)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+    {
+        view.status = "pending".into();
+        view.blocked_reason = Some("this SLO episode has no positive execution-admission receipt".into());
+    }
     Ok(())
 }
 
@@ -20368,6 +20487,9 @@ pub fn append_latest_observation_publication(
 
 /// Shared tables the projection digest covers, with the columns each leaves out.
 const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
+    ("slo_episode_events", &[]),
+    ("slo_episode_heads", &[]),
+    ("slo_pending", &[]),
     ("operations", &[]),
     ("blobs", &[]),
     ("documents", &["created_index"]),

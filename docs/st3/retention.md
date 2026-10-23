@@ -108,6 +108,11 @@ cargo run --release -p fractal --example retention_plan -- /private/dir/clone.sq
 It opens and migrates the clone, so never point it at a live store or at the copy you keep. Two
 builds that plan the same clone with the same rules report the same digests.
 
+SLO breach transitions keep the onset, dispatch, owner and recovery fences. A checkpoint
+can compact only redundant receipts after the episode's recovery is at least seven days
+old and existing reference/envelope guards permit it. The minimum claim id of each event
+and a differing-body conflict witness remain, so replay preserves both idempotence and
+UNKNOWN conflict states. Ordinary mission and active fix history retain their own rules.
 ## Giving space back
 
 A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A

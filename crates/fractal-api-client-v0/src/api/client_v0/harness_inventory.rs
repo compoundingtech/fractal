@@ -155,7 +155,7 @@ fn local_read(state: &AppState, actor: &str, agent: &str, mut query: HarnessInve
         status: "unsupported".into(), coverage: "none".into(), full_inventory: false,
         reason: Some("this harness has no observed native inventory source".into()),
         observed_at: snapshot.as_ref().map(|snapshot| snapshot.observed_at.clone()), items: Vec::new(),
-        page: PageInfo { limit, has_more: false, next_cursor: None, cursor_expires_at: None },
+        page: PageInfo { limit, has_more: false, next_cursor: None, cursor_expires_at: None, omitted_items: None },
     };
     let Some(snapshot) = snapshot else {
         if encoded.is_some() { return Err(client_page_expired("native inventory source changed")); }

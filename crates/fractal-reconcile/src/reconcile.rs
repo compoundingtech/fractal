@@ -1337,6 +1337,10 @@ pub fn overlay_runtime_environment(
     crate::environment::normalize_aliases(member);
     let mut runtime = runtime.clone();
     crate::environment::normalize_aliases(&mut runtime);
+    // This install choice ALWAYS overrides inherited/declaration values, including off.
+    let primary = fractal_drivers::claude_process::ENFORCEMENT_ENV;
+    let choice = runtime.get(primary).cloned().unwrap_or_else(|| "0".into());
+    crate::environment::set(member, primary, choice);
     for (key, value) in runtime {
         if matches!(key.as_str(), "ST_ACCESS_MODE" | "FRACTAL_ACCESS_MODE"
             | "ST_CODEX_ASKS" | "FRACTAL_CODEX_ASKS")
@@ -1366,6 +1370,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         if asks {
             self.runtime_environment.insert(fractal_drivers::access::CODEX_ASKS_ENV.into(), "1".into());
         }
+        self
+    }
+
+    /// Install-wide opt-in for future Claude claims. Off is emitted too, so declarations
+    /// and inherited environment cannot turn enforcement on for a default-off install.
+    pub fn with_claude_primary_ownership(mut self, enabled: bool) -> Self {
+        self.runtime_environment.insert(fractal_drivers::claude_process::ENFORCEMENT_ENV.into(),
+            if enabled { "1" } else { "0" }.into());
         self
     }
 
@@ -7969,7 +7981,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     "{}",
                     result.body["fields"]["reason"]
                         .as_str()
-                        .unwrap_or("the explicit restart failed and the seat is parked")
+                        .unwrap_or("the requested restart failed and the seat is parked")
                 );
             }
             return Ok(false);
@@ -8103,7 +8115,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             == observation.incarnation_id.as_deref()
                             && harness.is_ready()
                     })
-                    || (request.body["fields"]["operation"] == "claude-channel-recovery"
+                    || (channel_recovery::automatic_request(&request)
                         && !self.store.claude_channel_attached(
                             &subject.subject,
                             observation.incarnation_id.as_deref().unwrap(),
@@ -8145,6 +8157,29 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &format!("restart blocked: {error:#}"),
                 );
             }
+            // Recheck at the physical automatic-stop boundary, not only in the earlier
+            // recovery pass. A secondary's failure or an old request must never stop a live
+            // authenticated primary. Manual/required deployment intent keeps its old path.
+            if channel_recovery::automatic_request(&request)
+                && observation.incarnation_id.as_deref().is_some_and(|incarnation|
+                    crate::delivery_presence::claude_channel_proof_pending(&self.store, &subject.subject, incarnation)) {
+                return Ok(false); // Unknown proof cannot authorize a physical automatic stop.
+            }
+            if channel_recovery::automatic_request(&request)
+                && observation.incarnation_id.as_deref().is_some_and(|incarnation|
+                    crate::delivery_presence::claude_channel_attached(&self.store, &subject.subject, incarnation)) {
+                self.store.append_claim(&ClaimInput {
+                    subject: subject.subject.clone(), kind: "runtime.action.succeeded".into(),
+                    actor: request.actor.clone(), fields: BTreeMap::from([
+                        ("action".into(),serde_json::json!("restart")),
+                        ("incarnation_id".into(),serde_json::json!(observation.incarnation_id)),
+                        ("reason".into(),serde_json::json!("the authenticated primary channel attached before automatic stop; the current incarnation is retained")),
+                    ]), evidence: vec![request.id.clone()], expected_subject:None,
+                    idempotency_key:Some(completion),
+                })?;
+                self.signal_changed();
+                return Ok(false);
+            }
             // A self-restart that waited for its idle, quiescent boundary was asked for by the
             // seat itself. Asking it to prepare now would wake it into a new turn at that boundary.
             let quiesced = self
@@ -8157,8 +8192,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &subject.subject,
                     observation,
                     &request.id,
-                    "a restart was requested",
-                )?
+                    if channel_recovery::automatic_request(&request) {
+                        "automatic Claude channel recovery requested a restart"
+                    } else {
+                        "a restart was requested"
+                    },
+                        )?
             {
                 return Ok(true);
             }
@@ -8192,13 +8231,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 member,
                 &request,
-                "the explicit launch attempt was interrupted before its result was recorded",
+                if channel_recovery::automatic_request(&request) {
+                    "the automatic Claude channel recovery launch was interrupted before its result was recorded"
+                } else {
+                    "the explicit launch attempt was interrupted before its result was recorded"
+                },
             );
         }
         match self.perform_start_for_request(
             subject,
             member,
-            "an explicit seat restart was requested",
+            if channel_recovery::automatic_request(&request) {
+                "automatic Claude channel recovery requested a replacement incarnation"
+            } else {
+                "an explicit seat restart was requested"
+            },
             Some(&request),
         ) {
             Ok(false) => return Ok(true), // Placement or an automatic hold still defers this start.
@@ -8244,10 +8291,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .selected_desired_token(&subject.subject)?
             .as_deref()
             == request.body.pointer("/evidence/0").and_then(Value::as_str);
-        let reason = if current {
-            format!("the explicit restart failed and the seat is parked again: {detail}")
+        let origin = if channel_recovery::automatic_request(request) {
+            "automatic Claude channel recovery"
         } else {
-            format!("the explicit restart was superseded by a declaration change: {detail}")
+            "explicit restart"
+        };
+        let reason = if current {
+            format!("the {origin} failed and the seat is parked again: {detail}")
+        } else {
+            format!("the {origin} was superseded by a declaration change: {detail}")
         };
         let park = if member.driver.as_deref() == Some("codex") {
             "codex-crash-loop"
@@ -18571,6 +18623,8 @@ pub mod tests {
     mod channel_recovery;
     mod differential;
     mod first_readiness_tests;
+    pub(crate) mod slo_breach_tests;
+    mod slo_breach_flow_tests;
     mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;

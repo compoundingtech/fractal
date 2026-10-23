@@ -591,7 +591,10 @@
       "trust_levels": [
         "fleet"
       ],
-      "enforce": false,
+      "enforce": true,
+      "events": [
+        "pull_request"
+      ],
       "sample_one_in": 5,
       "inputs": [
         ".buckconfig",
