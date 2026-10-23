@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-flip-ready no longer lets a decision line that carries no information about the evidence log (outcome=unavailable with no log field: an old base without a gate or without a policy entry for the check, or a gate that could not run) count as log=- or restart a check's 24 h log window; a verified line without the log still restarts it. Such a run never skips.",
+  "replay": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Changes only when evidence-flip-ready considers a check's log window restarted (for example fractal-web after an old-base pull request); no skip policy or gate rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "A read-only helper script that reports when a check's flip trigger holds; no skip policy, workflow, gate, verifier, protocol, schema or CLI change."
+  }
+}
