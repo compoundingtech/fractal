@@ -4,7 +4,8 @@
   guard             may this job use the signing key? (event, ref, never a fork; a pull request: its authors)
   configure         write the signer's configuration and the key (mode 0600) and mask the key
   once CHECK        record that this job signs CHECK, and refuse a second signature for it
-  aggregate FILE    write the facts of an aggregate gate (from the `needs` context) for evidence-wrap
+  aggregate FILE    write the facts of an aggregate gate (from the `needs` context) for evidence-wrap; GATE_JOB names
+                    the gate: linux-gate (default) or fractal-web (the web lane's whole-check note)
   stage-facts FILE  write the facts of a stage that scripts/ci-linux already ran (its log and timing)
   step-facts FILE   write the facts of a job whose steps already ran (their outcomes), for jobs with no stage log
   cleanup           overwrite and remove the key and everything configure made (run it always)
@@ -86,6 +87,11 @@ def _strings(value, what):
     return [item.lower() for item in value]
 
 
+def email_known(email, emails, noreply):
+    """Exact address (any case), or [ID+]LOGIN@users.noreply.github.com with a numeric ID, matched whole."""
+    return email.lower() in emails or any(pattern.fullmatch(email) for pattern in noreply)
+
+
 def check_authors(base, head, opener, *actors):
     """A pull request run signs only when its authors are the repository's own. The list is read from the BASE
     commit, so the pull request cannot widen it. Two kinds of check. GitHub authenticates the account that
@@ -107,9 +113,9 @@ def check_authors(base, head, opener, *actors):
         raise Refused(f'no usable author list at the base commit ({AUTHORS_FILE}): {error}')
 
     def known(email):
-        return email.lower() in emails or any(pattern.fullmatch(email) for pattern in noreply)
+        return email_known(email, emails, noreply)
 
-    for role, login in (('opened the pull request', opener), *(('started or re-ran this run', actor) for actor in actors if actor)):
+    for role, login in (('opened the pull request', opener), *(('started or re-ran this run', actor) for actor in actors)):
         if not login or login.lower() not in logins:
             raise Refused(f'refusing: {login or "an unknown account"!r}, who {role}, is not in the author list')
     for line in _git('log', '--no-merges', '--format=%H %ae %ce', f'{base}..{head}').splitlines():
@@ -173,8 +179,9 @@ def add_source_inputs(facts, check):
     The key is the git tree of the tested tree reduced to the declared paths, computed by evidence-verify
     (--project) from the same base scripts the rest of the signing uses; a record signed with it can be found
     by another tree whose declared paths are the same. No declaration, no base commit, a base whose
-    evidence-verify has no --project yet, or any error: no key, and the record stays an exact-tree record."""
-    base, repository = env('PROJECT_BASE_SHA'), env('GITHUB_REPOSITORY')
+    evidence-verify has no --project yet, or any error: no key, and the record stays an exact-tree record.
+    The base is PROJECT_BASE_SHA when the step sets it, else the same choice taken from the event payload (event_base_sha)."""
+    base, repository = env('PROJECT_BASE_SHA') or event_base_sha(), env('GITHUB_REPOSITORY')
     verify = Path(__file__).resolve().parent / 'evidence-verify'
     if not (check and base and repository and verify.exists()):
         return
@@ -192,22 +199,52 @@ def add_source_inputs(facts, check):
         facts['inputs']['source_inputs'] = key
 
 
+def event_base_sha():
+    """The base the workflow's PROJECT_BASE_SHA expression names (merge group base, else pull request base, else the
+    commit itself), read from the runner's event payload, for a step that does not set the variable (the aggregate
+    note job). Only selects which base's policy declares the inputs; anything unreadable is no base, so no key."""
+    try:
+        with open(env('GITHUB_EVENT_PATH')) as handle:
+            event = json.load(handle)
+        sha = (event.get('merge_group') or {}).get('base_sha') or (event.get('pull_request') or {}).get('base', {}).get('sha') \
+            or env('GITHUB_SHA')
+    except (OSError, ValueError, AttributeError, TypeError):
+        return ''
+    return sha if isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha) else ''
+
+
+# Required checks with their own notes that the aggregate note job waits for only to publish those notes: their
+# results are not in the linux-gate note and their gates' decisions do not stop it (docs/st3/gate-evidence.md).
+SEPARATE_CHECKS = ('genie-freshness', 'typescript-client')
+
+
 def aggregate(path):
     """What an aggregate job honestly knows: which jobs it needed, what each reported, its verdict.
 
     Not the stages' commands, outputs, inventories, timings or toolchains: it did not run them.
     """
     needs = json.loads(env('NEEDS_JSON') or '{}')
+    if env('GATE_JOB') == 'fractal-web':
+        fractal_web_aggregate(path, needs)
+        return
+    # The web lane's jobs and its gate belong to the lane's own whole-check note (fractal_web_aggregate), never to this one.
+    needs = {name: entry for name, entry in needs.items() if name not in (*FRACTAL_WEB_JOBS, 'evidence-gate-fractal-web')}
     # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
-    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items()) if not name.startswith('evidence-gate-')}
+    # Neither is a job of the path-sensitive fractal-web lane: it is its own lane with its own notes, and it is
+    # skipped whenever a change touches no web path, which must not stop the linux-gate verdict being recorded.
+    # Nor are the separate checks (SEPARATE_CHECKS): the note job waits for them only to publish their own notes.
+    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())
+               if not name.startswith(('evidence-gate-', 'fractal-web-')) and name not in SEPARATE_CHECKS}
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
     # An evidence gate that decided to skip says so in its output, set only by its marker step. Required
     # checks whose gate skipped still end in success with their steps skipped, so their own result
-    # cannot show it: this output can. No note then, whatever the other results say.
+    # cannot show it: this output can. No note then, whatever the other results say. Every gate counts except
+    # those of the separate checks, which decide nothing this note records: a gate added later counts by default.
     taken = sorted(name for name, entry in needs.items()
-                   if name.startswith('evidence-gate-') and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
+                   if name.startswith('evidence-gate-') and name.removeprefix('evidence-gate-') not in SEPARATE_CHECKS
+                   and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
     if taken:
         raise Refused(f'not recording: the evidence gate skipped work in this run ({", ".join(taken)}), so it did not test this tree itself')
     # A needed job that did not run (skipped by the evidence gate, or for any other reason) means this
@@ -229,6 +266,65 @@ def aggregate(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    # The aggregate is what the linux-gate skip rests on, so it carries the input key its policy declares, like a stage note.
+    add_source_inputs(facts, gate)
+    Path(path).write_text(json.dumps(facts, sort_keys=True))
+
+
+# The fractal-web check's jobs: detection, the execution shards (one matrix job) and the always-run verdict.
+FRACTAL_WEB_JOBS = ('fractal-web', 'fractal-web-changes', 'fractal-web-execution')
+
+
+def fractal_web_aggregate(path, needs):
+    """The fractal-web check's whole-check note: what the evidence note job knows about the lane's jobs in this run.
+
+    One note for the whole check, never one per shard: it is signed only when the lane ran (detection succeeded and said
+    a web path changed), every execution shard succeeded and the lane's evidence gate did not skip it. GitHub gives a
+    dependent job one result for a matrix job, `success` only when every shard succeeded, so a skipped, failed or
+    cancelled shard leaves no note at all: never a note that reads as success. The shard count and the test sets come
+    from the same expressions as the matrix (KIT_SHARD_COUNT, KIT_INPUTS, KIT_PLAY_SET, APP_TEST_SET), so a pull
+    request's one-shard per-commit run is recorded as exactly that. Each shard's own note still carries its own result.
+    """
+    missing = [name for name in FRACTAL_WEB_JOBS if name not in needs]
+    if missing:
+        raise Refused(f'the fractal-web job(s) {", ".join(missing)} are not among the needed jobs, so there is no verdict to record')
+    results = {name: str(needs[name].get('result', 'unknown')) for name in sorted(FRACTAL_WEB_JOBS)}
+    gate = needs.get('evidence-gate-fractal-web') or {}
+    if str((gate.get('outputs') or {}).get('skip', '')).lower() == 'true':
+        raise Refused('not recording: the fractal-web evidence gate skipped the lane in this run, so it did not test this tree itself')
+    detection = needs['fractal-web-changes']
+    relevant = str((detection.get('outputs') or {}).get('relevant', ''))
+    if results['fractal-web-changes'] != 'success' or relevant != 'true':
+        raise Refused(f'not recording: the fractal-web lane did not run in this run (detection ended {results["fractal-web-changes"]}, '
+                      f'relevant={relevant or "unknown"}), so it did not test this tree itself')
+    if results['fractal-web-execution'] != 'success':
+        raise Refused(f'not recording: fractal-web-execution ended {results["fractal-web-execution"]}, so at least one shard was '
+                      'skipped, failed or cancelled and the lane did not test this tree itself')
+    if results['fractal-web'] not in ('success', 'failure'):
+        raise Refused(f'not recording: the fractal-web verdict ended {results["fractal-web"]}, so the check did not finish')
+    count = env('KIT_SHARD_COUNT')
+    if not (count.isdigit() and 1 <= int(count) <= 16):
+        raise Refused(f'KIT_SHARD_COUNT must be the number of execution shards (1 to 16), not {count!r}')
+    sets = {'kit_inputs': (env('KIT_INPUTS'), ('true', 'false')), 'kit_play_set': (env('KIT_PLAY_SET'), ('commit', 'all')),
+            'app_test_set': (env('APP_TEST_SET'), ('related', 'all'))}
+    for name, (value, allowed) in sets.items():
+        if value not in allowed:
+            raise Refused(f'{name.upper()} must be one of {", ".join(allowed)}, not {value!r}')
+    shards = {str(index): results['fractal-web-execution'] for index in range(int(count))}
+    facts = {
+        'command': ['fractal-web', 'aggregate', *results],
+        'exit_code': 0 if results['fractal-web'] == 'success' else 1,
+        'output': {'gate': results['fractal-web'], 'needs': results, 'shards': shards},
+        'inputs': {
+            'run_id': env('GITHUB_RUN_ID'), 'run_attempt': env('GITHUB_RUN_ATTEMPT'), 'event_name': env('GITHUB_EVENT_NAME'),
+            'ref': env('GITHUB_REF'), 'run_started_at': env('RUN_STARTED_AT'), 'workflow': env('GITHUB_WORKFLOW'),
+            'needed_jobs': ','.join(results), 'stage_results': ','.join(f'{n}={r}' for n, r in results.items()),
+            'kit_shard_count': count, 'shard_results': ','.join(f'{n}={r}' for n, r in shards.items()),
+            **{name: value for name, (value, _) in sets.items()},
+        },
+    }
+    facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    add_source_inputs(facts, 'fractal-web')
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 
@@ -281,8 +377,9 @@ def step_facts(path):
     """What a job honestly knows about steps it already ran: which command they stand for and how each ended.
 
     STEP_CHECK is the check name, STEP_COMMAND a JSON array naming the command, STEP_OUTCOMES a JSON
-    object {step id: outcome} taken from the steps context. The note is a success only if every step
-    succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
+    object {step id: outcome} taken from the steps context. STEP_INPUTS, if set, is a JSON object of extra
+    named string inputs (a shard number, a test set) recorded next to the fixed ones; it can add names but
+    never replace one. The note is a success only if every step succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
     example it was covered by a trusted note), so no note is made, not even a failure.
     """
     gate_skipped()
@@ -311,6 +408,17 @@ def step_facts(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    try:
+        extra = json.loads(env('STEP_INPUTS') or '{}')
+    except ValueError:
+        raise Refused('STEP_INPUTS must be JSON')
+    if not (isinstance(extra, dict) and all(re.fullmatch(r'[a-z][a-z0-9_]{0,40}', k) and isinstance(v, str) and 0 < len(v) <= 200
+                                            for k, v in extra.items())):
+        raise Refused('STEP_INPUTS must be an object of short lower-case names with nonempty string values')
+    clash = sorted(set(extra) & set(facts['inputs']))
+    if clash:
+        raise Refused(f'STEP_INPUTS cannot replace the fixed input(s) {", ".join(clash)}')
+    facts['inputs'].update(extra)
     add_source_inputs(facts, check)
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 

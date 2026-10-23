@@ -146,7 +146,7 @@ fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_default
     let ambient_scope = seeded_supervisor_scope(&ambient_catalog, None, &state);
     assert_ne!(selected_scope, ambient_scope);
     for scope in [&selected_scope, &ambient_scope] {
-        let projection = st2::park::ParkProjection::current(scope.join("parked")).unwrap();
+        let projection = fractal_legacy_runner::park::ParkProjection::current(scope.join("parked")).unwrap();
         assert!(
             projection
                 .publish(
@@ -168,8 +168,8 @@ fn projected_recovery_targets_its_exact_catalog_and_host_despite_ambient_default
     execute_recovery(recovery, &bin, &ambient_catalog, &state);
 
     let (selected, selected_errors) =
-        st2::park::take_unpark_requests(&selected_scope.join("unpark"));
-    let (ambient, ambient_errors) = st2::park::take_unpark_requests(&ambient_scope.join("unpark"));
+        fractal_legacy_runner::park::take_unpark_requests(&selected_scope.join("unpark"));
+    let (ambient, ambient_errors) = fractal_legacy_runner::park::take_unpark_requests(&ambient_scope.join("unpark"));
     assert!(selected_errors.is_empty() && ambient_errors.is_empty());
     assert_eq!(selected, ["h.worker"]);
     assert!(
@@ -419,12 +419,12 @@ fn completed_catalog_aba_during_runtime_observation_is_incomplete() {
         // The same transaction `st2 catalog apply` runs, in this process: the ABA then takes
         // milliseconds inside the observation, not two launches of the CLI.
         let apply = |prepared: &Path, expected: &str| {
-            let input_sha256 = st2::catalog_transaction::digest_prepared(&catalog, prepared)
+            let input_sha256 = fractal_legacy_runner::catalog_transaction::digest_prepared(&catalog, prepared)
                 .unwrap()
                 .root_sha256;
-            st2::catalog_transaction::apply(st2::catalog_transaction::ApplyRequest {
+            fractal_legacy_runner::catalog_transaction::apply(fractal_legacy_runner::catalog_transaction::ApplyRequest {
                 catalog: catalog.clone(),
-                mode: st2::catalog_transaction::ApplyMode::Prepared {
+                mode: fractal_legacy_runner::catalog_transaction::ApplyMode::Prepared {
                     prepared: prepared.to_path_buf(),
                     input_sha256,
                     expect_sha256: expected.to_string(),
@@ -564,12 +564,11 @@ fn failed_and_timed_out_pty_commands_are_typed_incomplete() {
     assert!(!failed.status.success());
     let failed_json: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
     assert_eq!(failed_json["complete"], false);
-    assert!(
-        failed_json["errors"][0]
-            .as_str()
-            .unwrap()
-            .contains("fixture failure")
-    );
+    // A failed launcher is reported by its exit status alone: launcher output may carry
+    // environment values, so it never reaches the inventory.
+    let failed_error = failed_json["errors"][0].as_str().unwrap();
+    assert!(failed_error.contains("exit status: 7"), "{failed_error}");
+    assert!(!failed_error.contains("fixture failure"), "{failed_error}");
 
     let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join("sleep"))

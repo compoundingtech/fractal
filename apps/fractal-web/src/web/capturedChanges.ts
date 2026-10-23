@@ -1,5 +1,5 @@
 import { toolDiffs, type ToolDiff } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-tool-preview.ts'
-import type { ResourceData } from '@smalltalk/fractal-ui/assistant-ui/resources'
+import type { ResourceData } from '@fractal/ui/assistant-ui/resources'
 import type { ToolCallItem } from '../conversation/model.ts'
 import type { ConversationPage } from '../data/source.ts'
 
