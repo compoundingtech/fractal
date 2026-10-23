@@ -45,7 +45,9 @@ its conversation. **Conversation first**, in `Ctrl+K`, makes this device open ag
 conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
 device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
 of its attached terminal: click it to show it, click an answer to send it, or click
-"open in Inbox". Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
+"open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
+green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
+the full reason and answers needing your words stay in Inbox. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
 answers an alert. When the link to the
 terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
 it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Inbox cards show
