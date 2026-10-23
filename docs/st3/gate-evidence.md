@@ -1466,9 +1466,11 @@ run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.to
 `nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`. A machine without a usable `/dev/kvm` fails it.
 
 **Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
-is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory on disk,
-`/var/tmp/cl.XXXXXX` (`CI_LOCAL_TMP_ROOT` names another root; tests put Unix sockets several levels below it, and a socket path is limited to
-108 bytes, which the daemons' sockets in the delivery-probe and seat tests exceeded under the scratch), because a dev shell's `TMPDIR` is
+is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
+`/dev/shm/cl.XXXXXX` when `/dev/shm` has 20 GiB free and `/var/tmp/cl.XXXXXX` on disk otherwise (`CI_LOCAL_TMP_ROOT` names another root;
+tests put Unix sockets several levels below it, and a socket path is limited to 108 bytes, which the daemons' sockets in the delivery-probe
+and seat tests exceeded under the scratch; in RAM the tests' SQLite commits do not wait for a disk sync: on a build host the linux-gate tests
+took 849 s there against 1518 s on disk, and 519 s with 12 threads, at about 3.3 GB of `/dev/shm`), because a dev shell's `TMPDIR` is
 under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
 `/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
 CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
@@ -1493,7 +1495,7 @@ since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
 stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
-shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+shared host the stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
 `ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
 `CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
 default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
