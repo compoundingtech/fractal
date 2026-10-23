@@ -2,6 +2,7 @@
 //! Raw edits below deliberately exercise shapes no longer admitted by public writers.
 use super::*;
 use super::super::{append_claim_tx, latest_actual, latest_resource_kind};
+use super::preparation::PENDING_QUERY;
 use proptest::prelude::*;
 
 const SUBJECTS: [&str; 4] = [

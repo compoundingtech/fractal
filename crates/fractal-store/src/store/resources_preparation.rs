@@ -6,7 +6,7 @@ const RELEVANT: &str = "(substr(claims.subject,1,9)='resource/' OR claims.kind='
     OR EXISTS (SELECT 1 FROM local_resource_preparation state WHERE state.subject=claims.subject))";
 
 // CROSS JOIN fixes the loop order even with STAT4: an empty queue must never scan claims.
-static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
     "SELECT claims.id,claims.subject FROM local_resource_preparation_pending pending
      CROSS JOIN claims ON claims.id=pending.claim_id
      CROSS JOIN batches ON batches.id=claims.batch_id
