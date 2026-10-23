@@ -96,6 +96,8 @@ mod owned_sets;
 pub mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
+pub use revision_changes::revision_card;
+#[cfg(any(test, feature = "test-support"))]
 pub use published_attention::{
     attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
     refresh_attention_list_with,
@@ -113,6 +115,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
