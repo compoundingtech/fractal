@@ -1,7 +1,7 @@
 # st operational-state contract
 
 This page defines which facts each operational read selects. The tests in
-`crates/st3/tests/operational_state_contract.rs` check its fixtures and the two JSON inventories
+`crates/fractal/tests/operational_state_contract.rs` check its fixtures and the two JSON inventories
 beside it.
 
 ## Three layers
@@ -176,7 +176,7 @@ have converged.
 
 ## Regression fixtures
 
-The fixtures under `crates/st3/tests/fixtures/operational-state` cover:
+The fixtures under `crates/fractal/tests/fixtures/operational-state` cover:
 
 - the terminal `signal-rename-codex/sig.sup` runtime;
 - a claimed step whose lease is already expired at snapshot time;
