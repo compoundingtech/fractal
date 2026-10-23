@@ -2690,8 +2690,7 @@ impl Ui {
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
         let glasses = &mut self.glasses;
-        // Home over the glass takes the keys, as Home does; Esc closes it and Ctrl+K still opens
-        // the palette.
+        // Usage floats over the space: Esc closes it; Ctrl+H opens or focuses Inbox.
         if glasses.home
             && !self.editing
             && self.confirm.is_none()
@@ -2699,7 +2698,7 @@ impl Ui {
         {
             match key.code {
                 KeyCode::Esc => self.close_home(),
-                KeyCode::Char('h') if control => self.close_home(),
+                KeyCode::Char('h') if control => self.open_home(),
                 KeyCode::Char('k') if control || command => self.open_palette(None, Open::Here),
                 _ => return false,
             }
@@ -3881,13 +3880,7 @@ impl Ui {
                 'k' => self.open_palette(None, Open::Here),
                 's' => self.toggle_sidebar(),
                 'g' => self.open_glasses_palette(),
-                'h' => {
-                    if self.home_open() {
-                        self.close_home();
-                    } else {
-                        self.open_home();
-                    }
-                }
+                'h' => self.open_home(),
                 'o' => {
                     let glasses = &mut self.glasses;
                     glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
@@ -4692,6 +4685,28 @@ mod tests {
         assert_eq!(ui.attention_focus(), Some(id));
         assert_eq!(open_panes(&ui), opened);
         assert!(ui.frame.borrow().home.is_none());
+    }
+
+    #[test]
+    fn ctrl_h_from_usage_opens_inbox_and_refocuses_it_across_splits() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some(ATLAS_ID.into())), Open::Tab);
+        ui.toggle_usage();
+        assert!(ui.usage_open());
+        ctrl(&mut ui, 'h');
+        assert!(!ui.usage_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        let tab = ui.glasses.glass().layout.groups()[0].current;
+        ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
+        press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
+        assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
+        let opened = open_panes(&ui);
+        ui.toggle_usage();
+        assert!(ui.usage_open());
+        ctrl(&mut ui, 'h');
+        assert!(!ui.usage_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(open_panes(&ui), opened);
     }
 
     #[test]
@@ -7166,7 +7181,7 @@ mod tests {
         // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
         let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
         assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
+        assert!(shown.matches("terminal (Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
         assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
     }
 
