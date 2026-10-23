@@ -103,6 +103,33 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
+    def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for call in calls:
+            env = call['env']
+            self.assertEqual(env['CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER'], str(self.work / 'scripts/ci-test-tmpdir'))
+            self.assertEqual(env['CI_TEST_TMPDIR_ROOT'], env['TMPDIR'])  # under the run's own scratch, removed with it
+
+    def test_the_runner_gives_every_start_a_fresh_tmpdir_and_runs_the_command_in_its_place(self):
+        root = Path(self.tmp.name) / 'root'
+        root.mkdir()
+        runner = ROOT / 'scripts/ci-test-tmpdir'
+        seen = []
+        for _ in range(2):
+            child = subprocess.Popen([str(runner), 'sh', '-c', 'echo "$TMPDIR $$"; mkdir "$TMPDIR/.git"'], stdout=subprocess.PIPE, text=True,
+                                     env={'PATH': os.environ['PATH'], 'CI_TEST_TMPDIR_ROOT': str(root), 'TMPDIR': '/elsewhere'})
+            out, _ = child.communicate()
+            self.assertEqual(child.returncode, 0)
+            directory, pid = out.split()
+            self.assertEqual(int(pid), child.pid)  # exec: no extra process between the caller and the test
+            self.assertEqual(Path(directory).parent, root)
+            seen.append(directory)
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertFalse((root / '.git').exists())  # what one start leaves at the top of its TMPDIR stays there
+        done = subprocess.run([str(runner), 'true'], env={'PATH': os.environ['PATH']}, capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)  # outside scripts/ci-local it refuses rather than guess a directory
+
     def test_on_a_host_whose_umask_is_002_the_stages_get_ci_s_022_and_no_group_writable_scratch(self):
         self.umask = 0o002
         root = self.home / '.cache/ci-local'

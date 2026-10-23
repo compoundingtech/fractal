@@ -84,6 +84,16 @@ unset LD_PRELOAD
 # TMPDIR, which are removed at exit, and the account's builds share one server (127.0.0.1:4226): every compile through it then failed
 # ("sccache: error: Failed to create temp dir") until it was stopped. The kept build directory (CARGO_TARGET_DIR) is the local cache.
 unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
+# Each test process gets a TMPDIR of its own under this run's (scripts/ci-test-tmpdir, as the cargo target runner nextest honours): on a
+# shared TMPDIR, one test that left an empty `.git` at its top made every later test there see a repository that is not one (2026-10-23,
+# 21 failures in one local run; the stray /tmp/.git on the build hosts came the same way). A CI runner is fresh for every job.
+triple=${CI_LOCAL_TARGET_TRIPLE:-$( { rustc -vV 2>/dev/null || true; } | sed -n 's/^host: //p')}
+if [ -n "$triple" ]; then
+  export CI_TEST_TMPDIR_ROOT="$TMPDIR"
+  export "CARGO_TARGET_$(printf '%s' "$triple" | tr '[:lower:]-' '[:upper:]_')_RUNNER=$(cd "$(dirname "$0")" && pwd)/ci-test-tmpdir"
+else
+  echo "ci-local: no rustc to name the host target; the tests share one TMPDIR" >&2
+fi
 touch "$GITHUB_STEP_SUMMARY"
 # clippy's ratchet compares with the base, as CI compares with the event's base: CLIPPY_BASE_SHA when given (scripts/st-test
 # gives the base it just fetched and records it in the note), otherwise main as fetched now, never a local ref that may be old.

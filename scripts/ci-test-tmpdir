@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# A cargo target runner for scripts/ci-local's stages: every test binary cargo or nextest starts (under nextest, every test process)
+# gets a TMPDIR of its own, made fresh under the run's TMPDIR, and then runs in place of this script (exec: no extra process). A test
+# that leaves something at the top of its TMPDIR (an empty `.git`, which every later test under that directory then takes for a
+# repository) can no longer change what the tests after it see. The directories go with the run's scratch.
+set -euo pipefail
+root=${CI_TEST_TMPDIR_ROOT:?scripts/ci-test-tmpdir runs as scripts/ci-local sets it up}
+TMPDIR=$(mktemp -d "$root/test.XXXXXX")
+export TMPDIR
+exec "$@"

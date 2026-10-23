@@ -1474,7 +1474,10 @@ under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens o
 `/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
 CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
 when its cache is unavailable), because a cache server started inside the run keeps the run's `HOME` and `TMPDIR`, removed at exit, and the
-account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache); and the
+account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache);
+each test process gets a `TMPDIR` of its own under the run's (`scripts/ci-test-tmpdir`, set as the cargo target runner, which nextest
+honours for every test and every listing), because one test that left an empty `.git` at the top of a shared `TMPDIR` made every later
+test there see a repository that is not one (a CI runner is fresh for every job); and the
 stages run with a CI runner's umask, 022, in a scratch no one else can
 write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). A check that builds and tests the Rust workspace
 (`mail-redelivery-canaries`, `linux-gate` and `isolation-vm`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
