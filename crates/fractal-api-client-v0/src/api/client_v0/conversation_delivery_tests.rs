@@ -168,7 +168,7 @@ fn native_page_suppresses_a_receipted_echo_before_annotation_without_a_receipt_l
         .store
         .connection
         .write()
-        .execute_batch("DROP TABLE local_native_delivery_receipts_v2;")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h19cf3c8b3dc1 owner=fractal_api_client_v0::api::client_v0::conversation_delivery_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE local_native_delivery_receipts_v2;")
         .unwrap();
     let managed = crate::api::managed_session_owner_at(&fixture.state.store, snapshot.store_index, &fixture.route)
         .unwrap();

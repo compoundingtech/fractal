@@ -456,12 +456,24 @@ impl DeliveryStore for Store {
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         let mut messages = Vec::with_capacity(subjects.len());
-        for (subject, created_index) in subjects {
-            let message = self.message_view_cached(&connection, &subject, created_index)?;
-            if message.to == recipient
-                && message.tags.iter().any(|tag| tag.starts_with("st3-work:"))
-            {
-                messages.push(message);
+        for chunk in subjects.chunks(fractal_store::store::message_versions::CHUNK) {
+            let requested = chunk
+                .iter()
+                .map(|(subject, _)| subject.as_str())
+                .collect::<Vec<_>>();
+            let versions = fractal_store::store::message_versions::read(&connection, &requested)?;
+            for ((subject, created_index), version) in chunk.iter().zip(versions) {
+                let message = self.message_view_cached_at_version(
+                    &connection,
+                    subject,
+                    *created_index,
+                    version,
+                )?;
+                if message.to == recipient
+                    && message.tags.iter().any(|tag| tag.starts_with("st3-work:"))
+                {
+                    messages.push(message);
+                }
             }
         }
         sort_messages_canonically(&connection, &mut messages)?;

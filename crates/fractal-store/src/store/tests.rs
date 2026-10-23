@@ -126,6 +126,11 @@ mod activity_purity_tests {
     /* sqlite-large-value: allow-for-now lv-h2c081374795f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
 }
 
+mod subscription_state_full_value_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-haaf140af31b3 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subscription_state_full_value_tests.rs");
+}
+
 mod limits_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-h5244785b99be owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("limits_purity_tests.rs");
@@ -2749,6 +2754,23 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
 }
 
 #[test]
+fn declaration_restart_observation_waits_on_an_older_registry() {
+    let store = Store::open_memory("node").unwrap();
+    let record = store.append_claim(&ClaimInput {
+        subject: "agent/example/relaunch".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "status":"running", "incarnation_id":"old", "restarting_from":"old"
+        })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut older = fractal_schema::registry().clone();
+    older.claims.get_mut("runtime.observed").unwrap().fields.remove("restarting_from").unwrap();
+    assert!(matches!(classify_replicated_claim_with_registry(&record, &older).unwrap(),
+        ReplicatedClaimAdmission::UnknownField));
+    assert!(matches!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).unwrap(),
+        ReplicatedClaimAdmission::Valid));
+}
+
+#[test]
 fn a_subject_with_no_actual_or_desired_state_has_unknown_reachability() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/diagnostic-run/sig.hub";
@@ -4258,9 +4280,11 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
     });
     let input = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -4276,6 +4300,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes: vec![candidate],
         signature_requests: Vec::new(),
@@ -4332,9 +4357,11 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
     });
     let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -4353,6 +4380,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         signature_requests: Vec::new(),
@@ -5075,9 +5103,11 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                 FLEET,
                 &ReplicationExchange {
                     build: None,
+                    claim_ranges: None,
                     projection_digests: Default::default(),
                     peer: "source".into(),
                     fleet_id: FLEET.into(),
+                    shard_id: None,
                     schema_digest: String::new(),
                     projection_registry_digest: None,
                     projection_versions: Default::default(),

@@ -67,6 +67,7 @@ import {
 import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './subjectReadPort.ts'
 import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
+import { gatewayNativeDetails } from './nativeDetailsSource.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -184,6 +185,7 @@ export const liveSource = ({
     discovery: client,
     registry,
   })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     St3Live({
       ...options,
@@ -1114,6 +1116,7 @@ export const liveSource = ({
     source: {
       mode: 'live',
       subjectReads,
+      nativeDetails,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,

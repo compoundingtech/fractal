@@ -233,6 +233,7 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
         vec!["fleet", "mode", "dial-out"],
         vec!["fleet", "transports", "add", "fabric"],
         vec!["fleet", "transports", "remove", "fabric"],
+        vec!["fleet", "transports", "prefer", "tailscale"],
         vec!["fleet", "migrate", "--finish"],
         vec!["fleet", "migrate", "--unfinish"],
         vec!["fleet", "migrate", "--anchor"],

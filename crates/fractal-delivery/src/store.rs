@@ -153,6 +153,8 @@ pub mod message_send_tests;
 pub mod tests;
 #[cfg(test)]
 pub mod writer_bound_tests;
+#[cfg(test)]
+pub mod work_wake_message_versions_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod writer_bound_tests_shared_missions;
 #[cfg(any(test, feature = "test-support"))]

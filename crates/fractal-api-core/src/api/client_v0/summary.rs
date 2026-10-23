@@ -9,7 +9,6 @@ use crate::SeatsStore;
 use crate::EvidenceStore;
 use super::*;
 use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
-use fractal_ui_model::missions::Display;
 
 #[derive(Debug)]
 pub struct RosterNotPublished;
@@ -30,8 +29,8 @@ pub fn working(agent: &Value) -> bool {
 }
 /// A mission that is really running or about to: stuck, paused and finished runs, and ones that
 /// only wait on a person, are counted elsewhere.
-pub fn active(mission: &fractal_ui_model::missions::Mission) -> bool {
-    !mission.system && mission.word.is_active()
+pub fn active(mission: &fractal_client::Mission) -> bool {
+    !mission.system && fractal_ui_model::missions::row_word(mission, &[]).is_active()
 }
 
 /// What every selection's summary shares at `snapshot`: each mission and whether it is active,
@@ -51,23 +50,11 @@ pub fn shared(
     let store = &state.store;
     let compute = || {
         let (missions, deadline) = store.client_summary_missions(now)?;
-        let semantics = fractal_ui_model::missions::adapt(
-            missions.iter(),
-            std::iter::empty(),
-            std::iter::empty(),
-            "",
-            &Display {
-                mission_label: &|m| m.header.id.clone(),
-                agent_label: &|a| a.name.clone(),
-                age_label: &|_, _| String::new(),
-                clean_text: &str::to_owned,
-            },
-        );
         Ok((
             vec![
-                json!({"evaluated_at":now.to_string(),"valid_until":deadline.map(|d| d.to_string()),"missions":semantics
-                .into_iter()
-                .map(|m| json!({"id":m.id,"system":m.system,"active":active(&m)}))
+                json!({"evaluated_at":now.to_string(),"valid_until":deadline.map(|d| d.to_string()),"missions":missions
+                .iter()
+                .map(|m| json!({"id":m.header.id,"system":m.system,"active":active(m)}))
                 .collect::<Vec<_>>()}),
             ],
             false,

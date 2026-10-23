@@ -79,7 +79,7 @@ fn native_delivery_receipt_is_atomic_and_replay_does_not_rebind_it() {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         let before = projection_digest::tables(&tx).unwrap();
-        tx.execute("UPDATE local_native_delivery_receipts_v2 SET native_id='scope-only-fixture' WHERE claim_id=?1",[&receipt.id]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-he540ca01d9e9 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_native_delivery_receipts_v2 SET native_id='scope-only-fixture' WHERE claim_id=?1",[&receipt.id]).unwrap();
         assert_eq!(before, projection_digest::tables(&tx).unwrap());
         tx.rollback().unwrap();
     }
@@ -146,7 +146,7 @@ fn native_delivery_metadata_failure_rolls_back_the_receipt_and_operation() {
     let store = Store::open_memory("node").unwrap();
     let (fence, read) = prepared(&store, "message/rollback");
     let before = store.index().unwrap();
-    store.connection.write().execute_batch("CREATE TRIGGER reject_fixture_proof BEFORE INSERT ON local_native_delivery_receipts_v2 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;").unwrap();
+    store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hf0905fde9312 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER reject_fixture_proof BEFORE INSERT ON local_native_delivery_receipts_v2 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;").unwrap();
     assert!(
         store
             .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
@@ -161,7 +161,7 @@ fn native_delivery_metadata_failure_rolls_back_the_receipt_and_operation() {
     store
         .connection
         .write()
-        .execute_batch("DROP TRIGGER reject_fixture_proof;")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h83dd55ca0487 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_fixture_proof;")
         .unwrap();
     assert!(
         store
@@ -184,7 +184,7 @@ fn native_delivery_missing_operation_proof_is_absent_and_not_repaired_by_read() 
     store
         .connection
         .write()
-        .execute("DELETE FROM operations WHERE id=?1", [operation])
+        .execute(/* sqlite-large-value: allow-for-now lv-h25d6eed211d2 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1", [operation])
         .unwrap();
     assert!(links(&store, store.index().unwrap()).is_empty());
     assert_eq!(
@@ -212,7 +212,7 @@ fn native_delivery_timestamp_updates_keep_proof_and_meaning_updates_drop_it() {
         .connection
         .write()
         .execute(
-            "UPDATE claims SET accepted_at_unix_ms='1792000000000' WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h9e12e8fdba56 owner=fractal_delivery::store::conversation_deliveries_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1792000000000' WHERE id=?1",
             [&receipt.id],
         )
         .unwrap();
@@ -224,7 +224,7 @@ fn native_delivery_timestamp_updates_keep_proof_and_meaning_updates_drop_it() {
         .connection
         .write()
         .execute(
-            "UPDATE claims SET body=json_set(body,'$.fields.changed_fixture',1) WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h732b8a0cef4f owner=fractal_delivery::store::conversation_deliveries_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.changed_fixture',1) WHERE id=?1",
             [&receipt.id],
         )
         .unwrap();
@@ -282,7 +282,7 @@ fn native_delivery_foreign_keys_off_identity_change_and_missing_rows_never_rebin
             .unwrap();
         let error = connection
             .execute(
-                "UPDATE claims SET id='replacement-fixture-id' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h829dd40a00f1 owner=fractal_delivery::store::conversation_deliveries_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET id='replacement-fixture-id' WHERE id=?1",
                 [&receipt.id],
             )
             .expect_err(
@@ -300,11 +300,11 @@ fn native_delivery_foreign_keys_off_identity_change_and_missing_rows_never_rebin
     {
         let connection = store.connection.write();
         connection
-            .execute_batch("DROP TRIGGER projection_digest_claims_identity_update;")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h6f5e80392435 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER projection_digest_claims_identity_update;")
             .unwrap();
         connection
             .execute(
-                "UPDATE claims SET id='replacement-fixture-id' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h8bb74fe04e67 owner=fractal_delivery::store::conversation_deliveries_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET id='replacement-fixture-id' WHERE id=?1",
                 [&receipt.id],
             )
             .unwrap();
@@ -335,9 +335,9 @@ fn native_delivery_fingerprint_refuses_changed_meaning_even_without_the_guard_tr
     {
         let connection = store.connection.write();
         connection
-            .execute_batch("DROP TRIGGER local_native_delivery_update_v2;")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h21a37e16de2f owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER local_native_delivery_update_v2;")
             .unwrap();
-        connection.execute("UPDATE claims SET body=json_set(body,'$.fields.changed_after_copy',1) WHERE id=?1",[&receipt.id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h901486bc8e1b owner=fractal_delivery::store::conversation_deliveries_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.changed_after_copy',1) WHERE id=?1",[&receipt.id]).unwrap();
     }
     assert!(links(&store, store.index().unwrap()).is_empty());
     assert_eq!(
@@ -378,12 +378,12 @@ fn native_delivery_missing_physical_claims_still_count_towards_the_lookup_bound(
         let connection = store.connection.write();
         connection
             .execute_batch(
-                "PRAGMA foreign_keys=OFF; DROP TRIGGER local_native_delivery_delete_v2;",
+                /* sqlite-large-value: allow-for-now lv-h29e2f2f8cf91 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "PRAGMA foreign_keys=OFF; DROP TRIGGER local_native_delivery_delete_v2;",
             )
             .unwrap();
         connection
             .execute(
-                "DELETE FROM claims WHERE id IN (?1,?2)",
+                /* sqlite-large-value: allow-for-now lv-h97d515d6986d owner=fractal_delivery::store::conversation_deliveries_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id IN (?1,?2)",
                 params![receipts[3].id, receipts[2].id],
             )
             .unwrap();
@@ -403,10 +403,10 @@ fn native_delivery_query_work_does_not_scan_unrelated_receipt_history() {
         for number in 0..10_000 {
             let claim = append_claim_tx(tx, "node", &format!("message/other-{number}"),
                 "message.read", Some(OWNER), &json!({"fields":{"status":"read"}}), &[], None)?;
-            tx.execute("INSERT INTO local_native_delivery_receipts_v2 VALUES (?1,'unrelated-fixture',?2,?3,?4,'node',?5)",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h7ced1778e1a7 owner=fractal_delivery::store::conversation_deliveries_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_native_delivery_receipts_v2 VALUES (?1,'unrelated-fixture',?2,?3,?4,'node',?5)",
                 params![claim.id,SESSION,format!("other-native-{number}"),OWNER,claim.store_index])?;
             if number==99 || number==9999 {
-                let mut query = tx.prepare(QUERY)?;
+                let mut query = tx.prepare(/* sqlite-large-value: allow-for-now lv-haf4892290549 owner=fractal_delivery::store::conversation_deliveries_tests TODO=trace-statement-and-value-representation */ QUERY)?;
                 query.reset_status(rusqlite::StatementStatus::VmStep);
                 let rows = query.query_map(params!["[\"native-one\"]",SESSION,OWNER,"node",i64::MAX], |_| Ok(()))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -414,7 +414,7 @@ fn native_delivery_query_work_does_not_scan_unrelated_receipt_history() {
                 costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
             }
         }
-        let plan = tx.prepare(&format!("EXPLAIN QUERY PLAN {QUERY}"))?
+        let plan = tx.prepare(/* sqlite-large-value: allow-for-now lv-hc9f2e02403b8 owner=fractal_delivery::store::conversation_deliveries_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {QUERY}"))?
             .query_map(params!["[\"native-one\"]",SESSION,OWNER,"node",i64::MAX], |row| row.get::<_,String>(3))?
             .collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
         assert!(plan.contains("local_native_delivery_identity_v2"), "{plan}");

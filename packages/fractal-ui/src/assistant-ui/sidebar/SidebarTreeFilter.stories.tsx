@@ -302,6 +302,17 @@ async function playFilterProbes(canvasElement: HTMLElement, benchmark: boolean) 
     const filter = [...production.samples, ...restored.samples]
     const reference = [...production.reference, ...restored.reference]
     root.dataset.pooledRatio = String(p90(filter) / p90(reference))
+    // Publish completed measurements before the assertion. Storybook 10.6.1 drops
+    // reporter results when play throws; this synchronous event survives that failure.
+    const [theme, width] = root.dataset.testid!.slice('filter-probe-'.length).split('-')
+    window.dispatchEvent(new CustomEvent('kit-filter-benchmark', { detail: {
+      width: Number(width), theme,
+      filterP90Milliseconds: p90(filter),
+      referenceP90Milliseconds: p90(reference),
+      pooledRatio: Number(root.dataset.pooledRatio),
+      busyControlRatio: Number(root.dataset.busyRatio),
+      threshold: ratioBudget,
+    } }))
     await assertRatio(filter, reference)
   }
 }

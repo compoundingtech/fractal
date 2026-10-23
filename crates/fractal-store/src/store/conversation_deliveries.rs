@@ -47,7 +47,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
-        let mut statement = connection.prepare(QUERY)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h09cab06daf63 owner=fractal_store::store::conversation_deliveries TODO=trace-statement-and-value-representation */ QUERY)?;
         let requested = serde_json::to_string(ids)?;
         let rows = statement.query_map(
             params![requested, session, owner, self.origin(), through],

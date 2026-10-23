@@ -59,7 +59,7 @@ summarize_load() {
     printf 'Runner reference: %s ms to sort 2^21 values on one core (the same work on every host).\n' \
       "$(jq -r '.runner_reference_ms // "-"' "$report")"
     jq -r 'if (.unavailable // {}) == {} then empty else
-      "\nUnavailable (report-only until #3553): \(.unavailable | add) reads found a published list withdrawn" +
+      "\nUnavailable (failing, #3553): \(.unavailable | add) reads found a published list withdrawn" +
       (if .unavailable_window_s == null then "" else " from \(.unavailable_window_s[0] | floor) s to \(.unavailable_window_s[1] | floor) s into the load" end) +
       ": \(.unavailable | to_entries | map("\(.key) (\(.value))") | join("; "))" end' "$report"
   } >> "$GITHUB_STEP_SUMMARY"
