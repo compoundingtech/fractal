@@ -1404,8 +1404,9 @@ refuse when it is started with `LD_PRELOAD`.
 **Heavy checks and Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch, its `TMPDIR`
 included, is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another), because a dev shell's `TMPDIR` is
 under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
-`/tmp/.git` (tests that look for the enclosing repository find it); and a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
-CI runner has one (the `malloc_trim` tests fail under it). A check that builds and tests the Rust workspace
+`/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
+CI runner has one (the `malloc_trim` tests fail under it); and the stages run with a CI runner's umask, 022, in a scratch no one else can
+write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). A check that builds and tests the Rust workspace
 (`mail-redelivery-canaries` and `linux-gate`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
 it is named (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its
 wait. Their local command is

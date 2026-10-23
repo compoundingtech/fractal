@@ -29,8 +29,12 @@ done
 # The scratch, and the stages' TMPDIR inside it, are on the account's disk as a CI runner's temporary directory is, never the
 # caller's TMPDIR: a dev shell puts that under /tmp, which on some build hosts is a small tmpfs (tests that need tens of GB of
 # scratch are refused there) or holds a stray /tmp/.git (tests that look for the enclosing repository find it).
+# A CI runner's umask is 022: a host whose umask is 002 would make the stages' directories group-writable, and tests that
+# refuse a directory others can change (the secrets gateway's) fail there.
+umask 022
 scratch_root=${CI_LOCAL_SCRATCH_ROOT:-$HOME/.cache/ci-local}
 mkdir -p "$scratch_root"
+chmod go-w "$scratch_root"
 scratch=$(mktemp -d "$scratch_root/run.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}

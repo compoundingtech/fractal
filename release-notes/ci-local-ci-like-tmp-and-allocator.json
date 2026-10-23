@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "scripts/ci-local (the local Linux gate stages st-test signs) gives the stages a CI-like temporary directory and allocator: the scratch and TMPDIR are on the account's disk under ~/.cache/ci-local instead of the dev shell's /tmp, and LD_PRELOAD is dropped. A full local linux-gate on main failed before this on both build hosts (a /tmp tmpfs too small for the checkpoint tests, a stray /tmp/.git, a preloaded jemalloc).",
+  "summary": "scripts/ci-local (the local Linux gate stages st-test signs) gives the stages a CI-like environment: the scratch and TMPDIR are on the account's disk under ~/.cache/ci-local instead of the dev shell's /tmp, LD_PRELOAD is dropped, and the umask is 022 with a scratch root no one else can write to. A full local linux-gate on main failed before this on both build hosts (a /tmp tmpfs too small for the checkpoint tests, a stray /tmp/.git, a preloaded jemalloc, umask 002).",
   "replay": {
     "status": "none",
     "detail": "scripts/ci-local's environment for the Linux gate stages only; no protocol, schema, policy or workflow change."
