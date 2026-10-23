@@ -34,7 +34,7 @@ gate = load('ci_evidence_gate', 'scripts/ci-evidence-gate')
 fixtures = load('evidence_verify_test', 'scripts/evidence-verify-test')
 REPOSITORY = 'org/repo'
 # The checks with an evidence gate job in fleet.yml (evidence-gate-<check>).
-CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries', 'fractal-web')
+CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'ci-script-tests', 'mail-redelivery-canaries', 'fractal-web')
 # The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
 POLICY_CHECKS = CHECKS
 WEEK = 7 * 24 * 3600
@@ -48,6 +48,7 @@ CANARIES_ARGV = ['bash', 'scripts/ci-linux', 'mail-redelivery-canaries']
 # The step-outcome notes of the other three checks (nix-evidence, agent/evidence-more-checks).
 STEP_ARGV = {
     'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
+    'ci-script-tests': ['bash', 'scripts/ci-script-tests'],
     'typescript-client': ['bash', 'scripts/ci-typescript-client'],
     'isolation-vm': ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'],
 }
@@ -875,7 +876,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
-        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'genie-freshness')
+        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'genie-freshness', 'ci-script-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
@@ -1824,7 +1825,7 @@ class WorkflowStructure(unittest.TestCase):
                 # Every gate it reads must be one of its needs, and the check's own gate must be among them.
                 self.assertTrue({f'evidence-gate-{g}' for g in referenced} <= self.needs_of(block), name)
                 expected = {'mail-redelivery-canaries': {'linux-gate', 'mail-redelivery-canaries'},
-                            'genie-freshness': {'genie-freshness'}, 'typescript-client': {'typescript-client'},
+                            'genie-freshness': {'genie-freshness'}, 'ci-script-tests': {'ci-script-tests'}, 'typescript-client': {'typescript-client'},
                             'isolation-vm': {'isolation-vm'}, 'fractal-web-execution': {'fractal-web'}}.get(name, {'linux-gate'})
                 self.assertEqual(referenced, expected, name)
         self.assertGreaterEqual(signed, 10)  # the stage jobs, the canaries and the three step-outcome jobs
@@ -2024,11 +2025,13 @@ class WorkflowStructure(unittest.TestCase):
         self.assertNotIn('true', condition)
         self.assertEqual(condition.count('||'), 3 + condition.count("github.event_name != 'pull_request' ||"))
 
-    def test_every_evidence_test_script_runs_in_the_required_genie_freshness_check(self):
-        listed = (ROOT / 'scripts/ci-genie-freshness').read_text()
+    def test_every_evidence_test_script_runs_in_a_required_check(self):
+        # The self-tests that read only the CI scripts run in ci-script-tests; the ones that read the whole tree run in genie-freshness.
+        listed = (ROOT / 'scripts/ci-genie-freshness').read_text() + (ROOT / 'scripts/ci-script-tests').read_text()
         for path in sorted((ROOT / 'scripts').iterdir()):
             if re.fullmatch(r'(?:ci-)?evidence-[a-z-]*test', path.name):
-                self.assertRegex(listed, rf'(?<![\w-]){re.escape(path.name)}(?![\w-])', f'{path.name} is not run by scripts/ci-genie-freshness')
+                self.assertRegex(listed, rf'(?<![\w-]){re.escape(path.name)}(?![\w-])',
+                                 f'{path.name} is run by neither scripts/ci-genie-freshness nor scripts/ci-script-tests')
 
 if __name__ == '__main__':
     unittest.main()
