@@ -104,8 +104,13 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
         [&receipt_id], |row| row.get(0),
     ).unwrap();
     let receipt: Value = serde_json::from_str(&receipt).unwrap();
-    assert_eq!(receipt["fields"]["legacy_runtime_start_closures"][0]["operation_id"], "legacy-op");
-    assert_eq!(receipt["fields"]["legacy_runtime_start_closures"][0]["native_evidence"], evidence);
+    assert!(receipt["fields"].get("legacy_runtime_start_closures").is_none());
+    let closures: Value = serde_json::from_str(
+        receipt["fields"]["reason"].as_str().unwrap().split_once("; legacy runtime start closures: ").unwrap().1,
+    ).unwrap();
+    assert_eq!(closures[0]["operation_id"], "legacy-op");
+    assert_eq!(closures[0]["native_evidence"], evidence);
+    assert_eq!(receipt["fields"].as_object().unwrap().len(), 4);
     assert!(reopened.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
     assert!(reopened.apply_operational_repair(&plan.token).unwrap().already_applied);
 }
