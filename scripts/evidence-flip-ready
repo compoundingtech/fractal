@@ -178,6 +178,11 @@ def collect(github, checks, since, until):
     return rows
 
 
+def unverified(row):
+    """The gate never verified (no gate or no policy entry at an old base), so the line says nothing about the log."""
+    return row['fields'].get('outcome') == 'unavailable' and row['fields'].get('log', '-') == '-'
+
+
 def evaluate(rows, enforce, now):
     """The trigger for one check, from its rows (window and lookback)."""
     start = now - datetime.timedelta(seconds=WINDOW_S)
@@ -194,7 +199,9 @@ def evaluate(rows, enforce, now):
     # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
     hidden = sorted({row['run'] for row in red if row['check'] not in SKIPPED_MEMBERS or row['members_red']})
     visible = sorted({row['run'] for row in red} - set(hidden))
-    # The log window began with the first line that has a log value after the last line without one.
+    # The log window began with the first line that has a log value after the last line without one. An unverified line
+    # (an old base's gate) neither starts nor restarts it.
+    rows = [row for row in rows if not unverified(row)]
     unset = [i for i, row in enumerate(rows) if row['fields'].get('log', '-') == '-']
     began = rows[unset[-1] + 1:] if unset else rows
     window_start = began[0]['created_at'] if began else None
@@ -204,7 +211,8 @@ def evaluate(rows, enforce, now):
         'log_missing': log.count('missing'), 'unlogged_pass_unexplained': unexplained, 'hidden_red': hidden,
         'visible_red': visible, 'log_window_start': iso(window_start),
     }
-    why = [f'{log.count(value)} lines with log={value}' for value in NOT_FRESH if value in log]
+    verified = [value for row, value in zip(window, log) if not unverified(row)]
+    why = [f'{verified.count(value)} lines with log={value}' for value in NOT_FRESH if value in verified]
     if window_start is None:
         why.append('no line with a log value')
     elif window_start > start:

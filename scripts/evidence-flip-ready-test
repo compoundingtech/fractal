@@ -197,7 +197,17 @@ class FlipReady(unittest.TestCase):
         gh = FakeGitHub()
         gh.run(1, at(1), ['evidence-decision v1 check=genie-freshness decision=run outcome=unavailable reason=no-gate-at-base run=1'])
         self.gh = gh
-        self.assertEqual(self.check()['why_not'][:2], ['1 lines with log=-', 'no line with a log value'])
+        self.assertEqual(self.check()['why_not'][:1], ['no line with a log value'])
+
+    def test_an_old_bases_unverified_line_neither_counts_as_unpinned_nor_restarts_the_window(self):
+        self.ready_history(count=40)
+        before = self.check()
+        self.gh.run(3000, at(1), [f'evidence-decision v1 check={CHECK} decision=run outcome=unavailable reason=no_policy record=- gate_sha256=abc'])
+        self.gh.run(3001, at(1), [f'evidence-decision v1 check={CHECK} decision=run outcome=unavailable reason=no-gate-at-base run=3001'])
+        entry = self.check()
+        self.assertEqual((entry['ready'], entry['log_window_start'], entry['why_not']), (True, before['log_window_start'], []))
+        self.gh.run(3002, at(1), [decision(log='-')])  # a verified line without the log still restarts it
+        self.assertEqual(self.check()['why_not'][0], '1 lines with log=-')
 
     def test_missing_and_unexplained_unlogged_passes_block_and_latency_explains_one(self):
         self.ready_history(count=40)
