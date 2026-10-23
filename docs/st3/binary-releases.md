@@ -32,6 +32,8 @@ the Nix `st3` package. The archive installer preserves that tree at
 rollback. On macOS it also seals a copy inside `SmallTalk.app/Contents/share/fractal-web`
 before signing, so the app's real executable can resolve its own assets.
 No Node runtime or separate web service is needed by installed releases.
+Release builders on both Linux and macOS require Nix to build those immutable
+assets; the release workflow provisions it on both platforms.
 
 Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
 Set `services.smalltalk.webListen = null;` to disable it, or set an explicit
