@@ -26,6 +26,135 @@ use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
+fn legacy_repair_fixture(store: &Store) -> Value {
+    store.connection.write().execute(
+        "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
+         VALUES('legacy-op','agent/example-legacy','worker-owner',?1,'stop-request',1,?2,1,0,1,1)",
+        params![
+            json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":true},
+                "desired_token":"legacy-desired","selected_token":"legacy-selected"}).to_string(),
+            json!({"error":"legacy start returned without closure proof"}).to_string(),
+        ],
+    ).unwrap();
+    // Internal-only fixture: the native layer owns the physical-fact schema.
+    json!({"operation_id":"legacy-op","runtime_id":"legacy-runtime","legacy":true,
+        "native_fixture":{"closed":true,"capture":"first"}})
+}
+
+#[test]
+fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    let evidence = legacy_repair_fixture(&store);
+    let plan = store.operational_repair_plan_with_legacy_starts(&[evidence.clone()]).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    assert_eq!(plan.items[0].class, "revoked-legacy-runtime-start");
+    assert_eq!(plan.items[0].details["native_evidence"], evidence);
+    assert_eq!(plan.items[0].details["operation"]["revoked_by"], "stop-request");
+
+    let mut changed = evidence.clone();
+    changed["native_fixture"]["capture"] = json!("second");
+    for fresh in [vec![], vec![changed]] {
+        assert_eq!(
+            store.apply_operational_repair_with_legacy_starts(&plan.token, &fresh).unwrap_err().code,
+            "stale-repair-plan",
+        );
+    }
+    let wrong_token = format!("orpv0:{}", "0".repeat(64));
+    assert_eq!(
+        store.apply_operational_repair_with_legacy_starts(&wrong_token, &[evidence.clone()])
+            .unwrap_err().code,
+        "stale-repair-plan",
+    );
+    let result = store.apply_operational_repair_with_legacy_starts(
+        &plan.token, &[evidence.clone()],
+    ).unwrap();
+    assert_eq!(result.applied, 1);
+    assert_eq!(result.affected_subjects, vec!["agent/example-legacy"]);
+    let receipt_id = result.receipt_claim_id.unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path, "node").unwrap();
+    let connection = reopened.readers.get();
+    let operation = connection.query_row(
+        "SELECT * FROM local_runtime_starts WHERE id='legacy-op'", [], runtime_starts::read,
+    ).unwrap();
+    assert!(operation.cleanup_verified);
+    let closed = operation.result.unwrap();
+    assert_eq!(closed["producer_closed"], true);
+    assert_eq!(closed["verification"], "producer-closed");
+    assert_eq!(closed["closure_proof"]["witness"]["native_evidence"], evidence);
+    assert_eq!(closed["closure_proof_id"], json!(format!(
+        "start-proof/{}", canonical_hash(&closed["closure_proof"]).unwrap(),
+    )));
+    let receipt: String = connection.query_row(
+        "SELECT body FROM claims WHERE id=?1 AND kind='repair.applied'",
+        [&receipt_id], |row| row.get(0),
+    ).unwrap();
+    let receipt: Value = serde_json::from_str(&receipt).unwrap();
+    assert_eq!(receipt["fields"]["legacy_runtime_start_closures"][0]["operation_id"], "legacy-op");
+    assert_eq!(receipt["fields"]["legacy_runtime_start_closures"][0]["native_evidence"], evidence);
+    assert!(reopened.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
+    assert!(reopened.apply_operational_repair(&plan.token).unwrap().already_applied);
+}
+
+#[test]
+fn legacy_runtime_repair_rejects_ineligible_local_rows_and_evidence() {
+    for (column, value) in [
+        ("revoked_by", Value::Null),
+        ("finished", json!(0)),
+        ("cleanup_verified", json!(1)),
+        ("applied", json!(0)),
+        ("body", json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":false}})),
+        ("body", json!({"member":{"host":"other","runtime_id":"legacy-runtime","terminal":true}})),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let evidence = legacy_repair_fixture(&store);
+        let sql_value = match value {
+            Value::Null => rusqlite::types::Value::Null,
+            Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap()),
+            value => rusqlite::types::Value::Text(value.to_string()),
+        };
+        store.connection.write().execute(
+            &format!("UPDATE local_runtime_starts SET {column}=?1 WHERE id='legacy-op'"),
+            [sql_value],
+        ).unwrap();
+        assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty(),
+            "accepted ineligible {column}");
+    }
+    for (field, value) in [
+        ("operation_id", json!("wrong-operation")),
+        ("runtime_id", json!("wrong-runtime")),
+        ("legacy", json!(false)),
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let mut evidence = legacy_repair_fixture(&store);
+        evidence[field] = value;
+        assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty());
+    }
+}
+
+#[test]
+fn legacy_runtime_repair_token_binds_every_local_operation_field() {
+    for update in [
+        "UPDATE local_runtime_starts SET revoked_by='another-stop'",
+        "UPDATE local_runtime_starts SET result='{\"error\":\"changed\"}'",
+        "UPDATE local_runtime_starts SET owner='another-owner'",
+        "UPDATE local_runtime_starts SET receipted=0",
+        "UPDATE local_runtime_starts SET dispatched=0",
+        "UPDATE local_runtime_starts SET body=json_set(body,'$.desired_token','changed')",
+    ] {
+        let store = Store::open_memory("node").unwrap();
+        let evidence = legacy_repair_fixture(&store);
+        let plan = store.operational_repair_plan_with_legacy_starts(&[evidence.clone()]).unwrap();
+        store.connection.write().execute(update, []).unwrap();
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(
+            &plan.token, &[evidence],
+        ).unwrap_err().code, "stale-repair-plan");
+    }
+}
+
 mod resource_pending_receive_tests {
     
 }

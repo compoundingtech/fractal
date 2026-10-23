@@ -4032,9 +4032,29 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Daemon-only evidence captured while holding the runtime spawn locks.
+    pub fn operational_repair_plan_with_legacy_starts(
+        &self,
+        native_evidence: &[Value],
+    ) -> Result<OperationalRepairPlan> {
+        let connection = self.readers.get();
+        operational_repair_plan_with_legacy_starts_tx(
+            &connection, now_ms(), &self.origin, native_evidence,
+        )
+    }
+
     pub fn apply_operational_repair(
         &self,
         token: &str,
+    ) -> Result<OperationalRepairResult, St3Error> {
+        self.apply_operational_repair_with_legacy_starts(token, &[])
+    }
+
+    /// Rechecks the complete evidence-bound plan inside the normal writer fence.
+    pub fn apply_operational_repair_with_legacy_starts(
+        &self,
+        token: &str,
+        native_evidence: &[Value],
     ) -> Result<OperationalRepairResult, St3Error> {
         if !token.starts_with("orpv0:") {
             return Err(St3Error::new(
@@ -4093,7 +4113,9 @@ impl Store {
             });
         }
 
-        let plan = operational_repair_plan_tx(&transaction, now_ms()).map_err(internal)?;
+        let plan = operational_repair_plan_with_legacy_starts_tx(
+            &transaction, now_ms(), &self.origin, native_evidence,
+        ).map_err(internal)?;
         if plan.token != token {
             return Err(St3Error::new(
                 "stale-repair-plan",
@@ -4124,6 +4146,16 @@ impl Store {
         for item in &plan.items {
             affected_subjects.extend(item.affected_subjects.iter().cloned());
             match item.class.as_str() {
+                "revoked-legacy-runtime-start" => {
+                    let operation_id = item.details["operation"]["id"].as_str()
+                        .ok_or_else(|| St3Error::new("invalid-repair-plan", "missing runtime operation"))?;
+                    runtime_starts::retain_runtime_start_producer_closed_tx(
+                        &transaction,
+                        &self.origin,
+                        operation_id,
+                        item.details.get("native_evidence"),
+                    ).map_err(internal)?;
+                }
                 "terminal-descendants" => {
                     let generation = item
                         .details
@@ -4266,6 +4298,12 @@ impl Store {
             &json!({"fields": {
                 "token": token,
                 "item_count": plan.items.len(),
+                "legacy_runtime_start_closures": plan.items.iter()
+                    .filter(|item| item.class == "revoked-legacy-runtime-start")
+                    .map(|item| json!({
+                        "operation_id": item.details["operation"]["id"],
+                        "native_evidence": item.details["native_evidence"],
+                    })).collect::<Vec<_>>(),
                 "affected_subjects": affected_subjects,
                 "reason": "applied the exact graph-authorized operational repair plan",
             }}),
@@ -12376,6 +12414,62 @@ pub fn operational_repair_plan_tx(
         },
         items,
     })
+}
+
+fn operational_repair_plan_with_legacy_starts_tx(
+    connection: &Connection,
+    snapshot_unix_ms: u128,
+    origin: &str,
+    native_evidence: &[Value],
+) -> Result<OperationalRepairPlan> {
+    let mut plan = operational_repair_plan_tx(connection, snapshot_unix_ms)?;
+    let mut seen = BTreeSet::new();
+    for evidence in native_evidence {
+        let (Some(operation_id), Some(runtime_id)) = (
+            evidence["operation_id"].as_str(), evidence["runtime_id"].as_str(),
+        ) else { continue };
+        if evidence["legacy"] != true {
+            continue;
+        }
+        let operation = connection.query_row(
+            "SELECT * FROM local_runtime_starts WHERE id=?1",
+            [operation_id],
+            runtime_starts::read,
+        ).optional()?;
+        let Some(operation) = operation else { continue };
+        if !operation.finished || operation.revoked_by.is_none()
+            || operation.cleanup_verified || !operation.applied
+            || operation.result.as_ref().is_none_or(|result| !result.is_object())
+            || operation.body["member"]["terminal"] != true
+            || operation.body["member"]["runtime_id"].as_str() != Some(runtime_id)
+            || operation.body["member"]["host"].as_str() != Some(origin)
+        {
+            continue;
+        }
+        // Duplicate identical internal captures are harmless; conflicting captures
+        // remain token-bound rather than selecting an arbitrary physical witness.
+        if !seen.insert((operation_id.to_owned(), canonical_hash(evidence)?)) {
+            continue;
+        }
+        push_operational_repair_item(
+            &mut plan.items,
+            "revoked-legacy-runtime-start",
+            &operation.subject,
+            vec![operation.subject.clone()],
+            "the owner daemon proved the revoked legacy terminal producer physically closed",
+            BTreeMap::from([
+                ("operation".into(), serde_json::to_value(&operation)?),
+                ("owner_host".into(), Value::from(origin)),
+                ("native_evidence".into(), evidence.clone()),
+            ]),
+        )?;
+    }
+    plan.items.sort_by(|left, right| {
+        (&left.class, &left.subject, &left.id).cmp(&(&right.class, &right.subject, &right.id))
+    });
+    plan.token = format!("orpv0:{}", canonical_hash(&("st3.operational-repair.v0", &plan.items))?);
+    plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
+    Ok(plan)
 }
 
 fn push_operational_repair_item(

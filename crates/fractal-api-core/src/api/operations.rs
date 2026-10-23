@@ -4,6 +4,7 @@ use crate::MissionsStore;
 use crate::LimitsStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
+use crate::RuntimeStartsStore;
 use super::*;
 
 pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
@@ -201,22 +202,55 @@ fn build_tools_check(tools: &crate::environment::BuildTools) -> DoctorCheck {
 pub async fn operational_repair_plan(
     State(state): State<AppState>,
 ) -> Result<Json<OperationalRepairPlan>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.operational_repair_plan())
-        .await
-        .map(Json)
+    blocking_store(move || owner_operational_repair_plan(&state)).await.map(Json)
 }
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
-    let store = state.store.clone();
-    let result = blocking_action(move || store.apply_operational_repair(&request.token)).await?;
+    let effect_state = state.clone();
+    let result = blocking_action(move || {
+        let (_guards, evidence) = legacy_start_repair_evidence(&effect_state)
+            .map_err(|error| St3Error::new("legacy-start-proof-unavailable", format!("{error:#}")))?;
+        effect_state.store.apply_operational_repair_with_legacy_starts(&request.token, &evidence)
+    }).await?;
     if result.applied != 0 {
         signal_changed(&state);
     }
     Ok(Json(result))
+}
+
+pub(super) fn owner_operational_repair_plan(state: &AppState) -> anyhow::Result<OperationalRepairPlan> {
+    let (_guards, evidence) = legacy_start_repair_evidence(state)?;
+    state.store.operational_repair_plan_with_legacy_starts(&evidence)
+}
+
+/// Physical evidence comes only from this owner daemon, never the repair request.
+/// Keep each native spawn-lock guard alive through the normal writer transaction.
+fn legacy_start_repair_evidence(
+    state: &AppState,
+) -> anyhow::Result<(Vec<fractal_runtime::LegacyStartClosureProof>, Vec<Value>)> {
+    let runtime = daemon_pty(state)?;
+    let mut guards = Vec::new();
+    let mut evidence = Vec::new();
+    for operation in state.store.pending_runtime_starts()? {
+        if !operation.finished || !operation.applied || operation.revoked_by.is_none() || operation.cleanup_verified {
+            continue;
+        }
+        let Some(member) = operation.body.get("member") else { continue; };
+        if member["terminal"] != true || member["host"].as_str() != Some(state.node.as_str()) {
+            continue;
+        }
+        let Some(runtime_id) = member["runtime_id"].as_str() else { continue; };
+        if let Some(proof) = runtime.legacy_start_closure(runtime_id, &operation.id)? {
+            let mut value = serde_json::to_value(&proof.evidence)?;
+            value["legacy"] = Value::from(true);
+            evidence.push(value);
+            guards.push(proof);
+        }
+    }
+    Ok((guards, evidence))
 }
 
 mod backup_export;
