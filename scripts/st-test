@@ -142,6 +142,15 @@ def lane_names(base):
         return set()
 
 
+def policy_checks(base):
+    """The checks the accepted base's skip policy names (none when it is absent or unreadable)."""
+    done = git('show', f'{base}:.st/evidence-skip-policy.json', check=False)
+    try:
+        return list(json.loads(done.stdout.decode())['checks']) if done.returncode == 0 else []
+    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
+        return []
+
+
 def lane_edits(verifier_path, directory, base, check, tree):
     """The paths of `check`'s lane definition that `tree` changes relative to `base` (empty when it changes none). evidence-wrap refuses
     to sign such a tree; asking first lets the run say so plainly, as "not signed", instead of reporting a failed check."""
@@ -286,7 +295,8 @@ def main(argv):
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
     parser.add_argument('--all', action='store_true', help='with no --check: the heavy checks too (' + ', '.join(sorted(HEAVY)) + ')')
-    parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree; exit 0 if all are, 3 if not')
+    parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
+                        'and with --all a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
@@ -311,9 +321,20 @@ def main(argv):
             verifier = Path(scratch) / 'evidence-verify'
             verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
             repository = args.repository or repository_of(remote or 'origin')
-            rows = [(name,) + covered(str(verifier), Path('.'), tree, name, args.base, repository) for name in checks]
-        for name, is_covered, why in rows:
-            print(f'  {name:<20} {"covered" if is_covered else "not covered":<12} {why}')
+            lanes, rows = lane_names(args.base), []
+            for name in checks:
+                # A tree that edits a check's lane cannot be signed here (evidence-wrap refuses it): CI runs that check.
+                edits = lane_edits(str(verifier), Path('.'), args.base, name, tree) if name in lanes else []
+                if edits:
+                    rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})'))
+                else:
+                    is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository)
+                    rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why))
+            if args.all and not args.check:
+                # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
+                rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
+        for name, is_covered, label, why in rows:
+            print(f'  {name:<24} {label:<22} {why}')
         return 0 if all(row[1] for row in rows) else 3
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
