@@ -6,7 +6,7 @@ order: 2
 
 # CLI reference
 
-`fractal` opens the terminal interface. The same CLI reads and updates the graph from scripts and coding agents.
+The `fractal` CLI reads and updates the graph from your shell, scripts, and coding agents. For a graphical client, use the [web app](../guides/web-and-ios.md).
 
 ```sh
 fractal --help
@@ -49,7 +49,8 @@ For small independent authorized work, use `fractal work start`. Claim before ex
 | `fractal replication status` | Inspect graph synchronization. |
 | `fractal devices` | Pair, inspect, and revoke clients. |
 | `fractal subject show ID` | Inspect one typed graph subject. |
-| `fractal demo` | Validate and play isolated scripted demos. |
+| `fractal demo check FILE` | Validate a scripted demo file without playback. |
+| `fractal web` | Open the configured, already running web app; does not start a server. |
 
 `fractal up` runs the foreground daemon for explicit process supervision. Do not launch it alongside another daemon using the same state. Prefer setup's user service for ordinary installations.
 
@@ -57,4 +58,4 @@ For small independent authorized work, use `fractal work start`. Claim before ex
 
 Use `--as person/NAME` where a person operation requires an actor. A managed agent uses its bound identity; a flag is not permission to impersonate someone. Person-only setup and scripted demos must run outside a bound agent session.
 
-See [Configuration and KDL](configuration.md) and the [CLI implementation](https://github.com/compoundingtech/fractal/blob/main/crates/fractal/src/main.rs) for the declaration of the command tree.
+See [Configuration and KDL](configuration.md), the [CLI implementation](https://github.com/compoundingtech/fractal/blob/main/crates/fractal/src/main.rs), and the [web URL launcher](https://github.com/compoundingtech/fractal/blob/main/crates/fractal/src/fractal.rs) for the command contracts.

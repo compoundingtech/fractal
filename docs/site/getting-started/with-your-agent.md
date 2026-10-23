@@ -111,4 +111,4 @@ Tell the user the installed version, startup method, worker ID, run ID, workspac
 fractal agents stop agent/garden/worker --as "person/$PERSON"
 ```
 
-The user can open `fractal` to inspect work, messages, and Now. Continue with [Missions in practice](../guides/missions-in-practice.md) to add review and dependencies.
+The user can inspect work and messages with the CLI or a configured [web app](../guides/web-and-ios.md). Continue with [Missions in practice](../guides/missions-in-practice.md) to add review and dependencies.

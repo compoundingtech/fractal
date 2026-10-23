@@ -47,4 +47,4 @@ fractal conversations send agent/garden/worker --from person/ada \
   --subject 'Hello' --body 'Tell me which workspace you are in. Do not change files.'
 ```
 
-Open the worker in `fractal` and check the reply. A successful send records durable conversation; it does not prove a task has been completed. Use a [mission](first-mission.md) for work with a result to verify.
+Inspect the reply in the configured [web app](../guides/web-and-ios.md), or use `fractal conversations ls agent/garden/worker` and the CLI's conversation-reading commands. A successful send records durable conversation; it does not prove a task has been completed. Use a [mission](first-mission.md) for work with a result to verify.

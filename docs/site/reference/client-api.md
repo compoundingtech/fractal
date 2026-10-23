@@ -6,7 +6,7 @@ order: 5
 
 # Client API
 
-Fractal's terminal, web, and iOS clients read work and submit authorized actions through the client contract. A custom client should use that contract rather than treating the daemon's privileged internal API as a public network service.
+Fractal's web and iOS clients read work and submit authorized actions through the client contract. A custom client should use that contract rather than treating the daemon's privileged internal API as a public network service.
 
 ## Start here
 
@@ -20,8 +20,8 @@ Fractal's terminal, web, and iOS clients read work and submit authorized actions
 
 Expose the paired-only gateway through HTTPS or an encrypted tailnet route. Keep the privileged daemon socket private. Pair each trusted device with the scopes it needs, protect its saved credentials, and revoke devices you no longer trust.
 
-A phone or client-only terminal does not replicate the graph or run agents. It needs a live connection to make changes. Show offline or stale state honestly; do not render a cached observation as proof of current success.
+A phone or browser client does not replicate the graph or run agents. It needs a live connection to make changes. Show offline or stale state honestly; do not render a cached observation as proof of current success.
 
 Use server-provided subject IDs, current action availability, and revision tokens. A user opening a card is not approval; send an explicit authorized action and handle the returned result.
 
-For a user-facing pairing walkthrough, see [Terminal and iOS clients](../guides/terminal-and-ios.md).
+For user-facing connection guidance, see [Web and iOS clients](../guides/web-and-ios.md).

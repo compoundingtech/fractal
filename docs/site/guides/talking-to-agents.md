@@ -8,11 +8,11 @@ order: 3
 
 Messages are durable conversation. Missions track work and results; alerts track decisions that need a person. Use each for its own purpose.
 
-## In the terminal interface
+## In the web app
 
-Run `fractal`, find an agent with **Ctrl+K**, and open its conversation. Type in the composer and send. **Ctrl+H** opens Now. When attached to a live agent terminal, detach before using application navigation shortcuts.
+Open your configured [web app](web-and-ios.md), select an agent, and use its conversation composer. Read the agent's reply and inspect any work or request it refers to. The web server must already be running; `fractal web` opens its URL but does not start it.
 
-An agent's native terminal is useful for login, trust, and provider screens. It is not the only way to inspect its work: missions, messages, and results live in the graph.
+An agent's native terminal remains useful for login, trust, and provider screens. It is not the only way to inspect its work: missions, messages, and results live in the graph.
 
 ## From the CLI
 

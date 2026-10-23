@@ -19,12 +19,12 @@ Neither Rust nor Nix is required for binary installation. Agents consume your pr
 Review the [installer](https://github.com/compoundingtech/fractal/blob/main/install.sh) before running it if you prefer to inspect downloaded scripts.
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh -s -- --no-run
 export PATH="$HOME/.local/bin:$PATH"
 fractal --version
 ```
 
-The installer downloads the latest release and checks its SHA256 sidecar. The archive and checksum come from the same release endpoint; this is an integrity check, not an independent signature. To install without opening the interface, pass `--no-run` to the installer, as shown in [agent setup](with-your-agent.md).
+The installer downloads the latest release and checks its SHA256 sidecar. The archive and checksum come from the same release endpoint; this is an integrity check, not an independent signature. `--no-run` installs the commands without launching a client.
 
 ## Set up your machine
 
@@ -32,7 +32,7 @@ Run `fractal setup` in your terminal. Choose your person name, a persistent mach
 
 Setup describes each integration before changing it. A new installation uses the `auto` access mode: provider-managed permission checks reduce accidents but are not a security boundary. `bypass` removes those prompts. Do not change that setting without the user's authorization.
 
-The terminal interface opens with your agents and conversations. **Ctrl+H** opens Now; **Ctrl+K** finds an agent or mission; **Ctrl+Q** quits the interface without stopping background agents.
+Use the CLI to inspect agents and missions. For graphical access, connect to an already configured [web app](../guides/web-and-ios.md): `fractal web` opens its URL but does not start a web server.
 
 ## Check success
 
