@@ -2363,6 +2363,7 @@ impl Ui {
             return if self.usage_open() { Pane::Usage(id) } else { Pane::Home(id) };
         }
         match self.focused_pane() {
+            Some(Pane::List(0)) => Pane::Home(self.list_selection(0)),
             // A mission's k swaps its card and its whole declaration in the same tab.
             Some(Pane::Mission(id)) if self.kdl => Pane::Declaration(id),
             Some(Pane::Declaration(id)) if !self.kdl => Pane::Mission(id),
@@ -3656,7 +3657,7 @@ impl Ui {
                 ),
                 (
                     "ctrl+h",
-                    "Now, and again to close it (in a text box it is backspace)",
+                    "open or focus Inbox (in a text box it is backspace)",
                 ),
                 ("q", "quit"),
             ],
@@ -3694,7 +3695,7 @@ impl Ui {
                 ("x", "Missions: show st's own missions"),
                 ("n", "Agents: a new agent; Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
-                ("x", "Now: dismiss a request, update or message"),
+                ("x", "Inbox: dismiss a request, update or message"),
                 (
                     "b p",
                     "Usage: group by agent, mission, step...; change the period",
@@ -6064,7 +6065,6 @@ impl Ui {
             Hit::Message | Hit::Subject | Hit::Resize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
-            Hit::Home if self.home_open() && !self.usage_open() => self.close_home(),
             Hit::Home => self.open_home(),
             // The terminal may be on another machine than stui (over SSH or fabric): the
             // clipboard is the person's, so the link lands where their browser is. Run locally,

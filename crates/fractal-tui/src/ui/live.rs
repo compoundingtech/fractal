@@ -3132,7 +3132,7 @@ async fn perform(
                 )
                 .await?;
             Ok((
-                "Launch created; the planner's proposal will appear in Now".into(),
+                "Launch created; the planner's proposal will appear in Inbox".into(),
                 None,
             ))
         }
