@@ -11,3 +11,4 @@ record f8eef5daffbc95218caa972fb3828d0e3324798c linux-gate 0 fleet/ci 2026-10-23
 record f9529390cfc779d0b39f9a6109bba9ba6d3d294a linux-tests-shard-4 0 fleet/ci 2026-10-23T18:05:00Z
 record d1be55a6d47da3d3c5eec279653607d2ff410a0e typescript-client 0 host/forge 2026-10-23T18:31:00Z
 record 1c353158b139a5d82f0251e646506106d5521aa6 genie-freshness 0 host/forge 2026-10-23T18:38:16Z
+record 6a732fc2aaeb94e41f03073512421dea1c0eda73 linux-gate 0 host/forge 2026-10-23T19:15:47Z
