@@ -2102,7 +2102,14 @@ struct RecorderReportArgs {
 #[derive(Subcommand)]
 enum RepairCommand {
     /// Compute the exact read-only repair plan and approval token.
-    DryRun,
+    DryRun {
+        /// Restrict repair items to these exact subjects (repeatable).
+        #[arg(long = "subject")]
+        subjects: Vec<String>,
+        /// Restrict repair items to these classes (repeatable).
+        #[arg(long = "class")]
+        classes: Vec<String>,
+    },
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
 }
@@ -10307,10 +10314,38 @@ async fn run_doctor(
     Ok(())
 }
 
+fn repair_plan_path(subjects: &[String], classes: &[String]) -> Result<String> {
+    if subjects.is_empty() && classes.is_empty() { return Ok("/v1/repair".into()); }
+    Ok(format!("/v1/repair?subjects={}&classes={}",
+        urlencoding::encode(&serde_json::to_string(subjects)?),
+        urlencoding::encode(&serde_json::to_string(classes)?)))
+}
+
+fn validate_repair_plan_filters(
+    plan: &OperationalRepairPlan, subjects: &[String], classes: &[String],
+) -> Result<()> {
+    let mut subjects = subjects.to_vec();
+    let mut classes = classes.to_vec();
+    subjects.sort();
+    subjects.dedup();
+    classes.sort();
+    classes.dedup();
+    let actual = Store::operational_repair_token_filters(&plan.token)?;
+    anyhow::ensure!(actual == (subjects.clone(), classes.clone()),
+        "the serving daemon did not bind the requested repair filters; upgrade the daemon before applying repair");
+    anyhow::ensure!(plan.items.iter().all(|item|
+        (subjects.is_empty() || subjects.binary_search(&item.subject).is_ok())
+            && (classes.is_empty() || classes.binary_search(&item.class).is_ok())),
+        "the serving daemon returned repair items outside the requested filters");
+    Ok(())
+}
+
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
-        RepairCommand::DryRun => {
-            let plan: OperationalRepairPlan = client.get("/v1/repair").await?;
+        RepairCommand::DryRun { subjects, classes } => {
+            let path = repair_plan_path(&subjects, &classes)?;
+            let plan: OperationalRepairPlan = client.get(&path).await?;
+            validate_repair_plan_filters(&plan, &subjects, &classes)?;
             if json_output {
                 print_value(&plan, true)?;
             } else {

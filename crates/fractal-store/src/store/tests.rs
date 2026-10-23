@@ -165,6 +165,83 @@ fn legacy_runtime_repair_token_binds_every_local_operation_field() {
     }
 }
 
+#[test]
+fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
+    let store = Store::open_memory("node").unwrap();
+    let selected = legacy_repair_fixture(&store);
+    store.connection.write().execute(
+        "INSERT INTO local_runtime_starts
+         SELECT 'unselected-op','agent/example-unselected',owner,
+           json_set(body,'$.member.runtime_id','unselected-runtime'),
+           revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted
+         FROM local_runtime_starts WHERE id='legacy-op'", [],
+    ).unwrap();
+    let mut unselected = selected.clone();
+    unselected["operation_id"] = json!("unselected-op");
+    unselected["runtime_id"] = json!("unselected-runtime");
+    let evidence = vec![selected, unselected];
+    let subjects = vec!["agent/example-legacy".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let all = store.operational_repair_plan_with_legacy_starts(&evidence).unwrap();
+    assert_eq!(all.items.len(), 2);
+    let filtered = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &classes,
+    ).unwrap();
+    assert_eq!(filtered.items.len(), 1);
+    assert_ne!(filtered.token, all.token);
+    assert_eq!(Store::operational_repair_token_filters(&filtered.token).unwrap(),
+        (subjects.clone(), classes.clone()));
+    let repeated = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &[subjects[0].clone(), subjects[0].clone()], &classes,
+    ).unwrap();
+    assert_eq!(filtered.token, repeated.token);
+
+    // Reusing the digest while widening/removing its embedded filter cannot
+    // turn the approval into an unfiltered mutation.
+    let digest = filtered.token.split(':').nth(1).unwrap();
+    let widened = OperationalRepairFilter::new(&[], &classes);
+    let tampered = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(&widened).unwrap()));
+    for token in [format!("orpv0:{digest}"), tampered] {
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(&token, &evidence)
+            .unwrap_err().code, "stale-repair-plan");
+    }
+    store.connection.write().execute(
+        "UPDATE local_runtime_starts SET result='{\"error\":\"unselected changed\"}' WHERE id='unselected-op'",
+        [],
+    ).unwrap();
+    let result = store.apply_operational_repair_with_legacy_starts(&filtered.token, &evidence).unwrap();
+    assert_eq!(result.applied, 1);
+    let connection = store.readers.get();
+    let closed: bool = connection.query_row(
+        "SELECT cleanup_verified FROM local_runtime_starts WHERE id='legacy-op'", [], |row| row.get(0),
+    ).unwrap();
+    let untouched: bool = connection.query_row(
+        "SELECT cleanup_verified FROM local_runtime_starts WHERE id='unselected-op'", [], |row| row.get(0),
+    ).unwrap();
+    assert!(closed);
+    assert!(!untouched);
+}
+
+#[test]
+fn filtered_legacy_runtime_repair_refuses_changed_selected_set_and_class() {
+    let store = Store::open_memory("node").unwrap();
+    let evidence = vec![legacy_repair_fixture(&store)];
+    let subjects = vec!["agent/example-legacy".to_owned()];
+    let classes = vec!["expired-claim".to_owned()];
+    let empty = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &classes,
+    ).unwrap();
+    assert!(empty.items.is_empty());
+    let selected = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &evidence, &subjects, &["revoked-legacy-runtime-start".into()],
+    ).unwrap();
+    store.connection.write().execute(
+        "UPDATE local_runtime_starts SET revoked_by='changed-stop' WHERE id='legacy-op'", [],
+    ).unwrap();
+    assert_eq!(store.apply_operational_repair_with_legacy_starts(&selected.token, &evidence)
+        .unwrap_err().code, "stale-repair-plan");
+}
+
 mod resource_pending_receive_tests {
     
 }

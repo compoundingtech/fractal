@@ -163,8 +163,13 @@ Compact list, detail, human tree, and JSON are renderers of typed models, not in
 `st doctor` is read-only. Its `operational-repair` check computes the same bounded plan returned by
 `GET /v1/repair` and points to `st repair dry-run` when contradictions exist. A plan uses
 `st3.operational-repair.v0`, lists the exact affected subjects and reasons, and carries an
-`orpv0:<sha256>` token over the canonically ordered repair items. Snapshot index is diagnostic and
-is not part of the token.
+`orpv0:<sha256>` token over the canonically ordered repair items. Repeatable `--subject` and
+`--class` options restrict exact item subjects and classes (AND between filter kinds, OR within
+each kind). A filtered token is `orpv0:<sha256>:<hex-encoded-canonical-filter>`; the digest binds
+both the normalized filter and selected items. Apply reads its scope from the token and never
+widens it. Unselected changes do not invalidate a filtered plan; selected changes do.
+Snapshot index is diagnostic and is not part of the token. A newer CLI refuses an older daemon
+that ignores requested filters.
 
 `st repair apply TOKEN` applies only that exact recomputed plan. A changed plan fails with
 `stale-repair-plan`; callers must inspect a new dry-run. Registered classes are terminal
@@ -190,13 +195,25 @@ reconciliation plus the repair receipt; registry rows and history are preserved.
 Run on the owning host after deploying the daemon:
 
 ```sh
-st repair dry-run --json
-st repair apply orpv0:REVIEWED_DIGEST --json
-st repair dry-run --json
+plan=$(mktemp /tmp/legacy-start-repair.XXXXXX.json)
+st repair dry-run --class revoked-legacy-runtime-start \
+  --subject agent/compoundingtech/st-notes \
+  --subject agent/dotfiles/st-delegation \
+  --subject agent/dotfiles/devnet \
+  --subject agent/dotfiles/flow \
+  --subject agent/dotfiles/fractal-web-app --json | tee "$plan"
+# Review the selected items and physical evidence before applying.
+st repair apply "$(jq -er '.token' "$plan")" --json
+st repair dry-run --class revoked-legacy-runtime-start \
+  --subject agent/compoundingtech/st-notes \
+  --subject agent/dotfiles/st-delegation \
+  --subject agent/dotfiles/devnet \
+  --subject agent/dotfiles/flow \
+  --subject agent/dotfiles/fractal-web-app --json
 ```
 
-Review every item in the plan before using its exact token: apply authorizes the whole listed
-plan, not just one seat. If the target legacy start is not listed, proof is missing; do not edit
+Review every selected item before using its exact token. The subject/class filters above exclude
+unrelated graph repairs. If a target legacy start is not listed, proof is missing; do not edit
 the ledger or remove its PTY row to force eligibility.
 
 ## Regression fixtures
