@@ -31,8 +31,11 @@ vi.mock('./ConversationPaneFallback.tsx', async importOriginal => {
 // pending, and no backend is needed to prove when its code is requested.
 let gatewayObservation: FeedSyncObservation | undefined
 const reconnect = vi.fn()
+const askingAgents: ReadonlySet<string> = new Set()
 vi.mock('../data/react.tsx', () => ({
   useFleet: () => rosterFeed,
+  useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
+  useAskingAgents: () => askingAgents,
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
@@ -173,7 +176,7 @@ describe('conversation import boundary', () => {
     expect(skeleton?.querySelectorAll('[data-wf-skeleton-row]')).toHaveLength(8)
     expect(skeleton?.querySelectorAll('[data-wf-skeleton-line]')).toHaveLength(16)
     expect(skeleton?.querySelectorAll('button, a, input, [tabindex]')).toHaveLength(0)
-    expect(container.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents')
+    expect(container.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents…')
   })
 
   it('removes skeletons for observed empty rosters and read refusals rather than inventing rows', async () => {
@@ -184,7 +187,7 @@ describe('conversation import boundary', () => {
     rosterFeed = { _tag: 'Unavailable', reason: 'ungranted', detail: 'not-for-display' }
     await renderShell()
     expect(container.querySelector('[data-wf-roster-skeleton]')).toBeNull()
-    expect(container.querySelector('[data-wf-roster-reason="ungranted"]')?.textContent).toBe('No access to the agent roster. Read access has not been granted')
+    expect(container.querySelector('[data-wf-roster-reason="ungranted"]')?.textContent).toBe('No access to the agent rosterRead access has not been granted.')
     expect(container.textContent).not.toContain('not-for-display')
   })
 
@@ -321,6 +324,7 @@ describe('conversation import boundary', () => {
     const ux: UxTelemetry = {
       activeSpan: () => undefined,
       traceContext: () => undefined,
+      beginOpen: () => ({ phase: () => {}, contentCommitted: () => () => {}, cancel: () => {} }),
       shellCommitted: () => capture,
       rosterCommitted: () => () => {},
       beginSwitch: () => {},

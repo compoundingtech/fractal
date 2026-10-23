@@ -346,7 +346,7 @@ Claude and Codex seats, and applies it as the `person` in your st config (or `--
 host creates. Its next-step commands name the agent's subject, here `agent/builder.site`. `--print-kdl` shows
 the declaration without applying it, and `--description` says what the agent is for.
 `--message "Inspect the failing tests"` supplies an explicit first message through the harness's
-native startup argument. With no message, the seat starts idle. The Rust `st3-client` crate exposes
+native startup argument. With no message, the seat starts idle. The Rust `fractal-client` crate exposes
 `agent_create` with the same creation options; TypeScript and Swift expose `agentCreate`.
 
 Ctrl+\\ detaches and leaves the agent running. `st terminals attach agent/builder.site` attaches

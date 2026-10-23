@@ -24,7 +24,7 @@ let
       --extract-to "$1" \
       --extract-overwrite \
       --no-tests=fail \
-      -E 'package(=st2) and binary(=integration) and (test(/^transport_isolation::/) or test(/^nomad_survival::managed_agent_color_contract_crosses_systemd_scope$/))'
+      -E 'package(=fractal-legacy-runner) and binary(=integration) and (test(/^transport_isolation::/) or test(/^nomad_survival::managed_agent_color_contract_crosses_systemd_scope$/))'
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -54,9 +54,12 @@ pkgs.testers.runNixOSTest {
     import shlex
     import time
 
-    archive = os.environ["ST_ISOLATION_ARCHIVE"]
-    workspace = os.environ["ST_ISOLATION_WORKSPACE"]
-    build_workspace = os.environ["ST_ISOLATION_BUILD_WORKSPACE"]
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    archive = (os.environ["FRACTAL_ISOLATION_ARCHIVE"] if "FRACTAL_ISOLATION_ARCHIVE" in os.environ else os.environ["ST_ISOLATION_ARCHIVE"])
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    workspace = (os.environ["FRACTAL_ISOLATION_WORKSPACE"] if "FRACTAL_ISOLATION_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_WORKSPACE"])
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    build_workspace = (os.environ["FRACTAL_ISOLATION_BUILD_WORKSPACE"] if "FRACTAL_ISOLATION_BUILD_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_BUILD_WORKSPACE"])
 
     started = time.monotonic()
     machine.wait_for_unit("multi-user.target")
@@ -81,7 +84,8 @@ pkgs.testers.runNixOSTest {
     print(output)
     assert re.search(r"\b3 tests run: 3 passed\b", output), "all three systemd-scope cases must run and pass"
 
-    with open(os.environ["ST_ISOLATION_TIMINGS"], "w") as timings:
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:
         json.dump({"boot_seconds": round(boot_seconds, 1), "test_seconds": round(test_seconds, 1)}, timings)
   '';
 }

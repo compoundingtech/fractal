@@ -120,7 +120,11 @@ const styles = stylex.create({
   shortcutActive: { color: text.fgSoft },
   surfaceMotion: { transformOrigin: 'center', animationDuration: motion.fast, animationTimingFunction: motion.ease, ':is([data-entering])': { animationName: enterSurface }, ':is([data-exiting])': { animationName: exitSurface }, '@media (prefers-reduced-motion: reduce)': { animationName: 'none', animationDuration: '0s', transform: 'none', ':is([data-entering])': { animationName: 'none' }, ':is([data-exiting])': { animationName: 'none' } } },
 })
-/** Shared tooltip surface; portal ownership and trigger behavior stay with each caller. */
+/**
+ * Shared tooltip surface; portal ownership and trigger behavior stay with each caller. It sizes to its text
+ * (up to the cap) rather than to the room left of the viewport edge, so a long reason near the edge shifts
+ * inward instead of wrapping word by word.
+ */
 export const tooltipStyles = stylex.create({
-  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, width: 'max-content', maxWidth: g.tooltipMax, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start' },
+  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, boxSizing: 'border-box', width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start' },
 })

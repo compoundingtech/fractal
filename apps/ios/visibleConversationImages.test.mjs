@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ConversationImageViewport, VisibleConversationImage } from './visibleConversationImages.ts';
-import { contentImageUri, loadConversationContent } from '../../clients/typescript/st3-views/conversationContent.ts';
+import { contentImageUri, loadConversationContent } from '../../clients/typescript/fractal-views/conversationContent.ts';
 
 const tick = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);

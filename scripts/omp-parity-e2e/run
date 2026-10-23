@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
+python3 "$(dirname "${BASH_SOURCE[0]}")/../script_process.py" --check-platform
 umask 077
 
 usage() {
@@ -54,8 +56,8 @@ ST3=$(realpath "$ST3")
 [[ -z "$CORPUS" ]] || CORPUS=$(realpath "$CORPUS")
 require 'st3 executable' test -x "$ST3"
 ROOT=$(realpath "$(dirname "${BASH_SOURCE[0]}")/../..")
-FIXTURE="$ROOT/crates/st3-daemon/fixtures/native-records/omp-parity.jsonl"
-CHILD_FIXTURE="$ROOT/crates/st3-daemon/fixtures/native-records/omp-parity-child.jsonl"
+FIXTURE="$ROOT/crates/fractal-daemon/fixtures/native-records/omp-parity.jsonl"
+CHILD_FIXTURE="$ROOT/crates/fractal-daemon/fixtures/native-records/omp-parity-child.jsonl"
 require 'parent fixture readable' test -r "$FIXTURE"
 require 'child fixture readable' test -r "$CHILD_FIXTURE"
 ISO=$(mktemp -d "${TMPDIR:-/tmp}/omp-parity-e2e.XXXXXX")
@@ -71,7 +73,7 @@ cleanup() {
     tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
   fi
   if [[ -n "$DAEMON" ]]; then
-    kill -TERM "$DAEMON" 2>/dev/null || true
+    python3 "$ROOT/scripts/script_process.py" "$DAEMON" 15 --root "$ISO"
     wait "$DAEMON" 2>/dev/null || true
   fi
   if ((KEEP)); then
@@ -85,7 +87,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 export HOME="$ISO/home" XDG_RUNTIME_DIR="$ISO/run" XDG_STATE_HOME="$ISO/state" XDG_CONFIG_HOME="$ISO/config" XDG_CACHE_HOME="$ISO/cache"
-unset ST_AGENT ST3_PERSON ST3_ENDPOINT
+unset FRACTAL_AGENT ST_AGENT FRACTAL_PERSON ST3_PERSON FRACTAL_ENDPOINT ST3_ENDPOINT
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "${TMUX_SOCKET%/*}"
 SOCKET="$ISO/run/st3.sock"
 CLIENT_SOCKET="$ISO/run/st3-client.sock"
@@ -318,7 +320,8 @@ done
 
 # Open the actual saved session through Ctrl+K's direct session-id affordance.
 # No host-wide fake OMP process: the fixture remains a historical session.
-export ST3_ENDPOINT="$SOCKET" ST3_PERSON='person/tester'
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_ENDPOINT="$SOCKET" ST3_ENDPOINT="$SOCKET" FRACTAL_PERSON='person/tester' ST3_PERSON='person/tester'
 printf -v UI_COMMAND '%q ui --local' "$ST3"
 check 'start isolated stui terminal' tmux -f /dev/null -S "$TMUX_SOCKET" new-session -d -s omp-e2e -n stui -x 240 -y 100 "$UI_COMMAND"
 TMUX_STARTED=1

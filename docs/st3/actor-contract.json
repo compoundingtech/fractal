@@ -147,6 +147,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st agents rename-id": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st agents repos": {
         "actor": "none",
         "accepts_person": false,
@@ -876,6 +885,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st fleet transports prefer": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st fleet transports remove": {
         "actor": "none",
         "accepts_person": false,
@@ -1191,6 +1209,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st migrate host": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st missions cancel": {
         "actor": "required",
         "accepts_person": true,
@@ -1255,6 +1282,15 @@
         "ignores_actor": false
       },
       "st missions release": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st missions rename-id": {
         "actor": "required",
         "accepts_person": true,
         "can_carry_person": true,
@@ -1504,6 +1540,15 @@
         "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st schedules ls": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
       "st schema claims": {
@@ -1894,6 +1939,15 @@
         "ignores_actor": false
       },
       "st slo ls": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st store prepare-indexes": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,

@@ -78,7 +78,7 @@ TOML
     sleep 55
     memory "$pid" 60 "$label" "$round"
     if [[ -n $shim ]]; then
-      kill -s RTMIN+3 "$pid"
+      python3 "$here/../script_process.py" "$pid" "$(python3 -c 'import signal; print(signal.SIGRTMIN + 3)')" --root "$root"
       for _ in $(seq 1 50); do
         [[ -e "$trigger.done" ]] && break
         sleep 0.2
