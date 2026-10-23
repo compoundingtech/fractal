@@ -4716,6 +4716,30 @@ mod tests {
     }
 
     #[test]
+    fn tab_badge_tracks_optimistic_answer_hiding_stale_frames_and_rollback() {
+        let mut ui = tab_badge_world();
+        let mut world = ui.world.clone();
+        if let Load::Ready(items) = &mut world.attention {
+            items[0].kind = AttentionKind::Request {
+                from: "Asker".into(), from_id: "agent/a".into(), question: "Choose".into(),
+                structured: None, images: Vec::new(),
+            };
+        }
+        ui.set_world(world.clone());
+        let tab = Tab::pane("list:home");
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(2));
+        ui.note_acted(&Effect::Attention {
+            id: "attention/a".into(), action: "work.done".into(),
+            reason: Some("Yes".into()), answer: None,
+        });
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(1));
+        ui.set_world(world);
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(1));
+        ui.finish_answer("attention/a", false);
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(2));
+    }
+
+    #[test]
     fn tab_badge_excludes_retained_closed_cards_after_set_world() {
         let mut ui = tab_badge_world();
         ui.world.link = Link::Live;
@@ -5085,6 +5109,57 @@ mod tests {
         assert!(!ui.usage_open());
         assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
         assert_eq!(open_panes(&ui), opened);
+    }
+
+    #[test]
+    fn long_recommendation_reasons_leave_the_chips_visible_in_the_final_viewport() {
+        let agent = "agent/example/atlas/builder";
+        let reason = "Canary stayed healthy; the rollback flag remains available. ".repeat(10);
+        let mut ui = glass();
+        let request: fractal_client::StructuredRequest =
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "type": "choice",
+                "question": "How far does the release go?",
+                "why_person": "You own the rollout.",
+                "recommendation": {"answer": "all", "reason": reason},
+                "answers": [
+                    {"id": "stage", "label": "Staging only", "consequence": "Staging."},
+                    {"id": "canary", "label": "Canary", "consequence": "One host."},
+                    {"id": "hold", "label": "Hold", "consequence": "Wait."},
+                    {"id": "all", "label": "Ship to all", "consequence": "Everyone."}
+                ]
+            }))
+            .unwrap();
+        ui.world.attention = Load::Ready(
+            ["attention/one", "attention/two"]
+                .into_iter()
+                .map(|id| {
+                    let mut item = alert_prompt(id, agent);
+                    item.title = "Release scope".into();
+                    item.kind = AttentionKind::Request {
+                        from: "Atlas".into(),
+                        from_id: agent.into(),
+                        question: request.question.clone(),
+                        structured: Some(Box::new(request.clone())),
+                        images: Vec::new(),
+                    };
+                    item
+                })
+                .collect(),
+        );
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        // This renders the clipped 120x32 viewport, not the unbounded band rows.
+        let shown = screen(&ui);
+        println!("{shown}");
+        assert_eq!(shown.matches("★ Ship to all").count(), 2, "{shown}");
+        assert_eq!(shown.matches("Staging only").count(), 2, "{shown}");
+        assert_eq!(shown.matches("open in Inbox").count(), 2, "{shown}");
+        assert!(shown.contains("Message Atlas Builder"), "{shown}");
+        let reasons: Vec<_> = shown.lines().filter(|line| line.contains("★ recommended:")).collect();
+        assert_eq!(reasons.len(), 2, "{shown}");
+        assert!(reasons.iter().all(|line| line.contains('…')), "{shown}");
     }
 
     #[test]

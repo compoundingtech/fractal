@@ -47,6 +47,8 @@ class CiLocal(unittest.TestCase):
         (self.home / '.local/bin/cargo').chmod(0o755)
         self.stage_exits = []
         self.umask = 0o022
+        self.tmp_root = root / 'short-tmp'
+        self.tmp_root.mkdir()
 
     def run_local(self, *stages, **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
@@ -63,14 +65,15 @@ class CiLocal(unittest.TestCase):
                'GH_TOKEN': 'secret', 'GITHUB_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x', 'EVIDENCE_PUSH_TOKEN': 'secret',
                'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'),
                'ST2_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite', 'FRACTAL_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite',
-               'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', **extra}
+               'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), **extra}
         done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(self.umask))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
-        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2')
+        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2',
+                                     RUSTC_WRAPPER='/nix/store/x-sccache/bin/sccache', CARGO_BUILD_RUSTC_WRAPPER='sccache')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls],
                          [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install'], [], ['mail-redelivery-canaries']])
@@ -79,12 +82,17 @@ class CiLocal(unittest.TestCase):
             scratch = Path(env['HOME'])
             self.assertNotEqual(scratch, self.home)
             self.assertTrue(str(scratch).startswith(self.tmp.name), scratch)
-            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'TMPDIR'):
+            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
                 self.assertTrue(env[name].startswith(str(scratch.parent)), (name, env[name]))
-            # The scratch and the stages' TMPDIR are on the account's disk, never the caller's TMPDIR (a dev shell's, under /tmp).
+            # The scratch is on the account's disk, never the caller's TMPDIR (a dev shell's, under /tmp).
             self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/run.'), scratch)
-            self.assertEqual(env['TMPDIR'], str(scratch.parent / 'tmp'))
+            # The TMPDIR is short and on disk (Unix socket paths below it are limited to 108 bytes): under CI_LOCAL_TMP_ROOT.
+            self.assertEqual(Path(env['TMPDIR']).parent, self.tmp_root)
+            self.assertTrue(Path(env['TMPDIR']).name.startswith('cl.'), env['TMPDIR'])
             self.assertNotIn('LD_PRELOAD', env)  # a host's preloaded allocator: CI preloads nothing
+            # no compiler cache server: one started here would keep this run's HOME and TMPDIR, removed at exit, for every build
+            self.assertNotIn('RUSTC_WRAPPER', env)
+            self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
                          'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
@@ -96,8 +104,37 @@ class CiLocal(unittest.TestCase):
                              (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
+            # Last, so cargo finds the dev shell's clippy before the rustup proxy there.
+            self.assertEqual(env['PATH'].split(':')[-1], f'{self.home}/.cargo/bin')
         self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_each_test_process_gets_a_tmpdir_of_its_own_through_the_cargo_target_runner(self):
+        done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_TARGET_TRIPLE='x86_64-unknown-linux-gnu')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for call in calls:
+            env = call['env']
+            self.assertEqual(env['CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER'], str(self.work / 'scripts/ci-test-tmpdir'))
+            self.assertEqual(env['CI_TEST_TMPDIR_ROOT'], env['TMPDIR'])  # the run's own short TMPDIR, removed with it
+
+    def test_the_runner_gives_every_start_a_fresh_tmpdir_and_runs_the_command_in_its_place(self):
+        root = Path(self.tmp.name) / 'root'
+        root.mkdir()
+        runner = ROOT / 'scripts/ci-test-tmpdir'
+        seen = []
+        for _ in range(2):
+            child = subprocess.Popen([str(runner), 'sh', '-c', 'echo "$TMPDIR $$"; mkdir "$TMPDIR/.git"'], stdout=subprocess.PIPE, text=True,
+                                     env={'PATH': os.environ['PATH'], 'CI_TEST_TMPDIR_ROOT': str(root), 'TMPDIR': '/elsewhere'})
+            out, _ = child.communicate()
+            self.assertEqual(child.returncode, 0)
+            directory, pid = out.split()
+            self.assertEqual(int(pid), child.pid)  # exec: no extra process between the caller and the test
+            self.assertEqual(Path(directory).parent, root)
+            seen.append(directory)
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertFalse((root / '.git').exists())  # what one start leaves at the top of its TMPDIR stays there
+        done = subprocess.run([str(runner), 'true'], env={'PATH': os.environ['PATH']}, capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)  # outside scripts/ci-local it refuses rather than guess a directory
 
     def test_on_a_host_whose_umask_is_002_the_stages_get_ci_s_022_and_no_group_writable_scratch(self):
         self.umask = 0o002
@@ -115,7 +152,7 @@ class CiLocal(unittest.TestCase):
         (self.devshell / 'cargo').unlink()
         self.log.unlink()
         # The tools the script needs, from directories that hold no cargo.
-        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'touch', 'env', 'python3')}
+        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'chmod', 'grep', 'touch', 'env', 'python3')}
         tools = [entry for entry in sorted(tools) if not (Path(entry) / 'cargo').exists()]
         done, calls = self.run_local('mail-redelivery-canaries', PATH=':'.join([str(self.bin), f'{self.home}/.local/bin', *tools]))
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)

@@ -1370,7 +1370,7 @@ class CommittedPolicy(unittest.TestCase):
             '.github/workflows/main-upkeep.yml', '.github/workflows/main-upkeep.yml.genie.ts', '.github/workflows/workspace-ci.ts',
             'BUCK', 'BUCK.genie.ts', 'apps/fractal-web', 'buck2', 'clients/typescript/fractal-client', 'clients/typescript/fractal-scenarios',
             'clients/typescript/fractal-views', 'docs/st3/client-v0/schemas', 'fixtures', 'flake.lock', 'flake.nix', 'megarepo.kdl',
-            'megarepo.lock', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-sdk', 'packages/fractal-ui',
+            'megarepo.lock', 'nix/fractal-web.nix', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-sdk', 'packages/fractal-ui',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'scripts/ci-fractal-web', 'scripts/ci-fractal-web-changes',
             'scripts/ci-fractal-web-gate', 'scripts/ci-fractal-web-kit-graph', 'scripts/ci-fractal-web-licenses',
             'scripts/ci-fractal-web-licenses-test', 'scripts/ci-fractal-web-test', 'scripts/ci-typescript-client', 'scripts/ci-web-shell',
@@ -1460,7 +1460,7 @@ class CommittedPolicy(unittest.TestCase):
                     self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
         self.assertEqual(sorted(with_host), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
         for (check, kind), rule in with_host.items():
-            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent'], check)
+            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent', 'queue'], check)
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
             # to the lane as well (Factory, 2026-10-22), so a tree that edits its own lane never skips on a local note.
@@ -1470,6 +1470,11 @@ class CommittedPolicy(unittest.TestCase):
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
             self.assertEqual(override['events'], ['pull_request'], check)
+            # The queue level (a merge-queue signer's key): the host's command and inputs, held to the lane, for the merge queue only.
+            queue = dict(rule['by_level']['queue'])
+            self.assertIs(queue.pop('lane'), True, check)
+            self.assertEqual(queue.pop('events'), ['merge_group'], check)
+            self.assertEqual(queue, {key: value for key, value in override.items() if key != 'events'}, check)
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
@@ -1483,6 +1488,26 @@ class CommittedPolicy(unittest.TestCase):
             loader.exec_module(st_test)
             for (check, kind), rule in with_host.items():
                 self.assertEqual(rule['by_level']['host']['command'], st_test.LOCAL[check], check)
+
+    def test_a_queue_note_never_covers_a_pull_request_and_covers_nothing_until_its_check_admits_the_merge_queue(self):
+        # Inert by construction: the level is limited to merge_group, and every check is still limited to pull requests, so the
+        # narrowed list is empty. A check's own flip (its events gaining merge_group) is what lets a queue note skip, one check at a time.
+        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        with_queue = []
+        for check, entry in policy['checks'].items():
+            for kind, rule in entry['kinds'].items():
+                if 'queue' not in (rule.get('trust_levels') or []) and 'queue' not in (rule.get('by_level') or {}):
+                    continue
+                with_queue.append((check, kind))
+                self.assertNotIn('queue', entry['trust_levels'], check)  # never the check's own list, so never `observed`
+                rules = self.rules(check)
+                level = rules['kinds'][kind]['by_level']['queue']
+                self.assertEqual((level['events'], level['lane']), (['merge_group'], True), check)
+                self.assertNotIn('pull_request', evidence_verify.narrowed_events(None, level['events']), check)
+                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']),
+                                 ['merge_group'] if 'merge_group' in (rules['events'] or []) else [], check)
+                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']), [], f'{check}: not flipped yet')
+        self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
 
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
         for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
@@ -1539,7 +1564,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
             # No weaker signer is admitted, except the host level for the locally signable checks (see the test for the host level).
-            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent') if check in HOST_CHECKS else None, check)
+            self.assertEqual(rules['kinds']['wrapper']['trust_levels'], ('fleet', 'host', 'agent', 'queue') if check in HOST_CHECKS else None, check)
             self.assertIsNone(rules['kinds']['observed']['trust_levels'], check)
         # fractal-web lists only its whole-check note, signed by the evidence note job from the lane's jobs (never one shard's
         # note, whose command is ['bash', 'scripts/ci-fractal-web']): the observer's record is of the always-emitted fractal-web

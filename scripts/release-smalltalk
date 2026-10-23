@@ -22,6 +22,7 @@ cd "$repo"
 if $dry_run; then
   printf 'cargo build --release --locked --target %s -p fractal\n' "$target"
   printf 'stage bin/%s\n' "${runtime_binaries[@]}"
+  printf 'nix build .#fractal-web --no-link --print-out-paths; stage share/fractal-web\n'
   printf 'link bin/fractal -> st3\n'
   # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
   printf 'link bin/st -> st3\n'
@@ -71,6 +72,14 @@ build_dir=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import jso
 for binary in "${binaries[@]}"; do
   install -m 0755 "$build_dir/$target/release/$binary" "$work/$package/bin/$binary"
 done
+
+# The static assets use the same source stamp and frozen workspace as the Nix package.
+web_package=$(nix build .#fractal-web --no-link --print-out-paths)
+test -f "$web_package/share/fractal-web/index.html"
+mkdir -p "$work/$package/share"
+cp -R "$web_package/share/fractal-web" "$work/$package/share/fractal-web"
+# Store permissions belong to Nix, not to mutable release/extraction/install trees.
+chmod -R u+w "$work/$package/share/fractal-web"
 
 # Keep the immutable runtime source at a stable Cargo-home path. A random temporary
 # checkout invalidates its fingerprints on every job even when the pin is unchanged.
@@ -149,6 +158,7 @@ mkdir -p "$work/install-home"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 FRACTAL_MACOS_INSTALL_HOME="$work/install-home" ST_MACOS_INSTALL_HOME="$work/install-home" FRACTAL_MACOS_APP_PATH="$work/installed/SmallTalk.app" ST_MACOS_APP_PATH="$work/installed/SmallTalk.app" \
   "$work/extracted/$package/install.sh" --bin-dir "$work/installed"
+test -f "$work/share/fractal-web/index.html"
 # Query outside the build checkout: installed tools must retain their baked source identity.
 (cd "$work/extracted" && "$work/installed/st" --version --json) > "$work/version.json"
 python3 - "$work/version.json" <<'PY_VERSION'
