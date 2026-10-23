@@ -178,6 +178,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/AgentActions.tsx",
     "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
     "apps/fractal-web/src/web/AlertsPopover.tsx",
+    "apps/fractal-web/src/web/AlertsPopover.tsx",
     "apps/fractal-web/src/web/AttentionControls.tsx",
     "apps/fractal-web/src/web/capturedChanges.ts",
     "apps/fractal-web/src/web/ChangesInspector.tsx",
