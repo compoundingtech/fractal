@@ -437,6 +437,8 @@ pub struct Ui {
     /// Attention items st no longer lists that nobody here acted on. Nothing leaves Home by
     /// itself (Nathan, 2026-10-07): they stay, marked, until `x` clears them.
     closed: HashSet<String>,
+    /// Subject membership and current badge observations, indexed when the world changes.
+    tab_statuses: glass::TabStatuses,
     /// Conversations scrolled up to their oldest entry since the last frame: each asks st for
     /// the page before it.
     older_wanted: RefCell<BTreeSet<String>>,
@@ -760,6 +762,7 @@ impl Ui {
         let mut resource_sidebar = resource_sidebar::Sidebar::default();
         resource_sidebar.observe(&world);
         Self {
+            tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
             world,
             documents: std::collections::BTreeMap::new(),
             selected: [0; 6],
@@ -931,6 +934,7 @@ impl Ui {
         self.world = world;
         self.keep_closed_attention(before);
         self.hide_pending_answers();
+        self.refresh_tab_statuses();
         for (index, id) in chosen.into_iter().enumerate() {
             if let Some(id) = id
                 && let Some(position) = self
@@ -4790,6 +4794,7 @@ impl Ui {
                     ("message", 'l') => {
                         if let Some(id) = self.selected_id() {
                             self.snoozed.insert(id);
+                            self.refresh_tab_statuses();
                             let index = self.selected[0];
                             self.select(index);
                             self.flash("Put off until later · demo, this machine only");
@@ -5661,6 +5666,7 @@ impl Ui {
                 }
             }
         }
+        self.refresh_tab_statuses();
         if self.tab() == 0 {
             self.select(self.selected[0]);
         }
@@ -6370,6 +6376,7 @@ impl Ui {
                 }
                 demo.loaded = true;
             }
+            self.refresh_tab_statuses();
             return;
         }
         let viewing = (self.tab() == 1)

@@ -140,6 +140,23 @@ wrong until the host is repaired; exchanges cannot fix it.
 The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage.
 The phone tabs are Now, Resources, Fleet, and Spaces.
 
+Terminal workspace tabs derive presentation identity from their existing pane keys,
+like the web strip's `data-tab-kind` (never from the displayed or custom title).
+`A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
+reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
+`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
+open alerts in that subject's attention window, excluding informational updates and
+recently closed items; zero is omitted, and an unavailable window shows `◆?`.
+A separate `?` means live attention reports an open question prompt. Native question
+kind or an exact question-tool call identity establishes its type, independently of
+available client-answer actions (whose submission window can expire). Cached calls
+without an open live prompt never establish that a question is still pending.
+Mission tabs include current question prompts of agents assigned to that mission;
+Inbox includes all current question prompts. Counts disappear before
+type/activity/question identity when space is tight. Subject membership indexes are
+rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
+
+
 ### Now: what needs you
 
 - Grouped by tier (`words.json` → `tier`): somebody is stopped on you, something broke, today,
