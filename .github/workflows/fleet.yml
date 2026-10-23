@@ -1088,6 +1088,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-0
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -1227,7 +1228,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   typescript-client:
     name: typescript-client
     needs: [pick-runner, genie-freshness, evidence-gate-typescript-client]
@@ -1245,6 +1254,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-0
       - name: Fetch the whole history without evidence tags
         if: (github.event_name == 'pull_request') && needs.evidence-gate-typescript-client.outputs.skip != 'true'
         env:
@@ -1380,7 +1390,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Cache the locked TypeScript and Effect toolchain","outcome":"${{ steps.typescript-cache.outcome }}","hit":"${{ steps.typescript-cache.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   nix-evidence-genie-freshness:
     name: nix-evidence-genie-freshness
     needs: [pick-runner]
@@ -1619,6 +1637,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-0
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -1724,9 +1743,19 @@ jobs:
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
         if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
+        shell: bash
         env:
           CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          snapshot_script="${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}"
+          if [ ! -f "$snapshot_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Build snapshot: **UNAVAILABLE (checkout/setup incomplete)** — no snapshot was created.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Build snapshot unavailable: checkout/setup did not provide the pack helper'
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$snapshot_script" pack
       - id: build-snapshot-upload
         name: Retain the same-source build snapshot
         if: "!cancelled() && steps.build-snapshot-save.outputs.publish == 'true'"
@@ -1776,7 +1805,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   linux-tests:
     name: linux-tests
     needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
@@ -1804,6 +1841,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -1979,7 +2017,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   linux-tests-shard-2:
     name: linux-tests-shard-2
     needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
@@ -2007,6 +2053,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2179,7 +2226,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   linux-tests-shard-3:
     name: linux-tests-shard-3
     needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
@@ -2207,6 +2262,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2379,7 +2435,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   linux-tests-shard-4:
     name: linux-tests-shard-4
     needs: [pick-runner, linux-test-build, evidence-gate-linux-gate]
@@ -2407,6 +2471,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2579,7 +2644,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   linux-clippy:
     name: linux-clippy
     needs: [pick-runner, evidence-gate-linux-gate]
@@ -2601,6 +2674,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-0
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2682,9 +2756,19 @@ jobs:
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
         if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
+        shell: bash
         env:
           CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          snapshot_script="${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}"
+          if [ ! -f "$snapshot_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Build snapshot: **UNAVAILABLE (checkout/setup incomplete)** — no snapshot was created.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Build snapshot unavailable: checkout/setup did not provide the pack helper'
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$snapshot_script" pack
       - id: build-snapshot-upload
         name: Retain the same-source build snapshot
         if: "!cancelled() && steps.build-snapshot-save.outputs.publish == 'true'"
@@ -2788,7 +2872,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   linux-fleet-compat:
     name: linux-fleet-compat
     needs: [pick-runner, evidence-gate-linux-gate]
@@ -2809,6 +2901,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-0
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2890,9 +2983,19 @@ jobs:
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
         if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
+        shell: bash
         env:
           CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          snapshot_script="${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}"
+          if [ ! -f "$snapshot_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Build snapshot: **UNAVAILABLE (checkout/setup incomplete)** — no snapshot was created.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Build snapshot unavailable: checkout/setup did not provide the pack helper'
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$snapshot_script" pack
       - id: build-snapshot-upload
         name: Retain the same-source build snapshot
         if: "!cancelled() && steps.build-snapshot-save.outputs.publish == 'true'"
@@ -2996,7 +3099,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-0.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   mail-redelivery-canaries:
     name: mail-redelivery-canaries
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
@@ -3022,6 +3133,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3128,9 +3240,19 @@ jobs:
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
         if: (!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
+        shell: bash
         env:
           CI_SNAPSHOT_PIPELINE: ${{ github.workflow_sha }}
-        run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" pack'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          snapshot_script="${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}"
+          if [ ! -f "$snapshot_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Build snapshot: **UNAVAILABLE (checkout/setup incomplete)** — no snapshot was created.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Build snapshot unavailable: checkout/setup did not provide the pack helper'
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 "$snapshot_script" pack
       - id: build-snapshot-upload
         name: Retain the same-source build snapshot
         if: (!cancelled() && steps.build-snapshot-save.outputs.publish == 'true') && !(needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true')
@@ -3240,7 +3362,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
     needs:
       [
         pick-runner,
@@ -3484,6 +3614,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3708,7 +3839,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   fractal-web-changes:
     name: fractal-web-changes
     runs-on: ubuntu-latest
@@ -4082,6 +4221,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+        id: cache-audit-checkout-1
       - name: Fetch the whole history without evidence tags
         if: (github.event_name == 'pull_request') && needs.evidence-gate-fractal-web.outputs.skip != 'true'
         env:
@@ -4244,7 +4384,15 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the pnpm store","outcome":"${{ steps.pnpm-store.outcome }}","hit":"${{ steps.pnpm-store.outputs.cache-hit }}","matched":"${{ steps.pnpm-store.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the web shell closure","outcome":"${{ steps.web-shell.outcome }}","hit":"${{ steps.web-shell.outputs.cache-hit }}","matched":"${{ steps.web-shell.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
-        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+          CI_CACHE_CHECKOUT_OUTCOME: ${{ steps.cache-audit-checkout-1.outcome }}
+        run: |
+          audit_script="${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"
+          if [ ! -f "$audit_script" ] && [ "$CI_CACHE_CHECKOUT_OUTCOME" != success ]; then
+            printf '%s\n' 'Cache coverage: **UNAVAILABLE (checkout/setup incomplete)** — audit script is absent; no cache hit/miss verdict.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::notice::Cache coverage unavailable: checkout/setup did not provide the audit script'
+            exit 0
+          fi
+          python3 "$audit_script"
   fractal-web:
     name: fractal-web
     needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]
