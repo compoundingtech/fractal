@@ -723,5 +723,149 @@ class StTest(unittest.TestCase):
             self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)
 
 
+
+FAKE_RUN = """import os, sys
+from xml.sax.saxutils import quoteattr
+open(os.environ['FAKE_CALLS'], 'a').write(os.environ['CI_TEST_PACKAGES'] + '\\n')
+code = int(os.environ.get('FAKE_EXIT', '0'))
+if os.environ.get('FAKE_NO_REPORT') != '1':
+    out = ['<testsuites name="nextest-run">']
+    for package in os.environ['CI_TEST_PACKAGES'].split(','):
+        out.append('<testsuite name=%s>' % quoteattr(package))
+        out.append('<testcase name="unit_one" classname=%s></testcase>' % quoteattr(package))
+        failing = package == os.environ.get('FAKE_FAIL')
+        out.append('<testcase name="unit_two" classname=%s>%s</testcase>' % (quoteattr(package), '<failure message="x"/>' if failing else ''))
+        out.append('</testsuite>')
+        if failing:
+            code = 100
+    out.append('</testsuites>')
+    open(os.environ['CI_TEST_JUNIT'], 'w').write('\\n'.join(out))
+sys.exit(code)
+"""
+
+
+class PerCrate(StTest):
+    """scripts/st-test --check rust-tests: one signature per crate, and only the crates without a passing note for their key run."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = Path(self.tmp.name) / 'fake-calls'
+        fake = Path(self.tmp.name) / 'fake-run.py'
+        fake.write_text(FAKE_RUN)
+        patcher = mock.patch.object(st_test, 'RUN_TESTS', [sys.executable, str(fake)])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        git(self.work, 'checkout', '-q', 'main')
+        (self.work / 'Cargo.toml').write_text('[workspace]\nmembers = ["crates/base", "crates/top"]\n')
+        (self.work / 'Cargo.lock').write_text('lock\n')
+        for name, deps in (('base', ''), ('top', '[dependencies]\nbase = { path = "../base" }\n')):
+            (self.work / f'crates/{name}/src').mkdir(parents=True)
+            (self.work / f'crates/{name}/Cargo.toml').write_text(f'[package]\nname = "{name}"\nversion = "0.1.0"\n{deps}')
+            (self.work / f'crates/{name}/src/lib.rs').write_text(f'// {name}\n')
+        (self.work / '.st/rust-test-inputs.json').write_text(json.dumps({'global': ['Cargo.toml', 'Cargo.lock'],
+                                                                         'crates': {'base': {'extra': []}, 'top': {'extra': []}}}))
+        for script in ('rust-test-keys', 'ci-rust-test-result'):
+            shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'workspace')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', '--ff-only', 'main')
+
+    def run_crates(self, *args, **env):
+        extra = dict({'FAKE_CALLS': str(self.calls), 'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}, **env)
+        return self.run_st_test('--check', 'rust-tests', *args, extra_env=extra)
+
+    def ran(self):
+        return self.calls.read_text().split() if self.calls.exists() else []
+
+    def crate_records(self):
+        return sorted((s['predicate']['observed']['inputs']['crate'], s['predicate']['observed']['checks']['rust-tests']['exit_code'])
+                      for s in self.statements() if 'rust-tests' in s['predicate']['observed']['checks'])
+
+    def test_the_first_run_tests_every_crate_once_and_signs_each_separately(self):
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top'], 'one nextest run for both crates')
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 0)])
+        record = next(s for s in self.statements() if s['predicate']['observed']['inputs'].get('crate') == 'top')['predicate']['observed']['inputs']
+        self.assertEqual(record['tests_run'], '2')
+        self.assertEqual(record['tests_ignored'], '0')
+        self.assertEqual(record['filterset'], 'package(=base) or package(=top)')
+        self.assertRegex(record['source_inputs'], r'^[0-9a-f]{40}$')
+        self.assertRegex(record['test_list_sha256'], r'^[0-9a-f]{64}$')
+        self.assertRegex(record['ignored_list_sha256'], r'^[0-9a-f]{64}$')
+        self.assertIn('2 of 2 crates run and signed', out)
+
+    def test_an_unchanged_tree_runs_nothing_and_a_change_runs_the_crate_and_its_dependents_only(self):
+        self.run_crates()
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top'], 'nothing ran the second time')
+        self.assertIn('all 2 crates already have a passing note', out)
+        self.commit('crates/top/src/lib.rs', '// changed\n')
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top', 'top'], 'base is below top: its key did not move')
+        self.commit('crates/base/src/lib.rs', '// changed\n')
+        self.run_crates()
+        self.assertEqual(self.ran()[-1], 'base,top')
+
+    def test_a_change_outside_every_crate_runs_nothing(self):
+        self.run_crates()
+        self.commit('notes.md', 'x')
+        code, out, err = self.run_crates()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top'])
+
+    def test_a_note_signed_on_another_tree_with_the_same_key_covers_this_one(self):
+        self.run_crates()
+        self.commit('notes.md', 'x')
+        code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('2 of 2 crates covered', out)
+
+    def test_a_failing_crate_is_recorded_as_a_failure_and_does_not_cover_itself_while_the_other_is_signed(self):
+        code, out, err = self.run_crates(FAKE_FAIL='top')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 1)])
+        code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 3, out + err)
+        self.assertIn('to run: top', out)
+
+    def test_a_run_that_did_not_complete_signs_nothing(self):
+        code, out, err = self.run_crates(FAKE_EXIT='101', FAKE_NO_REPORT='1')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.crate_records(), [])
+        self.assertIn('no crate was signed', out)
+
+    def test_crate_narrows_the_run_to_the_named_crates_and_refuses_a_name_that_is_not_one(self):
+        code, out, err = self.run_crates('--crate', 'base')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base'])
+        self.assertEqual(self.crate_records(), [('base', 0)])
+        code, out, err = self.run_crates('--crate', 'nope')
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('not a workspace crate of this tree: nope', out)
+
+    def test_status_names_the_crates_to_run(self):
+        code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
+        self.assertEqual(code, 3, out + err)
+        self.assertIn('2 crates to run', out)
+        self.assertIn('to run: base, top', out)
+
+    def test_rust_tests_is_named_with_check_and_is_not_part_of_all_yet(self):
+        self.assertIn('rust-tests', st_test.OPT_IN)
+        self.assertIn('rust-tests', st_test.BUILDS)
+        code, out, err = self.run_st_test('--list', '--all')
+        self.assertNotIn('rust-tests', out)
+        code, out, err = self.run_st_test('--list', '--check', 'rust-tests')
+        self.assertIn('rust-tests: python3 scripts/ci-rust-test-result', out)
+
+
+# PerCrate reuses StTest's repository, signer and helpers, not its tests.
+for _name in [name for name in dir(StTest) if name.startswith('test_') and name not in PerCrate.__dict__]:
+    setattr(PerCrate, _name, None)
+
 if __name__ == '__main__':
     unittest.main()
