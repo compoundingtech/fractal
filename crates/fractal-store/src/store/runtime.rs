@@ -197,6 +197,7 @@ impl SmalltalkRuntime {
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
+        task_grants::create_schema(connection)?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
         }
@@ -400,6 +401,7 @@ impl Runtime for SmalltalkRuntime {
             ("mission_runs".into(), 2),
             ("run_generations".into(), 2),
             ("step_runs".into(), 2),
+            ("task_grants".into(), 1),
         ])
     }
 
@@ -435,7 +437,8 @@ impl Runtime for SmalltalkRuntime {
         repaired: &str,
         replacement: &str,
     ) -> Result<()> {
-        select_desired_repair_tx(transaction, repaired, replacement)
+        select_desired_repair_tx(transaction, repaired, replacement)?;
+        task_grants::repair(transaction, repaired, replacement)
     }
 
     fn append_claim_tx(

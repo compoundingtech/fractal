@@ -29,6 +29,7 @@ fn open_installs_each_domain_in_order() {
             "agent-messages",
             "arrangements",
             "limits",
+            "task-grants",
         ]
     );
 }
@@ -46,6 +47,8 @@ fn append_projects_each_claim_kind_in_order() {
         ("message.sent", &["custom", "resource-preparation", "agent-messages"]),
         ("harness.limits", &["custom", "resource-preparation", "limits"]),
         ("arrangement.edited", &["custom", "resource-preparation", "arrangements"]),
+        ("task-grant.created", &["custom", "resource-preparation", "task-grants"]),
+        ("task-grant.revoked", &["custom", "resource-preparation", "task-grants"]),
         ("intent.desired", &["identities", "custom", "resource-preparation"]),
         ("work.claimed", &["custom", "resource-preparation"]),
         ("message.read", &["custom", "resource-preparation"]),
@@ -65,13 +68,16 @@ fn append_projects_each_claim_kind_in_order() {
             "agent-messages",
             "limits",
             "arrangements",
+            "task-grants",
         ]
     );
 }
 
 #[test]
-fn replicated_claims_project_arrangements_only() {
+fn replicated_claims_project_registered_families() {
     assert_eq!(taking(projectors::REPLICATED, "arrangement.edited"), ["arrangement-project"]);
+    assert_eq!(taking(projectors::REPLICATED, "task-grant.created"), ["task-grants"]);
+    assert_eq!(taking(projectors::REPLICATED, "task-grant.revoked"), ["task-grants"]);
     for kind in ["intent.desired", "glass.upserted", "message.sent", "harness.limits"] {
         assert!(taking(projectors::REPLICATED, kind).is_empty(), "{kind}");
     }
@@ -89,7 +95,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "glass-heads", "directive-notes", "arrangements"]
+        ["planning", "identities", "resources", "glass-heads", "directive-notes", "arrangements", "task-grants"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -101,6 +107,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/directive-notes",
             "full-replay/custom",
             "full-replay/arrangements",
+            "full-replay/task-grants",
             "full-replay/flush",
         ]
     );

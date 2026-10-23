@@ -78,6 +78,17 @@ regression and all convergence oracles; its only two failures were the old v5 tr
 assertions for seeds 34 and 1597. Characterization follows those measured outcomes,
 not an RNG prediction; the exact per-seed equality and majority coverage checks remain.
 
+`claims-v7.json` is the serialization of the registry that adds the task-grant manifest kinds
+`task-grant.created` and `task-grant.revoked` on top of version 6; v1 to v6 remain unchanged for
+comparisons pinned to those corpora. It is the next free corpus slot after the identity-rename
+registry. After merging main, regenerate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v7.json`;
+do not hand-edit the snapshot. The simulation selects v7 and records that filename in its audit
+summary. The kinds change the shared RNG stream, so v6's never-trim characterization `[34]` does
+not apply: with v7 all 17 fixed seeds converged and trimmed a checkpoint (the never-trim set is
+empty), measured with
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation
