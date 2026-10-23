@@ -105,6 +105,44 @@ class StTest(unittest.TestCase):
             found.append(json.loads(git(self.work, 'cat-file', 'blob', blob)))
         return found
 
+    def nudge_recorder(self, exit_code=0):
+        calls = Path(self.tmp.name) / f'nudge-calls-{exit_code}'
+        argv = [sys.executable, '-c', f'import sys; open({str(calls)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n"); sys.exit({exit_code})', 'pull-now']
+        return calls, json.dumps(argv)
+
+    def test_a_push_asks_this_host_s_evidence_log_to_pull_once_and_a_run_without_push_does_not(self):
+        self.commit('b.txt', 'two')
+        calls, argv = self.nudge_recorder()
+        code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_EVIDENCE_LOG_NUDGE': argv})
+        self.assertEqual(code, 0, err)
+        self.assertFalse(calls.exists(), 'nothing was pushed, so the log has nothing new')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_LOG_NUDGE': argv})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls.read_text(), 'pull-now\n')
+        self.assertIn("asked this host's log to pull now", out)
+        pushed = subprocess.run(['git', '-C', str(Path(self.tmp.name) / 'origin.git'), 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/'],
+                                capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(pushed), 1, 'the record reached the remote before the log was asked')
+
+    def test_a_failing_or_malformed_nudge_never_changes_the_result(self):
+        self.commit('b.txt', 'two')
+        calls, argv = self.nudge_recorder(exit_code=5)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_LOG_NUDGE': argv})
+        self.assertEqual(code, 0, err)
+        self.assertIn('its timer will', out)
+        self.commit('c.txt', 'three')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env={'ST_EVIDENCE_LOG_NUDGE': '"systemctl"'})
+        self.assertEqual(code, 0, err)
+        self.assertIn('not asked', out)
+
+    def test_without_a_configured_command_the_log_is_asked_only_where_its_unit_is_installed(self):
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.object(st_test.shutil, 'which', return_value='/bin/systemctl'):
+            self.assertIsNone(st_test.log_nudge_argv())
+            unit = self.home / '.config/systemd/user/evidence-log.service'
+            unit.parent.mkdir(parents=True)
+            unit.write_text('[Service]\n')
+            self.assertEqual(st_test.log_nudge_argv(), ['systemctl', '--user', 'start', '--no-block', 'evidence-log.service'])
+
     def test_a_branch_that_holds_the_base_tip_is_signed_in_place_and_reported_covered(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test('--check', 'demo')
@@ -158,9 +196,11 @@ class StTest(unittest.TestCase):
         self.lane_file()
         self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
         code, out, err = self.run_st_test('--check', 'demo')
-        self.assertNotEqual(code, 0)
+        # Not a failure: nothing failed, the check is not signed and CI runs it (exit 4).
+        self.assertEqual(code, 4, err)
         self.assertEqual(self.statements(), [])
-        self.assertIn('FAILED', out)  # the wrapper's own message goes to the child's stderr, not to this capture
+        self.assertRegex(out, r'demo +not signed +0s +this tree edits its lane \(scripts/lane\.sh\); CI runs it')
+        self.assertNotIn('FAILED', out)
 
     def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
         self.commit('b.txt', 'two')
@@ -168,6 +208,24 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         statement, = self.statements()
         self.assertNotIn('lane_definition_sha256', statement['predicate']['observed']['inputs'])
+
+    def test_a_check_that_depends_on_the_base_is_given_the_fetched_base_and_records_it(self):
+        self.commit('b.txt', 'two')
+        seen = self.home / 'clippy-base'
+        base = git(self.work, 'rev-parse', 'origin/main')
+        with mock.patch.object(st_test, 'BASE_BOUND', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'printf %s "$CLIPPY_BASE_SHA" > {seen}'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text(), base)
+        statement, = self.statements()
+        self.assertEqual(statement['predicate']['observed']['inputs']['clippy_base_sha'], base)
+        # A check that does not depend on the base records no base and is given none.
+        self.commit('b.txt', 'three')
+        code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'printf %s "${{CLIPPY_BASE_SHA-unset}}" > {seen}'])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text(), 'unset')
+        self.assertFalse([s for s in self.statements() if 'clippy_base_sha' in s['predicate']['observed']['inputs']
+                          and s['subject'][0]['digest']['gitTree'] == git(self.work, 'rev-parse', 'HEAD^{tree}')])
 
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
@@ -413,7 +471,16 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['genie-freshness', 'typescript-client'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness'])
+
+    def test_a_heavy_check_runs_only_when_named_or_with_all(self):
+        # The pre-push hook runs st-test with no --check: a check that builds the whole workspace must not start on every push.
+        for args, names in (([], ['typescript-client', 'genie-freshness']),
+                            (['--all'], ['typescript-client', 'genie-freshness', 'mail-redelivery-canaries', 'linux-gate']),
+                            (['--check', 'mail-redelivery-canaries'], ['mail-redelivery-canaries'])):
+            done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)
 
 
 if __name__ == '__main__':

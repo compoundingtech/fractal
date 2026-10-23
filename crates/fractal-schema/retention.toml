@@ -28,6 +28,7 @@
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }
+"agent.renamed" = { class = "durable" }
 "agent.retired" = { class = "durable" }
 "arrangement.edited" = { class = "durable" }
 "attention.requested" = { class = "durable" }
@@ -106,6 +107,7 @@
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
 "mission.published" = { class = "durable" }
+"mission.renamed" = { class = "durable" }
 "observer.observed" = { class = "current" }
 "observer.refresh-requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "observer.state" = { class = "current", pending = "no reader audit yet" }
@@ -178,7 +180,7 @@
 "subscription.mission-request-released" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "subscription.mission-requested" = { class = "transition", window = "7d", pending = "pending requests read it" }
 "subscription.mission-started" = { class = "transition", window = "7d", pending = "it closes a mission request" }
-"subscription.state" = { class = "current", pending = "no reader audit yet" }
+"subscription.state" = { class = "current", pending = "full-value contract declared (full_value.rs); removal is a later step" }
 "subscription.watch-ended" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.input.requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.input.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }

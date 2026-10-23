@@ -24,6 +24,27 @@ use super::*;
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         self.inner.snapshot_ptys()
     }
+    fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
+        // Hide verification evidence consistently from worker observation and
+        // pass-scoped completion. Raw snapshots remain available to stop tests.
+        if self.verification_hidden.load(Ordering::Acquire) {
+            return Ok(PtyRegistrySnapshot::default());
+        }
+        let observations = self.snapshot_ptys()?;
+        let mut start_operations = HashMap::new();
+        for observation in &observations {
+            if let Some(incarnation) = &observation.incarnation_id
+                && let Some(operation) =
+                    self.start_operation(&observation.runtime_id, true, incarnation)?
+            {
+                start_operations.insert(
+                    observation.runtime_id.clone(),
+                    (incarnation.clone(), operation),
+                );
+            }
+        }
+        Ok(PtyRegistrySnapshot { observations, start_operations })
+    }
     fn observe_exec(&self, id: &str) -> Result<Option<RuntimeObservation>> {
         self.inner.observe_exec(id)
     }
@@ -1508,6 +1529,74 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
 }
 
     #[test]
+fn a_foreign_live_pty_prelaunch_rejection_closes_the_durable_start() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let pty = root.path().join("pty");
+    let called = root.path().join("producer-called");
+    std::fs::write(&pty, format!("#!/bin/sh\nprintf called > {called:?}\nexit 99\n")).unwrap();
+    std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let registry = root.path().join("registry");
+    std::fs::create_dir(&registry).unwrap();
+    let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+    apply_source(&store, &format!(
+        "version 2\nagent \"example-prelaunch/worker\" {{ workspace {:?}; argv {:?} \"1000\"; }}",
+        root.path().display().to_string(), sleep_program(),
+    ), "prelaunch");
+    let desired = store.desired_subjects_named(&["agent/example-prelaunch/worker".into()])
+        .unwrap().remove(0);
+    let mut member = desired.member.as_ref().unwrap().clone();
+    member.environment.insert("PATH".into(), format!("{}:${{PATH}}", root.path().display()));
+    let environment = member_environment(&member.environment, &launch_executable().unwrap(), None).unwrap();
+    assert_eq!(fractal_runtime::resolve_executable("pty", &environment).unwrap(), pty,
+        "the native path must resolve the fixture instead of the login environment");
+    let row = registry.join(format!("{}.json", member.runtime_id));
+    let record = serde_json::json!({
+        "createdAt": "older", "tags": {"st3.start-operation": "older-operation"}
+    }).to_string();
+    std::fs::write(&row, &record).unwrap();
+    std::fs::write(registry.join(format!("{}.pid", member.runtime_id)),
+        std::process::id().to_string()).unwrap();
+    let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
+    let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+    let result = reconciler.dispatch_start(start_jobs::PreparedStart {
+        subject: desired.clone(), launch_member: member.clone(), member,
+        reason: "foreign PTY prelaunch regression".into(), request: None,
+        desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+        selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+        placement_evidence: Vec::new(), start_request: String::new(),
+        start_request_receipt: None, control_request: None, control_request_receipt: None,
+        expected_incarnation: None, resume_operation: None,
+    });
+    let pending = store.runtime_start_for(&desired.subject).unwrap();
+    assert!(pending.is_none(), "a known nonlaunch remained producer-open: {pending:?}; dispatch: {result:?}");
+    let failed = store.observations_for(&desired.subject, "runtime.action.failed")
+        .unwrap().pop().unwrap();
+    assert_eq!(failed.body["fields"]["operation_status"], "producer-closed");
+    let operation = failed.body["fields"]["operation"].as_str().unwrap();
+    let result: String = store.readers.get().query_row(
+        "SELECT result FROM local_runtime_starts WHERE id=?1", [operation], |row| row.get(0),
+    ).unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["closure_kind"], "native-rejection");
+    let proof = &result["closure_proof"];
+    assert_eq!(proof["witness"]["kind"], "native-rejection");
+    assert_eq!(proof["verification"], "producer-closed");
+    assert_eq!(proof["operation_id"], operation);
+    assert_eq!(proof["subject"], desired.subject);
+    assert_eq!(proof["runtime_id"], desired.member.as_ref().unwrap().runtime_id);
+    assert_eq!(proof["start_request_receipt"]["body"]["fields"]["operation"], operation);
+    assert_eq!(result["closure_proof_id"],
+        format!("start-proof/{}", smallclaims::hash::canonical_hash(proof).unwrap()));
+    assert!(!called.exists(), "the foreign-row refusal must precede the launcher");
+    assert_eq!(std::fs::read_to_string(row).unwrap(), record,
+        "rejection must not retire or change the foreign incarnation");
+}
+
+    #[test]
 fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     if crate::test_support::supervise_test() {
         return;
@@ -1994,4 +2083,172 @@ async fn unreadable_start_provenance_does_not_block_an_authorized_fenced_stop() 
         .unwrap();
     assert!(operation.revoked_by.is_some() && !operation.cleanup_verified);
     assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 1));
+}
+
+#[test]
+fn reopened_revoked_nonlaunch_witnesses_do_not_control_an_older_pty() {
+    for kind in ["before-backend", "native-rejection", "never-dispatched"] {
+        for change in [
+            "valid", "producer-open", "missing", "operation", "subject", "owner",
+            "origin", "runtime", "request", "receipt", "witness", "proof-id", "generic-error",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("claims.db");
+            let store = Arc::new(Store::open(&path, "node").unwrap());
+            apply_source(
+                &store,
+                "version 2\nagent \"example-witness/worker\" { workspace \"/tmp\"; command \"true\" }",
+                "stored-witness",
+            );
+            let desired = store
+                .desired_subjects_named(&["agent/example-witness/worker".into()])
+                .unwrap()
+                .remove(0);
+            let member = desired.member.as_ref().unwrap().clone();
+            let runtime_id = member.runtime_id.clone();
+            let id = uuid::Uuid::now_v7().to_string();
+            let prepared = start_jobs::PreparedStart {
+                subject: desired.clone(),
+                member: member.clone(),
+                launch_member: member,
+                reason: "persisted nonlaunch witness recovery".into(),
+                request: None,
+                desired_token: "stored-witness".into(),
+                selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+                placement_evidence: Vec::new(),
+                start_request: String::new(),
+                start_request_receipt: None,
+                control_request: None,
+                control_request_receipt: None,
+                expected_incarnation: None,
+                resume_operation: None,
+            };
+            let mut operation = crate::store::RuntimeStartOperation {
+                id: id.clone(),
+                subject: desired.subject.clone(),
+                owner: "previous-owner".into(),
+                body: serde_json::to_value(prepared).unwrap(),
+                revoked_by: None,
+                finished: false,
+                result: None,
+                applied: false,
+                cleanup_verified: false,
+                dispatched: false,
+                receipted: false,
+            };
+            assert_eq!(
+                store.admit_runtime_start(&mut operation, 2).unwrap(),
+                crate::store::RuntimeStartAdmission::Admitted,
+            );
+            if kind != "never-dispatched" {
+                assert!(store.dispatch_runtime_start(&id, 2).unwrap());
+            }
+            store.revoke_runtime_start(&id, "stored-revocation").unwrap();
+            if kind == "never-dispatched" {
+                assert!(store.cancel_undispatched_runtime_start(&id).unwrap());
+            } else {
+                store.finish_runtime_start(&id, &serde_json::json!({
+                    "error": "exact nonlaunch result",
+                    "producer_closed": true,
+                    "closure_kind": kind,
+                })).unwrap();
+            }
+            let mut result: Value = serde_json::from_str(
+                &store.readers.get().query_row(
+                    "SELECT result FROM local_runtime_starts WHERE id=?1",
+                    [&id], |row| row.get::<_, String>(0),
+                ).unwrap(),
+            ).unwrap();
+            // New completions already close atomically. Seed only the missed
+            // legacy/recovery state, then close and reopen the fixture database.
+            assert!(store.pending_runtime_starts().unwrap()[0].cleanup_verified);
+            match change {
+                "valid" => {}
+                "producer-open" => {
+                    result["producer_closed"] = Value::from(false);
+                    result["verification"] = Value::from("producer-open-unverified");
+                }
+                "missing" => {
+                    result.as_object_mut().unwrap().remove("closure_proof");
+                    result.as_object_mut().unwrap().remove("closure_proof_id");
+                }
+                "generic-error" => {
+                    result = serde_json::json!({
+                        "error": "guarded start cannot attribute an existing incarnation to a new launch",
+                        "producer_closed": false,
+                        "verification": "producer-open-unverified",
+                    });
+                }
+                "operation" => result["closure_proof"]["operation_id"] = Value::from("other-operation"),
+                "subject" => result["closure_proof"]["subject"] = Value::from("agent/example-other"),
+                "owner" => result["closure_proof"]["owner"] = Value::from("other-owner"),
+                "origin" => result["closure_proof"]["origin"] = Value::from("other-origin"),
+                "runtime" => result["closure_proof"]["runtime_id"] = Value::from("example.other"),
+                "request" => result["closure_proof"]["start_request"] = Value::from("other-request"),
+                "receipt" => result["closure_proof"]["start_request_receipt"]["subject"] = Value::from("agent/example-other"),
+                "witness" => result["closure_proof"]["witness"]["kind"] = Value::from("positive-producer-proof"),
+                "proof-id" => result["closure_proof_id"] = Value::from("start-proof/tampered"),
+                _ => unreachable!(),
+            }
+            if matches!(change, "operation" | "subject" | "owner" | "origin" | "runtime" | "request" | "receipt" | "witness") {
+                // A self-consistent digest is not ownership/provenance proof.
+                result["closure_proof_id"] = Value::from(format!(
+                    "start-proof/{}",
+                    smallclaims::hash::canonical_hash(&result["closure_proof"]).unwrap(),
+                ));
+            }
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-hb6f3ff597ef3 owner=fractal_reconcile::reconcile::tests::start_preemption TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=0,applied=1,result=?2 WHERE id=?1",
+                rusqlite::params![id, serde_json::to_string(&result).unwrap()],
+            ).unwrap();
+            drop(connection);
+            drop(store);
+            let store = Arc::new(Store::open(&path, "node").unwrap());
+            let runtime = Arc::new(FakeRuntime::default());
+            let snapshots = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_snapshots = snapshots.clone();
+            *runtime.before_snapshot.lock().unwrap() = Some(Box::new(move || {
+                observed_snapshots.fetch_add(1, Ordering::Relaxed);
+            }));
+            let older = RuntimeObservation {
+                runtime_id: runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some("older-incarnation".into()),
+            };
+            runtime.ptys.lock().unwrap().push(older.clone());
+            runtime.start_operations.lock().unwrap().insert(
+                (runtime_id, "older-incarnation".into()), "older-operation".into(),
+            );
+            let reconciler = Reconciler::new(
+                store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+            );
+            reconciler.reconcile_start_jobs().unwrap();
+            assert_eq!(
+                snapshots.load(Ordering::Relaxed),
+                usize::from(change != "valid"),
+                "{kind}: {change}: stored exact closure must precede the lazy PTY snapshot",
+            );
+            assert_eq!(
+                store.runtime_start_for(&desired.subject).unwrap().is_none(),
+                change == "valid", "{kind}: {change}",
+            );
+            let (verified, retained): (bool, String) = store.readers.get().query_row(
+                "SELECT cleanup_verified,result FROM local_runtime_starts WHERE id=?1",
+                [&id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(verified, change == "valid", "{kind}: {change}");
+            assert_eq!(serde_json::from_str::<Value>(&retained).unwrap(), result);
+            assert!(runtime.stops.lock().unwrap().is_empty());
+            assert!(runtime.kills.lock().unwrap().is_empty());
+            assert!(runtime.removes.lock().unwrap().is_empty());
+            assert!(runtime.starts.lock().unwrap().is_empty());
+            let ptys = runtime.ptys.lock().unwrap();
+            assert_eq!(ptys.len(), 1);
+            assert_eq!(ptys[0].incarnation_id, older.incarnation_id);
+            assert_eq!(ptys[0].status, "running");
+        }
+    }
 }

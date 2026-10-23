@@ -53,6 +53,11 @@ public struct ErrorEnvelope: Codable, Error, Sendable {
 
 public enum ErrorCode: Codable, Sendable, Equatable {
     case recipientRetired
+    case identityCycle
+    case identityOccupied
+    case identityRetiredSource
+    case identityCrossKind
+    case identityUnknown
     case lifecycleUnavailable
     case retirementUpgradeRequired
     case notFound
@@ -117,6 +122,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = switch raw {
         case "recipient-retired": .recipientRetired
+        case "identity-cycle": .identityCycle
+        case "identity-occupied": .identityOccupied
+        case "identity-retired-source": .identityRetiredSource
+        case "identity-cross-kind": .identityCrossKind
+        case "identity-unknown": .identityUnknown
         case "lifecycle-unavailable": .lifecycleUnavailable
         case "retirement-upgrade-required": .retirementUpgradeRequired
         case "attention-migrated": .attentionMigrated
@@ -181,6 +191,11 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     public func encode(to encoder: Encoder) throws {
         let raw = switch self {
         case .recipientRetired: "recipient-retired"
+        case .identityCycle: "identity-cycle"
+        case .identityOccupied: "identity-occupied"
+        case .identityRetiredSource: "identity-retired-source"
+        case .identityCrossKind: "identity-cross-kind"
+        case .identityUnknown: "identity-unknown"
         case .lifecycleUnavailable: "lifecycle-unavailable"
         case .retirementUpgradeRequired: "retirement-upgrade-required"
         case .attentionMigrated: "attention-migrated"
@@ -1426,4 +1441,199 @@ public struct PushRegistrationResponse: Codable, Sendable {
     public let apiVersion, requestID: String
     public let value: PushRegistrationStatus
     enum CodingKeys: String, CodingKey { case apiVersion = "api_version", requestID = "request_id", value }
+}
+
+
+/// Raw fields and unfamiliar state strings survive decode/encode. No takeover meaning.
+public struct ScheduleOwner: Codable, Sendable {
+    public let runID: String?
+    public let generationID: String?
+    public let stepID: String?
+    public let state: String
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+        case generationID = "generation_id"
+        case stepID = "step_id"
+        case state
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        runID = try values.decodeIfPresent(String.self, forKey: .runID)
+        generationID = try values.decodeIfPresent(String.self, forKey: .generationID)
+        stepID = try values.decodeIfPresent(String.self, forKey: .stepID)
+        state = try values.decode(String.self, forKey: .state)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleKnowledge: Codable, Sendable {
+    public let originHostID: String?
+    public let basis: String
+    public let lastExchangeAt: String?
+    public let ageMS: UInt64?
+    public let completeness: String
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case originHostID = "origin_host_id"
+        case basis
+        case lastExchangeAt = "last_exchange_at"
+        case ageMS = "age_ms"
+        case completeness
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        originHostID = try values.decodeIfPresent(String.self, forKey: .originHostID)
+        basis = try values.decode(String.self, forKey: .basis)
+        lastExchangeAt = try values.decodeIfPresent(String.self, forKey: .lastExchangeAt)
+        ageMS = try values.decodeIfPresent(UInt64.self, forKey: .ageMS)
+        completeness = try values.decode(String.self, forKey: .completeness)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleUnheardHost: Codable, Sendable {
+    public let hostID: String
+    public let lastExchangeAt: String?
+    public let ageMS: UInt64?
+    public let reason: String
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case hostID = "host_id"
+        case lastExchangeAt = "last_exchange_at"
+        case ageMS = "age_ms"
+        case reason
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        hostID = try values.decode(String.self, forKey: .hostID)
+        lastExchangeAt = try values.decodeIfPresent(String.self, forKey: .lastExchangeAt)
+        ageMS = try values.decodeIfPresent(UInt64.self, forKey: .ageMS)
+        reason = try values.decode(String.self, forKey: .reason)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleCoverage: Codable, Sendable {
+    public let scope: String
+    public let unheardAfterMS: UInt64
+    public let unheardHosts: [ScheduleUnheardHost]
+    public let membership: String
+    public let coveredHostCount: UInt64
+    public let truncated: Bool
+    public let omittedConfiguredPeerCount: UInt64
+    public let omittedCoveredHostCount: UInt64
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case scope
+        case unheardAfterMS = "unheard_after_ms"
+        case unheardHosts = "unheard_hosts"
+        case membership
+        case coveredHostCount = "covered_host_count"
+        case truncated
+        case omittedConfiguredPeerCount = "omitted_configured_peer_count"
+        case omittedCoveredHostCount = "omitted_covered_host_count"
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        scope = try values.decode(String.self, forKey: .scope)
+        unheardAfterMS = try values.decode(UInt64.self, forKey: .unheardAfterMS)
+        unheardHosts = try values.decode([ScheduleUnheardHost].self, forKey: .unheardHosts)
+        membership = try values.decode(String.self, forKey: .membership)
+        coveredHostCount = try values.decode(UInt64.self, forKey: .coveredHostCount)
+        truncated = try values.decode(Bool.self, forKey: .truncated)
+        omittedConfiguredPeerCount = try values.decode(UInt64.self, forKey: .omittedConfiguredPeerCount)
+        omittedCoveredHostCount = try values.decode(UInt64.self, forKey: .omittedCoveredHostCount)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct ScheduleDeclaration: Codable, Sendable {
+    public let id: String
+    public let revision: String
+    public let declarationClaimID: String
+    public let declarationOriginHostID: String?
+    public let owner: ScheduleOwner
+    public let primaryHostID: String?
+    public let standbyState: String
+    public let standbyNode: JSONValue
+    public let state: String
+    public let declaration: JSONValue
+    public let declarationBytes: UInt64
+    public let readProblem: String?
+    public let nextDeclaredFireAt: String?
+    public let nextFireState: String
+    public let nextFireBasis: String
+    public let knowledge: ScheduleKnowledge
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case id
+        case revision
+        case declarationClaimID = "declaration_claim_id"
+        case declarationOriginHostID = "declaration_origin_host_id"
+        case owner
+        case primaryHostID = "primary_host_id"
+        case standbyState = "standby_state"
+        case standbyNode = "standby_node"
+        case state
+        case declaration
+        case declarationBytes = "declaration_bytes"
+        case readProblem = "read_problem"
+        case nextDeclaredFireAt = "next_declared_fire_at"
+        case nextFireState = "next_fire_state"
+        case nextFireBasis = "next_fire_basis"
+        case knowledge
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        revision = try values.decode(String.self, forKey: .revision)
+        declarationClaimID = try values.decode(String.self, forKey: .declarationClaimID)
+        declarationOriginHostID = try values.decodeIfPresent(String.self, forKey: .declarationOriginHostID)
+        owner = try values.decode(ScheduleOwner.self, forKey: .owner)
+        primaryHostID = try values.decodeIfPresent(String.self, forKey: .primaryHostID)
+        standbyState = try values.decode(String.self, forKey: .standbyState)
+        standbyNode = try values.decode(JSONValue.self, forKey: .standbyNode)
+        state = try values.decode(String.self, forKey: .state)
+        declaration = try values.decode(JSONValue.self, forKey: .declaration)
+        declarationBytes = try values.decode(UInt64.self, forKey: .declarationBytes)
+        readProblem = try values.decodeIfPresent(String.self, forKey: .readProblem)
+        nextDeclaredFireAt = try values.decodeIfPresent(String.self, forKey: .nextDeclaredFireAt)
+        nextFireState = try values.decode(String.self, forKey: .nextFireState)
+        nextFireBasis = try values.decode(String.self, forKey: .nextFireBasis)
+        knowledge = try values.decode(ScheduleKnowledge.self, forKey: .knowledge)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
+}
+public struct SchedulesPage: Codable, Sendable {
+    public let kind: String
+    public let collection: String
+    public let asOf: String
+    public let basis: String
+    public let items: [ScheduleDeclaration]
+    public let page: PageInfo
+    public let coverage: ScheduleCoverage
+    public let fields: [String: JSONValue]
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case collection
+        case asOf = "as_of"
+        case basis
+        case items
+        case page
+        case coverage
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try values.decode(String.self, forKey: .kind)
+        collection = try values.decode(String.self, forKey: .collection)
+        asOf = try values.decode(String.self, forKey: .asOf)
+        basis = try values.decode(String.self, forKey: .basis)
+        items = try values.decode([ScheduleDeclaration].self, forKey: .items)
+        page = try values.decode(PageInfo.self, forKey: .page)
+        coverage = try values.decode(ScheduleCoverage.self, forKey: .coverage)
+        fields = try [String: JSONValue](from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws { try fields.encode(to: encoder) }
 }

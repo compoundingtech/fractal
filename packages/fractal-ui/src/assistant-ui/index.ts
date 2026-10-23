@@ -41,10 +41,12 @@ export { Button as CompositionButton, IconButton as CompositionIconButton, Menu,
 export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProps, TooltipSurfaceProps } from './composition/Controls'
 
 /** Controlled sidebar row; the host owns clock and data. */
-export { SidebarAgentRow, AgentHoverCard, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
-export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
+export { SidebarAgentRow, AgentHoverCard, AgentRowActions, type AgentRowActionsProps, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
+export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'
 export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
-export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export { usageScopeLabel } from './sidebar/model.ts'
+export type { SidebarAgentRow as SidebarAgentRowData, SidebarActions, SidebarUsage, SidebarUsageScope, SidebarDuration, SidebarLastTurn, SidebarMissionContext, SidebarMissionInfo, SidebarMissionProgress, SidebarMissionStep, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export { SidebarTree } from './sidebar/SidebarTree.tsx'
 export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 /** Read-only declaration source (KDL, or a labelled structured fallback) with copy-all. */
@@ -74,3 +76,16 @@ export { ComposerSession } from './composer-session/ComposerSession.tsx'
 export type { ComposerSessionProps, ComposerLayout, RunningBehavior, MentionMode, TargetMode } from './composer-session/ComposerSession.tsx'
 export { EffortPicker, unknownEffort, messageEffort } from './embrace-composer/EffortPicker.tsx'
 export type { EffortControl } from './embrace-composer/EffortPicker.tsx'
+
+/** Details and resource tabs; application-owned transport observations stay independent of content. */
+export { DetailsPane } from './details/DetailsPane.tsx'
+export type { DetailsVariants, DetailsLayoutIntent, DetailsPaneProps } from './details/DetailsPane.tsx'
+export { DetailsWhy } from './details/DetailsUnavailable.tsx'
+export type { DetailsState, DetailsOverview, DetailsSection, DetailsSectionName, DetailsResource, DetailsValue, DetailsDisplayObservation, DetailsReadFailure, DetailsSpendRead } from './details/model.ts'
+export type { DetailsPendingShape } from './details/DetailsCharts.tsx'
+export type { TraceSeries, TraceFact, TraceUnknownReason, TraceSpendMeters, TraceSpendScope, TraceAccumulationWindow, TraceCoverage, TraceCoverageState, TraceSubagent, TraceCostSplit, TraceBucket, TraceBuckets, TraceTurns, TraceIncarnation } from './details/trace-series.ts'
+export { TabStrip, paneTabItem, paneTabIdentity } from './workbench/TabStrip.tsx'
+export type { TabStripItem } from './workbench/TabStrip.tsx'
+export { SessionTraceProvider, sessionTraceProviderLayer } from './details/session-trace-provider.ts'
+export type { SessionTraceQuery, SessionTraceProviderService } from './details/session-trace-provider.ts'
+export { TraceSeriesSchema } from './details/trace-series-schema.ts'

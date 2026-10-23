@@ -7,12 +7,15 @@ mod checkout;
 pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
+pub mod follow;
 mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
 pub use contract::*;
 pub use generated::*;
+mod identities;
+pub use identities::*;
 
 use bytes::Bytes;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -985,6 +988,11 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::InvalidArrangementKey
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
+        | ErrorCode::IdentityCycle
+        | ErrorCode::IdentityOccupied
+        | ErrorCode::IdentityRetiredSource
+        | ErrorCode::IdentityCrossKind
+        | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
         | ErrorCode::MessageSelectorsNotReady
@@ -2024,6 +2032,29 @@ impl Client {
         self.launch_children(launch_id, "approvals", cursor, limit)
             .await
     }
+    pub async fn schedules_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        unheard_after_ms: Option<u64>,
+    ) -> Result<Envelope<SchedulesPage>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if let Some(age) = unheard_after_ms {
+            query.push(format!("unheard_after_ms={age}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/schedules{suffix}")).await
+    }
     pub async fn missions_list(
         &self,
         cursor: Option<&str>,
@@ -2202,6 +2233,15 @@ impl Client {
         history: bool,
     ) -> Result<Envelope<Page>, ClientError> {
         self.list_internal("terminals", cursor, limit, history)
+            .await
+    }
+    pub async fn runtime_starts_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        self.list_internal("runtime-starts", cursor, limit, history)
             .await
     }
     pub async fn operations_list(
@@ -3969,6 +4009,26 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
+            // A schedule collection has no missing-item 404. An older router may answer an
+            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
+            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+                let error = ErrorEnvelope {
+                    api_version: "st3.client.v0".into(),
+                    error_version: "st3.client.error.v0".into(),
+                    request_id: String::new(),
+                    code: ErrorCode::UnsupportedCapability,
+                    message: "this server does not support schedules.list; upgrade the server"
+                        .into(),
+                    retryable: false,
+                    retry_after_ms: None,
+                    details: Default::default(),
+                };
+                return Err(ClientError::Api(
+                    error.code.clone(),
+                    error.message.clone(),
+                    Box::new(error),
+                ));
+            }
             if status == 404 && bytes.is_empty() && path.starts_with("/v1/client/launches/") {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
@@ -5052,6 +5112,37 @@ mod tests {
             }
             lines
         })
+    }
+
+    #[test]
+    fn schedule_models_preserve_unknown_fields_and_state_strings() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/schedules-page.json"
+        ))
+        .unwrap();
+        let decoded: Envelope<SchedulesPage> = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.value.items[0].state, "future-state");
+        assert_eq!(decoded.value.items[0].standby_state, "future-state");
+        assert_eq!(decoded.value.items[0].knowledge.completeness, "unknown");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    }
+    #[test]
+    fn schedule_reads_encode_explicit_parameters_and_keep_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture=include_str!("../../../docs/st3/client-v0/fixtures/schedules-page.json");
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("schedules.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,200,fixture.into()),(0,404,error),(0,404,String::new())]);
+            let client=Client::unix_as(&socket,"person/ada");
+            let page=client.schedules_list(Some("next&cursor"),Some(1),Some(300000)).await.unwrap();
+            assert_eq!(page.value.items.len(),1);
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            assert!(matches!(client.schedules_list(None,None,None).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            let lines=server.await.unwrap();
+            assert_eq!(lines.len(),3);
+            assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
+            assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
     }
 
     #[test]

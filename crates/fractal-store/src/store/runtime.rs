@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// The newest complete roster in each history mode, and the page order of the current one.
+#[derive(Default)]
+pub struct PreviousRoster {
+    pub resources: Vec<AgentResourcesEntry>,
+    pub page_refs: Option<AgentResourcesEntry>,
+}
+
 /// smalltalk's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
 /// the graph for the caches its reads use.
 #[derive(Default)]
@@ -45,6 +52,10 @@ pub struct SmalltalkRuntime {
     pub usage_folds: Mutex<UsageFolds>,
     /// Ordering and queue metadata for lazy HTTP pages, shared at the same graph cuts.
     pub agent_page_refs_cache: Mutex<VecDeque<AgentResourcesEntry>>,
+    /// The roster readers had when a projection catching up last projected more admitted
+    /// claims: readers serve it, under its own cut, until the roster refolds. A fold never
+    /// starts from it, and a forget drops it.
+    pub agent_roster_previous: Mutex<PreviousRoster>,
     /// Acquire before opening a SQLite snapshot, never while pinning a WAL read mark.
     pub agent_resources_admission: Arc<tokio::sync::Mutex<()>>,
     pub agent_resources_admission_state: Mutex<roster_admission::AdmissionState>,
@@ -477,6 +488,10 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        // Replication admission/import, repair and pruning can dirty preparation
+        // without running APPEND (or can do so after its last claim projector).
+        // The native connection signal makes the no-work boundary SQL-free.
+        resources::flush_preparation(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -488,35 +503,8 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn forget_views(&self) {
-        self.observer_actuals.invalidate();
-        let mut cache = self
-            .subject_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        cache.views.clear();
-        cache.statuses.clear();
-        cache.summary_statuses.clear();
-        cache.runtime_statuses.clear();
-        cache.card_statuses.clear();
-        drop(cache);
-        let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
-        self.conversation_owner_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        owners.clear();
-        drop(owners);
-        self.agent_status_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.agent_resources_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.exact_agent_resources_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
-        self.agent_roster_published.send_modify(|revision| *revision += 1);
+        self.forget_reductions();
+        *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();
         self.arrangement_list.forget();
@@ -527,23 +515,42 @@ impl Runtime for SmalltalkRuntime {
         self.published_work.forget();
         self.published_runtimes.forget();
         self.published_views.invalidate();
-        self.agent_page_refs_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        // Nothing is published now, and a refold from the log takes seconds on a large store.
-        // Where agents lists are being read, start it here rather than when the next read finds
-        // no roster and waits for it. A node nobody reads keeps folding only on demand, so a
-        // long catch-up or trim that forgets once per chunk does not refold it once per chunk.
-        let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
-        let read_lately = read_at != 0
-            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
-        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
-            let _ = self.agent_roster_requested_at.compare_exchange(
-                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            wake.notify_one();
+        self.wake_read_roster();
+    }
+
+    fn projection_advanced(&self, caught_up: bool) {
+        // Readers keep the roster they had while it refolds from nothing: keep it before the
+        // caches it lives in are cleared.
+        {
+            let resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
+            let refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
+            for history in [false, true] {
+                if let Some(entry) = resources.iter()
+                    .filter(|entry| entry.history == history && entry.covered.is_none())
+                    .max_by_key(|entry| (entry.index, entry.local))
+                {
+                    previous.resources.retain(|kept| kept.history != history);
+                    previous.resources.push(entry.clone());
+                }
+            }
+            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
+                previous.page_refs = Some(entry.clone());
+            }
+        }
+        // Reductions keyed by graph cut alone would answer from the prefix projected before:
+        // the cut did not move. They go, as on a forget.
+        self.forget_reductions();
+        // The missions, work, attention, glasses and arrangements lists read the projection
+        // frontier and refold what it newly covers on their own; they keep serving meanwhile.
+        self.summary_list.forget();
+        self.published_views.invalidate();
+        // The runtimes list and the roster fold from nothing, which takes seconds on a large
+        // store. Folding them after every chunk of a long backlog kept a busy node folding the
+        // whole time; readers keep the rows they had until the backlog is in, then one refold.
+        if caught_up {
+            self.published_runtimes.refold();
+            self.wake_read_roster();
         }
     }
 
@@ -616,7 +623,7 @@ impl Runtime for SmalltalkRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.person-directive-notes.forward-compat.v1";
+    "st3.shared-projections.identity-naming.claim-id-collision.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {
@@ -631,14 +638,74 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
     }
     Ok(())
+}
+
+
+impl SmalltalkRuntime {
+    /// Drop every reduction kept by graph cut: statuses, views, conversation owners, agent
+    /// cards and the roster built from them, usage folds and agent page order.
+    fn forget_reductions(&self) {
+        self.observer_actuals.invalidate();
+        let mut cache = self
+            .subject_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        cache.views.clear();
+        cache.statuses.clear();
+        cache.summary_statuses.clear();
+        cache.runtime_statuses.clear();
+        cache.card_statuses.clear();
+        drop(cache);
+        let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
+        self.conversation_owner_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        owners.clear();
+        drop(owners);
+        self.agent_status_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.agent_resources_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.exact_agent_resources_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
+        self.agent_roster_published.send_modify(|revision| *revision += 1);
+        self.agent_page_refs_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// The roster's caches were cleared, and a refold from the log takes seconds on a large
+    /// store. Where agents lists are being read, start it here rather than when the next read
+    /// finds no roster and waits for it. A node nobody reads keeps folding only on demand, so a
+    /// long catch-up or trim that forgets once per chunk does not refold it once per chunk.
+    fn wake_read_roster(&self) {
+        let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
+        let read_lately = read_at != 0
+            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
+        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
+            let _ = self.agent_roster_requested_at.compare_exchange(
+                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            wake.notify_one();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -751,6 +818,10 @@ mod schema_install_tests {
         assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap(), "the earlier committed initial chunk must survive");
         for name in [
             "resource_observations",
+            "local_resource_preparation",
+            "local_resource_preparation_claims",
+            "local_resource_preparation_pending",
+            "local_resource_preparation_dirty",
             "custom_registrations",
             "local_custom_dirty",
         ] {
@@ -790,6 +861,10 @@ mod schema_install_tests {
         );
         for name in [
             "resource_observations",
+            "local_resource_preparation",
+            "local_resource_preparation_claims",
+            "local_resource_preparation_pending",
+            "local_resource_preparation_dirty",
             "custom_registrations",
             "local_custom_dirty",
         ] {

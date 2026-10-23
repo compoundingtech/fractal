@@ -492,8 +492,10 @@ export const evidenceStageJob = (name: string) =>
  */
 export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
 /**
- * A lane that is skipped whenever its paths are untouched (fractal-web), so it has no evidence gate of its own and a
- * run that did not execute it makes no note for it. It is signed shard by shard (scripts/ci-evidence-signing STEP_INPUTS).
+ * A lane that is skipped whenever its paths are untouched (fractal-web), so a run that did not execute it makes no note
+ * for it. Each shard signs its own note (scripts/ci-evidence-signing STEP_INPUTS), and the evidence note job signs one
+ * whole-check note from the lane's jobs (`aggregate` with GATE_JOB=fractal-web); the skip policy accepts only the latter.
+ * Its evidence gate is evidence-gate-fractal-web, read like typescript-client's.
  */
 export const evidenceLaneNames = ['fractal-web'] as const
 export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
@@ -502,10 +504,9 @@ export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 // which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
 // job's log or step outcomes say. Every gate named here must be in that job's `needs`.
 export const gateSkipExpression = (name: string): string => {
-  if ((evidenceLaneNames as readonly string[]).includes(name)) return 'false'
   const gates = name === 'mail-redelivery-canaries'
     ? ['linux-gate', 'mail-redelivery-canaries']
-    : (evidenceStepNames as readonly string[]).includes(name) ? [name] : ['linux-gate']
+    : [...evidenceStepNames, ...evidenceLaneNames].includes(name as never) ? [name] : ['linux-gate']
   return '${{ ' + gates.map((gate) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`).join(' || ') + ' }}'
 }
 
@@ -680,6 +681,24 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
   ]
 }
 
+/**
+ * A test lane's count of tests nextest passed only on a retry, as the name of a tiny artifact
+ * (`nextest-flaky-<lane>-<N>`), so `st slo` reads it with one artifacts listing per run and no
+ * download. `scripts/ci-linux tests` writes `flaky=N` and the file; nothing is uploaded for 0.
+ */
+export const nextestFlakyUpload = (name: string) => ({
+  name: 'Name the flaky test count',
+  if: "${{ !cancelled() && steps.nextest.outputs.flaky != '' && steps.nextest.outputs.flaky != '0' }}",
+  'continue-on-error': true,
+  uses: 'actions/upload-artifact@v4',
+  with: {
+    name: `nextest-flaky-${name}-\${{ steps.nextest.outputs.flaky }}`,
+    path: '${{ runner.temp }}/nextest-flaky.txt',
+    'if-no-files-found': 'ignore',
+    'retention-days': 1,
+  },
+})
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({
@@ -820,6 +839,22 @@ const embeddedPython = (script: string) =>
 // per-commit set unsharded on shard 0.
 const kitShardCount = 2
 const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
+// What one run of the lane covers, written once: the matrix, the run step, each shard's note and the whole-check note
+// all read these, so a note can never claim more shards or a fuller test set than the run had.
+const kitShardCountExpression = `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`
+const kitPlaySetExpression = "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}"
+const appTestSetExpression = "${{ github.event_name == 'pull_request' && 'related' || 'all' }}"
+/**
+ * The environment of the evidence note job's step that signs the fractal-web whole-check note (scripts/ci-evidence-signing
+ * aggregate with GATE_JOB=fractal-web). That job must need fractal-web-changes, whose kit-inputs output these read.
+ */
+export const fractalWebNoteEnv = {
+  GATE_JOB: 'fractal-web',
+  KIT_SHARD_COUNT: kitShardCountExpression,
+  KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
+  KIT_PLAY_SET: kitPlaySetExpression,
+  APP_TEST_SET: appTestSetExpression,
+} as const
 
 /**
  * The path-sensitive fractal-web gate always runs on GitHub-hosted capacity. Detection
@@ -857,7 +892,7 @@ export const fractalWebJobs = {
       'fail-fast': false,
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
-    needs: ['fractal-web-changes', 'genie-freshness'],
+    needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
     if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
@@ -892,17 +927,17 @@ export const fractalWebJobs = {
           ...fractalWebShellEnv,
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
           KIT_SHARD_INDEX: '${{ matrix.shard }}',
-          KIT_SHARD_COUNT: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
+          KIT_SHARD_COUNT: kitShardCountExpression,
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
           // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
           // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
-          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
+          KIT_PLAY_SET: kitPlaySetExpression,
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
           KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
           // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
           // placed in the import graph); merge groups and manual runs run every test file.
-          APP_TEST_SET: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
+          APP_TEST_SET: appTestSetExpression,
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
@@ -913,27 +948,30 @@ export const fractalWebJobs = {
         uses: 'actions/upload-artifact@v4',
         with: {
           name: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}',
-          path: '${{ runner.temp }}/kit-play-receipts/receipt.json',
+          path: '${{ runner.temp }}/kit-play-receipts/',
           'if-no-files-found': 'ignore',
         },
       },
-      // One note per shard: the test sets it ran and which shard of how many are recorded, so a later policy can
-      // require the whole set. The note says only that this shard's run step ended as it did.
+      // One note per shard: the test sets it ran and which shard of how many are recorded. The note says only that this
+      // shard's run step ended as it did, so the skip policy does not accept it for the check: the whole-check note signed
+      // by the evidence note job (fractalWebNoteEnv) does.
       ...evidenceStepSteps('fractal-web', ['bash', 'scripts/ci-fractal-web'], ['run'], {
         artifact: 'evidence-note-fractal-web-shard-${{ matrix.shard }}',
         inputs: {
           kit_shard: '${{ matrix.shard }}',
-          kit_shard_count: `\${{ ${kitSharded} && '${kitShardCount}' || '1' }}`,
-          kit_play_set: "${{ github.event_name == 'pull_request' && 'commit' || 'all' }}",
-          app_test_set: "${{ github.event_name == 'pull_request' && 'related' || 'all' }}",
+          kit_shard_count: kitShardCountExpression,
+          kit_play_set: kitPlaySetExpression,
+          app_test_set: appTestSetExpression,
         },
       }),
     ],
   },
   'fractal-web': {
     name: 'fractal-web',
-    needs: ['fractal-web-changes', 'fractal-web-execution'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check.
+    needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
+    // A failed, cancelled or unexpectedly skipped execution must fail this check. Under an evidence skip the execution
+    // shards end in success with their steps skipped (fleet.yml.genie.ts), so the verdict passes and the cost steps,
+    // which have no receipts to read, do not run.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
@@ -949,20 +987,30 @@ export const fractalWebJobs = {
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },
-      // A successful matrix result alone cannot prove all expected shards ran.
+      // Publish costs for single-shard runs too; exact full-index coverage remains merge-group-only.
       {
         uses: 'actions/checkout@v4',
-        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true'",
         with: { 'persist-credentials': false },
       },
       {
         uses: 'actions/download-artifact@v4',
-        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        id: 'cost-receipts',
+        'continue-on-error': true,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'",
         // Include older attempts only from this exact run/head, for rerun-failed-jobs.
         with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
       },
       {
+        name: 'Publish web lane costs as a public check annotation',
+        'continue-on-error': true,
+        if: "!cancelled() && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && steps.cost-receipts.outcome == 'success'",
+        run: 'node packages/fractal-ui/scripts/kit-play-cost.mjs "$RUNNER_TEMP/kit-play-receipts"',
+      },
+      {
         name: 'Require every kit shard and exact full-index coverage',
+        // Never conditioned on the evidence gate: only merge groups and manual runs shard, a skip is for pull requests
+        // only (the policy's events), and a skip taken anyway leaves no receipts, so this step would fail the check.
         if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
         run: `node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" ${kitShardCount}`,
       },

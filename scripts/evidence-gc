@@ -3,7 +3,7 @@
 
   scripts/evidence-gc [--repo .] [--remote origin] [--fetch] [--apply] [--main origin/main]
                       [--retention FILE] [--as-of UNIX] [--head COMMIT ...] [--heads-from FILE] [--plan-out FILE]
-                      [--lock-config FILE]
+                      [--lock-config FILE] [--before-delete JSON_ARGV]
   scripts/evidence-gc --relock-only --lock-config FILE
 
 Dry run by default: it reads the records in --repo and prints the plan, changing nothing. With --fetch it first fetches
@@ -42,8 +42,13 @@ protection still off at the end, is an alarm: exit 4. One line on stderr, and `l
   evidence-gc-lock v1 unlocked_at=... relocked_at=... window_s=... tags_deleted=N unexplained=N final=on|OFF
 --relock-only runs "relock" and "check" alone (a unit's ExecStopPost, after a kill no finally survives).
 
-FAILS CLOSED: if a commit named by --head cannot be turned into a tree, or no branch tip is known at all, --apply refuses to
-delete anything.
+BEFORE DELETING (--before-delete JSON_ARGV, needs --plan-out): with --apply, the command runs once the plan is written and before
+anything is deleted or migrated, with the plan file's path as its last argument, without a shell. The evidence log's GC lines go
+here (scripts/evidence-gc-timer runs `evidence-log-timer gc --plan FILE`), so the log says GC removed a tree before its records
+disappear. If it fails, nothing is deleted (`refused`, exit 1).
+
+FAILS CLOSED: if a commit named by --head cannot be turned into a tree, or no branch tip is known at all, or the --before-delete
+command fails, --apply refuses to delete anything.
 
   exit 0  done (or a dry run)    exit 1  a step failed or a head could not be resolved    exit 2  usage
   exit 3  the live set alone exceeds cap_records (nothing live was deleted)
@@ -467,6 +472,18 @@ def apply_remote(repo, remote, migrate, doomed, lock=None):
     return failed, lock_window(repo, remote, tags, push, failed, lock, header)
 
 
+def before_delete(argv, plan_path, summary):
+    """Run the --before-delete command on the plan; True when it exited 0. Its stdout goes to stderr: ours is the summary."""
+    try:
+        done = subprocess.run([*argv, plan_path], stdin=subprocess.DEVNULL, capture_output=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        summary['before_delete'] = {'exit_code': None, 'error': str(error)}
+        return False
+    sys.stderr.write((done.stdout + done.stderr).decode(errors='replace'))
+    summary['before_delete'] = {'exit_code': done.returncode}
+    return done.returncode == 0
+
+
 def apply_local(repo, migrate, doomed):
     commands = ''.join(f'create {new} {git(repo, "rev-parse", old).stdout.decode().strip()}\n' for old, new in migrate)
     commands += ''.join(f'delete {ref}\n' for ref in doomed)
@@ -491,12 +508,23 @@ def main(argv):
     parser.add_argument('--plan-out', help='also write the plan, with its inputs digest, to this file')
     parser.add_argument('--lock-config', help='the unlock, relock and check commands of the protection on the remote\'s evidence tags')
     parser.add_argument('--relock-only', action='store_true', help='run the relock and check commands of --lock-config, nothing else')
+    parser.add_argument('--before-delete', help='JSON argv run with the --plan-out path appended, after planning and before deleting')
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return 2 if error.code else 0
     try:
         lock = load_lock(args.lock_config) if args.lock_config else None
+        before = None
+        if args.before_delete:
+            try:
+                before = json.loads(args.before_delete)
+            except ValueError:
+                before = None
+            if not isinstance(before, list) or not before or not all(isinstance(a, str) for a in before):
+                raise Usage('--before-delete must be a JSON array of strings')
+            if not args.plan_out:
+                raise Usage('--before-delete needs --plan-out: the command is given the plan file')
         if args.relock_only:
             if lock is None:
                 raise Usage('--relock-only needs --lock-config')
@@ -577,6 +605,9 @@ def main(argv):
         doomed, migrate = plan['delete'], plan['migrate']
         if unresolved and args.apply:
             summary['refused'] = 'a live head could not be resolved to a tree: nothing was changed'
+            status = 1
+        elif args.apply and (doomed or migrate) and before and not before_delete(before, args.plan_out, summary):
+            summary['refused'] = 'the --before-delete command failed: nothing was changed'
             status = 1
         elif args.apply and (doomed or migrate):
             failed, report = apply_remote(args.repo, args.remote, migrate, doomed, lock) if args.remote else ([], None)

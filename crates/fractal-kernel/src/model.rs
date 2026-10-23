@@ -823,6 +823,8 @@ pub struct UnderSpec {
 pub struct ScheduleSpec {
     pub stopped: bool,
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby: Option<ScheduleStandby>,
     pub at_unix_ms: Option<i64>,
     pub every_ms: Option<u64>,
     pub anchor_unix_ms: Option<i64>,
@@ -830,6 +832,12 @@ pub struct ScheduleSpec {
     pub catch_up: String,
     pub max_catch_up: Option<u32>,
     pub work: Option<ScheduledWork>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScheduleStandby {
+    pub host: String,
+    pub after_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CalendarSchedule {
@@ -2279,6 +2287,12 @@ impl MessageView {
 pub struct MessageSendReceipt {
     #[serde(flatten)]
     pub message: MessageView,
+    #[serde(default)]
+    pub requested_recipient: String,
+    #[serde(default)]
+    pub recipient: String,
+    #[serde(default)]
+    pub recipient_identity: String,
     /// This daemon's accepted delivery kind. Absent on pre-silent daemons: tags alone
     /// cannot confirm that an older daemon honors silent delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]

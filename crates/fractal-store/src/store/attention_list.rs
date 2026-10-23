@@ -40,11 +40,11 @@ pub struct AttentionPublication {
     /// Every person's rows, most urgent first, as `client_attention_resources_at` orders them,
     /// each with the presentation `fleet` gives it.
     pub rows: Arc<Vec<Value>>,
+    /// Owner-indexed rows in the same order, built only when the refresher changes the rows.
+    pub owners: BTreeMap<String, Arc<Vec<Value>>>,
     /// The agents the rows' presentations read, from the newest published roster; `None`
     /// before the first.
     pub fleet: Option<Arc<AttentionFleet>>,
-    /// Owner-indexed rows in the same order, built only when the refresher changes the rows.
-    pub owners: BTreeMap<String, Arc<Vec<Value>>>,
 }
 
 /// What the attention presentation reads from an agents roster: each agent's label, the step

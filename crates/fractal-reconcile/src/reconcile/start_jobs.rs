@@ -284,11 +284,25 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub fn reconcile_start_jobs(&self) -> Result<()> {
+        self.reconcile_start_jobs_with_snapshot(&PassPtySnapshot::new())
+    }
+
+    fn pass_pty_snapshot<'a>(
+        &self,
+        snapshot: &'a PassPtySnapshot,
+    ) -> Result<&'a PtyRegistrySnapshot> {
+        snapshot
+            .get_or_init(|| self.runtime.snapshot_ptys_with_provenance())
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error:#}"))
+    }
+
+    pub(super) fn reconcile_start_jobs_with_snapshot(&self, snapshot: &PassPtySnapshot) -> Result<()> {
         for operation in self.store.pending_runtime_starts()? {
             let subject = operation.subject.clone();
             if reconcile_decision_admitted(&subject) {
                 self.isolate("start-completion", &subject, || {
-                    self.reconcile_start_operation(operation)
+                    self.reconcile_start_operation(operation, snapshot)
                 });
             } else {
                 // Gate operations are not admitted reconciliation-fault subjects.
@@ -296,14 +310,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.isolate(
                     &format!("start-completion:{subject}"),
                     &format!("daemon/{}", self.host),
-                    || self.reconcile_start_operation(operation),
+                    || self.reconcile_start_operation(operation, snapshot),
                 );
             }
         }
         Ok(())
     }
 
-    fn reconcile_start_operation(&self, mut operation: RuntimeStartOperation) -> Result<()> {
+    fn reconcile_start_operation(
+        &self,
+        mut operation: RuntimeStartOperation,
+        snapshot: &PassPtySnapshot,
+    ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
         let current =
             self.store.selected_desired_token(&operation.subject)? == prepared.selected_token;
@@ -340,23 +358,34 @@ impl<R: RuntimeControl> Reconciler<R> {
                     !result["error"].is_string()
                         && result["verification"] != "operation-incarnation"
                 }) {
-                    let observation = self.runtime.observe_start(&prepared.launch_member)?;
-                    if let Some(incarnation) = observation.and_then(|item| item.incarnation_id) {
-                        if self
-                            .runtime
-                            .start_operation(
-                                &prepared.member.runtime_id,
-                                prepared.member.terminal,
-                                &incarnation,
-                            )?
-                            .as_deref()
-                            != Some(operation.id.as_str())
+                    let exec_observation;
+                    let observation = if prepared.member.terminal {
+                        self.pass_pty_snapshot(snapshot)?.observations.iter()
+                            .find(|item| item.runtime_id == prepared.member.runtime_id)
+                    } else {
+                        exec_observation = self.runtime.observe_start(&prepared.launch_member)?;
+                        exec_observation.as_ref()
+                    };
+                    if let Some(incarnation) = observation.and_then(|item| item.incarnation_id.as_deref()) {
+                        let exec_provenance;
+                        let provenance = if prepared.member.terminal {
+                            self.pass_pty_snapshot(snapshot)?.start_operations
+                                .get(&prepared.member.runtime_id)
+                                .filter(|(observed, _)| observed == incarnation)
+                                .map(|(_, operation)| operation.as_str())
+                        } else {
+                            exec_provenance = self.runtime.start_operation(
+                                &prepared.member.runtime_id, false, incarnation,
+                            )?;
+                            exec_provenance.as_deref()
+                        };
+                        if provenance != Some(operation.id.as_str())
                         {
                             return Ok(());
                         }
                         if !self
                             .store
-                            .verify_runtime_start(&operation.id, &incarnation)?
+                            .verify_runtime_start(&operation.id, incarnation)?
                         {
                             return Ok(());
                         }
@@ -502,7 +531,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.start_changed(&operation.subject);
         }
         if operation.revoked_by.is_some() {
-            self.cleanup_revoked_start(&operation, &prepared)?;
+            self.cleanup_revoked_start(&operation, &prepared, snapshot)?;
         } else {
             self.start_queued_job(&operation)?;
         }
@@ -513,26 +542,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         &self,
         operation: &RuntimeStartOperation,
         prepared: &PreparedStart,
+        snapshot: &PassPtySnapshot,
     ) -> Result<()> {
+        if self
+            .store
+            .close_runtime_start_from_stored_witness(&operation.id)?
+        {
+            self.start_changed(&operation.subject);
+            return Ok(());
+        }
         let member = &prepared.member;
+        let exec_observation;
         let observation = if member.terminal {
-            self.runtime
-                .snapshot_ptys()?
-                .into_iter()
+            self.pass_pty_snapshot(snapshot)?.observations.iter()
                 .find(|o| o.runtime_id == member.runtime_id)
         } else {
-            self.runtime.observe_exec(&member.runtime_id)?
+            exec_observation = self.runtime.observe_exec(&member.runtime_id)?;
+            exec_observation.as_ref()
         };
         let Some(observation) = observation else {
             // An error from an entered backend does not prove its detached producer closed.
             if operation.finished
-                && (operation
-                    .result
-                    .as_ref()
-                    .is_some_and(|r| r["producer_closed"] == true)
-                    || self
-                        .runtime
-                        .start_operation_closed(&prepared.launch_member)?)
+                && self
+                    .runtime
+                    .start_operation_closed(&prepared.launch_member)?
             {
                 self.store
                     .retain_runtime_start_producer_closed(&operation.id)?;
@@ -549,10 +582,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
             return Ok(());
         };
-        let provenance =
-            self.runtime
-                .start_operation(&member.runtime_id, member.terminal, incarnation)?;
-        if provenance.as_deref() != Some(operation.id.as_str()) {
+        let exec_provenance;
+        let provenance = if member.terminal {
+            self.pass_pty_snapshot(snapshot)?.start_operations
+                .get(&member.runtime_id)
+                .filter(|(observed, _)| observed == incarnation)
+                .map(|(_, operation)| operation.as_str())
+        } else {
+            exec_provenance =
+                self.runtime.start_operation(&member.runtime_id, false, incarnation)?;
+            exec_provenance.as_deref()
+        };
+        if provenance != Some(operation.id.as_str()) {
             self.record_once(
                 &operation.subject,
                 "harness.diagnostic",
@@ -596,13 +637,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             }
         }
-        self.reconcile_runtime_stop(
+        // The pass evidence identifies a candidate, not permission to signal a name.
+        // Exact native retirement rechecks the incarnation against fresh runtime state.
+        self.reconcile_runtime_stop_inner(
             &operation.subject,
             &member.runtime_id,
             member.terminal,
             Some(incarnation),
             member.shutdown_timeout_ms,
-            Some(&observation),
+            Some(observation),
+            operation.finished.then_some(operation.id.as_str()),
         )?;
         Ok(())
     }

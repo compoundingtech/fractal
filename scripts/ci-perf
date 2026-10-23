@@ -56,6 +56,12 @@ summarize_load() {
     jq -r '.paths | to_entries[] |
       "| \(.key) | \(.value.count) | \(.value.p50_ms | floor) | \(.value.p99_ms | floor) | \(.value.max_ms | floor) | \(.value.budget_ms | floor) | \(if .value.descriptive_target_ms == null then "-" else "\(.value.descriptive_target_ms | floor)\(if .value.over_descriptive_target then " over" else "" end)" end) |"' "$report"
     printf '\nTarget: the p99 in slo/targets.toml, described and never gated. Budgets and main'"'"'s baseline are the gates.\n'
+    printf 'Runner reference: %s ms to sort 2^21 values on one core (the same work on every host).\n' \
+      "$(jq -r '.runner_reference_ms // "-"' "$report")"
+    jq -r 'if (.unavailable // {}) == {} then empty else
+      "\nUnavailable (failing, #3553): \(.unavailable | add) reads found a published list withdrawn" +
+      (if .unavailable_window_s == null then "" else " from \(.unavailable_window_s[0] | floor) s to \(.unavailable_window_s[1] | floor) s into the load" end) +
+      ": \(.unavailable | to_entries | map("\(.key) (\(.value))") | join("; "))" end' "$report"
   } >> "$GITHUB_STEP_SUMMARY"
 }
 

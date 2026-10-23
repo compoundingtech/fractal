@@ -176,6 +176,19 @@ pub fn raw_terminal_owner_splice(
 
 pub use crate::delivery_presence::claude_channel_attached;
 
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
@@ -379,6 +392,9 @@ impl ApiError {
     pub fn bad(error: St3Error) -> Self {
         let status = match error.code {
             "recipient-retired"
+            | "identity-cycle"
+            | "identity-occupied"
+            | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
             | "stale-subject"
@@ -396,9 +412,9 @@ impl ApiError {
             | "wrong-message-recipient"
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
+            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -592,6 +608,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/agents/rename-id", post(agents::rename_agent_id))
+        .route("/v1/missions/rename-id", post(agents::rename_mission_id))
         .route("/v1/agents/restart", post(agents::restart_agent))
         .route("/v1/agents/rollout", post(agents::rollout_agent))
         .route("/v1/agents/start", post(agents::start_mission_seat))
@@ -1449,6 +1467,28 @@ pub fn a_publication_far_behind_its_previous_one_is_not_a_freshness_sample() {
     assert!(publish_sampled(7, 8));
     assert!(publish_sampled(7, 7 + PUBLISH_SAMPLE_CLAIMS));
     assert!(!publish_sampled(7, 8 + PUBLISH_SAMPLE_CLAIMS), "after a catch-up");
+    assert_eq!(publish_collection("attention"), "attention");
+    assert_eq!(publish_collection("sessions"), "other");
+}
+
+/// Publications more than [`PUBLISH_SAMPLE_CLAIMS`] claims after the previous one, which
+/// `projection-fresh` does not sample, by `collection` (docs/st3/observability.md).
+static PUBLISH_SAMPLES_SKIPPED: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3")
+            .u64_counter("st.slo.projection_fresh.skipped")
+            .with_unit("{publication}")
+            .build()
+    });
+
+/// A publication's `collection` as a closed metric attribute.
+fn publish_collection(collection: &str) -> &'static str {
+    match collection {
+        "missions" => "missions",
+        "agents" => "agents",
+        "attention" => "attention",
+        _ => "other",
+    }
 }
 
 /// A refresher published `collection` at `cut`, after a publication at `previous`: time it
@@ -1466,6 +1506,15 @@ pub fn record_publish_latency(
     published_at_unix_ms: u128,
 ) {
     if !publish_sampled(previous, cut) {
+        if cut > previous && crate::otel::metrics_enabled() {
+            PUBLISH_SAMPLES_SKIPPED.add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "collection",
+                    publish_collection(collection),
+                )],
+            );
+        }
         return;
     }
     let committed = match store.first_local_commit_after(previous, cut) {
@@ -2977,6 +3026,7 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                     item["state"] = json!("waiting");
                 }
             }
+            overlay_declaration_restart(item, client_now_ms());
             overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
@@ -2991,6 +3041,23 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
         overlay_subagents(store, items)?;
         Ok(())
     })
+}
+
+// A marker describes a replacement, not proof that its owner is still progressing.
+// Evaluate this on every live presentation, including retained roster cards, rather
+// than only when a new claim invalidates the fold. Expiry changes no durable fact.
+const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
+
+fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let fields = item.as_object_mut().expect("agent card");
+    let previous = fields.remove("_restart_underlying_state");
+    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
+    if fields.get("state").and_then(Value::as_str) == Some("restarting")
+        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
+        && let Some(previous) = previous
+    {
+        fields.insert("state".into(), previous);
+    }
 }
 
 /// How long a declared seat may take to show a running session before it is called down.
@@ -3123,10 +3190,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
@@ -3431,6 +3508,28 @@ fn client_agent_cards_presented(
                     .or_else(|| subject.desired_token.as_deref().and_then(claim_time))
             })
             .flatten();
+            // A declaration replacement carries the incarnation it is retiring. Keep
+            // that shutdown and the new harness readiness interval distinct from a first start.
+            let restarting_from = fields
+                .and_then(|fields| fields.get("restarting_from"))
+                .and_then(Value::as_str);
+            let restart_underlying_state = state;
+            let restart_until = subject.actual_claim.as_deref()
+                .and_then(|claim| actual_claim_times.as_ref().ok()?.get(claim).copied())
+                .map(|accepted| accepted.saturating_add(DECLARATION_RESTART_PRESENTATION_MS));
+            let restarting = restart_until.is_some() && restarting_from.is_some_and(|from| {
+                subject.reachability == "reachable"
+                    && !matches!(state, "waiting" | "failed")
+                    && (state == "starting"
+                        || (fields
+                            .and_then(|fields| fields.get("incarnation_id"))
+                            .and_then(Value::as_str) == Some(from)
+                            && matches!(
+                                observed,
+                                Some("running")
+                            )))
+            });
+            let state = if restarting { "restarting" } else { state };
             let handoff = subject.desired_token.as_deref()
                 .map(|token| crate::placement::handoff(store, &subject.subject, token, snapshot_index))
                 .transpose()?.flatten();
@@ -3524,6 +3623,8 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "_restart_underlying_state": restart_underlying_state,
+                "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
                 "runtime_ids": runtime_ids,
                 "owner_run_id": subject.owner_run,
@@ -4831,12 +4932,19 @@ fn client_launch_resource(
                 .map(|revision| format!("launch-approval/{}/{revision}", session.id))
         })
         .collect::<Vec<_>>();
+    use crate::store::identities::{IdentityKind, IdentityStore};
+    let mission = format!("mission/{}", session.mission.strip_prefix("mission/").unwrap_or(&session.mission));
+    let title = match store.resolve_identity(IdentityKind::Mission, &mission) {
+        Ok(resolved) => resolved.canonical_id.strip_prefix("mission/").unwrap_or(&resolved.canonical_id).to_owned(),
+        Err(error) if error.code == "identity-unknown" => session.mission.clone(),
+        Err(error) => return Err(error.into()),
+    };
     Ok(json!({
         "id": format!("launch/{}", session.id),
         "kind": "launch",
         "revision": format!("launch/{}", session.updated_at_unix_ms),
         "updated_at": client_timestamp(session.updated_at_unix_ms),
-        "title": session.mission,
+        "title": title,
         "phase": phase,
         "request": session.request,
         "planner": session.planner,
@@ -5795,11 +5903,11 @@ pub async fn serve_unix_with_ready(
     app: Router,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(socket, None, app, false, harness_ancestor, ready).await
+    serve_unix_with_ancestor_ready(socket, None, app, None, harness_ancestor, ready).await
 }
 
 pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
-    serve_unix_inner(socket, app, false).await
+    serve_unix_with_ancestor(socket, None, app, None, harness_ancestor).await
 }
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
@@ -5939,12 +6047,15 @@ pub fn start_agent_roster(state: &AppState) {
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
 /// its parents. `state_socket` gives clients without the daemon's runtime environment a stable
 /// address for the same listener. Test servers and the paired gateway use the unbound listener.
+/// Every bound router is guarded at the serving boundary using `store`, including routers not
+/// built by `router_for_transport`. Historical and current agent names share one actor identity.
 pub async fn serve_unix_bound(
     socket: &Path,
     state_socket: &Path,
     app: Router,
+    store: Arc<Store>,
 ) -> anyhow::Result<()> {
-    serve_unix_bound_with_ready(socket, state_socket, app, || {}).await
+    serve_unix_bound_with_ready(socket, state_socket, app, store, || {}).await
 }
 
 /// Readiness is published only once the initialized local API can accept requests.
@@ -5952,43 +6063,42 @@ pub async fn serve_unix_bound_with_ready(
     socket: &Path,
     state_socket: &Path,
     app: Router,
+    store: Arc<Store>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(
         socket,
         Some(state_socket),
         app,
-        true,
+        Some(store),
         harness_ancestor,
         ready,
     )
     .await
 }
 
-async fn serve_unix_inner(socket: &Path, app: Router, bind_harness: bool) -> anyhow::Result<()> {
-    serve_unix_with_ancestor(socket, None, app, bind_harness, harness_ancestor).await
-}
-
+/// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
+/// authorization; `None` serves an unbound listener without consulting `ancestor`.
 pub async fn serve_unix_with_ancestor(
     socket: &Path,
     state_socket: Option<&Path>,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ancestor: fn(u32) -> Option<String>,
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(socket, state_socket, app, bind_harness, ancestor, || {}).await
+    serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
 
 async fn serve_unix_with_ancestor_ready(
     socket: &Path,
     state_socket: Option<&Path>,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, ancestor, ready).await
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -6066,20 +6176,22 @@ pub async fn reserve_unix_socket(
 }
 
 /// Only a fully initialized router may turn the reservation into a listener.
+/// `Some(store)` binds local harness ancestry and guards every router before route effects;
+/// `None` selects the unbound listener used by the paired gateway.
 pub async fn serve_reserved_unix_with_ready(
     reserved: ReservedUnixSocket,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, harness_ancestor, ready)
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, harness_ancestor, ready)
         .await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
-    bind_harness: bool,
+    bound_store: Option<Arc<Store>>,
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
@@ -6087,6 +6199,13 @@ async fn serve_reserved_unix_with_ancestor_ready(
         socket,
         reservation: _reservation,
     } = reserved;
+    // Binding and its Store-aware authorization are one serving-boundary capability.
+    // Install it here so directly constructed routers cannot bypass the guard.
+    let bind_harness = bound_store.is_some();
+    let app = match bound_store {
+        Some(store) => app.layer(from_fn_with_state(store, guard_bound_actor)),
+        None => app,
+    };
     let listener = socket.listen(1024)?;
     // Only st3-fixture initializes this process-local state. Disable host ancestry while
     // retaining native-driver identification, which mailbox subscriptions require.
@@ -6174,28 +6293,6 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(agent) = &bound_agent {
                         request.extensions_mut().insert(BoundAgent(agent.clone()));
                     }
-                    let client_request = request.uri().path().starts_with("/v1/client/");
-                    let request = match guard_bound_request(request, bound_agent.as_deref()).await {
-                        Ok(request) => request,
-                        Err(error) => {
-                            let response = if client_request {
-                                let status = error.status;
-                                let raw = json!({"code":error.code,"message":error.message,"details":error.details});
-                                (
-                                    status,
-                                    Json(client_error_envelope(
-                                        status,
-                                        &raw,
-                                        &format!("request/{}", new_request_id()),
-                                    )),
-                                )
-                                    .into_response()
-                            } else {
-                                error.into_response()
-                            };
-                            return Ok::<_, std::convert::Infallible>(response);
-                        }
-                    };
                     app.oneshot(request).await
                 }
             });
@@ -6443,9 +6540,49 @@ fn record_legacy_poll(
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
+// The serving boundary supplies the immutable ancestry binding and its identity store before
+// any route or admission effect runs, including for directly constructed routers.
+async fn guard_bound_actor(
+    State(store): State<Arc<Store>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    let client_request = request.uri().path().starts_with("/v1/client/");
+    match guard_bound_request(request, bound_agent.as_deref(), &store).await {
+        Ok(request) => next.run(request).await,
+        Err(error) if client_request => {
+            let status = error.status;
+            let raw = json!({"code":error.code,"message":error.message,"details":error.details});
+            (
+                status,
+                Json(client_error_envelope(
+                    status,
+                    &raw,
+                    &format!("request/{}", new_request_id()),
+                )),
+            ).into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+fn is_bound_actor(store: &Store, actor: &str, bound_identity: &str) -> Result<bool, ApiError> {
+    if actor == bound_identity {
+        return Ok(true);
+    }
+    if actor.starts_with("agent/") {
+        Ok(public_identity(store, crate::store::identities::IdentityKind::Agent, actor)?.identity
+            == bound_identity)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
+    store: &Store,
 ) -> Result<Request<Body>, ApiError> {
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
@@ -6454,13 +6591,16 @@ pub async fn guard_bound_request(
         && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
+    let bound_identity = public_identity(
+        store, crate::store::identities::IdentityKind::Agent, bound_agent,
+    )?.identity;
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
     if let Some(person) = request
         .headers()
         .get(client_v0::LOCAL_PERSON_HEADER)
         .and_then(|value| value.to_str().ok())
-        && person != bound_agent
+        && !is_bound_actor(store, person, &bound_identity)?
     {
         return Err(ApiError::bad(St3Error::new(
             "foreign-agent-actor",
@@ -6517,7 +6657,7 @@ pub async fn guard_bound_request(
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
         for key in ["actor", "requester"] {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
-                && actor != bound_agent
+                && !is_bound_actor(store, actor, &bound_identity)?
             {
                 return Err(ApiError::bad(St3Error::new(
                     "foreign-agent-actor",
@@ -8236,6 +8376,13 @@ pub fn mission_source(
         .map_err(ApiError::internal)?;
     let resolved_kdl = resolve_document_references(kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
+    // Normalize authored names before deriving preview revisions, tokens, and provenance.
+    let intent = match crate::store::identities::normalize_intent(&state.store.readers.get(), &intent)
+        .map_err(ApiError::bad)?
+    {
+        std::borrow::Cow::Borrowed(_) => intent,
+        std::borrow::Cow::Owned(normalized) => normalized,
+    };
     let response = state
         .store
         .mission_at(
@@ -8487,6 +8634,7 @@ pub fn request_suspend(
 ) -> Result<ClaimRecord, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-suspend-actor")?;
     let subject = agent_subject(request.subject);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     let key = format!("agent-suspend:{subject}:{}", request.idempotency_key);
     if let Some(prior) = state
         .store
@@ -8586,6 +8734,7 @@ pub fn request_resume(
 ) -> Result<ClaimRecord, ApiError> {
     let actor = person_or_agent_actor(&request.actor, "invalid-resume-actor")?;
     let subject = agent_subject(request.subject);
+    let subject = public_identity(&state.store, crate::store::identities::IdentityKind::Agent, &subject)?.identity;
     let key = format!("agent-resume:{subject}:{}", request.idempotency_key);
     if let Some(prior) = state
         .store
@@ -9070,6 +9219,8 @@ pub fn accept_message_receipt_with_upload_owner(
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
+    let requested_recipient = normalize_message_party(&request.to);
+    let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
         return Err(ApiError::bad(St3Error::new(
             "adapter-route-refused",
@@ -9121,8 +9272,14 @@ pub fn accept_message_receipt_with_upload_owner(
             )));
         }
     }
-    let from = normalize_message_party(&request.from);
-    let to = normalize_message_party(&request.to);
+    let requested_from = normalize_message_party(&request.from);
+    // Device signatures cover their original party spellings. Unsigned writes use stable
+    // storage identities; signed historical party labels are resolved by the delivery index.
+    let (from, to) = if device_signature.is_some() {
+        (requested_from, requested_recipient.clone())
+    } else {
+        (receipt_recipient(&state.store, &requested_from)?.1, recipient_identity.clone())
+    };
     if !from.starts_with("daemon/")
         && request
             .tags
@@ -9349,6 +9506,9 @@ pub fn accept_message_receipt_with_upload_owner(
         "wake"
     };
     Ok(MessageSendReceipt {
+        requested_recipient,
+        recipient,
+        recipient_identity,
         kind: Some(kind.into()),
         message: MessageView {
             subject,
@@ -9376,6 +9536,32 @@ pub fn accept_message_receipt_with_upload_owner(
         already_sent: !appended,
         sent_at: Some(client_timestamp(record.accepted_at_unix_ms)),
     })
+}
+
+fn receipt_recipient(store: &Store, requested: &str) -> Result<(String, String), ApiError> {
+    use crate::store::identities::IdentityKind;
+    if requested.starts_with("agent/") {
+        let resolved = public_identity(store, IdentityKind::Agent, requested)?;
+        Ok((resolved.canonical_id, resolved.identity))
+    } else {
+        Ok((requested.to_owned(), requested.to_owned()))
+    }
+}
+
+fn public_identity(
+    store: &Store,
+    kind: crate::store::identities::IdentityKind,
+    id: &str,
+) -> Result<crate::store::identities::ResolvedIdentity, ApiError> {
+    use crate::store::identities::{IdentityStore, ResolvedIdentity};
+    match store.resolve_identity(kind, id) {
+        Ok(resolved) => Ok(resolved),
+        // A first send and a discovered or historical roster row need no declaration.
+        Err(error) if error.code == "identity-unknown" => Ok(ResolvedIdentity {
+            kind, identity: id.into(), canonical_id: id.into(), naming_revision: None,
+        }),
+        Err(error) => Err(ApiError::bad(error)),
+    }
 }
 
 /// A recipient's successful reply is durable evidence that the parent was consumed.
@@ -9704,6 +9890,8 @@ pub async fn start_mission_run_action(
         .store
         .create_mission_run(&request)
         .map_err(ApiError::bad)?;
+    let mut response = response;
+    runs::present_mission_run(&state.store, &mut response).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(response))
 }
@@ -9720,7 +9908,7 @@ fn cached_revision_submission(
         .cached_idempotency_response::<MissionRunView>(direct_key)
         .map_err(ApiError::internal)?
     {
-        return Ok(Some(RevisionSubmissionView {
+        let mut result = RevisionSubmissionView {
             provenance: state
                 .store
                 .mission_provenance(&mission_run.mission, &mission_run.revision)
@@ -9728,7 +9916,9 @@ fn cached_revision_submission(
             status: "applied".into(),
             mission_run,
             proposal: None,
-        }));
+        };
+        runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
+        return Ok(Some(result));
     }
     let Some(cached) = state
         .store
@@ -9747,7 +9937,7 @@ fn cached_revision_submission(
         .mission_run(&proposal.run)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::internal("the proposal mission run is unavailable"))?;
-    Ok(Some(RevisionSubmissionView {
+    let mut result = RevisionSubmissionView {
         provenance: state
             .store
             .mission_provenance(&mission_run.mission, &proposal.candidate_revision)
@@ -9755,7 +9945,9 @@ fn cached_revision_submission(
         status: proposal.status.clone(),
         mission_run,
         proposal: Some(proposal),
-    }))
+    };
+    runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
+    Ok(Some(result))
 }
 
 async fn get_revision_proposal(
@@ -9976,11 +10168,18 @@ pub struct LiveSession {
     pub driver: Option<String>,
 }
 
+pub fn session_storage_subject(state: &AppState, subject: &str) -> Result<String, ApiError> {
+    crate::store::identities::resolve_reference_conn(&state.store.readers.get(), subject)
+        .map_err(ApiError::bad)
+}
+
 pub fn live_session(
     state: &AppState,
     subject: &str,
     expected_incarnation: Option<&str>,
 ) -> Result<LiveSession, ApiError> {
+    let identity = session_storage_subject(state, subject)?;
+    let subject = identity.as_str();
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
@@ -10057,6 +10256,7 @@ pub async fn input_session_as(
     request: SessionInputRequest,
     authority_actor: &str,
 ) -> Result<Json<SessionControlResponse>, ApiError> {
+    let subject = session_storage_subject(state, &subject)?;
     let result_key = format!(
         "session-control-result:input:{subject}:{}",
         request.idempotency_key
@@ -10180,6 +10380,7 @@ pub async fn signal_session_as(
     request: SessionSignalRequest,
     actor: &str,
 ) -> Result<Json<SessionControlResponse>, ApiError> {
+    let subject = session_storage_subject(&state, &subject)?;
     let signal = match request.signal.as_str() {
         "interrupt" => libc::SIGINT,
         "terminate" => libc::SIGTERM,

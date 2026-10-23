@@ -3997,6 +3997,81 @@ export const ResourcesPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ResourcesPage = typeof ResourcesPage.Type
 export type ResourcesPageEncoded = typeof ResourcesPage.Encoded
 
+export const ScheduleUnheardHost = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "age_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991))),
+  "host_id": Schema.String,
+  "last_exchange_at": Schema.OptionFromNullOr(Schema.String),
+  "reason": openEnum(["older-than-threshold","never-recorded","clock-unknown"])
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleUnheardHost" }))()
+export type ScheduleUnheardHost = typeof ScheduleUnheardHost.Type
+export type ScheduleUnheardHostEncoded = typeof ScheduleUnheardHost.Encoded
+
+export const ScheduleCoverage = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "covered_host_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "membership": openEnum(["unknown"]),
+  "omitted_configured_peer_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "omitted_covered_host_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "scope": Schema.Literal("configured-peers-and-page-hosts"),
+  "truncated": Schema.Boolean,
+  /** Positive display threshold in milliseconds; default 300000, capped at the JSON exact integer ceiling; never host health. */
+  "unheard_after_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)).annotate({ description: "Positive display threshold in milliseconds; default 300000, capped at the JSON exact integer ceiling; never host health." }),
+  "unheard_hosts": Schema.Array(ScheduleUnheardHost).check(Schema.isMaxLength(200))
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleCoverage" }))()
+export type ScheduleCoverage = typeof ScheduleCoverage.Type
+export type ScheduleCoverageEncoded = typeof ScheduleCoverage.Encoded
+
+export const ScheduleKnowledge = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "age_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991))),
+  "basis": openEnum(["local-read","last-direct-exchange","unknown"]),
+  "completeness": openEnum(["unknown"]),
+  "last_exchange_at": Schema.OptionFromNullOr(Schema.String),
+  "origin_host_id": Schema.OptionFromNullOr(Schema.String)
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleKnowledge" }))()
+export type ScheduleKnowledge = typeof ScheduleKnowledge.Type
+export type ScheduleKnowledgeEncoded = typeof ScheduleKnowledge.Encoded
+
+export const ScheduleOwner = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "generation_id": Schema.OptionFromNullOr(Schema.String),
+  "run_id": Schema.OptionFromNullOr(Schema.String),
+  "state": openEnum(["recorded","not-recorded","unknown"]),
+  "step_id": Schema.OptionFromNullOr(Schema.String)
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleOwner" }))()
+export type ScheduleOwner = typeof ScheduleOwner.Type
+export type ScheduleOwnerEncoded = typeof ScheduleOwner.Encoded
+
+export const ScheduleDeclaration = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "declaration": Schema.Unknown,
+  "declaration_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "declaration_claim_id": Schema.String,
+  "declaration_origin_host_id": Schema.OptionFromNullOr(Schema.String),
+  "id": Schema.String,
+  "knowledge": ScheduleKnowledge,
+  "next_declared_fire_at": Schema.OptionFromNullOr(Schema.String),
+  "next_fire_basis": Schema.Literal("declaration-only"),
+  "next_fire_state": openEnum(["future","stopped","past-one-shot","unknown"]),
+  "owner": ScheduleOwner,
+  "primary_host_id": Schema.OptionFromNullOr(Schema.String),
+  "read_problem": Schema.OptionFromNullOr(Schema.String),
+  "revision": Schema.String,
+  "standby_node": Schema.Unknown,
+  "standby_state": openEnum(["declared","not-declared","unknown"]),
+  "state": openEnum(["declared","stopped","unknown"])
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleDeclaration" }))()
+export type ScheduleDeclaration = typeof ScheduleDeclaration.Type
+export type ScheduleDeclarationEncoded = typeof ScheduleDeclaration.Encoded
+
+export const SchedulesPage = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "as_of": Timestamp,
+  "basis": Schema.Literal("local-replicated-declarations"),
+  "collection": Schema.Literal("schedules"),
+  "coverage": ScheduleCoverage,
+  "items": Schema.Array(ScheduleDeclaration).check(Schema.isMaxLength(200)),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "SchedulesPage" }))()
+export type SchedulesPage = typeof SchedulesPage.Type
+export type SchedulesPageEncoded = typeof SchedulesPage.Encoded
+
 /** What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read. */
 export const SloHistory = /*#__PURE__*/ (() => Schema.Struct({
   "id": Schema.String,
@@ -4083,7 +4158,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, ClientDiagnosticsAck, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, DocumentsPage, SchedulesPage, DocumentReferences, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, ClientDiagnosticsAck, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
@@ -4091,6 +4166,11 @@ export type EnvelopeEncoded = typeof Envelope.Encoded
 /** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
 export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "recipient-retired",
+  "identity-cycle",
+  "identity-occupied",
+  "identity-retired-source",
+  "identity-cross-kind",
+  "identity-unknown",
   "lifecycle-unavailable",
   "retirement-upgrade-required",
   "attention-migrated",

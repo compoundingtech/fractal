@@ -294,7 +294,13 @@ CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separa
 safe and later ones reuse it, so nothing is built.
 Each run isolates test `HOME` and XDG state. The summary records the tested SHA,
 each stage's elapsed time, result and exit code; each stage job uploads `<job>-logs` with its log and `.time` file.
-Nextest's final summary retains flaky outcomes.
+Nextest's final summary retains flaky outcomes. The four test lanes (`linux-tests` and
+`linux-tests-shard-2`, `-3`, `-4`) also count them: `scripts/ci-linux tests` reads the `N flaky` of
+nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
+`genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
+not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
+lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 st3 integration fixtures use the separate `st3-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
@@ -611,7 +617,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
-  and `.github/repo-settings.json*`.
+  `.github/repo-settings.json*`, and what the lane reads although no web source names it:
+  `apps/ios/package.json` (a workspace member of the frozen install), `docs/st3/client-v0/fixtures/**`
+  (an SDK unit test's fixture), `pnpm-source-inputs.json*` (published by the web shell hook) and
+  `scripts/check-public-repo` (run by the scenario privacy lane).
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
@@ -723,8 +732,10 @@ reason=…`): `fractal-web` (the lane, the detector's relevant paths) and `fract
 (the kit plays, its kit paths). The key is `evidence-verify --project` over the check's
 inputs; a skip is only a trusted signed passing record with the same key, found by
 `evidence-verify` under the base skip policy. Inputs, detector, verifier and keys come
-from the base. Until the base policy declares a web check (and something signs it with
-input keys), every web decision is `run` with `reason=no-record`. `claims PATH…` and
+from the base. A matching record skips only when the base policy turns skipping on for
+the check (`enforce: true`); under a shadow entry the line reads `decision=run reason=shadow`
+and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
+its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
 `scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
@@ -1016,6 +1027,15 @@ fixed seed on pull requests reads that variable and runs its original size here.
 comment why its invariant holds at the smaller size. Run one locally at full scale with
 `ST_TEST_SCALE=full cargo nextest run ...`.
 
+Some test groups run only here. `.config/daily-only.filterset` lists them, one nextest filterset
+per line. `scripts/ci-nextest` leaves them out of every selection, so pull requests, merge groups
+and local runs skip them, unless `CI_TEST_LANE=daily` is set. Only the two `daily-tests` shards set
+it, so the shard inventory proof still covers exactly what each lane runs. Run a moved group locally with
+`CI_TEST_LANE=daily bash scripts/ci-nextest run -E '<its filter>'`. A group moves only after its
+per-pull-request contract tests run on every pull request and this run has been green three days,
+one pull request per group, with the measured time it saves; `scripts/ci-nextest-test` checks the
+selection.
+
 The `daily-report` job (`scripts/ci-daily-long-report`) writes each lane's result, time, longest
 step and failed steps to the run summary. On red, it opens or comments on the one open issue
 titled `Daily long-lane run failed`. The workflow is not a required check and changes no pull
@@ -1121,6 +1141,23 @@ renewals, status and work reads, and a person's reads), with the reconciler runn
 concurrent seat event long-polls. Quiet polls have a 31-second budget for their intentional
 30-second wait; mailbox WebSockets require authenticated native drivers and are excluded.
 The client usage endpoint has a dedicated 0.5-request/second scenario with a 300 ms p99 budget.
+
+Each regime of the budgeted run lasts 400 s, so every budgeted p99 rests on at least 300 samples;
+over fewer, a p99 is one of the run's slowest few (the replication exchange's, over 97 samples at
+120 s, was the second slowest). A kind keeps the busy host's rate where that is enough (the
+replication exchange's 0.8 a second gives 320) and is otherwise sampled just often enough: 0.75 a
+second, or 6.75 across the nine person-read paths. The 22 roster and window first snapshots are not
+a p99: each one must meet its budget. Every report also records `runner_reference_ms`, the fastest
+of three single-core sorts of 2^21 values timed before the daemon starts: runners of one Namespace
+machine type differ by about 2x, and the 1.6 to 2.1 s replication-exchange p99s of 10-16 to 10-20
+all came from the slower ones.
+
+At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
+"still being prepared", or a window's resync before its first snapshot. The store keeps serving
+each list while it projects a replication backlog in chunks and refolds it once the backlog is in
+([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)), so none is expected. The
+report keeps them apart from failed requests, under `unavailable` with the seconds they spanned,
+the step summary shows them, and any fails the run (`AVAILABILITY_GATED`).
 Generated usage history contains cumulative response rollups for long-lived standing sessions
 with stable attribution, so this scenario exercises many observations per series and period
 baselines and totals rather than an empty report or one series per observation.
@@ -1409,6 +1446,12 @@ branch deletion after merge. Check the live settings against the file with `gh-c
 ```sh
 nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/smalltalk --file .github/repo-settings.json
 ```
+
+A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
+no force push, an empty bypass list, creation open (CI and agents create records). Its enforcement is turned off only by
+`scripts/evidence-gc --lock-config`, around its own tag deletions, logged and relocked in a `finally`; see
+[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace). `gh-check-settings` reports it
+as drifted during that window.
 
 `st/ci` is no longer required. Its producer on the fleet's machines is retired after the first
 pull request has merged through the queue.

@@ -42,12 +42,16 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
+mod runtime_start_diagnostics;
 pub mod search;
+pub mod schedules;
 pub mod summary;
 #[cfg(test)]
 mod agents_window_tests;
 #[cfg(test)]
 mod push_tests;
+#[cfg(test)]
+mod pairing_order_tests;
 #[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
@@ -124,10 +128,12 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/conversations/{id}/stream",
             get(conversation_stream),
         )
+        .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
+        .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
         .route("/v1/client/runtimes/{*id}", get(runtime_detail))
         .route("/v1/client/observers", get(observers))
         .route(
@@ -1196,6 +1202,11 @@ async fn deliver_ivm_collection(
             result
         }
         Output::Silent => Refreshed::Current,
+        // Proposed opt-in resync-snapshot contract:
+        // docs/st3/client-v0/collection-resync-snapshot-proposal.md. On an IVM
+        // journal gap, the replacement authorized window and its continuation
+        // must come from one read cut and one frame. Keep this legacy branch for
+        // clients that have not opted in; this comment changes no wire behavior.
         output @ (Output::Unavailable | Output::Resync) => {
             let code = if matches!(output, Output::Resync) { "cursor-gap" } else { "internal" };
             if send_collection(socket, json!({"kind":"resync", "id":subscription.request.id,
@@ -3319,19 +3330,12 @@ fn observer_subscription_resources(
         } else {
             "subscription.state"
         };
-        let claim = state
-            .store
-            .claims_for_subject_kind_at(
-                &desired.subject,
-                claim_kind,
-                Some(snapshot.store_index.saturating_add(1)),
-                true,
-                1,
-            )?
-            .claims
-            .into_iter()
-            .next()
-            .map(|claim| (claim.body, claim.accepted_at_unix_ms));
+        // The canonical newest state at the cut, the one the detail read and attention choose.
+        let claim = state.store.observer_subscription_state(
+            &desired.subject,
+            claim_kind,
+            snapshot.store_index,
+        )?;
         let revision = state
             .store
             .selected_desired_revision(&desired.subject)?
