@@ -963,7 +963,7 @@ mod tests {
         let folded = text(&HashSet::new());
         let joined = folded.join("\n");
         assert!(
-            joined.contains("▸ 3 tool calls · ✓2 · ✕1 · last: $ cargo test -p fractal-tui"),
+            joined.contains("▸ 3 tool calls · ✓2 · ✕1 · last: $ cargo test -p fractal-…"),
             "{joined}"
         );
         assert!(

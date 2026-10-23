@@ -22,7 +22,7 @@ Do not add a heading, list markers, or other lines.
 
 Run `bash verify.sh` after you write the result. Correct the result until the verifier passes.
 
-Before you inspect `inventory.json` or write `RESULT.md`, publish the complete execution mission to Fractal.
+Before you inspect `inventory.json` or write `RESULT.md`, publish the complete execution mission to Small Talk.
 Publish one ready mission with ID `eval/mission-document-lift/work`.
 
 The KDL file must start with `version 2`. Put the mission directly after the version declaration.

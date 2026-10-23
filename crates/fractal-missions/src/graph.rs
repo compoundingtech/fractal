@@ -397,7 +397,7 @@ version 2
         time-limit "5m"
       }
       gate "the suite passes on main" {
-        cargo-test "log_diet" package="st3"
+        cargo-test "log_diet" package="fractal"
         workspace "repo"
       }
       gate "the handoff is published" { document "doc/acme/handoff" }
