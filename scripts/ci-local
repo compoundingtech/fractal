@@ -37,7 +37,11 @@ scratch_root=${CI_LOCAL_SCRATCH_ROOT:-$HOME/.cache/ci-local}
 mkdir -p "$scratch_root"
 chmod go-w "$scratch_root"
 scratch=$(mktemp -d "$scratch_root/run.XXXXXX")
-trap 'rm -rf "$scratch"' EXIT
+# The stages' TMPDIR is short and on disk: tests put Unix sockets several levels below it, a socket path is limited to 108 bytes, and
+# under the scratch above (~/.cache/ci-local/run.XXXXXX/tmp) the daemons' sockets in the delivery-probe and seat tests no longer fit.
+# /var/tmp is on disk on the build hosts (/tmp may be a small tmpfs); CI_LOCAL_TMP_ROOT names another root.
+tmp=$(mktemp -d "${CI_LOCAL_TMP_ROOT:-/var/tmp}/cl.XXXXXX")
+trap 'rm -rf "$scratch" "$tmp"' EXIT
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
 # The cargo the stages build with is the dev shell's own, handed to the build admission shim as CARGO_REAL: CI_LOCAL_CARGO
@@ -75,7 +79,7 @@ done
 PATH=$(IFS=':'; printf '%s' "${kept[*]}")
 export HOME="$scratch/home" CARGO_HOME="$cargo_home" RUSTUP_HOME="$rustup_home" CARGO_REAL="$cargo_real"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
-export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$scratch/tmp"
+export RUNNER_TEMP="$scratch/runner" GITHUB_STEP_SUMMARY="$scratch/summary.md" TMPDIR="$tmp"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$RUNNER_TEMP" "$TMPDIR"
 # A host may preload an allocator into every process (jemalloc); a CI runner preloads nothing, and tests that measure the allocator
 # (malloc_trim) fail under one.

@@ -1468,8 +1468,10 @@ run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.to
 `pull_request` with that command (`by_level`, `lane: true`), and the check-level trust stays `fleet`, so the `observed` kind stays CI's.
 A machine without a usable `/dev/kvm` cannot sign it: the run fails and CI runs the check.
 
-**Heavy checks and Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch, its `TMPDIR`
-included, is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another), because a dev shell's `TMPDIR` is
+**Heavy checks and Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
+is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory on disk,
+`/var/tmp/cl.XXXXXX` (`CI_LOCAL_TMP_ROOT` names another root; tests put Unix sockets several levels below it, and a socket path is limited to
+108 bytes, which the daemons' sockets in the delivery-probe and seat tests exceeded under the scratch), because a dev shell's `TMPDIR` is
 under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
 `/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
 CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
