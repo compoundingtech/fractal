@@ -466,6 +466,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         code: challenge.value.code,
         device_public_key: "raw-terminal-public-key-000000000000000000000".into(),
         key_storage: None,
+        fabric_node_id: None,
     },).await.unwrap();
     let gateway_socket = state.state_dir.join("raw-client-gateway.sock");
     let server_socket = gateway_socket.clone();
@@ -1582,6 +1583,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         code: challenge.value.code,
         device_public_key: "conformance-public-key-000000000000000000000000".into(),
         key_storage: None,
+        fabric_node_id: None,
     },)
         .await
         .unwrap();
@@ -1606,7 +1608,10 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     ).unwrap();
     assert_eq!(advertisement, serde_json::json!({
         "api_version": fractal_client::API_VERSION,
-        "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
+        "capabilities": [
+            {"id":"device-key-proofs", "version":1, "state":"granted"},
+            {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
+        ],
     }));
     assert_eq!(
         unix_status(&gateway_socket, "/v1/client/agents", None).await,

@@ -6510,3 +6510,82 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
             .all(|subject| subject.subject != WORKER || subject.member.is_none())
     );
 }
+
+/// `st devices fabric` changes only what st owns: `enable` exposes the client gateway socket,
+/// `status` lists the `st-device-…` peers, and `disable` removes those and the exposure while a
+/// peer someone added by hand stays.
+#[test]
+fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const BY_HAND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = root.path().join("fabric-calls");
+    let peers = json!({"peers": [
+        {"node": PHONE, "name": "st-device-0123456789ab", "allow": ["st3-client-v0"]},
+        {"node": BY_HAND, "name": "demo-phone", "allow": ["st3-client-v0"]},
+    ]});
+    std::fs::write(
+        bin.join("fabric"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{calls}'\ncase \"$1\" in\n  peers) echo '{peers}';;\n  \
+             expose|unexpose|remove) ;;\n  *) exit 1;;\nesac\n",
+            calls = calls.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("fabric"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let st = |args: &[&str]| {
+        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+            .env_remove("ST_AGENT")
+            .env_remove("ST_MISSION_RUN")
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .env("HOME", root.path().join("home"))
+            .env("PATH", &bin)
+            .args(["--json", "devices", "fabric"])
+            .args(args)
+            .output()
+            .unwrap();
+        cli_value(output)
+    };
+    let recorded = || std::fs::read_to_string(&calls).unwrap_or_default();
+
+    assert_eq!(
+        st(&["status"]),
+        json!({"service": null, "enabled": false, "granted": []})
+    );
+    assert_eq!(recorded(), "", "status without an exposure asks Fabric nothing");
+
+    assert_eq!(
+        st(&["enable"]),
+        json!({"service": "st3-client-v0", "enabled": true})
+    );
+    let expose = recorded();
+    assert!(
+        expose.starts_with("expose st3-client-v0 --socket ") && expose.ends_with("st3-client.sock\n"),
+        "{expose}"
+    );
+    assert!(root.path().join("state/st3/fabric-gateway.toml").exists());
+
+    assert_eq!(
+        st(&["status"]),
+        json!({"service": "st3-client-v0", "enabled": true, "granted": ["st-device-0123456789ab"]})
+    );
+    assert_eq!(
+        st(&["disable"]),
+        json!({"service": "st3-client-v0", "enabled": false, "removed": ["st-device-0123456789ab"]})
+    );
+    assert_eq!(
+        recorded().strip_prefix(&expose).unwrap(),
+        "peers --json\npeers --json\nremove st-device-0123456789ab\nunexpose st3-client-v0\n",
+        "the peer added by hand stays"
+    );
+    assert!(!root.path().join("state/st3/fabric-gateway.toml").exists());
+}

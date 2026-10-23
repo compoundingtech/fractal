@@ -9,7 +9,7 @@ import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plain
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
-import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingProof';
+import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
@@ -699,6 +699,9 @@ function useAppStore(proof?: FabricProfile) {
     if (advertisement.api_version !== API_VERSION || !Array.isArray(advertisement.capabilities) || !advertisement.capabilities.some(c => c.id === 'device-key-proofs' && c.version === 1 && c.state === 'granted')) {
       throw new Error('Member does not support verifiable device grants; upgrade it. The code was not submitted.');
     }
+    // A member that grants paired phones its gateway over Fabric learns this phone's NodeID here.
+    const node = fabricBuilt ? fabricNode || await fabricIdentity().catch(() => '') : '';
+    const fabricFields = pairingFabricNode(advertisement.capabilities, node);
     const made = await createDeviceKey();
     if (!made) throw new Error('This build cannot make a device key; update the phone app.');
     let consumed = false;
@@ -707,7 +710,7 @@ function useAppStore(proof?: FabricProfile) {
       if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
       const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
-      const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
+      const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage, ...fabricFields });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
       await verifyPairing(result.value, made.key, pin, {
@@ -723,16 +726,17 @@ function useAppStore(proof?: FabricProfile) {
       await SecureStore.setItemAsync(profileKey, JSON.stringify(next), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
       if (!signs) await removeDeviceKey(made.handle).catch(() => {});
       if (old?.signing?.handle) await removeDeviceKey(old.signing.handle).catch(() => {});
+      const grantProblem = fabricGrantProblem(result.value.fabric_grant);
       if (member) {
         setOwnProfiles(held => new Map(held).set(profileKey, next));
-        setPairingMember(null); setError('');
+        setPairingMember(null); setError(grantProblem);
         return;
       }
       if (!oldRaw) await removeDeviceKey().catch(() => {});
       await SecureStore.deleteItemAsync(CREDENTIAL_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(SIGNING_KEY).catch(() => {});
       await clearCachedProjection().catch(() => {});
-      setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError('');
+      setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
       // Paired over fabric alone: that member uses this device's own pairing.
       if (isFabricGatewayId(gateway) && fabricTarget && fabricGatewayId(fabricTarget) === gateway && !fabricTarget.device) {
         await saveFabricMembers(fabricMemberList.map(m => (sameFabricTarget(m, fabricTarget) ? { ...m, device: true as const } : m)));

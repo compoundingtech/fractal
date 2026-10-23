@@ -12,6 +12,8 @@ pub mod disk;
 pub mod evidence;
 pub mod native_views;
 pub mod conversation_header;
+/// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
+pub mod fabric_gateway;
 pub mod fleet;
 /// Built-in gate kinds: what gates shelled out for most, answered by st itself.
 pub mod gate_kinds;

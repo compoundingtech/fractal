@@ -922,7 +922,10 @@ async fn response_envelope_unbounded(
     {
         return Json(json!({
             "api_version": CLIENT_API_VERSION,
-            "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
+            "capabilities": [
+                {"id":"device-key-proofs", "version":1, "state":"granted"},
+                {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
+            ],
         }))
         .into_response();
     }

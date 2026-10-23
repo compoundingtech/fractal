@@ -5142,6 +5142,10 @@ pub struct PairingComplete {
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default)]
     key_storage: Option<String>,
+    /// The device's Fabric NodeID. When this member exposes its client gateway over Fabric,
+    /// pairing grants that NodeID the gateway, inbound-only, and revoking the pairing removes it.
+    #[serde(default)]
+    fabric_node_id: Option<String>,
 }
 
 /// Proof bytes and their authorization model come from one pinned snapshot. The model
@@ -5232,6 +5236,40 @@ impl Drop for PreparedDeviceGrant<'_> {
     }
 }
 
+/// Whether a pairing other than `device`'s, issued here, unrevoked and unexpired, carries `node`.
+fn fabric_node_still_paired(
+    state: &AppState,
+    completed: &[ClaimRecord],
+    device: &str,
+    node: &str,
+) -> Result<bool, ApiError> {
+    let revoked = state
+        .store
+        .claims_for_kind_at("custom.client.pairing-revoked", None, true, 10_000)
+        .map_err(ApiError::internal)?
+        .claims
+        .into_iter()
+        .filter_map(|claim| {
+            claim
+                .body
+                .pointer("/fields/device_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+    let now = client_now_ms();
+    Ok(completed.iter().any(|claim| {
+        let field = |name: &str| claim.body.pointer(&format!("/fields/{name}"));
+        let other = field("device_id").and_then(Value::as_str);
+        claim.origin == state.node
+            && field("fabric_node_id").and_then(Value::as_str) == Some(node)
+            && other.is_some_and(|other| other != device && !revoked.contains(other))
+            && field("expires_at_unix_ms")
+                .and_then(Value::as_u64)
+                .is_some_and(|expires| u128::from(expires) > now)
+    }))
+}
+
 // Proof preparation must not let simultaneous completions enroll a second key after another
 // request has consumed the same code. All checks and store writes follow this serialization.
 static PAIRING_COMPLETIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -5249,6 +5287,13 @@ pub async fn pairing_complete(
     }
     if let Some(completed) = assistant::complete(&state, &id, &request, session.transport).await? {
         return Ok(completed);
+    }
+    if let Some(node) = &request.fabric_node_id
+        && !crate::fabric_gateway::valid_node_id(node)
+    {
+        return Err(validation(
+            "the pairing completion's Fabric NodeID must be 64 lowercase hex characters",
+        ));
     }
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
@@ -5376,11 +5421,7 @@ pub async fn pairing_complete(
     } else {
         None
     };
-    let completed = state.store.append_claim(&ClaimInput {
-        subject: begun.subject.clone(),
-        kind: "custom.client.pairing-completed".into(),
-        actor: Some(person_id.clone()),
-        fields: BTreeMap::from([
+    let mut fields = BTreeMap::from([
             ("pairing_id".into(), Value::String(pairing_id)),
             ("device_id".into(), Value::String(device_id.clone())),
             ("session_actor".into(), Value::String(session_actor.clone())),
@@ -5397,7 +5438,15 @@ pub async fn pairing_complete(
             ("scopes".into(), json!(scopes)),
             ("delegated_scopes".into(), json!(scopes)),
             ("expires_at_unix_ms".into(), json!(expires_at)),
-        ]),
+    ]);
+    if let Some(node) = &request.fabric_node_id {
+        fields.insert("fabric_node_id".into(), Value::String(node.clone()));
+    }
+    let completed = state.store.append_claim(&ClaimInput {
+        subject: begun.subject.clone(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some(person_id.clone()),
+        fields,
         evidence: vec![begun.id.clone()],
         expected_subject: Some(Some(begun.id.clone())),
         idempotency_key: None,
@@ -5421,6 +5470,15 @@ pub async fn pairing_complete(
     }
     if let Some(proof) = root_proof {
         session["person_root_key_proof"] = proof;
+    }
+    // The pairing stands whatever Fabric says: the device can still use another route, and
+    // the session reports what happened so the device can say it.
+    if let Some(node) = &request.fabric_node_id {
+        let grant = crate::fabric_gateway::grant(&state.state_dir, node).await;
+        if let crate::fabric_gateway::Grant::Failed { detail } = &grant {
+            tracing::warn!(%device_id, %detail, "could not grant a paired device the client gateway over Fabric");
+        }
+        session["fabric_grant"] = grant.to_json();
     }
     Ok(Json(session))
 }
@@ -8365,6 +8423,15 @@ async fn dispatch_action(
                     .store
                     .revoke_device_key(person, key, &format!("pairing of {device} revoked"))
                     .map_err(ApiError::bad)?;
+            }
+            // Its Fabric grant goes too, unless another live pairing of the same NodeID on this
+            // member still needs it. A grant left behind reaches only the paired-only gateway,
+            // which no longer accepts this device's credential.
+            if let Some(node) = field("fabric_node_id")
+                && !fabric_node_still_paired(state, &claims.claims, &device, node)?
+                && let Err(error) = crate::fabric_gateway::revoke(&state.state_dir, node).await
+            {
+                tracing::warn!(%device, error = %format!("{error:#}"), "could not remove a revoked device's Fabric grant");
             }
             signal_changed(state);
             Ok(vec![device])

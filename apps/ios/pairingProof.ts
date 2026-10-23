@@ -141,3 +141,19 @@ export async function verifyPairing(session: PersonPairedSession, key: string, f
     else require(!fingerprint, 'Member did not return a person-root proof for read-only pairing; upgrade it or explicitly choose unpinned pairing.');
   }
 }
+
+type Advertised = ReadonlyArray<{ id: string; version: number; state: string }>;
+/**
+ * The phone's Fabric NodeID for the pairing request, only when the member advertises
+ * `fabric-gateway-grant`: that member grants the NodeID its client gateway, and an older member
+ * refuses a request carrying the field.
+ */
+export function pairingFabricNode(capabilities: Advertised, node: string): { fabric_node_id?: string } {
+  const supported = capabilities.some(c => c.id === 'fabric-gateway-grant' && c.version === 1 && c.state === 'granted');
+  return supported && /^[0-9a-f]{64}$/.test(node) ? { fabric_node_id: node } : {};
+}
+/** What to tell the person when pairing stood but the member could not grant this phone over Fabric. */
+export function fabricGrantProblem(grant: PersonPairedSession['fabric_grant']): string {
+  if (grant?.state !== 'failed') return '';
+  return `Paired, but the member could not grant this phone its gateway over Fabric${grant.detail ? `: ${grant.detail.replace(/\.$/, '')}.` : '.'} Tailscale or LAN still reaches it.`;
+}
