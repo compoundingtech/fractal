@@ -76,6 +76,11 @@ pub const APPEND: &[AppendProjector] = &[
         project: |transaction, claim| resources::refresh(transaction, &claim.subject),
     },
     AppendProjector {
+        name: "resource-preparation",
+        takes: Takes::Every,
+        project: |transaction, _| resources::flush_preparation(transaction),
+    },
+    AppendProjector {
         name: "glass-heads",
         takes: Takes::Kinds(&["glass.upserted", "glass.deleted"]),
         project: |transaction, _| glass_heads::flush(transaction),

@@ -269,6 +269,16 @@ impl<R> PublishedList<R> {
         self.wake.notify_one();
     }
 
+    /// More of the admitted claims projected, so rows at the same cut may have changed with no
+    /// new claim: fold from nothing next, while readers keep being served the newest rows under
+    /// their own cut until that fold publishes. Unlike [`Self::forget`], the generation stays,
+    /// so a fold under way still publishes and continuations of the newest rows still read.
+    pub fn refold(&self) {
+        let _newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        self.fold_from_nothing_next();
+        self.wake.notify_one();
+    }
+
     /// Fold from nothing next time, as after a fold from nothing failed.
     pub fn fold_from_nothing_next(&self) {
         self.forgotten.store(true, Ordering::Release);
@@ -502,5 +512,32 @@ mod tests {
         list.end();
         assert!(changes.has_changed().unwrap());
         assert!(matches!(list.current(), ListRead::Ended));
+    }
+
+    #[test]
+    fn a_refold_keeps_serving_the_newest_rows_until_a_fold_from_nothing_replaces_them() {
+        let list = PublishedList::<Vec<u64>>::default();
+        list.start();
+        list.publish(publication(4), 0);
+        let (_, first) = served(&list).unwrap();
+        // More claims projected at the same cut: readers keep the rows and their identity, so a
+        // continuation of them still reads, while the next fold starts from nothing.
+        list.refold();
+        assert_eq!(served(&list).unwrap(), (4, first));
+        assert_eq!(list.generation(), 0);
+        let (base, generation) = list.base();
+        assert!(base.is_none(), "the fold after a refold starts from nothing");
+        // A fold that began before another refold still publishes, and the one after it starts
+        // from nothing again: rows folded before a chunk projected are never the last word.
+        list.refold();
+        assert!(list.publish(publication(4), generation).is_some());
+        let (cut, second) = served(&list).unwrap();
+        assert_eq!(cut, 4);
+        assert_ne!(second, first, "the refolded rows at the same cut are a new publication");
+        assert!(list.base().0.is_none());
+        assert!(list.base().0.is_some(), "only once");
+        // A forget still stops serving at once.
+        list.forget();
+        assert!(matches!(list.current(), ListRead::NotReady));
     }
 }

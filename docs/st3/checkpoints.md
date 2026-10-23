@@ -119,6 +119,9 @@ checkpoint instead; see [Trimming](#trimming).
 The daemon does this work in the background, sleeping ten minutes after each pass, on a thread
 that never holds the store's writer for long. `[checkpoint] enabled = false` in a node's config stops that node
 sealing, and since every participant must seal, that stops trimming for the whole fleet.
+`[trim] local = true` takes a member out of checkpoints for local trim: it seals, verifies and
+adopts nothing and only finishes a trim it had already committed. That also stops checkpoints
+for the other members until a person excuses it; see [replication](replication.md).
 
 ## What a rule may drop
 

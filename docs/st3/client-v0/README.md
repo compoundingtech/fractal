@@ -228,6 +228,32 @@ See [agent declarations](../kdl-lifecycle.md#definitions-do-not-start-work).
 
 ### Agent activity and human blocking
 
+A declaration-driven relaunch reports `state: "restarting"` while the previous runtime stops
+and its replacement waits for current-incarnation harness readiness. A first launch remains
+`starting`. Current human blocking, faults, moves, suspension and failures retain their existing
+states. Runtime observation status still records the actual process state; `restarting` is the
+client presentation of the replacement interval. Exited/stopped/vanished observations without
+an active start fall through to their underlying state. Live presentation is bounded to two
+minutes from the selected runtime observation's acceptance time; after that, it exposes the
+underlying state without clearing the durable marker or changing recovery. The existing roster
+validity deadline also expires agents windows without a new claim. Missing acceptance metadata
+cannot certify the restart presentation.
+
+Older receivers retain a new-field runtime observation as an authenticated unknown-field waiting
+record rather than projecting it; other known records can continue to sync. A differing registry
+compatibility digest does not itself refuse wire-log replication, but graph projections are not
+compared as equal across those digests. Landing waits for the #2596 heal-writer successor to
+be deployed and the old-registry long-lag scheduler control to pass. With those gates met,
+rolling relaunches do not require an offline member to upgrade first: it keeps the new
+observation visibly waiting until ordinary upgrade admission. Do not rely on marker display
+or projection parity on older members.
+
+The generated agent-state type is an open string. Consumers requiring `running` treat
+`restarting` as not yet ready. `agents new --wait` keeps waiting (first starts are unchanged);
+`agents restart` also requires a different incarnation before completing. CLI prints the state;
+its unrecognized-state help remains the starting explanation. stui/phone/web rendering is not
+qualified by this daemon PR and must not be described as verified.
+
 An agent's `harness_state` describes activity independently of its optional `blocked_on`, `ask`,
 and diagnostic `reason`. A current `blocked_on: "human"` observation with ready, working, or idle
 activity makes the canonical agent `state: "waiting"`; clients present that combination as needing
@@ -2619,3 +2645,28 @@ them. Idle receipts outside the sync notice set do not notify client streams;
 repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
 remain the same. Older servers omit these optional fields; older clients ignore
 the additions. No API version, scope, operation or claim shape changes.
+
+## Schedule standby public read change set
+
+Compatibility **changed**: the optional standby declaration adds an optional
+`schedule_standby` local observation to CLI subject show/history. The exact legacy
+status route exposes it inside the existing open JSON `SubjectStatus.actual`
+object as `actual.schedule_standby`; it does not add a required generated-client
+resource or operation. Existing occurrence scheduled/reached claim bodies gain
+optional `standby` detail and `reason`. These additions keep the same claim kinds.
+
+Fields: `primary_host`, `standby_host`, `after_ms`, `eligibility`, `reason`,
+nullable `primary_heartbeat_age_ms`, `heartbeat_basis`, `observed_primary_view`,
+`run_twice_warning` and `cold_standby_limit`. A current local observation is not
+a converged eligibility assertion or exclusive lease. Historical reads label
+eligibility unknown and do not inject a current heartbeat age. History remains
+JSON lines of original claims/events with the optional observation field; an
+empty history still has no claims. Use subject show to read its current warnings.
+
+Jobs must be safe to run twice. The declaration guide, subject show (structured
+and text), history and release note expose the same cold-standby limitation:
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
+Hosted validation must run `cargo run -p st3-client-codegen -- --check`. Generated
+files remain generated; do not hand-edit clients for open JSON observation detail.
