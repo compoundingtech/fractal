@@ -75,7 +75,7 @@ def assess(lines, lanes, files):
 
 
 def message(listed):
-    command = 'scripts/st-test --all --push origin' if 'mail-redelivery-canaries' in listed else 'scripts/st-test --push origin'
+    command = 'scripts/st-test --push origin'
     return (f'These jobs ran in full because no pre-signed note covered this head: {", ".join(listed)}. '
             f'Run `{command}` before marking the pull request ready, and CI can skip them. How: {HOW}. '
             'This never fails a check or blocks a merge.')

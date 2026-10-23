@@ -13,8 +13,8 @@ forks) and are authored by a GitHub login in ~/.config/evidence-presign/authors 
 their code would run here, with the host's key within reach). Newest first, take the first head with a check of the class that
 has no note yet and was not tried for that tree before, and run `scripts/st-test --check NAME... --push origin` (from origin/main,
 as the pre-push hook does) on it in DIR, a clone this worker owns. Then stop: one head per tick, so the next head waits for the
-next tick and two runs never overlap (a lock per class). The light class is genie-freshness and typescript-client (about a minute);
-the heavy class is st-test's --all extras (linux-gate, mail-redelivery-canaries: tens of minutes of the shared build host).
+next tick and two runs never overlap (a lock per class). The light class is what `st-test --list` prints, which is now every check
+(st-test runs the whole per-PR suite by default); the heavy class is what --all adds to that, which is nothing.
 
 What it never repeats: a check that `st-test --status` says is covered (whoever signed it), and a check this worker already ran
 for the tree, whatever the result (a failure is recorded as a note and CI runs the check; the same tree fails the same way).

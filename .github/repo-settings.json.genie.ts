@@ -37,10 +37,8 @@ export default githubRepoSettings({
           do_not_enforce_on_create: false,
           required_status_checks: [
             { context: 'linux-gate', integration_id: 15368 },
-            { context: 'isolation-vm', integration_id: 15368 },
             { context: 'genie-freshness', integration_id: 15368 },
             { context: 'typescript-client', integration_id: 15368 },
-            { context: 'mail-redelivery-canaries', integration_id: 15368 },
             { context: 'fractal-web', integration_id: 15368 },
           ],
         },
