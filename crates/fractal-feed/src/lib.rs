@@ -735,10 +735,10 @@ async fn connected(
                                 let message = fractal_client::plain_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), message);
                             }
-                        } else if following.as_ref().is_some_and(|current| current.subscription == id) {
-                            if let Err(error) = fail_following(client, stream, updates, following, code, message).await {
-                                return Ended::Dropped(error.to_string());
-                            }
+                        } else if following.as_ref().is_some_and(|current| current.subscription == id)
+                            && let Err(error) = fail_following(client, stream, updates, following, code, message).await
+                        {
+                            return Ended::Dropped(error.to_string());
                         }
                     }
                     CollectionEvent::Screen { id, screen } => {
