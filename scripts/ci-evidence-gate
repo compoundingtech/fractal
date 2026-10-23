@@ -46,6 +46,8 @@ PROTECTED = (
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
     # What an agent-level note is held to (by_level "lane": true reads it from the base).
     '.st/required-lanes.json',
+    # What defines a per-crate test key and the note that signs it (docs/per-crate-test-signing.md).
+    'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
     # The evidence log's key: which log heads the verifier reads at all.
     '.st/evidence-log-key',
 )

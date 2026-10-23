@@ -68,12 +68,12 @@ LOCAL = {
     'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries'],
     # The VM tests: CI's isolation-vm job, with the test archive and gateway it downloads built in place (needs /dev/kvm).
     'isolation-vm': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'isolation-vm'],
+    # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
+    # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
+    'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
 }
-# One signature per workspace crate (docs/per-crate-test-signing.md), kept out of LOCAL until the skip policy and the lane file name it
-# (step 3): the recorded command is the small script that reads one crate's result out of the run's JUnit report, and the run itself is
-# RUN_TESTS, for the crates that have no passing note for their key.
 RUST_TESTS = 'rust-tests'
-RUST_TESTS_COMMAND = ['python3', 'scripts/ci-rust-test-result']
+RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
 # The tests stage, run as CI runs it with the crates to test in CI_TEST_PACKAGES and the report in CI_TEST_JUNIT.
 RUN_TESTS = ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']
 # nextest: 0 every test passed, 100 some test failed (the report is complete either way), 4 the selection matched no test.
@@ -83,6 +83,7 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm', RUST_TESTS})
 # rust-tests is named with --check only, never run by --all: --all signs linux-gate, whose tests stage it splits per crate. It joins --all
 # when the gate accepts per-crate notes and linux-gate stops running the tests stage (docs/per-crate-test-signing.md, step 3).
+OPT_IN = frozenset({RUST_TESTS})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})  # rust-tests is not: a test's result does not depend on the base
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
@@ -519,13 +520,13 @@ def main(argv):
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
         raise Failure(f'--base {args.base!r} must be a branch or ref name (it may not start with "-")')
-    unknown = [name for name in args.check if name not in LOCAL and name != RUST_TESTS]
+    unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
-        raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join([*LOCAL, RUST_TESTS])}')
-    checks = args.check or [name for name in LOCAL if args.all or name not in HEAVY]
+        raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
+    checks = args.check or [name for name in LOCAL if (args.all and name not in OPT_IN) or name not in HEAVY]
     if args.list:
         for name in checks:
-            print(f'{name}: {" ".join(RUST_TESTS_COMMAND if name == RUST_TESTS else LOCAL[name])}')
+            print(f'{name}: {" ".join(LOCAL[name])}')
         return 0
 
     remote, _, branch = args.base.partition('/')

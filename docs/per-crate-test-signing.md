@@ -127,10 +127,25 @@ and a stale pass is reused. Four controls, in order of when they bite:
 - `evidence-wrap` also indexes a record that signs `source_inputs` under `refs/notes/evidence-input/<check>/<key>/<record>` and
   `refs/tags/evidence/input/<check>/<key>/<record>` and pushes them with `--push`. Until now only CI's signer made those. Whether an agent
   seat's identity may create them on the remote is a repository rule that has not been confirmed (as for `refs/tags/evidence/*`).
-- Not in this step: the skip-policy entry, the lane definition and the gate job (step 3, with skip-ci-sigs-2 and skip-ci-lead-2): adding the
-  check to `.st/evidence-skip-policy.json` makes `evidence-verify-test` and `ci-evidence-gate-test` expect a gate job and lane for it. Until
+- Not in this step: the skip-policy entry, the lane definition and the gate job (step 3, with skip-ci-sigs-2 and skip-ci-lead-2). Until
   the policy names the check at the base, `st-test` judges coverage by signature, crate and key alone (a local convenience), and the notes
   carry no lane digest, so step 3's notes are signed again.
+
+## 8. As built in step 3 (policy, lane, verifier)
+
+- `.st/evidence-skip-policy.json`: `rust-tests` (shadow: `enforce` false, `pull_request` only, `sample_one_in` 5, no `inputs`: the keys are
+  per crate). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
+  `source_inputs`, `tests_run`, `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset` and `run_command_sha256`.
+- `.st/required-lanes.json`: the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
+  lock and manifests, and `.st`, which holds `rust-test-inputs.json`), so a tree that edits how keys are computed never skips on a local note.
+- `scripts/evidence-verify --check rust-tests --members --policy-from BASE --repository R ...`: the member list and each key come from the
+  tree's manifests with the `rust-test-keys` that sits next to the verifier and `.st/rust-test-inputs.json` at the base; the check is satisfied
+  only when EVERY member has a satisfying note for its own key (the usual rules per note, with the crate and key), else `crate_uncovered` with
+  a `missing` map of crate to reason. A satisfied result carries the oldest note's time, the weakest signer level, the sampling seed (a hash of
+  the member keys), and `crates` (crate to record). `--members --project` prints `{crates: {name: key}}` for the gate's one batched fetch.
+  The gate must copy the base's `evidence-verify` and `rust-test-keys` side by side.
+- `PROTECTED` in the gate now includes `scripts/rust-test-keys`, `.st/rust-test-inputs.json` and `scripts/ci-rust-test-result`.
+- The gate job itself (skip the test stage on `evidence-gate-rust-tests`, pull_request only) is skip-ci-lead-2's part of step 3.
 
 Measured with the committed extras over the last 57 first-parent merges of main (2026-10-23): the median merge changes the key of 5 of 52
 crates; 29 merges change at most 5, 5 change 6 to 20, 14 change 21 to 49, and 9 change 50 or more (global paths: a manifest, the lock, the
