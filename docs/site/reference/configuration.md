@@ -52,4 +52,12 @@ Publishing a mission creates an immutable definition revision. `fractal missions
 
 Mission-owned runtime declarations follow their owner lifetime; independent top-level agents remain available after runs finish. Dependencies order steps, not their order in the file. Durations use forms such as `"90m"`.
 
+## Free mode
+
+Within a fleet, an agent may publish, start, and revise missions and move agent queues as itself without a separate grant. This is broad authority, not isolation: review declarations before publication and give agents only access you intend them to use. A bound harness must retain its own identity; free mode does not allow it to impersonate a person or bypass operation-specific fences, human review, or a claimed producing step.
+
+## Definitions do not start work
+
+Publication saves a definition; it does not create a run. Start it explicitly with `fractal missions start`. To make a new run wait for another run to complete, use `--after RUN`; a failed or cancelled prerequisite is not successful completion. See [Missions in practice](../guides/missions-in-practice.md#queue-follow-on-work) for the runnable sequence.
+
 For exact supported syntax, see the [mission runtime](https://github.com/compoundingtech/fractal/blob/main/docs/st3/mission-graph-runtime.md), [schema](https://github.com/compoundingtech/fractal/blob/main/docs/st3/schema.md), and [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/st3/README.md).

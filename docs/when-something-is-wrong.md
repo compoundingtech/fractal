@@ -37,7 +37,7 @@ st subject history agent/garden/worker --limit 20
 st terminals peek agent/garden/worker
 ```
 
-The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and a agent with no recorded terminal may have nothing to peek.
+The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
 
 ## Free heap and resident memory
 
@@ -67,7 +67,7 @@ st usage --hours 24 --by agent
 st usage --hours 24 --by mission
 ```
 
-These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why a agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
+These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why an agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
 
 ## Recover the cause
 
@@ -79,7 +79,7 @@ st terminals attach agent/garden/worker
 
 After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](agent-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
 
-For a Claude agent with stale delivery, check `fractal claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that a agent's channel connected.
+For a Claude agent with stale delivery, check `fractal claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
 
 If doctor reports an operational contradiction, inspect the bounded repair plan:
 
@@ -160,7 +160,7 @@ Log in to the harness as that same OS user, attach to the affected agent and fin
 prompts. Check its declared workspace and [account](st3/accounts.md) rather than copying another
 user's credentials. A missing Claude channel needs `fractal claude-channel status` and the connection
 check above. A failed omp/OpenCode admission has exact boundary diagnostics; use
-[admission guidance](st3/agent-deploys.md#harness-admission-at-the-next-launch). Attach and inspect
+[admission guidance](st3/seat-deploys.md#harness-admission-at-the-next-launch). Attach and inspect
 before restarting repeatedly or overriding admission.
 
 ## macOS signing and permissions

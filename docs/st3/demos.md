@@ -38,7 +38,7 @@ Two examples are in [`examples/demos`](../../examples/demos):
 
 `fractal demo check FILE` reads a demo without playing it and lists its beats with their lines.
 
-Run it from your own terminal. Inside an agent agent, fractal binds every command to that agent, and
+Run it from your own terminal. Inside a managed agent, fractal binds every command to that agent, and
 the demo cannot act as its own agents and person. The demo's agents start through your login
 shell, like any agent, so that shell must find `pty` on its `PATH`; `fractal --instance demo doctor`
 names anything missing.

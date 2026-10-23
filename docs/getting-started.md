@@ -248,5 +248,5 @@ cover socket paths, recorded commands and recovery details.
 - [Two machines](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md): create a fleet, invite another machine and check replication.
 - [Terminal UI and iOS](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/terminal-and-ios.md): follow work and pair the phone app.
 - [Runnable examples](../examples/st3/README.md): agents, other harnesses, schedules and gates.
-- [Agent lifecycle](agent-lifecycle.md): restart, suspend/resume and stopped agents.
+- [Agent lifecycle](seat-lifecycle.md): restart, suspend/resume and stopped agents.
 - [GitHub integration](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/github-integration.md): optional repository intake and review.

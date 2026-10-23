@@ -1,6 +1,6 @@
 # Agent lifecycle
 
-A agent's declaration, work, messages, and decisions live in the graph. A running harness also has its own native session. Restarting a process does not erase the plan; preserving the **exact native conversation** is what suspend/resume is for.
+An agent's declaration, work, messages, and decisions live in the graph. A running harness also has its own native session. Restarting a process does not erase the plan; preserving the **exact native conversation** is what suspend/resume is for.
 
 Use the worker declared in [missions in practice](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md). Check it before changing anything:
 
@@ -17,14 +17,14 @@ st agents queue agent/garden/worker
 | Finish using this agent | Stop. It remains stopped until explicitly started or reapplied. |
 | Pause a quiet agent and return to exactly the same conversation | Suspend, then resume on the same host. |
 
-Restart a agent:
+Restart an agent:
 
 ```sh
 st agents restart agent/garden/worker --as person/ada
 st agents show agent/garden/worker
 ```
 
-When repeated failed starts have parked a agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `fractal agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `fractal agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
@@ -39,12 +39,12 @@ held claims do not read full subject status for lease maintenance. Checking work
 status keeps resident agents cheap without extending the renewal period or weakening the
 incarnation check.
 
-A restart of a agent that is up and ready first asks it for its handoff and waits at most two minutes
-(`--now` skips the wait); see [agent handoff](st3/agent-continuity.md).
+A restart of an agent that is up and ready first asks it for its handoff and waits at most two minutes
+(`--now` skips the wait); see [agent handoff](st3/seat-continuity.md).
 
 A restarted agent that cannot continue its conversation (another account, another model, a crash)
 gets a first message with the handoff it left and the live state of its work. See
-[agent handoff](st3/agent-continuity.md); a agent writes its handoff with `fractal agents handoff write`.
+[agent handoff](st3/seat-continuity.md); an agent writes its handoff with `fractal agents handoff write`.
 
 To preserve the exact conversation, wait until the agent has finished its turn and holds no claim:
 
@@ -79,7 +79,7 @@ completion evidence as current success.
 
 ## One-shot agents
 
-Declare `one-shot` on a agent that should finish when its process exits:
+Declare `one-shot` on an agent that should finish when its process exits:
 
 ```kdl
 version 2
@@ -94,7 +94,7 @@ The daemon retires the agent after its process exits, including an unsuccessful 
 process it discovers has vanished. It disappears from `fractal agents ls`; `fractal agents ls --all`,
 `fractal agents show agent/garden/interactive --all`, and subject history retain it. No launcher or
 post-exit wrapper needs to stay alive. Retirement takes precedence over the declaration's
-restart policy. A agent without `one-shot`, including one with `restart "never"`, keeps its
+restart policy. An agent without `one-shot`, including one with `restart "never"`, keeps its
 usual lifecycle.
 
 `fractal agents start garden/interactive --as person/ada` restores the same declaration and native
@@ -171,7 +171,7 @@ latest complete read within two seconds. Right after a daemon start on slow stor
 you to retry. `import show` gives the harness, native session ID, workspace, and process, if one is
 running. A running harness whose command line does not name its exact transcript is listed as
 blocked; exit it, then import its saved session from `import ls --all`. Check the workspace before
-importing: do not import a session already run by a agent.
+importing: do not import a session already run by an agent.
 
 For omp, the inventory reads only session transcripts, not JSONL tool logs within a session's
 attachment directory. If several transcript copies have the same native ID, fractal prefers a copy
@@ -309,7 +309,7 @@ st apply imported.kdl --as person/ada
 ```
 
 One limit remains: a resumed Claude Code session does not load fractal's channel yet, so fractal cannot
-wake an imported Claude agent for new mission work or messages. Give mission work to a agent you
+wake an imported Claude agent for new mission work or messages. Give mission work to an agent you
 declare yourself.
 
 ## Spot and recover a stale or stopped agent
@@ -327,13 +327,13 @@ earlier roster; after daemon startup the roster may still be being prepared. Whe
 to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
 client read and check the served snapshot index. This is not a replicated or cross-host cut.
 
-Read the selected declaration, latest runtime, and stop/suspension reason together. A agent hidden from the default list can still be shown by its exact ID. A `stale` delivery path means its message channel is not proving readiness; `outdated` means it is running older code. Check the local host's doctor report and any login/trust prompt before restarting. Resume a suspended agent; start an intentionally stopped one; restart a stale running one after fixing the cause.
+Read the selected declaration, latest runtime, and stop/suspension reason together. An agent hidden from the default list can still be shown by its exact ID. A `stale` delivery path means its message channel is not proving readiness; `outdated` means it is running older code. Check the local host's doctor report and any login/trust prompt before restarting. Resume a suspended agent; start an intentionally stopped one; restart a stale running one after fixing the cause.
 
-Daemon restarts adopt running agents. Current drivers and channels follow a replaced binary without restarting the provider session; [agents across deploys](st3/agent-deploys.md) explains their `current`, `outdated`, `legacy`, and `stale` reports. See [troubleshooting](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md) when a agent stops again.
+Daemon restarts adopt running agents. Current drivers and channels follow a replaced binary without restarting the provider session; [agents across deploys](st3/seat-deploys.md) explains their `current`, `outdated`, `legacy`, and `stale` reports. See [troubleshooting](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md) when an agent stops again.
 
-## Create a agent from the CLI
+## Create an agent from the CLI
 
-One command declares a agent on any fleet machine, waits until its harness is ready, and attaches
+One command declares an agent on any fleet machine, waits until its harness is ready, and attaches
 this terminal to it:
 
 ```sh
@@ -363,7 +363,7 @@ When Fabric cannot reach the owner, `fractal ui` goes through the client gateway
 says so with Fabric's reason. An owner that refuses the incarnation is never worked around. A paired
 device with no daemon of its own, such as the phone, uses the gateway.
 
-After creating a agent, fractal explains whether it is ready or still starting and prints the exact
+After creating an agent, fractal explains whether it is ready or still starting and prints the exact
 commands to attach, send it a message, inspect it, and stop it. These commands are also printed
 when startup times out or the agent needs your input. Attaching stays opt-in with `--attach`.
 Mission starts, launches, device pairing, and fleet creation or joining also finish with their
@@ -383,9 +383,9 @@ with a remote `--host`, pass an absolute `--cwd` or use that daemon's directory.
 restart after exit. `end` publishes a durable stop. Only its creator may create or end its declaration.
 The client crates expose `terminal_create` and `terminal_end` (camel case in TypeScript and Swift).
 
-## Declare and update a agent
+## Declare and update an agent
 
-A agent is a durable agent: a harness, a model, and a workspace, kept running by st. Write its
+An agent has a durable identity, harness, model, and workspace, kept running by Fractal. Write its
 declaration with `fractal agents start --print-kdl` and keep the file in Git:
 
 ```sh
@@ -429,7 +429,7 @@ st terminals peek agent/example/worker
 See [model accounts](st3/accounts.md) for usage totals, weekly limits, and account pools.
 
 The agent starts its harness in the workspace with no prompt. It stays idle, taking no turn, until
-a person types in its terminal or a message is posted to it. A agent you declare as
+a person types in its terminal or a message is posted to it. An agent you declare as
 `fleet/PROJECT/...` may also publish, start, and revise missions under `fleet/PROJECT/*`;
 `fractal agents show` prints that authority. `fractal terminals attach agent/example/worker` opens its
 terminal from any fleet machine; Ctrl+\\ detaches without stopping it. On the agent's own host it
@@ -443,16 +443,16 @@ restart policy keeps the running process and takes effect the next time it start
 restart agent/example/worker --as person/ada` to apply it now. Restart preserves the declaration,
 works for top-level and mission agents, and waits for a new running incarnation.
 
-Every relaunch of a agent continues its harness's last native session: `fractal agents restart`, a
+Every relaunch of an agent continues its harness's last native session: `fractal agents restart`, a
 changed launch, a harness that hung up or crashed, a daemon restart, and a stop followed by a
 start. Claude, Codex, pi, omp and OpenCode each resume the session their driver last reported for
 the agent, and a Claude agent whose workspace changed carries its transcript into the new
 workspace's project. A harness that cannot continue that session (its transcript is gone, or the
 declaration selects its own session) starts a new one and records a
 `native-continue-unavailable` warning; later relaunches do not try that session again. Only a
-mission step with `fresh-context` starts a agent on a new session on purpose. `--timeout 2m` changes the default ten-minute
+mission step with `fresh-context` starts an agent on a new session on purpose. `--timeout 2m` changes the default ten-minute
 wait; a failure or timeout explains why the agent is not running again. `fractal agents stop
-agent/example/worker --as person/ada` stops a agent until you apply its file again. It ends every
+agent/example/worker --as person/ada` stops an agent until you apply its file again. It ends every
 process the agent started, including builds and tests that outlived the harness, on hosts with a
 systemd user manager; [Stopping a session](st3/priority.md#stopping-a-session) says what
 other hosts miss. A mission agent you stop stays stopped while its run's generation lasts, across
@@ -461,9 +461,9 @@ other agent.
 
 `fractal agents suspend agent/example/worker --as person/ada` stops a quiet agent and keeps its harness's
 own session; `fractal agents resume agent/example/worker --as person/ada` brings the agent back on that
-same session and checks it. A agent suspends only when it is idle, with no pending question,
+same session and checks it. An agent suspends only when it is idle, with no pending question,
 claimed step, or running subagent. A suspended agent stays declared, is not restarted, and keeps
-its mail until it resumes. [Suspending a agent](st3/suspend.md) has the details.
+its mail until it resumes. [Suspending an agent](st3/suspend.md) has the details.
 
 Human labels are presentation, not launch configuration:
 
@@ -475,10 +475,10 @@ st agents rename agent/example/worker --clear --as person/ada
 Rename publishes only `desired.display_name`, the same durable field as KDL `name`. It does not
 restart the agent or change its identity, and a stopped agent keeps its restart budget and any
 crash-loop hold. The Agent API uses this effective label; clearing it restores `example/worker`.
-The label must be non-empty. Like declaring a agent in free mode, a person or an agent may rename
+The label must be non-empty. Like declaring an agent in free mode, a person or an agent may rename
 any agent. A bound harness must act as itself, and rename preserves the original declaring actor.
 
-[`examples/st3/agents`](../examples/st3/agents) has a agent file for each harness.
+[`examples/st3/agents`](../examples/st3/agents) has an agent file for each harness.
 
 Ordinary messages are `silent` or `wake` (the default for every sender and agent). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-agent wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
 

@@ -75,7 +75,7 @@ st fleet invites revoke fleet-invite/ID --reason TEXT
 
 The optional name pins the joiner's name. Expiry defaults to 15 minutes and accepts 10 seconds to
 24 hours. `auto` includes advertised endpoints; `--via` selects a transport. A sponsor must already
-be a fleet member with a listener. Invites are person operations; an agent agent must provide an
+be a fleet member with a listener. Invites are person operations; an agent must provide an
 explicit `--as person/NAME` where the command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.

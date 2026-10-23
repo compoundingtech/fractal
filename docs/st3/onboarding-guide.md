@@ -129,12 +129,12 @@ choice. Follow the installed command's help rather than inventing a model name.
 Claude agents use the user-owned fractal channel. Machine approval policy is optional:
 without it fractal uses the development-channel flag and admits its startup dialog.
 Provider or organization channel restrictions can still prevent delivery. MCP
-initialization alone is not proof that a message reached a agent; check the read
+initialization alone is not proof that a message reached an agent; check the read
 receipt. An idle unscoped Claude session exposes no fractal tools or notifications.
 
 ## Agents and messages
 
-A agent is a named agent with a workspace and harness. Work and messages survive
+An agent is a named agent with a workspace and harness. Work and messages survive
 daemon restarts. New agents are made through `fractal agents new`; inspect that command's
 help and let the person choose the project directory and harness. Examples use
 invented names such as person/ada and agent/garden/worker.
@@ -145,7 +145,7 @@ reply in the same conversation. Put long text in a graph document and send its
 immutable reference. A tool invocation or a running process does not prove that
 the agent read the message; use the recorded receipt.
 
-`fractal agents show`, `fractal agents queue` and `fractal agents workspace` answer what a agent is
+`fractal agents show`, `fractal agents queue` and `fractal agents workspace` answer what an agent is
 doing and where it works. `fractal agents restart` recovers a stuck harness while keeping
 its declaration. `fractal agents stop` leaves it stopped until explicitly started.
 Suspend and resume preserve a quiet agent's native conversation on the same machine;

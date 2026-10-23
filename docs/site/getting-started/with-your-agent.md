@@ -34,8 +34,8 @@ fractal --version
 Set `PERSON` and `NODE` in this shell to the names established in step 1, without `person/` prefixes. For a fresh machine, one possible normalization is:
 
 ```sh
-PERSON=$(id -un | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')
-NODE=$(hostname -s | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')
+PERSON=$(id -un | tr -d '\n' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')
+NODE=$(hostname -s | tr -d '\n' | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')
 ```
 
 Prefer explicitly supplied names over those defaults. If `NODE` is `local`, use a different stable name. Run:
