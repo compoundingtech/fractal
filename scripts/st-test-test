@@ -258,7 +258,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertRegex(out, r'demo +lane edit: CI runs it +this tree edits its lane \(scripts/lane\.sh\)')
 
-    def test_status_all_names_every_policy_check_and_one_without_a_local_command_is_ci_s(self):
+    def test_status_names_every_policy_check_and_one_without_a_local_command_is_ci_s(self):
         policy = json.loads(json.dumps(POLICY))
         policy['checks']['vm-only'] = {'trust_levels': ['fleet'], 'kinds': {'wrapper': {'command': ['vm-only', 'driver']}}}
         self.commit('.st/evidence-skip-policy.json', json.dumps(policy), branch='main')
@@ -266,14 +266,15 @@ class StTest(unittest.TestCase):
         git(self.work, 'checkout', '-q', 'feature')
         git(self.work, 'merge', '-q', 'main')
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--all', '--status')
+        code, out, err = self.run_st_test('--status')
         self.assertEqual(code, 3, out + err)  # demo has no note yet
         self.assertRegex(out, r'demo +not covered ')
         self.assertRegex(out, r'vm-only +CI runs it +no local command')
-        self.assertEqual(self.run_st_test('--all')[0], 0)
-        code, out, err = self.run_st_test('--all', '--status')
+        self.assertEqual(self.run_st_test()[0], 0)
+        code, out, err = self.run_st_test('--status')
         self.assertEqual(code, 0, out + err)  # demo signed, vm-only is CI's
-        self.assertNotIn('vm-only', self.run_st_test('--check', 'demo', '--status')[1])  # only with --all
+        self.assertEqual(self.run_st_test('--all', '--status'), (code, out, err))  # --all is accepted and means the same
+        self.assertNotIn('vm-only', self.run_st_test('--check', 'demo', '--status')[1])  # a named check asks about that check only
 
     def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
         self.commit('b.txt', 'two')
@@ -433,11 +434,11 @@ class StTest(unittest.TestCase):
     def pool(self):
         return next((self.home / '.cache/st-test').iterdir())
 
-    def test_a_heavy_check_builds_in_its_trees_kept_target_and_a_light_one_does_not(self):
+    def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
         command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}}" >> {seen}']
-        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
             target = self.pool() / 'target-0'
             (target / 'junk').write_bytes(b'x' * 4096)
@@ -451,7 +452,7 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
             shared = self.home / 'shared-target'
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': str(shared)})[0], 0)
-        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # not heavy: no kept target
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
 
     def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
@@ -784,9 +785,9 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'linux-gate'])
 
-    def test_a_heavy_check_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
+    def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
         tmp = Path(self.tmp.name)
         calls = tmp / 'calls'
@@ -801,7 +802,7 @@ class StTest(unittest.TestCase):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime)}
-        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
@@ -822,13 +823,13 @@ class StTest(unittest.TestCase):
             self.assertFalse(calls.exists())  # neither a scope nor a ticket
         self.commit('e.txt', 'five')
         self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
-        self.assertFalse(calls.exists())  # a light check is not wrapped
+        self.assertFalse(calls.exists())  # a check that builds nothing is not wrapped
 
-    def test_a_heavy_check_runs_only_when_named_or_with_all(self):
-        # The pre-push hook runs st-test with no --check: a check that builds the whole workspace must not start on every push.
-        for args, names in (([], ['typescript-client', 'genie-freshness']),
-                            (['--all'], ['typescript-client', 'genie-freshness', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm']),
-                            (['--check', 'mail-redelivery-canaries'], ['mail-redelivery-canaries'])):
+    def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
+        # No subset for signing: with no flag st-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
+        # The VM tests and the mail redelivery canaries run daily, not here.
+        suite = ['typescript-client', 'genie-freshness', 'linux-gate']
+        for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)

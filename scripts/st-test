@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--all] [--rerun] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
+  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE] [--attempt N] [--time-limit SECONDS]
   scripts/st-test --list
   scripts/st-test --status [--base origin/main]
 
-For every check that has a local command (the table below; the heavy ones, which build and test the Rust workspace, only when
-named or with --all: run `scripts/st-test --all --push origin` once on the head you mark ready) it runs that command once, on the
-tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
+For every check that has a local command (the table below: the whole per-PR suite; run `scripts/st-test --push origin` on the head
+you mark ready, and --all, accepted, means the same) it runs that command once, on the tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
 the output it measured under this host's key (scripts/evidence-keygen). A failing run is recorded too. It then
 asks the verifier, from the accepted base, whether the tree is now covered, and prints one line per check.
 
@@ -69,20 +68,17 @@ LOCAL = {
     'typescript-client': ['nix', 'develop', '.#web', '-c', 'bash', '-c',
                           'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'],
     'genie-freshness': ['nix', 'develop', '.#genie', '-c', 'bash', 'scripts/ci-genie-freshness'],
-    # A Linux gate stage, run as its CI job runs it but with a home of its own (scripts/ci-local).
-    'mail-redelivery-canaries': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'mail-redelivery-canaries'],
-    # The stages a linux-gate skip covers (the tests, clippy, fleet compatibility and the canaries), in one run.
-    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat', 'mail-redelivery-canaries'],
-    # The VM tests: CI's isolation-vm job, with the test archive and gateway it downloads built in place (needs /dev/kvm).
-    'isolation-vm': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'isolation-vm'],
+    # The stages a linux-gate skip covers (the tests, clippy and fleet compatibility), in one run, as their CI jobs run them but
+    # with a home of their own (scripts/ci-local). The VM tests and the mail redelivery canaries run daily (daily-long.yml).
+    'linux-gate': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests', 'clippy', 'fleet-compat'],
 }
-# Checks that build and test the Rust workspace: tens of minutes of a shared host. They run only when named (--check) or with
-# --all, never by default, so the pre-push hook keeps signing the light checks within its wait.
-HEAVY = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
+# Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
+# (a builds.slice scope, the kept target below), which nobody has to ask for.
+BUILDS = frozenset({'linux-gate'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate'})
 BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
-# The heavy checks build in one cargo target per pool tree (<pool>/target-N, outside the tree so the cleaning keeps it), kept between
+# The checks that build use one cargo target per pool tree (<pool>/target-N, outside the tree so the cleaning keeps it), kept between
 # runs, so a run does not start cold: the tree's path is the same every run, so the workspace's own crates rebuild only when they
 # changed and the dependencies and build scripts are reused. It is removed before a run once it passes TARGET_MAX_GB (the run holds
 # the tree's lock, so nobody else uses it). ST_EVIDENCE_TARGET=PATH names one shared target for all trees instead (kept as before:
@@ -206,7 +202,7 @@ def trim(target):
 
 
 def shared_target(tree_target=None):
-    """The kept target for the heavy checks and a lock held while they use it, or (None, None) when it is off or the caller set one.
+    """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
 
     With a pool tree's own target (and no ST_EVIDENCE_TARGET), that target: the tree's lock is held, so there is nothing to lock here."""
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
@@ -228,7 +224,7 @@ def shared_target(tree_target=None):
 
 
 def governed(argv, name):
-    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a heavy check: a builds.slice scope around
+    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
     memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
 
@@ -513,9 +509,9 @@ def main(argv):
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
-    parser.add_argument('--all', action='store_true', help='with no --check: the heavy checks too (' + ', '.join(sorted(HEAVY)) + ')')
+    parser.add_argument('--all', action='store_true', help='accepted, and the same as no flag: every check runs')
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
-                        'and with --all a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
+                        'and with no --check a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
@@ -523,7 +519,7 @@ def main(argv):
     unknown = [name for name in args.check if name not in LOCAL]
     if unknown:
         raise Failure(f'no local command for {", ".join(unknown)}; known: {", ".join(LOCAL)}')
-    checks = args.check or [name for name in LOCAL if args.all or name not in HEAVY]
+    checks = args.check or list(LOCAL)
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
@@ -550,7 +546,7 @@ def main(argv):
                 else:
                     is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
                     rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why))
-            if args.all and not args.check:
+            if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
         for name, is_covered, label, why in rows:
@@ -586,7 +582,7 @@ def main(argv):
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
             rows, failed, unsigned = [], False, False
             lanes = lane_names(args.base)
-            target, target_lock = shared_target(tree_target) if any(name in HEAVY for name in checks) else (None, None)
+            target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
             unmaterialized, materialized = None, False  # the members are fetched only once a check has to run
             for name in checks:
                 if unmaterialized:
@@ -624,7 +620,7 @@ def main(argv):
                 if args.push:
                     wrap += ['--push', args.push]
                 environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
-                if target and name in HEAVY:
+                if target and name in BUILDS:
                     environment['CARGO_TARGET_DIR'] = str(target)
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
@@ -634,7 +630,7 @@ def main(argv):
                 started = time.monotonic()
                 try:
                     command = wrap + ['--'] + LOCAL[name]
-                    done = subprocess.run(governed(command, name) if name in HEAVY else command, cwd=directory, timeout=args.time_limit,
+                    done = subprocess.run(governed(command, name) if name in BUILDS else command, cwd=directory, timeout=args.time_limit,
                                           env=environment)
                     code = done.returncode
                 except subprocess.TimeoutExpired:

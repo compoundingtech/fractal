@@ -123,7 +123,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -4040,27 +4040,44 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Daemon-only evidence captured while holding the runtime spawn locks.
+    pub fn operational_repair_plan_with_legacy_starts(
+        &self,
+        native_evidence: &[Value],
+    ) -> Result<OperationalRepairPlan> {
+        self.operational_repair_plan_with_legacy_starts_and_filter(native_evidence, &[], &[])
+    }
+
+    pub fn operational_repair_plan_with_legacy_starts_and_filter(
+        &self, native_evidence: &[Value], subjects: &[String], classes: &[String],
+    ) -> Result<OperationalRepairPlan> {
+        let filter = OperationalRepairFilter::new(subjects, classes);
+        let connection = self.readers.get();
+        filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
+            &connection, now_ms(), &self.origin, native_evidence,
+        )?, &filter)
+    }
+
+    /// Filters are carried inside the approval token; apply never guesses a wider plan.
+    pub fn operational_repair_token_filters(token: &str) -> Result<(Vec<String>, Vec<String>), St3Error> {
+        let (_, filter) = decode_repair_token(token)?;
+        Ok((filter.subjects, filter.classes))
+    }
+
     pub fn apply_operational_repair(
         &self,
         token: &str,
     ) -> Result<OperationalRepairResult, St3Error> {
-        if !token.starts_with("orpv0:") {
-            return Err(St3Error::new(
-                "invalid-repair-token",
-                "an operational repair token must start with `orpv0:`",
-            ));
-        }
-        let digest = token.trim_start_matches("orpv0:");
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(St3Error::new(
-                "invalid-repair-token",
-                "an operational repair token must contain one lowercase SHA-256 digest",
-            ));
-        }
+        self.apply_operational_repair_with_legacy_starts(token, &[])
+    }
+
+    /// Rechecks the complete evidence-bound plan inside the normal writer fence.
+    pub fn apply_operational_repair_with_legacy_starts(
+        &self,
+        token: &str,
+        native_evidence: &[Value],
+    ) -> Result<OperationalRepairResult, St3Error> {
+        let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
@@ -4101,7 +4118,9 @@ impl Store {
             });
         }
 
-        let plan = operational_repair_plan_tx(&transaction, now_ms()).map_err(internal)?;
+        let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
+            &transaction, now_ms(), &self.origin, native_evidence,
+        ).map_err(internal)?, &filter).map_err(internal)?;
         if plan.token != token {
             return Err(St3Error::new(
                 "stale-repair-plan",
@@ -4132,6 +4151,16 @@ impl Store {
         for item in &plan.items {
             affected_subjects.extend(item.affected_subjects.iter().cloned());
             match item.class.as_str() {
+                "revoked-legacy-runtime-start" => {
+                    let operation_id = item.details["operation"]["id"].as_str()
+                        .ok_or_else(|| St3Error::new("invalid-repair-plan", "missing runtime operation"))?;
+                    runtime_starts::retain_runtime_start_producer_closed_tx(
+                        &transaction,
+                        &self.origin,
+                        operation_id,
+                        item.details.get("native_evidence"),
+                    ).map_err(internal)?;
+                }
                 "terminal-descendants" => {
                     let generation = item
                         .details
@@ -4265,6 +4294,21 @@ impl Store {
         }
         affected_subjects.sort();
         affected_subjects.dedup();
+        // Keep the replicated receipt within the existing closed field schema.
+        // Older peers quarantine unknown fields, so legacy evidence is encoded
+        // in the already-defined reason string, not a new receipt field.
+        let closures = plan.items.iter()
+            .filter(|item| item.class == "revoked-legacy-runtime-start")
+            .map(|item| json!({
+                "operation_id": item.details["operation"]["id"],
+                "native_evidence": item.details["native_evidence"],
+            })).collect::<Vec<_>>();
+        let reason = if closures.is_empty() {
+            "applied the exact graph-authorized operational repair plan".to_owned()
+        } else {
+            format!("applied the exact graph-authorized operational repair plan; legacy runtime start closures: {}",
+                serde_json::to_string(&closures).map_err(internal)?)
+        };
         let receipt = append_claim_tx(
             &transaction,
             &self.origin,
@@ -4275,7 +4319,7 @@ impl Store {
                 "token": token,
                 "item_count": plan.items.len(),
                 "affected_subjects": affected_subjects,
-                "reason": "applied the exact graph-authorized operational repair plan",
+                "reason": reason,
             }}),
             &claim_ids,
             None,
@@ -12526,6 +12570,129 @@ pub fn operational_repair_plan_tx(
         },
         items,
     })
+}
+
+#[derive(Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OperationalRepairFilter {
+    subjects: Vec<String>,
+    classes: Vec<String>,
+}
+
+impl OperationalRepairFilter {
+    fn new(subjects: &[String], classes: &[String]) -> Self {
+        let mut filter = Self { subjects: subjects.to_vec(), classes: classes.to_vec() };
+        filter.subjects.sort();
+        filter.subjects.dedup();
+        filter.classes.sort();
+        filter.classes.dedup();
+        filter
+    }
+}
+
+fn decode_repair_token(token: &str) -> Result<(String, OperationalRepairFilter), St3Error> {
+    let invalid = || St3Error::new("invalid-repair-token", "expected an orpv0 digest and optional canonical filter");
+    let body = token.strip_prefix("orpv0:").ok_or_else(invalid)?;
+    let (digest, encoded) = body.split_once(':').map_or((body, None), |(digest, filter)| (digest, Some(filter)));
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(invalid());
+    }
+    let filter = if let Some(encoded) = encoded {
+        if encoded.len() > 65536 { return Err(invalid()); }
+        let bytes = hex::decode(encoded).map_err(|_| invalid())?;
+        let filter: OperationalRepairFilter = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if filter == OperationalRepairFilter::default()
+            || filter != OperationalRepairFilter::new(&filter.subjects, &filter.classes)
+            || hex::encode(serde_json::to_vec(&filter).map_err(internal)?) != encoded
+        {
+            return Err(invalid());
+        }
+        filter
+    } else {
+        OperationalRepairFilter::default()
+    };
+    Ok((digest.into(), filter))
+}
+
+fn filter_repair_plan(mut plan: OperationalRepairPlan, filter: &OperationalRepairFilter) -> Result<OperationalRepairPlan> {
+    if *filter == OperationalRepairFilter::default() { return Ok(plan); }
+    plan.items.retain(|item| {
+        (filter.subjects.is_empty() || filter.subjects.binary_search(&item.subject).is_ok())
+            && (filter.classes.is_empty() || filter.classes.binary_search(&item.class).is_ok())
+    });
+    let digest = canonical_hash(&("st3.operational-repair-filter.v0", filter, &plan.items))?;
+    plan.token = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(filter)?));
+    plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
+    Ok(plan)
+}
+
+fn operational_repair_plan_with_legacy_starts_tx(
+    connection: &Connection,
+    snapshot_unix_ms: u128,
+    origin: &str,
+    native_evidence: &[Value],
+) -> Result<OperationalRepairPlan> {
+    let mut plan = operational_repair_plan_tx(connection, snapshot_unix_ms)?;
+    let mut seen = BTreeSet::new();
+    for evidence in native_evidence {
+        let (Some(operation_id), Some(runtime_id)) = (
+            evidence["operation_id"].as_str(), evidence["runtime_id"].as_str(),
+        ) else { continue };
+        if evidence["legacy"] != true {
+            continue;
+        }
+        let operation = connection.query_row(
+            "SELECT * FROM local_runtime_starts WHERE id=?1",
+            [operation_id],
+            runtime_starts::read,
+        ).optional()?;
+        let Some(operation) = operation else { continue };
+        if !operation.finished || operation.revoked_by.is_none()
+            || operation.cleanup_verified || !operation.applied
+            || operation.result.as_ref().is_none_or(|result| !result.is_object())
+            || operation.body["member"]["terminal"] != true
+            || operation.body["member"]["runtime_id"].as_str() != Some(runtime_id)
+            || operation.body["member"]["host"].as_str() != Some(origin)
+        {
+            continue;
+        }
+        // Duplicate identical internal captures are harmless; conflicting captures
+        // remain token-bound rather than selecting an arbitrary physical witness.
+        if !seen.insert((operation_id.to_owned(), canonical_hash(evidence)?)) {
+            continue;
+        }
+        push_operational_repair_item(
+            &mut plan.items,
+            "revoked-legacy-runtime-start",
+            &operation.subject,
+            vec![operation.subject.clone()],
+            "the owner daemon proved the revoked legacy terminal producer physically closed",
+            BTreeMap::from([
+                // Bind private admission/result data without returning launch
+                // environments or other secrets in the public repair plan.
+                ("operation_fence".into(), Value::from(canonical_hash(&operation)?)),
+                ("operation".into(), json!({
+                    "id": operation.id,
+                    "subject": operation.subject,
+                    "owner": operation.owner,
+                    "revoked_by": operation.revoked_by,
+                    "finished": operation.finished,
+                    "applied": operation.applied,
+                    "cleanup_verified": operation.cleanup_verified,
+                    "dispatched": operation.dispatched,
+                    "receipted": operation.receipted,
+                })),
+                ("owner_host".into(), Value::from(origin)),
+                ("native_evidence".into(), evidence.clone()),
+            ]),
+        )?;
+    }
+    plan.items.sort_by(|left, right| {
+        (&left.class, &left.subject, &left.id).cmp(&(&right.class, &right.subject, &right.id))
+    });
+    plan.token = format!("orpv0:{}", canonical_hash(&("st3.operational-repair.v0", &plan.items))?);
+    plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
+    Ok(plan)
 }
 
 fn push_operational_repair_item(
