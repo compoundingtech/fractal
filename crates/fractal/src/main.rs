@@ -3170,6 +3170,9 @@ struct AgentRetireArgs {
     actor: String,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     reason: String,
+    /// Existing eligible agent identity, bare name or agent/NAME.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    successor: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: String,
 }
@@ -4086,9 +4089,9 @@ struct MessageListArgs {
     /// Mailbox identity; defaults to the non-empty ST_AGENT value.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     identity: Option<String>,
-    /// The same mailbox identity, spelled like `conversations read --as`.
+    /// Actor reading the mailbox. A retired mailbox requires its signed successor.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", conflicts_with = "identity")]
+    #[arg(long = "as")]
     actor: Option<String>,
     #[arg(long)]
     archive: bool,
@@ -7172,7 +7175,7 @@ async fn publish_text_with_expected(
                 idempotency_key: idempotency(&resolved.kdl, &mission.subject_tokens),
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
-                actor: Some(actor),
+                actor: Some(actor.clone()),
             },
         )
         .await
@@ -12467,6 +12470,9 @@ fn render_client_agent(
         }
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
+    if let Some(custody) = &agent.mail_custody {
+        let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}", custody.successor);
+    }
     let _ = writeln!(
         output,
         "HARNESS      {} · {}",
@@ -13358,6 +13364,7 @@ struct MessagePageFilters<'a> {
     from: Option<&'a str>,
     subject: Option<&'a str>,
     subject_prefix: Option<&'a str>,
+    acting_as: Option<&'a str>,
 }
 
 /// One mailbox page. A seat's delivery process passes its delivery report, which the daemon
@@ -13402,6 +13409,7 @@ async fn message_page_filtered(
         ("from", filters.from),
         ("subject", filters.subject),
         ("subject_prefix", filters.subject_prefix),
+        ("acting_as", filters.acting_as),
     ] {
         if let Some(value) = value {
             path.push_str(&format!("&{name}={}", urlencoding::encode(value)));
@@ -13773,7 +13781,25 @@ async fn read_message_after_lifecycle(
     let actor = normalize_message_subject(actor);
     if actor == message.from && actor != message.to {
         anyhow::ensure!(!archive, "a sender cannot archive the recipient's message");
-        return Ok(message);
+        if !message.to.starts_with("agent/") {
+            return Ok(message);
+        }
+        let detail: Option<Value> = match client.get(&format!(
+            "/v1/client/agents/{}", urlencoding::encode(&message.to),
+        )).await {
+            Ok(detail) => Some(detail),
+            Err(error)
+                if fractal_daemon::client::api_error_parts(&error)
+                    .is_some_and(|(status, _, _, _)| status == 404) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if detail.as_ref().and_then(|detail| detail["mail_custody"]["successor"].as_str())
+            != Some(actor.as_str()) {
+            return Ok(message);
+        }
     }
     accept_message(client, &message, &actor).await?;
     if archive {
@@ -13781,22 +13807,23 @@ async fn read_message_after_lifecycle(
     }
     // Lifecycle writes are synchronous, so refetching makes JSON and other machine-readable
     // output describe the state that this command actually committed instead of its input state.
-    read_message(client, &message.subject).await
+    let mut result = read_message(client, &message.subject).await?;
+    if actor != message.to {
+        // A successor's signed receipt can be canonically ordered alongside the
+        // original send. The command has just committed its read or close, so
+        // present that result here without changing the shared mailbox view.
+        result.status = if archive { "closed" } else { "read" }.into();
+    }
+    Ok(result)
 }
 
 async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> Result<()> {
     let actor = normalize_message_subject(actor);
-    anyhow::ensure!(
-        actor == message.to,
-        "message `{}` belongs to `{}`, not `{actor}`",
-        message.subject,
-        message.to
-    );
-    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered") {
+    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered" | "read") {
         return Ok(());
     }
     let reference = message.subject.trim_start_matches("message/");
-    if matches!(message.status.as_str(), "sent" | "staged") {
+    if actor == message.to && matches!(message.status.as_str(), "sent" | "staged") {
         deliver_message(
             client,
             reference,
@@ -13805,18 +13832,25 @@ async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> 
         )
         .await?;
     }
+    if message.status == "read" && actor == message.to {
+        return Ok(());
+    }
     let _: ClaimRecord = client
         .post(
             &format!("/v1/messages/{}/claims", urlencoding::encode(reference)),
             &MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "read".into(),
-                actor: Some(actor),
+                actor: Some(actor.clone()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: format!("message-read:{}", message.subject),
+                idempotency_key: if actor == message.to {
+                    format!("message-read:{}", message.subject)
+                } else {
+                    format!("message-custody-read:{}:{actor}", message.subject)
+                },
             },
         )
         .await?;
@@ -13876,18 +13910,19 @@ async fn stage_message(
 
 async fn close_message(client: &Client, reference: &str, actor: &str) -> Result<ClaimRecord> {
     let reference = normalize_message_reference(reference);
+    let actor = normalize_message_subject(actor);
     client
         .post(
             &format!("/v1/messages/{}/claims", urlencoding::encode(&reference)),
             &MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "closed".into(),
-                actor: Some(normalize_message_subject(actor)),
+                actor: Some(actor.clone()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: format!("message-closed:{reference}"),
+                idempotency_key: format!("message-closed:{reference}:{actor}"),
             },
         )
         .await

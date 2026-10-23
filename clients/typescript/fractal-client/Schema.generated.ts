@@ -268,7 +268,8 @@ export type AgentResumeParametersEncoded = typeof AgentResumeParameters.Encoded
 
 export const AgentRetireParameters = /*#__PURE__*/ (() => Schema.Struct({
   "agent": Id,
-  "reason": Schema.String.check(Schema.isMinLength(1))
+  "reason": Schema.String.check(Schema.isMinLength(1)),
+  "successor": optionalKey(Id)
 }).annotate({ identifier: "AgentRetireParameters" }))()
 export type AgentRetireParameters = typeof AgentRetireParameters.Type
 export type AgentRetireParametersEncoded = typeof AgentRetireParameters.Encoded
@@ -647,6 +648,13 @@ export const AgentLifecycle = /*#__PURE__*/ (() => openEnum(["standing","owner",
 export type AgentLifecycle = typeof AgentLifecycle.Type
 export type AgentLifecycleEncoded = typeof AgentLifecycle.Encoded
 
+export const AgentMailCustody = /*#__PURE__*/ (() => Schema.Struct({
+  "state": Schema.Literal("pending"),
+  "successor": AgentId
+}).annotate({ identifier: "AgentMailCustody" }))()
+export type AgentMailCustody = typeof AgentMailCustody.Type
+export type AgentMailCustodyEncoded = typeof AgentMailCustody.Encoded
+
 export const StepRunId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:step-run)/[^\\s]+$", "u"), "step-run").annotate({ identifier: "StepRunId" }))()
 export type StepRunId = typeof StepRunId.Type
 export type StepRunIdEncoded = typeof StepRunId.Encoded
@@ -950,6 +958,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "last_activity_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   /** The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row. */
   "lifecycle": optionalKey(AgentLifecycle),
+  /** Pending mail held for the named successor; omitted without custody. */
+  "mail_custody": optionalKey(AgentMailCustody),
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -4105,6 +4115,8 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "identity-unknown",
   "lifecycle-unavailable",
   "retirement-upgrade-required",
+  "invalid-custody-successor",
+  "custody-pending",
   "attention-migrated",
   "arrangement-exists",
   "arrangement-folder-exists",
