@@ -890,6 +890,7 @@ export type Attention = ResourceHeader & {
   mission_id?: Id;
   mission_run_id?: Id;
   person_id: Id;
+  presentation?: AttentionPresentation;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -909,6 +910,11 @@ export type Attention = ResourceHeader & {
   what?: string;
 };
 
+export type AttentionActor = {
+  id: Id;
+  label: string;
+};
+
 export type AttentionBlocked = {
   attempt: number;
   goal: string;
@@ -916,10 +922,34 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionPresentation = {
+  agent: (AttentionActor | null);
+  kind: 
+  "review"
+  | "feedback"
+  | "request"
+  | "update"
+  | "launch"
+  | "revision"
+  | "prompt"
+  | "login"
+  | "fault"
+  | null
+;
+  raised_by: (AttentionActor | null);
+  tier: "stopped" | "alert" | "today" | "later" | null;
+  waiting: (AttentionWaiting | null);
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
   state: string;
+};
+
+export type AttentionWaiting = {
+  path: string;
+  step: StepRunId;
 };
 
 export type BlobChunk = {
