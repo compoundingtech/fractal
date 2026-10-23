@@ -126,6 +126,11 @@ mod activity_purity_tests {
     /* sqlite-large-value: allow-for-now lv-h2c081374795f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("activity_purity_tests.rs");
 }
 
+mod subscription_state_full_value_tests {
+    use super::*;
+    /* sqlite-large-value: allow-for-now lv-haaf140af31b3 owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("subscription_state_full_value_tests.rs");
+}
+
 mod limits_purity_tests {
     use super::*;
     /* sqlite-large-value: allow-for-now lv-h5244785b99be owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ include!("limits_purity_tests.rs");
@@ -4275,9 +4280,11 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
     });
     let input = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -4293,6 +4300,7 @@ fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes: vec![candidate],
         signature_requests: Vec::new(),
@@ -4349,9 +4357,11 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
     });
     let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -4370,6 +4380,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         signature_requests: Vec::new(),
@@ -5092,9 +5103,11 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
                 FLEET,
                 &ReplicationExchange {
                     build: None,
+                    claim_ranges: None,
                     projection_digests: Default::default(),
                     peer: "source".into(),
                     fleet_id: FLEET.into(),
+                    shard_id: None,
                     schema_digest: String::new(),
                     projection_registry_digest: None,
                     projection_versions: Default::default(),

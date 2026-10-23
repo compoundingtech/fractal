@@ -355,6 +355,51 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
 export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed +1 and +2 mission queues prove popover geometry, keyboard focus, Escape and hover-free disclosure; catalog queues vary with work.' } }, play: queuedPlay }
 export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued missions · "+N" popover · light', args: { scheme: 'light' } }
 
+/** Bounding hit area after every rectangular CSS clip, including a visually hidden ancestor's 1px wrapper. */
+const clippedTouchRect = (control: HTMLElement): DOMRect => {
+  let box = rect(control)
+  const intersect = (left: number, top: number, right: number, bottom: number) => {
+    const x = Math.max(box.left, left), y = Math.max(box.top, top)
+    box = new DOMRect(x, y, Math.max(0, Math.min(box.right, right) - x), Math.max(0, Math.min(box.bottom, bottom) - y))
+  }
+  const length = (value: string, size: number, auto: number): number => {
+    if (value === 'auto') return auto
+    if (!/^-?(?:\d+\.?\d*|\.\d+)(?:px|%)?$/.test(value)) throw new Error(`Unsupported touch-target clip length: ${value}`)
+    return parseFloat(value) * (value.endsWith('%') ? size / 100 : 1)
+  }
+  for (let ancestor: HTMLElement | null = control; ancestor !== null; ancestor = ancestor.parentElement) {
+    const style = getComputedStyle(ancestor), bounds = rect(ancestor)
+    if (style.position === 'fixed' || style.transform !== 'none') throw new Error('Unsupported touch-target geometry')
+    if (style.visibility === 'hidden' || style.display === 'none') return new DOMRect()
+    if (ancestor !== control) {
+      const clipX = /^(hidden|clip|auto|scroll)$/.test(style.overflowX)
+      const clipY = /^(hidden|clip|auto|scroll)$/.test(style.overflowY)
+      if (clipX || clipY) {
+        const left = bounds.left + ancestor.clientLeft, top = bounds.top + ancestor.clientTop
+        intersect(clipX ? left : box.left, clipY ? top : box.top, clipX ? left + ancestor.clientWidth : box.right, clipY ? top + ancestor.clientHeight : box.bottom)
+      }
+    }
+    if (style.clip !== 'auto' && style.clip !== '') {
+      const match = /^rect\((.+)\)$/.exec(style.clip)
+      if (match === null) throw new Error(`Unsupported touch-target clip: ${style.clip}`)
+      const edges = match[1]!.trim().split(/,\s*|\s+/)
+      if (edges.length !== 4) throw new Error(`Invalid touch-target clip: ${style.clip}`)
+      intersect(bounds.left + length(edges[3]!, bounds.width, 0), bounds.top + length(edges[0]!, bounds.height, 0),
+        bounds.left + length(edges[1]!, bounds.width, bounds.width), bounds.top + length(edges[2]!, bounds.height, bounds.height))
+    }
+    if (style.clipPath !== 'none' && style.clipPath !== '') {
+      const match = /^inset\((.+)\)$/.exec(style.clipPath)
+      if (match === null) throw new Error(`Unsupported touch-target clip-path: ${style.clipPath}`)
+      const values = match[1]!.split(/\s+round\s+/)[0]!.trim().split(/\s+/)
+      if (values.length < 1 || values.length > 4) throw new Error(`Invalid touch-target clip-path: ${style.clipPath}`)
+      const [top, right = top!, bottom = top!, left = right!] = values
+      intersect(bounds.left + length(left!, bounds.width, 0), bounds.top + length(top!, bounds.height, 0),
+        bounds.right - length(right!, bounds.width, 0), bounds.bottom - length(bottom!, bounds.height, 0))
+    }
+  }
+  return box
+}
+
 /**
  * Touch-layout mission targets in `scope`: each is one button at least 44 × 44, its own box (no pseudo-element), inside
  * its own row, ending before every trailing control (disclosure, actions, any Open action) and clear of the next row.
@@ -380,8 +425,8 @@ const assertTouchTargets = async (scope: HTMLElement) => {
     await expect(Math.abs((pill.top + pill.bottom) / 2 - (box.top + box.bottom) / 2)).toBeLessThanOrEqual(1)
     await expect(rect(trigger.closest('[data-line2-slot="mission"]')!).width).toBeLessThanOrEqual(rect(line2(element)).width * 0.56 + 0.5)
     for (const other of element.querySelectorAll<HTMLElement>('button, [data-row-action], [data-agent-menu], [data-sidebar-disclosure]')) {
-      const otherBox = rect(other)
-      // The visually hidden details trigger is a 1px clip, not a target.
+      const otherBox = clippedTouchRect(other)
+      // A clipped-away control is not a competing touch target, regardless of its unclipped DOM rect.
       if (other === trigger || trigger.contains(other) || otherBox.width <= 1 || otherBox.height <= 1) continue
       await expect(intersects(box, otherBox)).toBe(false)
       if (otherBox.left >= box.left) await expect(box.right).toBeLessThanOrEqual(otherBox.left + 0.5)
@@ -402,6 +447,41 @@ const phonePlay: NonNullable<Story['play']> = async context => {
     .toEqual(['Port the upstream sidebar', 'Rename the users API', 'Watch the upload retries', 'Index the search logs', 'Map the billing events'])
   await expect(designedHost.querySelector('[data-queued-missions]:not([data-mission-trigger])')).toBeNull()
   await assertTouchTargets(designedHost)
+  // Negative control: an actual overlapping 44px target must still fail the same shared assertion.
+  const overlapRow = designedHost.querySelector<HTMLElement>('[data-touch-mission]')!
+  const missionTarget = overlapRow.querySelector<HTMLElement>('button[data-mission-trigger]')!
+  const overlapping = document.createElement('button')
+  overlapping.type = 'button'
+  overlapping.textContent = 'Overlapping target'
+  const targetBox = rect(missionTarget), rowBox = rect(overlapRow)
+  Object.assign(overlapping.style, { position: 'absolute', left: `${targetBox.left - rowBox.left}px`, top: `${targetBox.top - rowBox.top}px`, width: '44px', height: '44px' })
+  overlapRow.append(overlapping)
+  try {
+    const visibleOverlap = clippedTouchRect(overlapping)
+    await expect(visibleOverlap.width).toBe(44)
+    await expect(visibleOverlap.height).toBe(44)
+    await expect(intersects(rect(missionTarget), visibleOverlap)).toBe(true)
+    await expect(assertTouchTargets(designedHost)).rejects.toThrow(/expected true to be false/)
+  } finally {
+    overlapping.remove()
+  }
+  // Fixed positioning escapes clips; transformed ancestor rects mix viewport and layout coordinates. Fail closed.
+  for (const geometry of ['fixed control', 'fixed ancestor', 'transformed ancestor'] as const) {
+    const outer = document.createElement('div'), clipped = document.createElement('div'), control = document.createElement('button')
+    Object.assign(outer.style, { position: geometry === 'fixed ancestor' ? 'fixed' : 'absolute', left: '0px', top: '0px', transform: geometry === 'transformed ancestor' ? 'scale(2)' : 'none' })
+    Object.assign(clipped.style, { position: 'relative', overflow: 'hidden', width: '1px', height: '1px' })
+    control.type = 'button'
+    control.textContent = geometry
+    Object.assign(control.style, { position: geometry === 'fixed control' ? 'fixed' : 'absolute', left: '0px', top: '0px', width: '44px', height: '44px' })
+    clipped.append(control)
+    outer.append(clipped)
+    overlapRow.append(outer)
+    try {
+      await expect(assertTouchTargets(designedHost)).rejects.toThrow('Unsupported touch-target geometry')
+    } finally {
+      outer.remove()
+    }
+  }
 
   const parentSection = context.canvasElement.querySelector<HTMLElement>('[data-host="mission-parent"]')!
   const parent = parentSection.querySelector<HTMLElement>('[data-milestone-row]')!

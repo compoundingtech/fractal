@@ -217,3 +217,60 @@ fn aligned_comparison_excludes_different_definitions_and_expires_when_the_defini
     assert!(!view.peers[0].projection_comparison_waiting);
     assert!(view.peers[0].differing_tables.is_empty());
 }
+
+/// A node still projecting a backlog it admitted can hold the same envelopes as a settled peer
+/// while its tables lag: it sends no digests then, so the peer never names its tables as
+/// differing. Once projected, it sends them again.
+#[test]
+fn a_node_still_projecting_its_backlog_sends_no_digests_to_compare() {
+    let source = node("alder");
+    // Documents project into a digested table, so a lagging projection shows in its digest.
+    for number in 0..(2 * smallclaims::store::PROJECTION_CHUNK_CLAIMS + 7) {
+        source
+            .put_document(
+                &format!("doc/backlog/{number}"),
+                format!("version {number}").as_bytes(),
+                &None,
+                &format!("backlog-{number}"),
+            )
+            .unwrap();
+    }
+    let target = node("birch");
+    let mut inventory = target.replication_inventory().unwrap();
+    inventory.accepts = Some(smallclaims::store::REPLICATION_PAGE_LIMIT);
+    let backlog = source.export_replication_exchange(FLEET, &inventory).unwrap();
+    target
+        .receive_replication_exchange("alder", FLEET, &backlog)
+        .unwrap();
+    target.validate_replication_backlog().unwrap();
+    assert!(
+        target.replication_projection_deferred(),
+        "the admitted backlog is not projected yet"
+    );
+    let export = target.export_replication_summary(FLEET).unwrap();
+    assert!(export.projection_digests.is_empty(), "{:?}", export.projection_digests);
+    assert!(export.graph_digest.is_empty());
+    source
+        .receive_replication_exchange("birch", FLEET, &export)
+        .unwrap();
+    let peers = |store: &Store| {
+        store
+            .replication_status_sealed(true, Some(FLEET), &["birch".into()])
+            .unwrap()
+            .peers
+    };
+    let peer = &peers(&source)[0];
+    assert_eq!(
+        export.inventory.digest,
+        source.replication_inventory().unwrap().digest,
+        "both hold the same envelopes"
+    );
+    assert!(peer.differing_tables.is_empty(), "{peer:?}");
+    assert_ne!(peer.projection_graphs_equal, Some(false), "{peer:?}");
+
+    target.project_replication_backlog().unwrap();
+    assert!(!target.replication_projection_deferred());
+    let export = target.export_replication_summary(FLEET).unwrap();
+    assert!(!export.projection_digests.is_empty());
+    assert!(!export.graph_digest.is_empty());
+}

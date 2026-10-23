@@ -23,7 +23,7 @@ impl Store {
             .readers
             .get()
             .prepare_cached("SELECT step_path FROM step_runs WHERE subject=?1")?
-            .query_row([step], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h7dbe458e77a9 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [step], |row| row.get(0))
             .optional()?)
     }
 

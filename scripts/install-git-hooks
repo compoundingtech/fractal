@@ -66,4 +66,4 @@ chmod +x "$hook.tmp"
 changed=1
 [ -f "$hook" ] && cmp -s "$hook.tmp" "$hook" && changed=0
 mv -f "$hook.tmp" "$hook"
-[ "$changed" -eq 0 ] || echo "evidence pre-push hook installed (ST_SKIP_EVIDENCE=1 skips)"
+[ "$changed" -eq 0 ] || echo "evidence pre-push hook installed (ST_SKIP_EVIDENCE=1: sign in the background, do not wait)"

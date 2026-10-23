@@ -71,6 +71,69 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "clippy_base_sha"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "clippy_base_sha"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
           }
         }
       }
@@ -528,8 +591,11 @@
       "kinds": {
         "wrapper": {
           "command": [
-            "bash",
-            "scripts/ci-fractal-web"
+            "fractal-web",
+            "aggregate",
+            "fractal-web",
+            "fractal-web-changes",
+            "fractal-web-execution"
           ],
           "required_inputs": [
             "flake_lock_sha256",
@@ -537,16 +603,25 @@
             "wrapper_sha256",
             "system",
             "attempt",
-            "job",
-            "steps",
-            "step_outcomes",
-            "kit_shard",
             "kit_shard_count",
+            "shard_results",
+            "kit_inputs",
             "kit_play_set",
             "app_test_set"
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "shard_inputs": {
+            "count": "kit_shard_count",
+            "results": "shard_results",
+            "pull_request_count": 1
+          },
+          "input_order": {
+            "kit_inputs": [
+              "true",
+              "false"
+            ]
           }
         }
       }
