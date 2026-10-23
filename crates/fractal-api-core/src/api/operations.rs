@@ -14,7 +14,14 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
     Ok(Json(harnesses))
 }
 
-pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
+/// Startup observation supplied by the embedded browser listener.
+#[derive(Clone)]
+pub struct LocalWebStatus(pub DoctorCheck);
+
+pub async fn doctor(
+    State(state): State<AppState>,
+    web: Option<Extension<LocalWebStatus>>,
+) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
     let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
         .await
@@ -44,6 +51,9 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
         .await
         .map_err(ApiError::internal)??
         .0;
+    if let Some(Extension(web)) = web {
+        report.checks.push(web.0);
+    }
     if let Some(build_tools) = build_tools {
         report.checks.push(build_tools_check(
             &build_tools.await.map_err(ApiError::internal)?,
@@ -219,34 +229,23 @@ pub async fn apply_operational_repair(
     Ok(Json(result))
 }
 
-/// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
+mod backup_export;
+
+/// Return export headers before preparing the archive; its stream owns the work.
 pub async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let permit = backup_export::reserve()?;
     let store = state.store.clone();
+    // A bounded metadata check keeps ordinary precondition failures as HTTP errors.
+    // The producer checks again in the snapshot that actually backs up the data.
+    blocking_store(move || store.check_backup_projection()).await?;
     let bodies = message_body::bodies(&state.state_dir);
-    let file = blocking_store(move || {
+    Ok(backup_export::response(permit, move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
+        state.store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
-    })
-    .await?;
-    let file = tokio::fs::File::from_std(file);
-    let stream = futures_util::stream::try_unfold(file, |mut file| async move {
-        use tokio::io::AsyncReadExt;
-        let mut bytes = vec![0_u8; 64 * 1024];
-        let read = file.read(&mut bytes).await?;
-        if read == 0 {
-            return Ok::<_, std::io::Error>(None);
-        }
-        bytes.truncate(read);
-        Ok(Some((bytes, file)))
-    });
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
-        Body::from_stream(stream),
-    )
-        .into_response())
+    }))
 }
 
 #[derive(Deserialize)]
@@ -469,7 +468,7 @@ pub async fn status(
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || {
-        if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
+        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
             store.status_harness_only(subject)
         } else if query.history {
             store.status_history(
@@ -483,7 +482,26 @@ pub async fn status(
                 query.owner_run.as_deref(),
                 query.at_index,
             )
+        }?;
+        // Exact schedule reads gain an optional local observation. Keep broad/agent reads and
+        // primary-only schedules on their existing path; this is never a persisted projection.
+        if query.subject.as_deref().is_some_and(|subject| subject.starts_with("schedule/")) {
+            for subject in &mut response.subjects {
+                let origin = store.selected_desired_origin(&subject.subject)?.unwrap_or_else(|| store.origin.clone());
+                let Some(spec) = subject.desired.as_ref().and_then(|desired| crate::graph::schedule_spec(desired, &origin)) else { continue };
+                if let Some(mut shown) = crate::schedule_standby::display(&store, &subject.subject, &spec) {
+                    if query.at_index.is_some() || query.history {
+                        shown["eligibility"] = json!("unknown");
+                        shown["primary_heartbeat_age_ms"] = Value::Null;
+                        shown["heartbeat_basis"] = json!("unknown");
+                        shown["observed_primary_view"] = Value::Null;
+                        shown["reason"] = json!("historical declaration; no current eligibility assertion");
+                    }
+                    subject.actual.get_or_insert_with(|| json!({}))["schedule_standby"] = shown;
+                }
+            }
         }
+        Ok(response)
     })
     .await
     .map(Json)

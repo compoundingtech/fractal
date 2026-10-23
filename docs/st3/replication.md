@@ -11,6 +11,39 @@ or replica. Devices read and act through a member's client gateway and are not s
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
 
 
+## Automatic transport selection
+
+The local `fleet.toml` `transports` list is both an enablement filter and a
+preference order for automatic replication and peer-relay routes. With
+`["fabric", "tailscale"]`, available Fabric routes precede Tailscale; reversing
+the list reverses that preference. A carrier absent from an explicit list is not
+used automatically, even if its executable is installed. An empty list disables
+both Fabric and Tailscale automatic routes. Loopback remains the last automatic
+fallback, independent of its list position.
+
+Explicit config peer URLs (`[[peers]]` / `--peer`) retain precedence over automatic
+routes for backward compatibility. To let fleet preference select the carrier,
+remove the explicit override. Legacy operation without `fleet.toml` retains
+Tailscale-first automatic routing among locally available carriers.
+
+Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
+front, or to prefer an already enabled Fabric route without changing its saved
+protocol or exposure. An add without `--prefer` appends a new carrier and leaves
+an existing list unchanged. `st fleet transports remove fabric` keeps the relative
+order of remaining carriers and refuses to remove the last usable transport.
+Use `st fleet transports prefer tailscale` or `st fleet transports prefer fabric`
+to move an already enabled carrier first while preserving the remaining order.
+Preference only reorders: it never exposes, unexposes, enables, or removes a
+transport, and rejects a carrier absent from the list. An already-first carrier
+is a no-op, including no service restart. Changes are locked, saved atomically,
+and publish the existing enabled endpoints before refreshing services.
+These are local settings: choose the preference on each member independently.
+Installed services restart automatically; otherwise restart both `st3 daemon` and
+`st3 replication-worker` as instructed, including when using `--no-service`.
+The daemon reloads peer-relay transport settings; the worker reloads replication
+transport settings. Restarting only the worker leaves the running daemon's relay
+preference and enabled transports unchanged.
+
 ## Local adapter membership and leave authority
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
@@ -184,8 +217,9 @@ with `details.reason = "dial-out-owner"` and an explicit no-inbound-route messag
 conversation, terminal, raw attach, workspace and attachment reads, without trying listening
 peers as relays. The member's published mode overrides a configured direct URL. Correct an
 incorrect mode on the owning member with `st fleet mode listening`. This restarts installed
-services; without installed services (or with `--no-service`), restart `st3 replication-worker`
-as the command instructs. The restarted worker enables its listener and publishes the new
+services; without installed services (or with `--no-service`), restart both `st3 daemon`
+and `st3 replication-worker` as the command instructs. The restarted daemon reloads
+relay settings; the restarted worker enables its listener and publishes the new
 mode/endpoints. Other nodes see it after replication and at most five seconds of membership
 caching. Reverse owner-RPC and PTY transport over a dial-out connection
 requires separate transport support.
@@ -698,6 +732,10 @@ instead of accidentally selecting the older peer's full-inventory answer path.
 
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
+Each exchange also carries a claim-range summary: claim-range protocol version 1, and the count and digest of every claim its sender retains. Two members can hold different envelopes and still retain the same claims, so a member compares the claims, not envelope histories or projection outputs. The digest comes from the store's range index (`claim_range_digests`), and a summary omits it while the index is still folding claims in. A member compares only a summary of the version it speaks with its own folded index, and records in the peer's sync status when it last compared and since when the claims have differed (`claims_compared_at_unix_ms`, `claims_differ_since_unix_ms`). Claims in flight differ for a while, so the difference is reported and gates nothing: it does not mark the pair diverged, end or hold a first sync, or start a repair. Missing claims still arrive through ordinary envelope transport. An older peer sends no summary and ignores this one, and is compared by envelopes alone.
+
+When the claims differ and an exchange moved no envelopes, the dialing worker walks the difference as the lowest-priority sync work, at most four round trips per exchange. Each round trip is an ordinary summary exchange whose inventory carries one bounded `claim_range_query`, and the peer answers in its exchange's `claim_ranges`: every non-empty top range (64 tops by the first six bits of a claim ID), then the leaves of at most 4 differing tops (4,096 leaves by the first three hex digits), then the IDs of at most 8 differing leaves (at most 4,096 IDs beyond the first leaf), then the envelopes carrying at most 512 claims the walker found it lacks. Those envelopes travel with the peer's ordinary exchange and are admitted like any other; no projection image or peer result is installed. A claim the walker has retired is never asked for, and a range the peer holds nothing in is not descended, since only the peer's claims can be missing here. A walk runs once for each pair of whole-set digests, so claims one side retired, or holds that the other lacks, cost one walk until either side's claims change; an answer from an index still folding claims in is asked again at the next exchange. A peer without the claim-range protocol ignores the query and is never walked.
+
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
@@ -716,8 +754,8 @@ its first differing ranges in order, and this build no longer falls back to a fu
 when that listing stops on tombstone ranges. The large answers also stop once every member runs
 this build. A pair of members with only tombstone differences reports no
 progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
-remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
-[#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
+remains separate ([#1433](https://github.com/compoundingtech/fractal/issues/1433),
+[#1052](https://github.com/compoundingtech/fractal/issues/1052)); live-envelope convergence
 does not assert equal tombstone inventories.
 
 `sync::worker::tests::checkpoint_tombstones_do_not_starve_later_live_ranges` proves later notes
@@ -1175,6 +1213,14 @@ person runs `st replication checkpoint resume --reason ...`.
 
 Checkpoints are on by default. `[checkpoint] enabled = false` in a node's config stops that node
 sealing. Every participant must seal, so this stops trimming for the whole fleet.
+
+`[trim] local = true` in a member's config makes that member trim on its own instead of by
+checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
+checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
+had already committed still finishes; a checkpoint it was still recording stays recorded as it was
+and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
+it stops the old checkpoints on the other members until a person excuses it. No claim family is
+trimmed locally yet.
 
 ## Recovery
 

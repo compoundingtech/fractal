@@ -7,9 +7,10 @@ pub use fractal_ui_model::missions::{Mission, Step, StepState, Word};
 use std::collections::BTreeMap;
 
 /// Something that arrives later. `Loading` is never drawn as empty.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 #[serde(tag = "state", content = "value", rename_all = "snake_case")]
 pub enum Load<T> {
+    #[default]
     Loading,
     Ready(T),
     Failed(String),
@@ -100,6 +101,13 @@ pub struct World {
     pub usage_limits: Vec<fractal_client::UsageLimit>,
     #[serde(skip)]
     pub agent_messages: Option<fractal_client::AgentMessageEstimate>,
+    /// Objectives and budgets, from st's `slo.list` read: the same rows the phone and the web
+    /// app show.
+    #[serde(skip)]
+    pub slo: Load<Vec<fractal_client::SloRow>>,
+    /// What was left of each objective or budget across the chart period, by its id.
+    #[serde(skip)]
+    pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -440,6 +448,8 @@ impl Subagent {
 /// What the details pane shows about an agent. Every field is optional: st may not say.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AgentDetails {
+    /// Pending mailbox custody shown on retired agents.
+    pub mail_custody: Option<String>,
     /// The goal of the step it holds now.
     pub goal: Option<String>,
     pub claimed: Option<String>,

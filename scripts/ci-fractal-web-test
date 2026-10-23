@@ -52,6 +52,10 @@ def check(name, outcome, expected):
 # Match the generated client export graph and web lane inputs, not their Rust generators.
 detector_contract = runpy.run_path(str(detector))
 web_inputs = (
+    "packages/fractal-sdk/src/effect/mod.ts",
+    "packages/fractal-sdk/package.json",
+    "packages/fractal-sdk/tsconfig.json",
+    "packages/fractal-sdk/vitest.config.ts",
     "clients/typescript/fractal-client/index.ts",
     "clients/typescript/fractal-client/Models.generated.ts",
     "clients/typescript/fractal-client/Client.generated.ts",
@@ -72,6 +76,13 @@ web_inputs = (
     "flake.lock",
     "scripts/ci-web-shell",
     "scripts/ci-web-shell-test",
+    # Read by the lane without a web source naming them (the frozen install, an SDK fixture, the web shell hook, the
+    # scenario privacy lane): a change to only these must still run the lane.
+    "apps/ios/package.json",
+    "docs/st3/client-v0/fixtures/timeline-conformance.json",
+    "pnpm-source-inputs.json",
+    "pnpm-source-inputs.json.genie.ts",
+    "scripts/check-public-repo",
 )
 non_web_inputs = (
     "crates/fractal-client/src/lib.rs",
@@ -81,6 +92,9 @@ non_web_inputs = (
     "nested/megarepo.kdl",
     "nested/megarepo.lock",
     "nested/flake.lock",
+    "apps/ios/Sources/App.swift",
+    "apps/ios/package.json.bak",
+    "scripts/check-public-repo-test",
 )
 unexpected = []
 for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
@@ -263,7 +277,7 @@ assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' 
 assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}" in execution, "the per-commit budget"
 assert "APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}" in execution, "PRs run the related app tests, merge groups all"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
-assert "needs: [fractal-web-changes, genie-freshness]" in execution
+assert "needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]" in execution
 assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
 assert "needs.genie-freshness.result == 'success'" in execution
 assert "bash scripts/ci-web-shell run bash scripts/ci-fractal-web" in execution, "the lanes run in the cached web shell"
@@ -286,10 +300,13 @@ upkeep = (root / ".github/workflows/main-upkeep.yml").read_text()
 assert "name: Save the web shell closure" in upkeep
 assert "name: Save the pnpm store" in upkeep
 assert "bash scripts/ci-web-shell fill" in upkeep
-assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
+assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution, evidence-gate-fractal-web]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
-assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"
+required = [check["context"] for ruleset in json.loads(settings)["rulesets"] if ruleset["name"] == "main"
+            for rule in ruleset["rules"] if rule["type"] == "required_status_checks"
+            for check in rule["parameters"]["required_status_checks"]]
+assert "fractal-web" in required, "fractal-web is a required check on main"
 print("passed: generated jobs are unfiltered, hosted, bounded and fail closed")
 
 client = blocks["typescript-client"]
@@ -330,9 +347,10 @@ lanes = (root / "scripts/ci-fractal-web").read_text()
 assert lanes.index("lane \"Frozen install\" pnpm install --frozen-lockfile") < lanes.index("run_streams stream_scenarios"), "the install runs before the parallel streams"
 assert lanes.index("python3 scripts/ci-fractal-web-licenses --check") < lanes.index("buck2 build //:typecheck") < lanes.index("\nlane \"Toolchain and Buck root\"")
 print("passed: license coverage and manifest guards are wired into the generated CI lanes")
-assert 'lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.config.ts' in lanes
-assert 'lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/fractal-sdk exec vitest run --config vitest.perf.config.ts' in lanes
-sdk = root / "apps/fractal-web/packages/fractal-sdk"
+assert 'lane "SDK typecheck" pnpm --filter @fractal/sdk typecheck' in lanes
+assert 'lane "SDK unit tests" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.config.ts' in lanes
+assert 'lane "SDK frame CPU budgets" pnpm --dir packages/fractal-sdk exec vitest run --config vitest.perf.config.ts' in lanes
+sdk = root / "packages/fractal-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
@@ -475,14 +493,16 @@ assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*" in ga
 assert "actions/upload-artifact@v4" in execution
 assert "actions/download-artifact@v4" in gate_job
 assert "kit-play-shards.mjs" in gate_job
-assert gate_job.count(f"if: {sharded} && needs.fractal-web-changes.outputs.relevant == 'true'") == 3, "pull requests skip the shard aggregation"
+assert gate_job.count(f"if: {sharded} && needs.fractal-web-changes.outputs.relevant == 'true'") == 1, "pull requests skip exact shard aggregation, not cost publication"
+assert "kit-play-cost.mjs" in gate_job
+assert "id: cost-receipts" in gate_job
 print("passed: merge-group shards preserve receipts and the semantic gate validates complete coverage")
 
 # The kit module graph check: every bundled repository file must be a declared kit input.
 graph_check = root / "scripts/ci-fractal-web-kit-graph"
 detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
 assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
-roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "apps/fractal-web/packages/fractal-sdk/src/effect/resourceDecode.ts"]
+roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "packages/fractal-sdk/src/effect/resourceDecode.ts"]
 assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"

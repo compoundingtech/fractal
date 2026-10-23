@@ -1569,6 +1569,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.27.0",
  "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -1758,6 +1759,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallclaims",
+ "subtle",
  "tar",
  "tempfile",
  "tokio",
@@ -2069,6 +2071,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-mission-ui"
+version = "0.1.0"
+dependencies = [
+ "fractal-conversation-ui",
+ "fractal-ui-model",
+ "ratatui",
+]
+
+[[package]]
 name = "fractal-missions"
 version = "0.1.0"
 dependencies = [
@@ -2328,6 +2339,7 @@ dependencies = [
  "fractal-secrets",
  "fractal-telemetry",
  "fractal-terminal-direct",
+ "fractal-tiles-registry",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -2453,6 +2465,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-tiles-registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "fractal-tui"
 version = "0.1.0"
 dependencies = [
@@ -2468,6 +2489,7 @@ dependencies = [
  "fractal-conversation-ui",
  "fractal-daemon",
  "fractal-feed",
+ "fractal-mission-ui",
  "fractal-schema",
  "fractal-terminal-direct",
  "fractal-ui-model",

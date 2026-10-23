@@ -1433,6 +1433,8 @@ mod tests {
         let config = Config {
             node: "node-a".into(),
             access_mode: None,
+            claude_primary_ownership: None,
+            claude_primary_ownership_observe: None,
             seat_priority: None,
             person: None,
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
@@ -1453,6 +1455,7 @@ mod tests {
             github: crate::config::GithubConfig::default(),
             changes: crate::changes::config::Config::default(),
             checkpoint: crate::config::CheckpointConfig::default(),
+            trim: crate::config::TrimConfig::default(),
             limits: crate::config::LimitsConfig::default(),
             reconcile: crate::config::ReconcileConfig::default(),
             codex_work_without_asking: None,

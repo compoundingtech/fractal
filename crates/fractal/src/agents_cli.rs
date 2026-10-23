@@ -418,6 +418,7 @@ pub(super) async fn run_agents(
                     fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
+                        successor: args.successor.map(|value| if value.starts_with("agent/") { value } else { format!("agent/{value}") }),
                     },
                 )
                 .await?;

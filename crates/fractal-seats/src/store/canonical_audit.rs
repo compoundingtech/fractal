@@ -13,6 +13,9 @@ use fractal_missions::store::tests_shared_seats::{exchange_of, harness_state, ta
 // including columns the old graph digest did not cover. Local arrival cursors are tested through
 // the shared readers they accelerate rather than compared as if they were replicated identities.
 const SHARED_TABLES: &[(&str, &[&str])] = &[
+    ("slo_episode_events", &[]),
+    ("slo_episode_heads", &[]),
+    ("slo_pending", &[]),
     ("operations", &[]),
     ("blobs", &[]),
     ("documents", &["created_index"]),
@@ -123,6 +126,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "account_limit_seats",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local preparation state and queues, rebuildable from canonical claims.
+        "local_resource_preparation",
+        "local_resource_preparation_claims",
+        "local_resource_preparation_pending",
+        "local_resource_preparation_dirty",
         "local_glass_head_pending",
         "local_glass_head_dirty",
         "local_directive_note_pending",
@@ -1249,6 +1257,17 @@ fn reopening_a_legacy_json_subtype_digest_reseeds_and_replaces_its_triggers() {
 fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
     let store = Store::open_memory("alder").unwrap();
     write_audit_history(&store);
+    // The SLO breach tables hold projected rows; the digest covers each of their columns, so this
+    // control writes one row of each directly, apart from the reducer that normally fills them.
+    // It stays out of the shared history, whose peers rebuild these rows from claims.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h96cc0d92ac25 owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_episode_events(episode,event,member,fleet,objective,ordinal,claim_id,body,conflict,dispatched_at_ms,recorded_at_ms)
+            VALUES('episode-a','pending','alder','fleet-a','objective-a',1,'claim-a','{}',0,NULL,1)", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h043ea9e4de4e owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_episode_heads(fleet,member,objective,episode,ordinal,conflict) VALUES('fleet-a','alder','objective-a','episode-a',1,0)", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9d9bf03dc42a owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_pending(episode,fleet,member,objective,ordinal,onset_end_ms,onset_claim,body,body_key,mission_run)
+            VALUES('episode-a','fleet-a','alder','objective-a',1,1,'claim-a','{}','key-a',NULL)", [])?;
+        Ok(())
+    }).unwrap().unwrap();
     let mut connection = store.connection.lock().unwrap();
     // Deliberate projection corruption checks coverage independently of reducer semantics.
     connection

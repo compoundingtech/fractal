@@ -172,6 +172,7 @@
 "subagent.appeared" = { class = "transition", window = "7d", pending = "the subagent lease fold reads it" }
 "subagent.ended" = { class = "transition", window = "7d", pending = "the subagent lease fold reads it" }
 "subagent.renewed" = { class = "current", pending = "the subagent lease fold reads every renewal" }
+"slo.breach-transition" = { class = "transition", window = "7d" }
 "subscription.batch-sent" = { class = "transition", window = "7d", pending = "batch delivery reads it" }
 "subscription.batched" = { class = "transition", window = "7d", pending = "batch delivery reads it" }
 "subscription.mission-deferred" = { class = "transition", window = "7d" }
@@ -180,7 +181,7 @@
 "subscription.mission-request-released" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "subscription.mission-requested" = { class = "transition", window = "7d", pending = "pending requests read it" }
 "subscription.mission-started" = { class = "transition", window = "7d", pending = "it closes a mission request" }
-"subscription.state" = { class = "current", pending = "no reader audit yet" }
+"subscription.state" = { class = "current", pending = "full-value contract declared (full_value.rs); removal is a later step" }
 "subscription.watch-ended" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.input.requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.input.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
@@ -365,6 +366,13 @@ slot = []
 keep = "newest"
 undescribed = true
 
+# SLO onset, owner, dispatch and recovery fences remain authoritative. Only redundant
+# receipts of recovered episodes can compact after seven days; cited sources and
+# ordinary mission/work history retain the existing checkpoint reference guards.
+[[rules]]
+kind = "slo.breach-transition"
+slot = []
+keep = "episode-event-fences-and-conflicts-after-recovery-7d"
 # Keep pending history, then compact to the newest observation after one day.
 # The resolution and newest observation are never dropped.
 [[rules]]

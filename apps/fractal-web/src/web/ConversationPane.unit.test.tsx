@@ -29,6 +29,7 @@ vi.mock('../data/react.tsx', async () => {
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,
   useNowSnapshot: () => 1000,
+  usePausedNow: () => undefined,
   useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
   useAttention: () => ({ _tag: 'Waiting' }),
   })
@@ -207,7 +208,7 @@ describe('ConversationPane kit composition', () => {
     expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
-    expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')
+    expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')
     expect(workspace).toContain("hiddenPane: { contentVisibility: 'hidden'")
     expect(workspace).toContain('<ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />')
     expect(workspace).not.toContain('This subject has no available native view.')

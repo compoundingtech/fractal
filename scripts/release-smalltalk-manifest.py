@@ -24,6 +24,8 @@ for target in targets:
             for binary in ('st3', 'pty'):
                 member = archive.getmember(f'{package}/bin/{binary}')
                 assert member.isfile() and member.mode & 0o111, f'missing executable: {binary}'
+            web = archive.getmember(f'{package}/share/fractal-web/index.html')
+            assert web.isfile(), 'missing embedded web UI'
             assert not any(name.startswith((f'{package}/bin/stui', f'{package}/bin/st3-migrate')) for name in archive.getnames()), 'retired executable in archive'
             for installer in ('install.sh', 'install-macos.py'):
                 member = archive.getmember(f'{package}/{installer}')

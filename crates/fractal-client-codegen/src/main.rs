@@ -265,6 +265,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {{ self.get(&format!(\"/v1/client/documents/content?name={{}}\", percent_encode(name))).await }}"
             )?;
+        } else if id == "schedules.list" {
+            writeln!(out, "    pub async fn schedules_list(&self, cursor: Option<&str>, limit: Option<usize>, unheard_after_ms: Option<u64>) -> Result<Envelope<SchedulesPage>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} if let Some(age) = unheard_after_ms {{ query.push(format!(\"unheard_after_ms={{age}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/schedules{{suffix}}\")).await }}")?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -450,6 +452,8 @@ fn swift_operation_methods(
                 out,
                 "    public func documentGet(name: String) async throws -> Envelope<DocumentContent> {{ try await get(\"v1/client/documents/content\", query: [.init(name: \"name\", value: name)]) }}"
             )?;
+        } else if id == "schedules.list" {
+            writeln!(out, "    public func schedulesList(cursor: String? = nil, limit: Int? = nil, unheardAfterMS: UInt64? = nil) async throws -> Envelope<SchedulesPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let unheardAfterMS {{ query.append(.init(name: \"unheard_after_ms\", value: String(unheardAfterMS))) }}; return try await get(\"v1/client/schedules\", query: query) }}")?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -729,6 +733,12 @@ fn validate_surfaces(
         "DocumentContent",
         "DocumentItem",
         "DocumentsPage",
+        "SchedulesPage",
+        "ScheduleDeclaration",
+        "ScheduleOwner",
+        "ScheduleKnowledge",
+        "ScheduleCoverage",
+        "ScheduleUnheardHost",
         "DocumentReference",
         "DocumentReferences",
         "MessageBody",
@@ -1441,6 +1451,8 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(name: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }}), undefined, requestOptions); }}"
             )?;
+        } else if id == "schedules.list" {
+            writeln!(out, "    async schedulesList(options: {{ cursor?: string; limit?: number; unheard_after_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SchedulesPage>> {{ return this.get('/v1/client/schedules' + query(options), undefined, requestOptions); }}")?;
         } else if id == "documents.list" {
             writeln!(
                 out,

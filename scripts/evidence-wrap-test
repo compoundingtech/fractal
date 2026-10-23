@@ -95,6 +95,18 @@ def main(argv):
         assert statement(failed['record'])['predicate']['observed']['checks']['linux-gate']['exit_code'] == 3
         print('passed: a failing command is recorded with its exit code, and the wrapper returns it')
 
+        base = 'b' * 40
+        extra = wrap(['true'], '--input', f'clippy_base_sha={base}')
+        assert extra.returncode == 0, extra.stderr.decode()
+        recorded = statement(json.loads(extra.stderr.decode()[extra.stderr.decode().index('{'):])['record'])['predicate']['observed']['inputs']
+        assert recorded['clippy_base_sha'] == base and recorded['attempt'] == '1', recorded
+        notes_before = git(repo, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/')
+        for bad in ('attempt=9', 'lane_definition_sha256=x', 'Clippy=1', 'clippy_base_sha', 'clippy_base_sha=', '=x', '1x=2'):
+            refused = wrap(['true'], '--input', bad)
+            assert refused.returncode != 0 and b'--input' in refused.stderr, (bad, refused.stderr.decode())
+        assert git(repo, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/') == notes_before, 'a refused input signs nothing'
+        print('passed: --input records one more input, and refuses a name this script sets itself or a malformed one')
+
         # A host that preloads a library into every process (hetz2: jemalloc) still signs: the caller's loader and
         # interpreter variables reach the command, never the signer, and the signer itself still refuses them.
         (tmp / 'empty-lib').mkdir()

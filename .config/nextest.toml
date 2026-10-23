@@ -38,7 +38,7 @@ final-status-level = "flaky"
 # files. It leaves out st2-only code: st2's own unit tests (none of its remaining modules is
 # used by st3), its catalog, eval-run, resync, nomad-survival, event and resource-profile
 # supervisor tests, and st-drivers' catalog, resync and resource-profile supervisor modules.
-# `transport_isolation` needs real systemd user scopes; the isolation-vm job runs it in a
+# `transport_isolation` needs real systemd user scopes; the daily isolation-vm lane runs it in a
 # NixOS VM. The cost check and the load test (`daemon_cost`, `daemon_load`) run in their own
 # perf jobs (scripts/ci-perf). Only the in-memory targets-file linkage unit also runs here;
 # it starts no daemon or load. See docs/ci.md.
@@ -165,3 +165,10 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'package(=fractal) and binary(=integration) and kind(test) and (test(=daemon_restart::stop_escalation::claude_stop_escalation_records_ended_before_its_group_sigkill) or test(=daemon_restart::stop_escalation::opencode_stop_escalation_records_cover_before_its_group_sigkill) or test(=daemon_restart::stop_escalation::opencode_graceful_stop_rewrites_cover_with_the_reaped_signal))'
 retries = 0
+
+# SLO source controls retain the first adverse result. Measurement cases run in
+# nextest's isolated per-test process and print actual tuples on success.
+[[profile.ci.overrides]]
+filter = '(package(=fractal-store) and test(/^store::slo_breaches::tests::/)) or (package(=fractal-reconcile) and test(/^reconcile::tests::slo_breach_flow_tests::/))'
+retries = 0
+success-output = "immediate"

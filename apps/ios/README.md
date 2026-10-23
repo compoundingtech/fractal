@@ -75,7 +75,7 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 ## Build locally
 
-For a step-by-step setup, see [build and run the iOS app](../../docs/ios-app.md), including prerequisites, simulator and device builds, and pairing.
+For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
 With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.7.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/smalltalk.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
 
@@ -301,6 +301,10 @@ delivery state or stop installation.
 Keep all logs and state private: native tools include signing/device details.
 
 Focused scheduler tests: `python3 -m unittest discover -s apps/ios/scripts -p 'test_release_delivery.py'`.
+
+Debug builds resolve Metro without a network probe on the launch main thread. The `withNonblockingMetro` config plugin preserves this through Expo prebuild: it uses React Native's configured `RCT_jsLocation` host (including a custom port), otherwise the build's `ip.txt`, otherwise `localhost`, and delegates URL construction, asynchronous loading, and the error screen to React Native. An unreachable configured host shows the normal bundle-loading error instead of silently selecting another server. Set the host through React Native's development settings or launch with `-RCT_jsLocation <host>:<port>`; restore a reachable host and reload to recover. Release still uses the embedded bundle. The plugin fails prebuild if Expo changes the Swift entry-point template rather than silently dropping this launch guarantee.
+
+This is an application-entry-point workaround, not a React Native patch: [the upstream status-probe issue](https://github.com/react/react-native/issues/58903) tracks removing synchronous discovery waits while retaining upstream fallback semantics.
 
 The Debug app accepts a short-lived pairing deep link for headless simulator checks: `com.compoundingtech.smalltalk.starter://pair?gateway=...&id=...&code=...`. The link opens the pairing form with the code prefilled; it does not submit the code until a separately supplied fingerprint or explicit unpinned override is chosen. The handler is disabled in Release. Treat the link as a temporary credential and do not commit or log its populated form.
 

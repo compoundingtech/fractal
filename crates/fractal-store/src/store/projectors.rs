@@ -76,6 +76,11 @@ pub const APPEND: &[AppendProjector] = &[
         project: |transaction, claim| resources::refresh(transaction, &claim.subject),
     },
     AppendProjector {
+        name: "resource-preparation",
+        takes: Takes::Every,
+        project: |transaction, _| resources::flush_preparation(transaction),
+    },
+    AppendProjector {
         name: "glass-heads",
         takes: Takes::Kinds(&["glass.upserted", "glass.deleted"]),
         project: |transaction, _| glass_heads::flush(transaction),
@@ -136,6 +141,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "planning", run: rebuild_planning_tx },
     Hook { name: "identities", run: identities::rebuild },
     Hook { name: "resources", run: resources::rebuild },
+    Hook { name: "slo-breaches", run: slo_breaches::rebuild },
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },

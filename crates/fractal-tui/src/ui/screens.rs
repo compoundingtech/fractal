@@ -35,10 +35,6 @@ fn alerts_out_of_date(world: &World) -> Option<String> {
     Some(why.join("; "))
 }
 
-/// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
-/// only have invented data to show (Nathan, 2026-09-28).
-pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
-
 pub enum Item {
     Header {
         title: String,
@@ -141,20 +137,17 @@ pub fn word_style(word: Word, spinner: &'static str) -> (&'static str, Color) {
         Word::Failed => ("✕", theme::FAULT),
         Word::Cancelled => ("⊘", theme::QUIET),
         Word::NotStarted => ("○", theme::QUIET),
+        Word::Unknown => ("?", theme::QUIET),
     }
 }
 
 fn step_style(state: StepState, spinner: &'static str) -> (&'static str, Color, &'static str) {
-    match state {
-        StepState::Done => ("▰", theme::DONE, "done"),
-        StepState::Cancelled => ("−", theme::SURFACE2, "cancelled"),
-        StepState::Working => (spinner, theme::WORKING, "working"),
-        StepState::Ready => ("▱", theme::WAITING, "ready"),
-        StepState::Waiting => ("◐", theme::SAPPHIRE, "waiting"),
-        StepState::NeedsYou => ("◆", theme::PERSON, "needs you"),
-        StepState::Failed => ("✕", theme::FAULT, "failed"),
-        StepState::Pending => ("▱", theme::SURFACE2, "later"),
-    }
+    fractal_mission_ui::step_style(
+        state,
+        spinner,
+        &fractal_mission_ui::Palette::default(),
+        &fractal_mission_ui::Glyphs::default(),
+    )
 }
 
 pub fn attention_style(kind: &AttentionKind) -> (&'static str, Color) {
@@ -1523,43 +1516,11 @@ fn flow<'a>(
     steps: impl Iterator<Item = (&'a str, &'a [String], Color)>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let steps = steps.collect::<Vec<_>>();
-    let mut depth = vec![0usize; steps.len()];
-    for _ in 0..steps.len() {
-        for (index, (_, after, _)) in steps.iter().enumerate() {
-            for dependency in after.iter() {
-                if let Some(position) = steps.iter().position(|(name, _, _)| name == dependency) {
-                    depth[index] = depth[index].max(depth[position] + 1);
-                }
-            }
-        }
-    }
-    let layers = depth.iter().max().map(|max| max + 1).unwrap_or(0);
-    let mut runs = vec![];
-    for layer in 0..layers {
-        if layer > 0 {
-            runs.push(run(" → ", theme::fg(theme::SURFACE2)));
-        }
-        let names = steps
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| depth[*index] == layer)
-            .map(|(_, step)| *step)
-            .collect::<Vec<_>>();
-        // Steps that can run side by side read as a list: `a, b → c`.
-        for (index, (name, _, color)) in names.iter().enumerate() {
-            if index > 0 {
-                runs.push(run(", ", theme::dim()));
-            }
-            runs.push(run(name.to_string(), theme::fg(*color)));
-        }
-    }
-    text::wrap(
-        &runs,
+    fractal_mission_ui::flow(
+        steps,
         width,
-        &[run("  ", theme::dim())],
-        &[run("  ", theme::dim())],
-        None,
+        &fractal_mission_ui::Palette::default(),
+        &fractal_mission_ui::Glyphs::default(),
     )
 }
 
@@ -1835,6 +1796,7 @@ fn display_rank(word: Word) -> u8 {
         Word::Cancelled => 10,
         Word::Done => 11,
         Word::NotStarted => 12,
+        Word::Unknown => 13,
     }
 }
 
@@ -1885,7 +1847,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
             current = Some(mission.word);
             let (_, color) = word_style(mission.word, spinner);
             items.push(Item::Header {
-                title: mission.word.name().into(),
+                title: mission.label(),
                 count: missions
                     .iter()
                     .filter(|other| other.word == mission.word)
@@ -2015,7 +1977,7 @@ pub fn mission_detail(
     let inner = width.saturating_sub(4);
     doc.line(Line::from(vec![
         span(
-            format!(" {glyph} {} ", mission.word.name()),
+            format!(" {glyph} {} ", mission.label()),
             Style::default()
                 .fg(theme::CRUST)
                 .bg(color)
@@ -2063,137 +2025,32 @@ pub fn mission_detail(
         doc.append(card, 0);
     }
     what_you_can_do(&mut doc, world, mission, width, spinner);
-    let (done, total) = mission.progress();
-    let mut steps = Doc::new();
-    let mut bar = meter(done, total, 20, theme::DONE);
-    bar.push(span(format!("  {done}/{total} done"), theme::dim()));
-    steps.line(Line::from(bar));
-    // The order only says something when a step waits for another.
-    if mission.steps.iter().any(|step| !step.after.is_empty()) {
-        steps.lines(flow(
-            mission.steps.iter().map(|step| {
-                (
-                    step.name.as_str(),
-                    step.after.as_slice(),
-                    step_style(step.state, spinner).1,
-                )
-            }),
-            inner,
-        ));
-    }
-    let name_width = mission
-        .steps
-        .iter()
-        .map(|step| text::width(&step.name))
-        .max()
-        .unwrap_or(8)
-        .clamp(8, inner / 3);
-    steps.blank();
-    for step in &mission.steps {
-        let (glyph, color, word) = step_style(step.state, spinner);
-        let key = format!("step:{}:{}", mission.id, step.name);
-        let open = expanded.contains(&key);
-        steps.targets.push(super::doc::Target {
-            line: steps.lines.len(),
-            column: 0,
-            width: inner as u16,
-            hit: Hit::ToggleTool(key),
-        });
-        steps.line(Line::from(vec![
-            span(if open { "▾ " } else { "▸ " }, theme::dim()),
-            span(format!("{glyph} "), theme::strong(color)),
-            span(
-                format!(
-                    "{:<w$} ",
-                    text::truncate(&step.name, name_width),
-                    w = name_width
-                ),
-                theme::text(),
-            ),
-            span(format!("{:<11}", word), theme::fg(color)),
-            span(
-                // A long owner is cut so its age never runs into it.
-                format!(
-                    "{:<18}",
-                    text::truncate(step.owner.as_deref().unwrap_or("nobody"), 17)
-                ),
-                if step.owner.is_some() {
-                    theme::soft()
-                } else {
-                    theme::fg(theme::WAITING)
+    let steps = fractal_mission_ui::steps(
+        mission,
+        inner,
+        spinner,
+        expanded,
+        &fractal_mission_ui::Palette::default(),
+        &fractal_mission_ui::Glyphs::default(),
+        &theme::conversation(),
+    );
+    let steps = Doc {
+        lines: steps.lines,
+        targets: steps
+            .targets
+            .into_iter()
+            .map(|target| super::doc::Target {
+                line: target.line,
+                column: target.column,
+                width: target.width,
+                hit: match target.hit {
+                    fractal_mission_ui::Intent::ToggleStep(key) => Hit::ToggleTool(key),
                 },
-            ),
-            span(step.age.clone(), theme::dim()),
-        ]));
-        if let Some(note) = &step.note {
-            steps.lines(text::wrap(
-                &text::inline(note, theme::dim()),
-                inner,
-                &[run("      ", theme::dim())],
-                &[run("      ", theme::dim())],
-                None,
-            ));
-        }
-        // A step in hand says what it last reported, the status a person reads first.
-        if step.state == StepState::Working
-            && let Some(progress) = mission
-                .step_metadata
-                .get(&step.id)
-                .and_then(|metadata| metadata.last_progress.as_deref())
-        {
-            steps.lines(text::wrap(
-                &text::inline(progress, theme::text()),
-                inner,
-                &[run("      ", theme::dim())],
-                &[run("      ", theme::dim())],
-                None,
-            ));
-        }
-        // A step whose holder sat idle with nothing set to wake it says when st nudged it.
-        if step.state == StepState::Working
-            && let Some(nudged) = mission
-                .step_metadata
-                .get(&step.id)
-                .and_then(|metadata| metadata.nudged.as_deref())
-        {
-            steps.line(Line::from(vec![
-                span("      ", theme::dim()),
-                span(
-                    format!("nudged {nudged} ago: idle holding it, nothing set to wake it"),
-                    theme::soft(),
-                ),
-            ]));
-        }
-        if open {
-            let pad = "      ";
-            let mut field = |label: &str, values: &[String], style: Style| {
-                for (index, value) in values.iter().enumerate() {
-                    let head = if index == 0 {
-                        format!("{pad}{label:<12}")
-                    } else {
-                        format!("{pad}{:<12}", "")
-                    };
-                    steps.lines(text::wrap(
-                        &text::inline(value, style),
-                        inner,
-                        &[run(head, theme::dim())],
-                        &[run(format!("{pad}{:<12}", ""), theme::dim())],
-                        None,
-                    ));
-                }
-            };
-            field("goal", &step.goals, theme::text());
-            field("constraint", &step.constraints, theme::soft());
-            field("gate", &step.gates, theme::fg(theme::PERSON));
-            field("blocked by", &step.blockers, theme::fg(theme::RED));
-            if !step.after.is_empty() {
-                field("after", &[step.after.join(", ")], theme::soft());
-            }
-            field("attempt", &[step.attempt.to_string()], theme::soft());
-            steps.blank();
-        }
-    }
-    steps.line(Line::from(span("click a step to open it", theme::dim())));
+            })
+            .collect(),
+        messages: steps.messages,
+        entries: steps.entries,
+    };
     doc.card("steps", theme::OVERLAY1, false, steps, width);
     let mut agents = Doc::new();
     for id in &mission.agents {
@@ -2765,7 +2622,7 @@ pub fn worktree_detail(
             });
             missions.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(mission.word.name(), theme::fg(color)),
+                span(mission.label(), theme::fg(color)),
             ]));
         }
     }
@@ -2903,6 +2760,9 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::fg(harness_color(agent.harness)),
         );
         doc.field("host", &agent.host, width, theme::soft());
+        if let Some(custody) = &agent.details.mail_custody {
+            doc.field("mail", custody, width, theme::text());
+        }
         if let Some(tree) = &agent.worktree {
             doc.field("worktree", tree, width, theme::soft());
         }
@@ -2944,7 +2804,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.line(Line::from(vec![
             span(format!("{glyph} "), theme::strong(color)),
             span(mission.title.clone(), theme::bold()),
-            span(format!("  {}", mission.word.name()), theme::fg(color)),
+            span(format!("  {}", mission.label()), theme::fg(color)),
         ]));
         doc.line(Line::from(span(mission.id.clone(), theme::dim())));
         doc.line(Line::from(span(mission.word.explain(), theme::fg(color))));
@@ -3005,7 +2865,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
             theme::dim(),
         )));
         doc.blank();
-        doc.buttons(&[("g", "Open in Now", Hit::Key('g'), theme::PERSON)]);
+        doc.buttons(&[("g", "Open in Inbox", Hit::Key('g'), theme::PERSON)]);
     } else {
         doc.wrap(
             &[run(
@@ -3047,6 +2907,9 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
         inner.wrap(&text::inline(fault, theme::text()), width.saturating_sub(4));
         doc.card("broken", theme::FAULT, true, inner, width);
         doc.blank();
+    }
+    if let Some(custody) = &details.mail_custody {
+        doc.field("mail", custody, width, theme::text());
     }
     if agent.state == AgentState::NeedsLogin {
         let mut inner = Doc::new();
@@ -3357,7 +3220,7 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
                     span(path.last().cloned().unwrap_or_default(), theme::bold()),
                 ],
                 vec![span(
-                    format!("{} {done}/{total}", mission.word.name()),
+                    format!("{} {done}/{total}", mission.label()),
                     theme::fg(color),
                 )],
             )
@@ -3397,7 +3260,7 @@ pub fn new_mission_form(fields: &[String; 4], focus: usize, cursor: usize, width
     inner.blank();
     inner.wrap(
         &[run(
-            "Say what you want. A planner turns it into a proposed mission, which appears in Now for you to approve; nothing runs before that.",
+            "Say what you want. A planner turns it into a proposed mission, which appears in Inbox for you to approve; nothing runs before that.",
             theme::soft(),
         )],
         w,
@@ -3676,6 +3539,49 @@ mod tree_tests {
                 .iter()
                 .all(|kind| !kind.starts_with('N') && !kind.starts_with('H')),
             "{kinds:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mission_golden {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn mission_stories_golden() {
+        let world = super::super::demo::world();
+        let mut actual = String::new();
+        for mission in world.missions.items() {
+            for width in [40, 80, 120] {
+                for open in [false, true] {
+                    let expanded = if open {
+                        mission
+                            .steps
+                            .iter()
+                            .map(|step| format!("step:{}:{}", mission.id, step.name))
+                            .collect()
+                    } else {
+                        std::collections::HashSet::new()
+                    };
+                    let doc =
+                        mission_detail(&world, Some(&mission.id), width, "⠋", None, &expanded);
+                    // The digest also locks styles, exact span boundaries and click targets.
+                    let digest = Sha256::digest(format!("{doc:#?}").as_bytes());
+                    actual.push_str(&format!(
+                        "{} width={width} open={open} sha256={digest:x}\n",
+                        mission.id
+                    ));
+                    for line in &doc.lines {
+                        actual.push_str(&line.to_string());
+                        actual.push('\n');
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            actual,
+            include_str!("../../tests/fixtures/mission-stories.golden")
         );
     }
 }

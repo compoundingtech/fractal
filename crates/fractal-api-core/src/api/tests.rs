@@ -6680,6 +6680,87 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
 }
 
 #[tokio::test]
+async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "custody-api-fixture").unwrap();
+    let sent = state.store.append_claim(&ClaimInput {
+        subject: "message/custody-api".into(), kind: "message.sent".into(),
+        actor: Some("person/avery".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/avery")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note kept for the new custodian.")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-api-send".into()),
+    }).unwrap();
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    let retirement = state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "custody-api-retire", &[], Some("agent/example/new"),
+    ).unwrap().0;
+    let app = router(state.clone());
+    let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+    let (status, _) = get_request(app.clone(), "/v1/messages/page?acting_as=agent/example/new").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, denied) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/wrong&limit=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, denied) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/old&limit=1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, page) = get_request(app.clone(),
+        "/v1/messages/page?to=agent/example/old&acting_as=agent/example/new&limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["subject"], sent.subject);
+    let path = "/v1/messages/custody-api/claims";
+    let (status, denied) = json_request(app.clone(), path,
+        json!({"lifecycle":"read","actor":"agent/example/old","idempotency_key":"old-custody-read"})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, read) = json_request(app.clone(), path,
+        json!({"lifecycle":"read","actor":"agent/example/new","idempotency_key":"new-custody-read"})).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["actor"], "agent/example/new");
+    assert_eq!(read["body"]["fields"]["acting_for"], "agent/example/old");
+    assert!(read["body"]["evidence"].as_array().unwrap().iter().any(|id| id == &retirement.id));
+    let (status, closed) = json_request(app, path,
+        json!({"lifecycle":"closed","actor":"agent/example/new","idempotency_key":"new-custody-close"})).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["body"]["fields"]["acting_for"], "agent/example/old");
+}
+
+#[test]
+fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "custody-card-fixture").unwrap();
+    let index = state.store.index().unwrap();
+    let before = client_agent_resources_cached(&state.store, false, index).unwrap();
+    let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+    assert!(old.get("mail_custody").is_none());
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "custody-card-retire", &[], Some("agent/example/new"),
+    ).unwrap();
+    let after_index = state.store.index().unwrap();
+    let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+    let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+    assert_eq!(old["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+    let refolds = state.store.agent_resources_refolded_cards_for_test();
+    let warm = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+    assert_eq!(warm, after);
+    assert_eq!(state.store.agent_resources_refolded_cards_for_test(), refolds);
+}
+
+#[tokio::test]
 async fn eval_upload_posts_its_staged_documents_before_apply() {
     let root = tempfile::tempdir().unwrap();
     let eval_dir = tempfile::tempdir().unwrap();
@@ -9214,6 +9295,198 @@ fn agent_cards_advance_locally_and_keep_historical_snapshots() {
             .collect::<Vec<_>>(),
         ["node.amber", "node.birch", "node.cobalt"]
     );
+}
+
+#[test]
+fn declaration_restart_marker_preserves_suspension_and_placement() {
+    for moving in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = state.store.clone();
+        let source = r#"version 2
+agent "example/overlay" { workspace "/tmp"; harness "codex" {} }
+"#;
+        store.apply_internal(&parse_intent(source, "node").unwrap(), "overlay-source").unwrap();
+        let subject = "agent/example/overlay";
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running", "host":"node",
+                "runtime_id":"example.overlay", "incarnation_id":"old", "restarting_from":"old"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "harness.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"state":"idle", "driver":"codex", "incarnation_id":"old"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert_eq!(checked_agent_cache(&store, false, store.index().unwrap())[0]["state"], "restarting");
+        if moving {
+            let moved = source.replace("workspace", "host \"remote\"; workspace");
+            store.apply_internal(&parse_intent(&moved, "node").unwrap(), "overlay-move").unwrap();
+            let cards = checked_agent_cache(&store, false, store.index().unwrap());
+            assert_eq!(cards[0]["state"], "waiting");
+            assert_ne!(cards[0]["handoff"]["phase"], "running");
+        } else {
+            let token = store.selected_desired_token(subject).unwrap().unwrap();
+            let request = store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "runtime.action.requested".into(), actor: Some("person/test".into()),
+                fields: serde_json::from_value(json!({"action":"suspend", "incarnation_id":"old"})).unwrap(),
+                evidence: vec![token], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "runtime.action.succeeded".into(), actor: Some("person/test".into()),
+                fields: serde_json::from_value(json!({"action":"suspend", "operation_status":"suspended"})).unwrap(),
+                evidence: vec![request.id.clone()], expected_subject: None,
+                idempotency_key: Some(crate::suspension::suspend_completed_key(&request.id)),
+            }).unwrap();
+            let cards = checked_agent_cache(&store, false, store.index().unwrap());
+            assert_eq!(cards[0]["state"], "suspended");
+        }
+    }
+}
+
+#[test]
+fn declaration_relaunch_is_restarting_until_replacement_harness_is_ready() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let intent = parse_intent(
+        r#"version 2
+agent "example/relaunch" { workspace "/tmp"; harness "codex" {} }
+"#,
+        "node",
+    )
+    .unwrap();
+    store
+        .apply_internal(&intent, "relaunch-declaration")
+        .unwrap();
+    let subject = "agent/example/relaunch";
+    let append = |kind: &str, fields: Value| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: None,
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    let state_at = |index| checked_agent_cache(&store, false, index)[0]["state"].clone();
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"old","runtime_id":"example.relaunch"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "starting",
+        "first launch has no replacement"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"idle","driver":"codex","incarnation_id":"old"}),
+    );
+    let ready_cut = store.index().unwrap();
+    assert_eq!(state_at(ready_cut), "running");
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"old","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    let restart_cut = store.index().unwrap();
+    assert_eq!(state_at(restart_cut), "restarting");
+    let raw = client_agent_resources_uncached(&store, false, restart_cut).unwrap();
+    let deadline = raw[0]["_restart_until_unix_ms"].as_u64().unwrap() as u128;
+    assert_eq!(store.agent_roster_valid_until(restart_cut, None), Some(deadline),
+        "the existing agents window must wake at presentation expiry without a new claim");
+    let mut before = raw[0].clone();
+    overlay_declaration_restart(&mut before, deadline - 1);
+    assert_eq!(before["state"], "restarting");
+    let mut stuck = raw[0].clone();
+    overlay_declaration_restart(&mut stuck, deadline);
+    assert_eq!(stuck["state"], "running", "a stale marker cannot conceal the underlying state");
+    assert!(stuck.get("_restart_until_unix_ms").is_none());
+    assert_eq!(
+        state_at(ready_cut),
+        "running",
+        "snapshot before cutover stays unchanged"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"blocked","blocked_on":"human","ask":"permission","driver":"codex","incarnation_id":"old"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "waiting",
+        "the retiring harness's current human block remains visible"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"ended","blocked_on":null,"ask":null,"driver":"codex","incarnation_id":"old"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "failed",
+        "the retiring harness's failure is not hidden by its restart marker"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"idle","blocked_on":null,"ask":null,"driver":"codex","incarnation_id":"old"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "restarting");
+    append(
+        "runtime.observed",
+        json!({"status":"exited","incarnation_id":"old","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "stopped", "a deferred replacement is not active progress");
+    append(
+        "runtime.observed",
+        json!({"status":"starting","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "restarting");
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"new","runtime_id":"example.relaunch","restarting_from":"old"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "restarting",
+        "a new wrapper is not ready"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"blocked","blocked_on":"human","ask":"permission","driver":"codex","incarnation_id":"new"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "waiting",
+        "human blocks remain visible"
+    );
+    append(
+        "harness.observed",
+        json!({"state":"idle","blocked_on":null,"ask":null,"driver":"codex","incarnation_id":"new"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "running");
+    assert_eq!(
+        state_at(restart_cut),
+        "restarting",
+        "replacement readiness cannot rewrite history"
+    );
+    append(
+        "runtime.observed",
+        json!({"status":"stopped","incarnation_id":"new","runtime_id":"example.relaunch"}),
+    );
+    assert_eq!(
+        state_at(store.index().unwrap()),
+        "stopped",
+        "explicit stop has no restart marker"
+    );
+    append(
+        "runtime.observed",
+        json!({"status":"failed","runtime_id":"example.relaunch"}),
+    );
+    assert_eq!(state_at(store.index().unwrap()), "failed");
 }
 
 #[test]

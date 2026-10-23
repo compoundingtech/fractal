@@ -3,16 +3,16 @@
 The root [README](../../README.md) introduces the product and links its guides.
 [Getting started](../getting-started.md) walks through installation and a first mission.
 [Development](../development.md) covers source builds, CI, shared UI models, and repository layout.
-[Home Manager](../home-manager.md) covers declarative installation and user services.
+[Home Manager](../site/reference/home-manager.md) covers declarative installation and user services.
 
 Use these documents for implementation details:
 
 - [Architecture](design.md) defines the stable system shape.
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
-- [KDL lifecycle](kdl-lifecycle.md) defines day-to-day publication and revision workflows.
+- [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
-- [Free mode](kdl-lifecycle.md#free-mode): within a fleet, an agent may do anything the person who
+- [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
@@ -26,8 +26,6 @@ Use these documents for implementation details:
 - [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
 - [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
-- [Founder signing audit](founder-signing-audit.md) explains read-only capture, preserved unsealed
-  upgrades, and the remaining warnings for already-sealed unsigned delegations.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
 - [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
@@ -66,6 +64,8 @@ Use these documents for implementation details:
   asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
+- [Demos](demos.md) explains `st demo play`: a seeded, scripted demo in the terminal interface,
+  in its own instance, with timed and key-paced beats and no model tokens.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
   with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
 - [Sekrets](sekrets.md) explains the opt-in gateway that runs any CLI with a credential no seat
@@ -82,8 +82,7 @@ Use these documents for implementation details:
 - [Eval audit](eval-audit.md) records the test intent and prompt boundary for each st eval.
 - [Running st with omp](omp.md) covers omp seat setup, behavior, and known limits.
 - [Product roadmap](roadmap.md) records accepted future work.
-- [Guided CLI tour](cli-guided-tour.md) is the complete human walkthrough for every public command
-  and subcommand.
+- [CLI reference](../site/reference/cli.md) introduces the command surface and exact installed help.
 - [TUI and Expo iOS design-session brief](app-design-session-brief.md) captures the product promise,
   delivery gates, remote transport research, and autonomous release loop to review before UI work.
 - [Client v0 contract](client-v0/README.md) defines the shared TUI and mobile JSON, event, action,

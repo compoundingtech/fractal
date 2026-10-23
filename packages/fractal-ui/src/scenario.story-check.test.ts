@@ -13,7 +13,8 @@ import { isExportStory } from 'storybook/internal/csf'
 import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import * as nodePath from 'node:path'
-import { globSync } from 'node:fs'
+import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
 import './scenario-fixture-graph.unit.test.ts'
@@ -230,23 +231,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './Workbench.stories.tsx#HostToolReveal': 2936,
   './Workbench.stories.tsx#AllStates': 2936,
   './Workbench.stories.tsx#AllStatesLight': 2936,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#StickyChain': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#PushOutBoundary': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#DepthCap': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#AccessibleRows': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#PinnedClick': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#FocusAndReveal': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#VisibleFocusDoesNotJump': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#CollapseFilterReorder': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#ColdRevealBeforeMeasurement': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#RevealUnvisitedAncestors': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Light440': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Dark1440': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Light1440': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Modal240': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#Modal240Light': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#ChevronIcons': 3355,
-  './assistant-ui/sidebar/SidebarTree.stories.tsx#AllStates': 3355,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardKnown': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardUnknown': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#TimeCohort': 2906,
@@ -257,29 +241,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneTouchTargets': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneFocusNoHover': 2906,
   './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#ThemedOverlaysAndFocus': 2906,
-  './stories/milestone/RedesignMilestone.stories.tsx#Slice': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#SliceLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Loading': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#LoadingLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyRoster': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyRosterLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyThread': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#EmptyThreadLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NoMatch': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NoMatchLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#RosterError': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#RosterErrorLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ThreadUnavailable': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ThreadUnavailableLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Stale': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#StaleLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Navigation': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NavigationLight': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#HideChanges': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#NavigationKeyboard': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ErrorRecovery': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#ThreadRecovery': 3355,
-  './stories/milestone/RedesignMilestone.stories.tsx#Decisions': 3355,
 }
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
@@ -287,10 +248,6 @@ const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#Drawers': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersLight': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersOpen': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersFlow': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
@@ -308,8 +265,75 @@ const loadersByFile = Object.fromEntries(Object.entries(storyLoaders).map(([file
 const storybookDirectory = nodePath.resolve(uiSource, '../.storybook')
 // Do not filter by extension here: every configured file needs a loader or an
 // explicit failure, including newly configured CSF extensions and glob braces.
-const configuredStoryFiles = (globs: string[]) => globSync(globs, { cwd: storybookDirectory })
-  .map(file => nodePath.resolve(storybookDirectory, file))
+const configuredStoryFiles = (globs: string[], directory = storybookDirectory) => {
+  const unsupported = (glob: string): never => {
+    throw new Error(`Cannot derive static Storybook inventory roots for configured pattern: ${glob}`)
+  }
+  const expandBraces = (glob: string): string[] => {
+    const start = glob.indexOf('{')
+    if (start === -1) return glob.includes('}') ? unsupported(glob) : [glob]
+    const alternatives: string[] = []
+    let depth = 0
+    let part = start + 1
+    for (let index = start; index < glob.length; index++) {
+      const character = glob[index]
+      if (character === '{') depth++
+      if (character === '}') {
+        depth--
+        if (depth === 0) {
+          if (alternatives.length === 0) return unsupported(glob)
+          alternatives.push(glob.slice(part, index))
+          return alternatives.flatMap(alternative => expandBraces(glob.slice(0, start) + alternative + glob.slice(index + 1)))
+        }
+      }
+      if (character === ',' && depth === 1) {
+        alternatives.push(glob.slice(part, index))
+        part = index + 1
+      }
+    }
+    return unsupported(glob)
+  }
+  const rejectSymlink = (path: string) => {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) throw new Error(`Symlink in configured Storybook inventory: ${path}`)
+    return stat
+  }
+  const walk = (path: string) => {
+    if (!rejectSymlink(path).isDirectory()) return
+    for (const name of readdirSync(path)) {
+      if (name !== 'node_modules') walk(nodePath.join(path, name))
+    }
+  }
+  const files = new Set<string>()
+  for (const glob of globs) {
+    const expandedGlobs = expandBraces(glob)
+    if (glob.includes('node_modules') || expandedGlobs.some(expanded => expanded.includes('node_modules'))) {
+      throw new Error(`Unsupported node_modules segment in configured Storybook pattern: ${glob}; extend the scenario inventory check before loading dependency stories`)
+    }
+    const roots = new Set(expandedGlobs.map(expanded => {
+      if (/[()!\\]/.test(expanded)) return unsupported(glob)
+      const segments = expanded.split('/')
+      const magic = segments.findIndex(segment => /[*?[]/.test(segment))
+      if (magic === 0 || (magic !== -1 && segments.slice(magic).includes('..'))) return unsupported(glob)
+      return nodePath.resolve(directory, magic === -1 ? nodePath.dirname(expanded) : segments.slice(0, magic).join('/'))
+    }))
+    for (const root of roots) {
+      // Inspect static ancestors first, without following earlier path components.
+      const ancestors: string[] = []
+      for (let parent = nodePath.dirname(root); ; parent = nodePath.dirname(parent)) {
+        ancestors.push(parent)
+        if (parent === nodePath.dirname(parent)) break
+      }
+      for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
+      walk(root)
+    }
+    for (const file of globSync(glob, { cwd: directory })) {
+      // Glob exclusions miss leading ../ patterns; match dependency segments like the walk.
+      if (!file.split(nodePath.sep).includes('node_modules')) files.add(nodePath.resolve(directory, file))
+    }
+  }
+  return [...files]
+}
 const configuredFiles = configuredStoryFiles(storyGlobs)
 const storyModules: Record<string, StoryModule> = {}
 for (const file of configuredFiles) {
@@ -323,6 +347,88 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
   expect(storybookConfig.stories).toEqual(storyGlobs)
   expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
   expect(configuredFiles.length).toBeGreaterThan(0)
+})
+
+test('configured inventory rejects directory and file symlinks without following them', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
+  try {
+    const source = nodePath.join(directory, 'src')
+    mkdirSync(source)
+    const story = nodePath.join(source, 'Example.stories.tsx')
+    writeFileSync(story, '')
+    const globs = ['src/**/*.stories.tsx']
+    expect(configuredStoryFiles(globs, directory)).toEqual([story])
+    const directoryLink = nodePath.join(source, 'linked')
+    symlinkSync(directory, directoryLink, 'dir')
+    expect(() => configuredStoryFiles(globs, directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    expect(() => configuredStoryFiles(['src/linked/**/*.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    expect(() => configuredStoryFiles(['src/linked/src/**/*.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${directoryLink}`)
+    rmSync(directoryLink)
+    const fileLink = nodePath.join(source, 'Linked.stories.tsx')
+    symlinkSync(story, fileLink, 'file')
+    expect(() => configuredStoryFiles(globs, directory)).toThrow(`Symlink in configured Storybook inventory: ${fileLink}`)
+    expect(() => configuredStoryFiles(['src/Linked.stories.tsx'], directory)).toThrow(`Symlink in configured Storybook inventory: ${fileLink}`)
+    rmSync(fileLink)
+    const dependencies = nodePath.join(source, 'node_modules')
+    mkdirSync(dependencies)
+    symlinkSync(directory, nodePath.join(dependencies, 'ignored'), 'dir')
+    expect(configuredStoryFiles(globs, directory)).toEqual([story])
+    expect(() => configuredStoryFiles(['src/node_modules/**/*.stories.tsx'], directory))
+      .toThrow('Unsupported node_modules segment in configured Storybook pattern: src/node_modules/**/*.stories.tsx; extend the scenario inventory check')
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('configured inventory excludes dependency stories with leading relative prefixes', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-dependencies-'))
+  try {
+    const config = nodePath.join(directory, '.storybook')
+    const source = nodePath.join(directory, 'src')
+    mkdirSync(config)
+    mkdirSync(nodePath.join(source, 'a/node_modules/b'), { recursive: true })
+    mkdirSync(nodePath.join(source, 'a/not_node_modules/b'), { recursive: true })
+    const story = nodePath.join(source, 'a/Example.stories.tsx')
+    const similarNameStory = nodePath.join(source, 'a/not_node_modules/b/Example.stories.tsx')
+    writeFileSync(story, '')
+    writeFileSync(similarNameStory, '')
+    writeFileSync(nodePath.join(source, 'a/node_modules/b/Dependency.stories.tsx'), '')
+    for (const glob of [
+      '../src/**/*.stories.tsx',
+      './../src/**/*.stories.tsx',
+      '../.storybook/../src/**/*.stories.{ts,tsx}',
+      '../src/{a,./a}/**/*.stories.tsx',
+    ]) {
+      expect(configuredStoryFiles([glob], config).sort(), glob).toEqual([story, similarNameStory].sort())
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('configured inventory expands nested brace roots before inspecting symlinks', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-braces-'))
+  try {
+    const config = nodePath.join(directory, 'config/.storybook')
+    mkdirSync(config, { recursive: true })
+    mkdirSync(nodePath.join(directory, 'config/src/nested'), { recursive: true })
+    const outside = nodePath.join(directory, 'outside')
+    mkdirSync(outside)
+    const story = nodePath.join(outside, 'Example.stories.tsx')
+    writeFileSync(story, '')
+    const globs = ['../src/{nested,{../../outside,nested}}/**/*.stories.tsx']
+    expect(configuredStoryFiles(globs, config)).toEqual([story])
+    const link = nodePath.join(outside, 'linked')
+    symlinkSync(directory, link, 'dir')
+    expect(() => configuredStoryFiles(globs, config)).toThrow(`Symlink in configured Storybook inventory: ${link}`)
+    expect(() => configuredStoryFiles(['{../src,../../outside}/**/*.stories.tsx'], config))
+      .toThrow(`Symlink in configured Storybook inventory: ${link}`)
+    for (const glob of ['@(src|outside)/**/*.stories.tsx', '*/**/*.stories.tsx', '../src/{1..3}/**/*.stories.tsx']) {
+      expect(() => configuredStoryFiles([glob], config)).toThrow(`Cannot derive static Storybook inventory roots for configured pattern: ${glob}`)
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('configured .stories.ts CSFs are discovered and checked, including brace globs', async () => {
@@ -343,6 +449,11 @@ const undeclaredApp: string[] = []
 const exemptions: string[] = []
 const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
 const sliceFiles = new Set<string>()
+
+// react-stately renders every row in jsdom (no layout); SidebarTree's observed
+// CI maximum is 7.1 s, so 15 s allows about 2x. Other stories take at most ~1.9 s;
+// a global increase would hide regressions outside this expanded-tree fixture.
+const sidebarTreeValidationTimeoutMs = 15_000
 
 for (const [path, module] of Object.entries(storyModules)) {
   const { default: storyMeta, ...exports } = module
@@ -379,7 +490,7 @@ for (const [path, module] of Object.entries(storyModules)) {
       expect(result._tag).toBe('Passed')
       for (const exemption of result.exemptions) process.stdout.write(`${id}: ${exemption._tag} — ${exemption.reason}\n`)
       expect(result.exemptions).toHaveLength(tag === 'slices' ? 0 : 1)
-    })
+    }, path === './assistant-ui/sidebar/SidebarTree.stories.tsx' ? sidebarTreeValidationTimeoutMs : undefined)
   }
 }
 
@@ -446,13 +557,13 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('app mode debt matches its reviewed shrink-only pin', () => {
-  expect(Object.keys(deferredAppStoryModes)).toHaveLength(10)
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(6)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(264)
+  expect(exemptions).toHaveLength(381)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 

@@ -12,6 +12,7 @@ mod ci_test_paths;
 
 pub use fractal_kernel::accounts;
 pub mod api;
+pub mod web;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
@@ -84,6 +85,7 @@ pub use smallclaims::{performance, profile};
 pub use fractal_kernel::projection;
 pub use fractal_store::provenance;
 pub use fractal_reconcile::reconcile;
+pub use fractal_reconcile::schedule_standby;
 pub use fractal_kernel::rules;
 #[cfg(test)]
 pub(crate) use fractal_kernel::publication;

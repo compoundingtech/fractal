@@ -75,12 +75,13 @@ def git(repo, *args, stdin=None, config=(), env=None):
 
 
 POLICY_KEYS = {'version', 'checks'}
-CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require'}
+CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require', 'events'}
 REQUIRE_MODES = ('off', 'shadow', 'reject')
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
 MAX_INPUTS = 300
-KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level'}
+KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs'}
+SHARD_KEYS = {'count', 'results', 'pull_request_count'}
 LEVEL_KEYS = {'command', 'required_inputs', 'bind_inputs', 'events', 'lane'}
 EVENTS = ('pull_request', 'merge_group')
 
@@ -95,6 +96,28 @@ def checked_command_inputs(rule, where):
             and isinstance(bind, dict) and all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in bind.items())):
         raise Failure('error', f'skip policy for {where}: malformed required_inputs or bind_inputs')
     return command, required, bind
+
+
+def checked_value_rules(rule, where):
+    """A kind's checks on input VALUES, beyond presence: `input_order` and `shard_inputs`.
+
+    `input_order` maps an input to its values from strongest to weakest: a note covers a run only when its value ranks at or above the
+    run's own value (passed with --run-input KEY=VALUE). A run that did not say its value is never covered.
+    `shard_inputs` names a sharded job's inputs: `count` (1 to 16) and `results` (`0=success,1=success,...`, every shard, all success);
+    `pull_request_count`, when given, is the only count a note from a pull_request run may carry."""
+    order = rule.get('input_order', {})
+    if not (isinstance(order, dict) and all(isinstance(k, str) and k and isinstance(v, list) and len(v) >= 2 and len(set(v)) == len(v)
+                                            and all(isinstance(x, str) and x for x in v) for k, v in order.items())):
+        raise Failure('error', f'skip policy for {where}: input_order maps an input to two or more distinct values, strongest first')
+    shards = rule.get('shard_inputs')
+    if shards is not None:
+        count = shards.get('pull_request_count') if isinstance(shards, dict) else None
+        if not (isinstance(shards, dict) and set(shards) - SHARD_KEYS == set() and {'count', 'results'} <= set(shards)
+                and all(isinstance(shards[k], str) and shards[k] for k in ('count', 'results'))
+                and (count is None or (not isinstance(count, bool) and isinstance(count, int) and 1 <= count <= 16))):
+            raise Failure('error', f'skip policy for {where}: shard_inputs needs count and results input names, and an optional '
+                          'pull_request_count from 1 to 16')
+    return {key: list(values) for key, values in order.items()}, (dict(shards) if shards is not None else None)
 
 
 def policy_rules(text, check, repository):
@@ -136,6 +159,11 @@ def policy_rules(text, check, repository):
         raise Failure('error', f'skip policy for {check}: sample_one_in must be an integer from 1 to 1000')
     if not (isinstance(entry['kinds'], dict) and entry['kinds']):
         raise Failure('error', f'skip policy for {check}: kinds must name at least one kind')
+    # `events` (optional) limits the runs a note for this check may skip, whoever signed it: ["pull_request"] keeps the merge queue
+    # testing the combined tree. Absent means every event the gate allows; a signer level's own `events` can only narrow it further.
+    check_events = entry.get('events')
+    if check_events is not None and not valid_events(check_events):
+        raise Failure('error', f'skip policy for {check}: events must be a nonempty list of {", ".join(EVENTS)}')
 
     def fill(value):
         return value.replace('{repository}', repository).replace('{check}', check)
@@ -145,6 +173,7 @@ def policy_rules(text, check, repository):
         if kind not in KINDS or not isinstance(rule, dict) or set(rule) - KIND_KEYS or 'command' not in rule:
             raise Failure('error', f'skip policy for {check}: kind {kind!r} is not valid')
         command, required, bind = checked_command_inputs(rule, f'{check}/{kind}')
+        order, shards = checked_value_rules(rule, f'{check}/{kind}')
         prefix = rule.get('runner_prefix')
         kind_levels = rule.get('trust_levels')
         if kind_levels is not None and not (isinstance(kind_levels, list) and kind_levels
@@ -161,7 +190,7 @@ def policy_rules(text, check, repository):
             if level not in (kind_levels or levels):
                 raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} is not among the trust levels this kind accepts')
             events = override['events']
-            if not (isinstance(events, list) and events and len(set(events)) == len(events) and all(e in EVENTS for e in events)):
+            if not valid_events(events):
                 raise Failure('error', f'skip policy for {check}/{kind}: events must be a nonempty list of {", ".join(EVENTS)}')
             lcommand, lrequired, lbind = checked_command_inputs(override, f'{check}/{kind}/{level}')
             # `lane: true` holds this level's notes to the lane definition at the accepted base (.st/required-lanes.json at the policy's
@@ -180,9 +209,53 @@ def policy_rules(text, check, repository):
                        'trust_levels': tuple(kind_levels) if kind_levels else None,
                        # A signer level may be held to its own command, inputs and events (a host key may sign a different command and
                        # may cover pull requests only), whatever the rest of the kind says.
-                       'by_level': by_level}
+                       'by_level': by_level,
+                       # Values, not just presence: the note's value must cover the run's (input_order), and a sharded job's
+                       # inputs must name every shard as a success (shard_inputs). Whatever the signer level.
+                       'input_order': order, 'shard_inputs': shards}
     return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age, 'enforce': enforce,
-            'inputs': inputs, 'sample_one_in': sample, 'require': require}
+            'inputs': inputs, 'sample_one_in': sample, 'require': require,
+            'events': list(check_events) if check_events is not None else None}
+
+
+def value_checks(rule, inputs, run_inputs, attempts):
+    """The kind's value rules (checked_value_rules) on a record's inputs, against this run's own values where they apply."""
+    for key, order in rule.get('input_order', {}).items():
+        run_value, note_value = run_inputs.get(key), inputs.get(key)
+        if run_value not in order:
+            raise Failure('no_run_input', f'this run did not say its {key} (one of {", ".join(order)}), so no record can cover it',
+                          attempts=attempts)
+        if note_value not in order:
+            raise Failure('wrong_input', f'record input {key} is {note_value!r}, not one of {", ".join(order)}', attempts=attempts)
+        if order.index(note_value) > order.index(run_value):
+            raise Failure('wrong_input', f'record input {key}={note_value} does not cover this run\'s {key}={run_value}',
+                          attempts=attempts)
+    shards = rule.get('shard_inputs')
+    if shards:
+        count = inputs.get(shards['count'])
+        if not (isinstance(count, str) and count.isdigit() and 1 <= int(count) <= 16):
+            raise Failure('wrong_input', f'record input {shards["count"]} is {count!r}, not a shard count from 1 to 16', attempts=attempts)
+        expected = ','.join(f'{index}=success' for index in range(int(count)))
+        if inputs.get(shards['results']) != expected:
+            raise Failure('wrong_input', f'record input {shards["results"]} must name every one of its {count} shards as a success '
+                          f'({expected})', attempts=attempts)
+        if shards.get('pull_request_count') is not None and inputs.get('event_name') == 'pull_request' \
+                and int(count) != shards['pull_request_count']:
+            raise Failure('wrong_input', f'a pull_request record must have {shards["pull_request_count"]} shard(s), not {count}',
+                          attempts=attempts)
+
+
+def valid_events(events):
+    return isinstance(events, list) and events and len(set(events)) == len(events) and all(e in EVENTS for e in events)
+
+
+def narrowed_events(check_events, level_events):
+    """The events a satisfied note may skip: the check's list, narrowed by the signer level's; None (any) only when neither limits it."""
+    if check_events is None:
+        return level_events
+    if level_events is None:
+        return list(check_events)
+    return [event for event in level_events if event in check_events]
 
 
 LANES_KEYS = {'version', 'lanes'}
@@ -529,10 +602,11 @@ def log_view(repo, log_keys, tree, check, input_key, chosen, now=None, max_age=L
 
 
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None):
+           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None):
     """verified(...) and, with log_keys, the evidence log's shadow view of the same decision (docs/st3/gate-evidence.md)."""
     if not log_keys:
-        return verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane)
+        return verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
+                        run_inputs)
     input_key = None
     if rules is not None and rules.get('inputs') is not None:
         try:
@@ -540,7 +614,8 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
         except Failure:
             input_key = None
     try:
-        result = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane)
+        result = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
+                        run_inputs)
     except Failure as failure:
         failure.extra.update(log_view(repo, log_keys, tree, check, input_key, None, now))
         raise
@@ -549,7 +624,7 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
 
 
 def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-             trust_levels=None, now=None, rules=None, lane=None, level_lane=None):
+             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None):
     """`level_lane`, when given, is a callable returning the lane check at the policy's base; it is used only for a signer level
     whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone."""
     with tempfile.NamedTemporaryFile() as revocations:
@@ -671,6 +746,8 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
     if command is not None and result['command'] != command:
         raise Failure('wrong_command', f'latest record for check {check} ran a different command',
                       attempts=attempts)
+    if rule:
+        value_checks(rule, observed.get('inputs', {}), run_inputs or {}, attempts)
     if lane is not None:
         # The scripts that decide what the lane runs must be the accepted base's, byte for byte, in the tree that was signed; and the
         # note must carry the digest of that definition, so a note made against other scripts or another argv is not this lane's.
@@ -699,7 +776,7 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
         'match': 'tree' if statement['subject'][0]['digest']['gitTree'] == tree else 'inputs',
         'matched_tree': statement['subject'][0]['digest']['gitTree'], 'source_inputs': input_key,
         'sample_one_in': rules['sample_one_in'] if rules is not None else 1,
-        'events': events,
+        'events': narrowed_events(rules.get('events') if rules is not None else None, events),
     }
 
 
@@ -717,16 +794,32 @@ def read_lanes(repo, commit):
         raise Failure('error', f'no readable lane file at {commit}:{LANES_PATH}')
 
 
-def lane_for(repo, tree, lanes, check):
-    """The lane check of `check` for the verified tree, from (lane file text, accepted base commit); None without a lane file."""
+def lane_for(repo, tree, lanes, check, lane_base=None):
+    """The lane check of `check` for the verified tree, from (lane file text, accepted base commit); None without a lane file.
+
+    `lane_base` (the pull request's branch point) holds the tree to the lane's definition at that commit instead of the base's: a
+    branch that is only behind main, and changes none of the lane's files itself, is not a lane edit, and its note carries the
+    branch point's digest. The branch point must be an ancestor of the base (a definition main accepted) and the lane file itself
+    must be the same blob at both, so the argv and the paths are the base's either way."""
     if lanes is None:
         return None
     text, base = lanes
-    base_tree = git(repo, 'rev-parse', '--verify', '--end-of-options', base + '^{tree}').decode().strip()
+    definition_base = base
+    if lane_base is not None:
+        if not OID.match(lane_base):
+            raise Failure('error', 'the lane base must be a full lowercase commit ID')
+        code, _ = no_lazy(repo, 'merge-base', '--is-ancestor', lane_base, base)
+        if code != 0:
+            raise Failure('error', f'the lane base {lane_base[:12]} is not an ancestor of the accepted base')
+        here, there = (no_lazy(repo, 'rev-parse', '--verify', '-q', f'{commit}:{LANES_PATH}') for commit in (lane_base, base))
+        if here[0] != 0 or here != there:
+            raise Failure('definition_changed', f'{LANES_PATH} differs between the branch point and the accepted base')
+        definition_base = lane_base
+    base_tree = git(repo, 'rev-parse', '--verify', '--end-of-options', definition_base + '^{tree}').decode().strip()
     return lane_definition(repo, base_tree, tree, lane_rules(text, check))
 
 
-def require_all(repo, tree, keys, policy_text, repository, lane_file=None):
+def require_all(repo, tree, keys, policy_text, repository, lane_file=None, lane_base=None):
     """Every check whose policy says `require` (shadow or reject), judged by the same rules as a single check.
 
     One entry per such check with its own reason, so a missing lane is named, not folded into one boolean. The overall
@@ -747,7 +840,7 @@ def require_all(repo, tree, keys, policy_text, repository, lane_file=None):
             continue
         try:
             # A broken lane file or a missing definition path is a verifier error (it propagates); only a check without a lane entry is a lane refusal.
-            definition = lane_for(repo, tree, lane_file, check)
+            definition = lane_for(repo, tree, lane_file, check, lane_base)
         except Failure as failure:
             if failure.reason != 'no_lane':
                 raise
@@ -828,6 +921,9 @@ def main(argv):
     parser.add_argument('--lanes-from', metavar='COMMIT',
                         help=f'also hold the check to its lane definition in {LANES_PATH} at this accepted base: the lane\'s script blobs must be '
                              'identical in the verified tree and the base (definition_changed) and the note must carry the base\'s digest (wrong_definition)')
+    parser.add_argument('--lane-base', metavar='COMMIT',
+                        help='hold the lane to its definition at this commit (a pull request\'s branch point, an ancestor of the base with the '
+                             'same lane file) instead of at the base: a tree that only lags main is not a lane edit')
     parser.add_argument('--require-all', action='store_true',
                         help='judge every check whose policy says `require` (needs --policy-from, --repository and keys); '
                              'exit 1 only when a check in mode reject is not satisfied, exit 2 (decision error) when it could not decide')
@@ -841,6 +937,8 @@ def main(argv):
     logs.add_argument('--log-keys', help=f'allowed-signers file of the evidence log key: adds the log\'s shadow view ({LOG_REF})')
     logs.add_argument('--log-keys-from', metavar='COMMIT', help=f'read {LOG_KEY_PATH} from this commit (none there: no log view)')
     parser.add_argument('--command', help='JSON argument vector the record must have run')
+    parser.add_argument('--run-input', action='append', default=[], metavar='KEY=VALUE',
+                        help="this run's own value of an input the policy's input_order compares a record's value with (repeatable)")
     parser.add_argument('--kinds', help=f'comma-separated record kinds this check accepts (default: {",".join(KINDS)})')
     parser.add_argument('--policy-from', metavar='COMMIT',
                         help=f'apply the skip policy {POLICY_PATH} read from this accepted base (needs --repository)')
@@ -896,6 +994,9 @@ def main(argv):
     elif args.repository is not None:
         print('--repository is only used with --policy-from', file=sys.stderr)
         return 2
+    if args.lane_base is not None and not (args.lanes_from or args.policy_from):
+        print('--lane-base is only used with --lanes-from or --policy-from', file=sys.stderr)
+        return 2
     if args.max_age is not None and args.max_age <= 0:
         print('--max-age must be a positive number of seconds', file=sys.stderr)
         return 2
@@ -945,7 +1046,8 @@ def main(argv):
                 raise Failure('error', f'key list {args.keys} not found')
         if args.require_all:
             lane_file = (read_lanes(args.repo, args.lanes_from), args.lanes_from) if args.lanes_from else None
-            result = require_all(args.repo, tree, keys, read_policy(args.repo, args.policy_from), args.repository, lane_file)
+            result = require_all(args.repo, tree, keys, read_policy(args.repo, args.policy_from), args.repository, lane_file,
+                                 args.lane_base)
             print(json.dumps(result, indent=2))
             return 1 if result['decision'] == 'reject' else 0
         rules = None
@@ -956,6 +1058,12 @@ def main(argv):
                 raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
             rules = policy_rules(text, args.check, args.repository)
         lanes = (read_lanes(args.repo, args.lanes_from), args.lanes_from) if args.lanes_from else None
+        run_inputs = {}
+        for pair in args.run_input:
+            key, sep, value = pair.partition('=')
+            if not sep or not key:
+                raise Failure('error', f'--run-input must be KEY=VALUE, not {pair!r}')
+            run_inputs[key] = value
         log_keys = os.path.abspath(args.log_keys) if args.log_keys else None
         if args.log_keys_from:
             code, text = no_lazy(args.repo, 'show', '--end-of-options', f'{args.log_keys_from}:{LOG_KEY_PATH}')
@@ -967,9 +1075,10 @@ def main(argv):
         # A level held to its lane (by_level lane: true) is judged against the lane file of the same base as the policy.
         policy_base = args.policy_from
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
-                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check),
-                        level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check))
-                        if policy_base else None, log_keys=log_keys)
+                        trust_levels, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
+                        level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check,
+                                                     args.lane_base))
+                        if policy_base else None, log_keys=log_keys, run_inputs=run_inputs)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:

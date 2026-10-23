@@ -16,12 +16,13 @@ The five required queue checks and complete test partitions are retained.
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
-on `main` are `linux-gate`, `isolation-vm`, `genie-freshness`,
-`typescript-client` and `mail-redelivery-canaries`,
-and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)).
+on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web`,
+and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
+(`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
+requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
 
-Every **ready** pull request, including a fork, gets the Linux gate, the isolation VM, the
-freshness check, the TypeScript client check and the mail redelivery canaries. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
+Every **ready** pull request, including a fork, gets the Linux gate, the freshness check, the
+TypeScript client check and the web lane. Draft PRs allocate no CI runners: every job in Workspace CI, Performance, Public repository check,
 release validation, Nix validation and optional macOS CI has a draft guard. This includes metadata
 jobs and `always()` collectors. `ready_for_review` starts checks; `converted_to_draft` enters the
 existing PR concurrency group and cancels obsolete ready-head work while skipping every new job.
@@ -263,7 +264,7 @@ not billed cost or a claim of lower wall time. Cold seeds and evicted entries st
 downloads. A valid warm archive supplies the entire shell without the public NAR fetch that failed
 in run 38922273766/job 117046015044.
 
-The [original trial measurements](https://github.com/compoundingtech/smalltalk/pull/849#issuecomment-5936374396)
+The [original trial measurements](https://github.com/compoundingtech/fractal/pull/849#issuecomment-5936374396)
 recorded a warm run of 6m59s with this design, versus 8m49s to 9m30s with only the Cargo cache.
 That trial excluded the messaging matrix; current CI includes it. Caching the entire Nix store
 instead took 90–105 seconds to restore 4.4 GB, which cost more than it saved. The selected
@@ -549,8 +550,8 @@ both generations continue to coordinate with Claude's own config lock.
 survives a SIGKILL of its supervisor's cgroup, for both exec and pty tasks. The managed-agent
 color contract also checks environment propagation through a real user scope, including a
 PTY restart. These three tests need a real systemd user manager, which Namespace's runner
-image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the required
-`isolation-vm` job:
+image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily
+`daily-isolation-vm` job (`daily-long.yml`):
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
@@ -617,7 +618,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
-  and `.github/repo-settings.json*`.
+  `.github/repo-settings.json*`, and what the lane reads although no web source names it:
+  `apps/ios/package.json` (a workspace member of the frozen install), `docs/st3/client-v0/fixtures/**`
+  (an SDK unit test's fixture), `pnpm-source-inputs.json*` (published by the web shell hook) and
+  `scripts/check-public-repo` (run by the scenario privacy lane).
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
@@ -729,8 +733,10 @@ reason=…`): `fractal-web` (the lane, the detector's relevant paths) and `fract
 (the kit plays, its kit paths). The key is `evidence-verify --project` over the check's
 inputs; a skip is only a trusted signed passing record with the same key, found by
 `evidence-verify` under the base skip policy. Inputs, detector, verifier and keys come
-from the base. Until the base policy declares a web check (and something signs it with
-input keys), every web decision is `run` with `reason=no-record`. `claims PATH…` and
+from the base. A matching record skips only when the base policy turns skipping on for
+the check (`enforce: true`); under a shadow entry the line reads `decision=run reason=shadow`
+and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
+its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
 `scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
@@ -813,7 +819,7 @@ fall back to an older success; duplicate attempts, future attempts, mixed heads,
 mixed runs and missing shards fail closed. A new head/run cannot reuse old receipts.
 
 Storybook builds once per shard rather than introducing a third, serialized build job
-and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/smalltalk/actions/runs/38651083493/job/116150585943),
+and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/fractal/actions/runs/38651083493/job/116150585943),
 Storybook took 9.878 seconds (0.165 runner-minutes); runner initialization through the
 frozen install took 142.457 seconds (2.374 runner-minutes). Duplicating the small build
 is cheaper than another similarly prepared build job, even before artifact transfer.
@@ -829,7 +835,7 @@ negative step attempts are rejected, while person assignees are valid actor refe
 
 The SDK unit lane uses an injected clock to guard task yielding and bounded decode/order
 work deterministically, including the >150KB roster burst. `SDK frame CPU budgets`
-runs separately with `apps/fractal-web/packages/fractal-sdk/vitest.perf.config.ts`: after
+runs separately with `packages/fractal-sdk/vitest.perf.config.ts`: after
 warming, seven fixed observations guard the median worst task below 16ms of calling-thread
 CPU, total burst CPU below 50ms, and a one-row delta below 16ms. These are not retries.
 Calling-thread CPU excludes host descheduling and unrelated Node worker-thread CPU.
@@ -1148,11 +1154,11 @@ machine type differ by about 2x, and the 1.6 to 2.1 s replication-exchange p99s 
 all came from the slower ones.
 
 At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
-"still being prepared", or a window's resync before its first snapshot. Today the store withdraws
-every list once per chunk while it projects a replication backlog, so these come in bursts of a
-few seconds ([#3553](https://github.com/compoundingtech/smalltalk/issues/3553)). The report keeps
-them apart from failed requests, under `unavailable` with the seconds they spanned, and the step
-summary shows them. They fail nothing until the store fix lands and turns `AVAILABILITY_GATED` on.
+"still being prepared", or a window's resync before its first snapshot. The store keeps serving
+each list while it projects a replication backlog in chunks and refolds it once the backlog is in
+([#3553](https://github.com/compoundingtech/fractal/issues/3553)), so none is expected. The
+report keeps them apart from failed requests, under `unavailable` with the seconds they spanned,
+the step summary shows them, and any fails the run (`AVAILABILITY_GATED`).
 Generated usage history contains cumulative response rollups for long-lived standing sessions
 with stable attribution, so this scenario exercises many observations per series and period
 baselines and totals rather than an empty report or one series per observation.
@@ -1355,9 +1361,9 @@ The macOS workflow was manually disabled when this audit ran. Its cache configur
 maintained without changing that repository setting. Portable publishing permissions and
 accepted-source verification remain in place.
 
-## Required mail redelivery canaries
+## Daily mail redelivery canaries
 
-Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
+Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
 Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
@@ -1370,13 +1376,10 @@ The mailbox cases seed hour-old sent mail and recent staged and delivered-but-un
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 
-The script fails if any required test is missing, ignored, or filtered out. The named
-`mail-redelivery-canaries` check executes the script on its own Namespace 8x16 runner; a skipped
-or failed job cannot pass.
-`linux-gate` requires it, so this protection applies to pull requests and merge groups. It
-restores the main-seeded Linux test Cargo and Nix caches, prepares the same fixtures and rendered
-hooks, and retains its own logs, timing and failure evidence. It never uses the native priority
-or merge lanes, and neither test shard waits for it before starting its own suite.
+The script fails if any required test is missing, ignored, or filtered out. It ran per pull request
+and in the merge queue as a required check, a member of `linux-gate`, until 2026-10-23; since then it
+runs only in the daily run, and the canary tests are in `.config/daily-only.filterset`, so the
+per-PR test shards leave them out too. A red daily run comments on the run's one open issue.
 Apply the fifth live ruleset check after this workflow has passed on main.
 
 ## Generated files and existing workflows
@@ -1423,15 +1426,15 @@ gh pr merge NUMBER --auto
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and
-`mail-redelivery-canaries` (these run on the `merge_group` event; see the
+`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
+`merge_group` event; see the
 trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the five checks from GitHub Actions with an empty
+by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
 merge method MERGE, a proposed three entries build at once (see [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes)),
 up to five merge together, and a check that
@@ -1439,7 +1442,7 @@ never reports fails its entry after 60 minutes. Repository settings enable nativ
 branch deletion after merge. Check the live settings against the file with `gh-check-settings`:
 
 ```sh
-nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/smalltalk --file .github/repo-settings.json
+nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
 
 A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
@@ -1452,12 +1455,12 @@ as drifted during that window.
 pull request has merged through the queue.
 
 To roll back, restore the previous ruleset (the JSON is in the body of pull request #916) with
-`gh api --method PUT repos/compoundingtech/smalltalk/rulesets/20563764 --input old-main-ruleset.json`,
+`gh api --method PUT repos/compoundingtech/fractal/rulesets/20563764 --input old-main-ruleset.json`,
 then start the train again with `st missions start` on its mission.
 
 ## Measured concurrency
 
-The [manual capacity run](https://github.com/compoundingtech/smalltalk/actions/runs/36931429222)
+The [manual capacity run](https://github.com/compoundingtech/fractal/actions/runs/36931429222)
 on 2026-10-01 recorded the workspace limits with `nsc workspace concurrency --output json`:
 
 | Platform | Concurrent vCPUs | Concurrent memory |
@@ -1482,13 +1485,13 @@ runs executing 19 Namespace jobs together. Including the manual capacity run, th
 eight runs and 24 jobs. These are observed overlaps of runs at different stages, rather than
 eight fully parallel Workspace CI groups. The runs were:
 
-- main: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930646852)
-  and [macOS CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930646948) for one commit,
-  with [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931186016)
-  and [macOS CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931186029) for the next;
-- merge group: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36930644645);
-- PRs: [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931199367)
-  and [Workspace CI](https://github.com/compoundingtech/smalltalk/actions/runs/36931346163).
+- main: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930646852)
+  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36930646948) for one commit,
+  with [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931186016)
+  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36931186029) for the next;
+- merge group: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930644645);
+- PRs: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931199367)
+  and [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931346163).
 
 The initial jobs in 13 observed CI runs created from 21:30 UTC had a median startup delay of
 18 seconds, a 95th percentile of 187 seconds (nearest rank) and a maximum of 305 seconds (57 jobs). Startup
@@ -1538,7 +1541,7 @@ job stayed `queued` with no runner (13 minutes and counting). A plain `gh run ca
 to it. Recover with the force-cancel endpoint and a rerun:
 
 ```sh
-gh api --method POST repos/compoundingtech/smalltalk/actions/runs/RUN_ID/force-cancel
+gh api --method POST repos/compoundingtech/fractal/actions/runs/RUN_ID/force-cancel
 gh run rerun RUN_ID
 ```
 

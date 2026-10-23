@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st schedules ls",
+      "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_schedules_list_pages_declarations_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; explicit page flags and declarations compared after disk store reopen"
+    },
+    {
       "command": "st activity",
       "description": "Read bounded changes since a stable cursor",
       "tests": [
@@ -995,6 +1003,24 @@
       "verification": "existing CLI integration"
     },
     {
+      "command": "st demo check",
+      "description": "Check a demo file and list its beats without playing it",
+      "tests": [
+        "crates/fractal/src/demo.rs::a_demo_file_reads_as_its_seed_and_beats",
+        "crates/fractal/src/demo.rs::mistakes_are_named_with_their_line",
+        "crates/fractal/src/demo.rs::the_example_demos_are_playable_files"
+      ],
+      "verification": "the parser on a full demo, each kind of mistake with its line, and every example demo in examples/demos"
+    },
+    {
+      "command": "st demo play",
+      "description": "Reset an instance, seed a scripted demo and play its beats in the terminal interface",
+      "tests": [
+        "crates/fractal/tests/demo_play.rs::a_demo_plays_in_its_own_instance_and_ends_with_the_interface"
+      ],
+      "verification": "the real st binary under a PTY in a throwaway HOME: the instance is reset and seeded, timed and key-paced beats change the picture, and the daemon and scripted agents stop when the interface quits"
+    },
+    {
       "command": "st documents get",
       "description": "Read exact document bytes by immutable name-and-hash reference",
       "tests": [
@@ -1130,6 +1156,15 @@
         "crates/fractal/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
       ],
       "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; graph sync, restart restoration and refused exposure"
+    },
+    {
+      "command": "st fleet transports prefer",
+      "description": "Prefer an enabled transport without changing exposure or removing any carrier",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::transport_prefer_reorders_under_lock_without_changing_exposure",
+        "crates/fractal/tests/fleet.rs::transport_prefer_refuses_disabled_carriers_without_saving"
+      ],
+      "verification": "real CLI over isolated Unix daemons with a Fabric shim; both reorder directions, disabled-carrier refusal, exposure preservation, settings-lock contention, atomic save and no-op"
     },
     {
       "command": "st fleet transports remove",
@@ -2266,7 +2301,7 @@
     },
     {
       "command": "st ui",
-      "description": "Open the terminal interface with spaces or classic layout; plain st opens it for humans on two terminals",
+      "description": "Open the terminal interface in spaces; plain st opens it for humans on two terminals",
       "tests": [
         "crates/fractal/src/terminal_ui_tests.rs::terminal_ui_arguments_and_help_match_the_documented_surface",
         "crates/fractal/tests/typed_keys.rs::shifted_keys_are_typed_as_a_keyboard_protocol_terminal_sends_them",
@@ -2768,7 +2803,7 @@
     {
       "action": "simplify or expand tool detail",
       "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::shift_o_simplifies_every_conversation_and_back"
+        "crates/fractal-tui/src/ui/mod.rs::ctrl_p_simplifies_every_conversation_and_back"
       ],
       "verification": "local UI state; no daemon mutation, restart fence not applicable"
     },
@@ -2866,6 +2901,13 @@
       "tests": [
         "crates/fractal-tui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",
         "crates/fractal-tui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
+      ],
+      "verification": "local palette/reducer; resulting daemon effects are listed separately"
+    },
+    {
+      "action": "Usage",
+      "tests": [
+        "crates/fractal-tui/src/ui/glass.rs::ctrl_k_opens_usage_and_the_fleet_list"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
     },
