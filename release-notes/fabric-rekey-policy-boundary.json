@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify Fabric endpoint replacement and strengthen its atomic adapter regression proof",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "No claim schema changes."},
+  "rules": {"status": "none", "detail": "The adapter continues to replace its old NodeID record and exact grants in one revision-checked Fabric batch."},
+  "compatibility": {"status": "none", "detail": "No runtime behavior changes. Local Fabric identity rotation is distinct from adapter policy replacement."},
+  "downtime": {"status": "none", "detail": "Documentation and regression-test changes only."},
+  "manual": {"status": "none", "detail": "Do not assume atomic adapter policy replacement solves endpoint propagation after stopping the old Fabric identity."},
+  "recovery": {"status": "none", "detail": "Static and other-owner grants on an old NodeID remain outside adapter authority."}
+}
