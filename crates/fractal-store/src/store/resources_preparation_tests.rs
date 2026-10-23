@@ -776,6 +776,7 @@ fn pending_query_fixture(claims: usize) -> Connection {
     // historical stores; public admission would reject several of these fixtures.
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h2292dc1d64ce owner=fractal_store::store::resources_preparation_tests TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE batches(id TEXT PRIMARY KEY, origin TEXT, replica_sequence INTEGER);
          CREATE TABLE claims(store_index INTEGER PRIMARY KEY, id TEXT UNIQUE,
              batch_id TEXT, subject TEXT, accepted_at_unix_ms TEXT);
@@ -787,6 +788,7 @@ fn pending_query_fixture(claims: usize) -> Connection {
          INSERT INTO batches VALUES('batch/a','node/a',2),('batch/b','node/b',1),('edge','node/a',2);",
     ).unwrap();
     connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hb45924c770e1 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */
         "WITH RECURSIVE seq(i) AS(VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<?1)
          INSERT INTO claims SELECT i,printf('claim/%07d',i),
              CASE WHEN i<=20 THEN 'edge' WHEN i%2=0 THEN 'batch/b' ELSE 'batch/a' END,
@@ -794,6 +796,7 @@ fn pending_query_fixture(claims: usize) -> Connection {
         [i64::try_from(claims).unwrap()],
     ).unwrap();
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h6a89957798ac owner=fractal_store::store::resources_preparation_tests TODO=chunk-or-reference-exact-wire-values */
         "INSERT INTO claim_positions SELECT id,store_index FROM claims WHERE store_index>20;
          INSERT INTO claim_positions VALUES('claim/0000001',9),('claim/0000002',9),
              ('claim/0000003',0),('claim/0000004',-1),('claim/0000005',9223372036854775807);
@@ -814,7 +817,7 @@ fn old_pending_query() -> String {
 }
 
 fn pending_query_result(connection: &Connection, sql: &str) -> (Vec<(String, String)>, i32) {
-    let mut statement = connection.prepare(sql).unwrap();
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h18f468b699f4 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
     let rows = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
@@ -832,7 +835,7 @@ fn preparation_empty_pending_does_not_scan_claims() {
         let connection = pending_query_fixture(claims);
         for analyze in [false, true] {
             if analyze {
-                connection.execute_batch("ANALYZE").unwrap();
+                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hea52088ff2f0 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "ANALYZE").unwrap();
             }
             let (rows, steps) = pending_query_result(&connection, &PENDING_QUERY);
             assert!(rows.is_empty());
@@ -862,15 +865,16 @@ fn preparation_pending_query_preserves_canonical_order() {
     fixtures.push(legacy);
     for analyze in [false, true] {
         if analyze {
-            connection.execute_batch("ANALYZE").unwrap();
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hba0098c15806 owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ "ANALYZE").unwrap();
         }
         for (fixture, ids) in fixtures.iter().enumerate() {
             connection
-                .execute("DELETE FROM local_resource_preparation_pending", [])
+                .execute(/* sqlite-large-value: allow-for-now lv-h174885817547 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_pending", [])
                 .unwrap();
             for id in ids.iter().rev() {
                 connection
                     .execute(
+                        /* sqlite-large-value: allow-for-now lv-h536e543d013a owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */
                         "INSERT INTO local_resource_preparation_pending VALUES(?1)",
                         [id],
                     )
@@ -900,9 +904,10 @@ fn preparation_pending_query_benchmark() {
     let connection = pending_query_fixture(100_000);
     for pending in [0, 1, 5, 500] {
         connection
-            .execute("DELETE FROM local_resource_preparation_pending", [])
+            .execute(/* sqlite-large-value: allow-for-now lv-haf2d00445666 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_pending", [])
             .unwrap();
         connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h6a40b6345adf owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */
             "INSERT INTO local_resource_preparation_pending SELECT id FROM claims WHERE store_index>100000-?1",
             [pending],
         ).unwrap();

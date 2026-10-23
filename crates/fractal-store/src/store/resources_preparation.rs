@@ -439,7 +439,7 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
         return Ok(());
     }
     // Process new claims in canonical order, even when one transaction admits several rows.
-    let pending = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-he337585ac427 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &PENDING_QUERY)?
+    let pending = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d9bf7e6df3c owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &PENDING_QUERY)?
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, subject) in pending {
@@ -506,7 +506,7 @@ fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
             canonical::components("claims").join(",")
         )
     });
-    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4746913336a7 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h151e6a39c85e owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [id], |row| {
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he337585ac427 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h151e6a39c85e owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [id], |row| {
         let accepted = row.get_ref(1)?.as_str()?;
         let origin = match row.get_ref(2)? {
             rusqlite::types::ValueRef::Null => None,
@@ -535,7 +535,7 @@ fn advance(transaction: &Transaction<'_>, subject: &str, id: &str, key: Vec<u8>)
          FROM claims WHERE id=?1"
     )
     });
-    let (kind, body, accepted, eligible): (String, String, String, bool) = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2fff82c875a5 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?
+    let (kind, body, accepted, eligible): (String, String, String, bool) = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4746913336a7 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?
         .query_row(/* sqlite-large-value: allow-for-now lv-h86a6d29b4dfb owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hdfd806b3e120 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation(subject) VALUES(?1) ON CONFLICT(subject) DO NOTHING", [subject])?;
     if eligible || kind == "resource.observed" {
