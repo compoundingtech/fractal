@@ -27,8 +27,7 @@ examples. Scenarios are product-shaped data built on that contract; they do not 
 These decisions are fixed for this package. Sections below cite them as D1–D10.
 
 - **D1 Home:** one public package, `clients/typescript/fractal-scenarios`, holds the kit and the worlds.
-- **D2 Consumers:** fractal-ui Storybook, fractal-web (tests, dev mode, e2e), Fractal TUI, the fractal
-  TUI and iOS. Fractal TUI's `fixtures/clients/demo-world.json` becomes one generated world.
+- **D2 Consumers:** fractal-ui Storybook, fractal-web (tests, dev mode, e2e), Fractal TUI and iOS. Fractal TUI's `fixtures/clients/demo-world.json` becomes one generated world.
 - **D3 Realism:** seeded synthetic worlds plus real client-v0 frames recorded from a scratch daemon
   that drives a scripted fake harness. No capture from a live host enters the repository.
   Scenarios read like real engineering work.
@@ -45,7 +44,7 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
   over one cast; `world.with({ slice: override })` replaces one slice.
 - **D8 Binding:** the kit is Effect-free. Components get props through `useScenarioSlice`.
   App-level stories and fractal-web dev/e2e replay client-v0 frames over a mock WebSocket through
-  the real data layer. Fractal TUI, iOS and the TUI read JSON or use the same replay.
+  the real data layer. Fractal TUI and iOS read JSON or use the same replay.
 - **D9 Catalog:** seven narratives and the edge states listed under [Catalog](#catalog-d9);
   failed sync has one world per cause.
 - **D10 Storybook:** a global Scenario toolbar selects the world. Every story declares exactly

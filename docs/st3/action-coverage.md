@@ -413,7 +413,7 @@ the native bridge boundary; it does not claim an iOS simulator was driven.
 The Fractal TUI consumer is covered by `crates/fractal-e2e/tests/feed/inventory.rs` over an isolated
 Unix daemon: all six windows, typed client/usage adaptation, period replacement,
 unsubscription and authoritative reconnect snapshots.
-`crates/fractal-tui/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
+`crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
 and `…::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
 drive the actual binary with `scripts/stui-test-client` and `STUI_TIMING_LOG`.
 Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
