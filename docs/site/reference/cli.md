@@ -50,9 +50,11 @@ For small independent authorized work, use `fractal work start`. Claim before ex
 | `fractal devices` | Pair, inspect, and revoke clients. |
 | `fractal subject show ID` | Inspect one typed graph subject. |
 | `fractal demo check FILE` | Validate a scripted demo file without playback. |
-| `fractal web` | Open the configured, already running web app; does not start a server. |
+| `fractal web [--state-dir DIR]` | Open an authenticated session in the daemon's local web app; does not start another server. |
 
 `fractal up` runs the foreground daemon for explicit process supervision. Do not launch it alongside another daemon using the same state. Prefer setup's user service for ordinary installations.
+
+The daemon serves installed web assets on loopback port 7410 by default. `fractal web` reads its protected `web-launch-url` rendezvous; `FRACTAL_WEB_URL` explicitly overrides that URL. Keep launch URLs private. Use `fractal doctor` to diagnose missing assets or person configuration. Remote publishing is a separate opt-in setup; do not expose the local browser listener.
 
 ## Identity and automation
 

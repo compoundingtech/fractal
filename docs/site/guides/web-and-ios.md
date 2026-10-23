@@ -1,45 +1,48 @@
 ---
 title: "Web and iOS clients"
-description: "Open an existing web app or pair an iOS client to follow your agents."
+description: "Open the daemon's local web app or pair an iOS client to follow your agents."
 order: 10
 ---
 
 # Web and iOS clients
 
-The web app and iOS app show work in your fleet. Finish [installation](../getting-started/install.md) on the daemon machine first. A graphical client is separate from the daemon: starting the daemon does not start a web server.
+The web app and iOS app show work in your fleet. Finish [installation](../getting-started/install.md) on the daemon machine first. The daemon serves the installed web app locally by default; a separate source checkout or JavaScript server is not needed for ordinary local access.
 
-## Open the web app
+## Open the local web app
 
-If you already have a configured web server, open its URL in your browser. The CLI can open that URL for you:
-
-```sh
-FRACTAL_WEB_URL=https://your-configured-web-app.example fractal web
-```
-
-Replace the example URL with your actual endpoint. `fractal web` opens a running app; it does **not** start or configure the server. Without `FRACTAL_WEB_URL`, it opens `http://127.0.0.1:5173`, which is useful only when a server is already listening there. If a browser cannot be opened, the command prints the URL.
-
-The web app provides an agent roster and conversations. Select an agent to inspect its observed state and send a message through the composer. Check the connection and freshness indicators: retained content during a disconnect is not evidence that an agent is still running. A message send is not proof that its requested work completed.
-
-## Host the web app
-
-The web app currently requires a source checkout and separate server configuration. There is no automatic web-server startup in `fractal web`.
-
-From the repository root after the frozen workspace install, the build and server commands are:
+With the daemon running and its web assets installed:
 
 ```sh
-pnpm --dir apps/fractal-web build
-pnpm --dir apps/fractal-web start
+fractal web
 ```
 
-The start command requires the hosting configuration described in the [web implementation guide](https://github.com/compoundingtech/fractal/blob/main/docs/fractal-web.md#hosting-the-web-app-on-a-tailnet): an existing paired-only gateway socket, a protected paired bearer file, the exact public origin, and an allowed tailnet login list. Do not run the start command expecting those credentials or settings to be created for you.
+The daemon's local browser listener defaults to `http://127.0.0.1:7410`. The launcher reads a protected `web-launch-url` file from the daemon's state directory and opens the session URL in your browser. Do not copy that URL into chat, logs, or Git: it contains a one-time launch token.
 
-The documented deployment binds the server to loopback and publishes it with Tailscale Serve over HTTPS. Never use public Funnel for that deployment: its admission depends on the authenticated tailnet login. Every local user who can reach the loopback server must already be trusted with the paired person's authority. A full-control pairing grants broad control; this is not a multi-user authorization boundary.
+The daemon consumes that token, sets a 12-hour HttpOnly SameSite=Strict session cookie, redirects to the app, and rotates the launch token. Restarting the daemon clears its browser sessions; existing WebSockets do not yet enforce session expiry live. `fractal web` opens the daemon's existing session endpoint; it does not start the daemon or a second server. If a browser cannot be opened, it prints the session URL, which must still be treated as a credential.
+
+The web app provides an agent roster and conversations. Select an agent to inspect its observed state and send a message through the composer. Check connection and freshness indicators: retained content during a disconnect is not evidence that an agent is still running. A message send is not proof that its requested work completed.
+
+## Availability and configuration
+
+Run `fractal doctor` if the web app is unavailable. Missing web assets or a missing configured person can disable web access without disabling the daemon API. An occupied listener port is a daemon startup error, not an automatic fallback to another port.
+
+For an explicitly supervised foreground daemon, `fractal up --web-listen off` disables the browser listener; `--web-dist DIR` selects a web asset directory. Do not start another daemon against an existing store merely to change these options. Assets are installed separately from the executable, and changing them requires a daemon restart.
+
+Use `fractal web --state-dir DIR` when opening a daemon with a nondefault state directory. `FRACTAL_WEB_URL` is an explicit URL override; it is not needed for normal local access and does not configure a server.
+
+The local listener is a **same-machine browser boundary**. Do not publish port 7410 through Tailscale Serve or expose it to the network. The local session acts as the daemon's configured person; it is not a multi-user authorization boundary. See the [local daemon web contract](https://github.com/compoundingtech/fractal/blob/main/docs/fractal-web.md#local-daemon-web-app) for exact origin, cookie, and current session limitations.
+
+## Remote web access
+
+Remote browser access uses a separate, opt-in tailnet publisher, not the daemon's local browser listener. That publisher has its own configuration, paired bearer, allowed tailnet logins, and loopback port; the documented example uses port 7411 so it does not collide with the local listener.
+
+Follow the [opt-in tailnet publisher guide](https://github.com/compoundingtech/fractal/blob/main/docs/fractal-web.md#opt-in-tailnet-publisher). It describes the source build, server configuration, and Tailscale Serve HTTPS setup. Never use public Funnel for that publisher: admission depends on the authenticated tailnet login. Every local user who can reach its loopback port must already be trusted with the paired person's authority.
 
 ## iOS
 
 The phone is a paired client, not a graph replica or agent host. It shows work, conversations, documents, and requests. Confirm it is connected before sending actions. An offline screen does not mean your remote agents have stopped.
 
-Expose only the daemon's **paired-only gateway** through HTTPS or an encrypted tailnet route. Never expose the privileged daemon socket. Follow [gateway setup](https://github.com/compoundingtech/fractal/blob/main/docs/st3/client-v0/README.md#tailnet-carrier).
+Expose only the daemon's **paired-only gateway** through HTTPS or an encrypted tailnet route for the phone. This is separate from the local browser listener. Never expose the privileged daemon socket. Follow [gateway setup](https://github.com/compoundingtech/fractal/blob/main/docs/st3/client-v0/README.md#tailnet-carrier).
 
 On the daemon machine, begin a separate pairing for the phone:
 

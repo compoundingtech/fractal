@@ -32,7 +32,7 @@ Run `fractal setup` in your terminal. Choose your person name, a persistent mach
 
 Setup describes each integration before changing it. A new installation uses the `auto` access mode: provider-managed permission checks reduce accidents but are not a security boundary. `bypass` removes those prompts. Do not change that setting without the user's authorization.
 
-Use the CLI to inspect agents and missions. For graphical access, connect to an already configured [web app](../guides/web-and-ios.md): `fractal web` opens its URL but does not start a web server.
+Use the CLI to inspect agents and missions, or run `fractal web` to open the daemon's [local web app](../guides/web-and-ios.md). The daemon serves installed web assets on loopback port 7410 by default; the launcher opens an authenticated browser session without starting another server. If web access is unavailable, check `fractal doctor` for missing assets or person configuration.
 
 ## Check success
 

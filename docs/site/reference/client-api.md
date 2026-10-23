@@ -18,7 +18,7 @@ Fractal's web and iOS clients read work and submit authorized actions through th
 
 ## Security boundary
 
-Expose the paired-only gateway through HTTPS or an encrypted tailnet route. Keep the privileged daemon socket private. Pair each trusted device with the scopes it needs, protect its saved credentials, and revoke devices you no longer trust.
+The local browser app uses the daemon's same-machine cookie/session boundary; do not publish that listener to the network. Remote clients use the paired-only gateway through HTTPS or an encrypted tailnet route. Keep the privileged daemon socket private. Pair each trusted device with the scopes it needs, protect its saved credentials, and revoke devices you no longer trust. See [Web and iOS clients](../guides/web-and-ios.md) for the separate local and remote access paths.
 
 A phone or browser client does not replicate the graph or run agents. It needs a live connection to make changes. Show offline or stale state honestly; do not render a cached observation as proof of current success.
 

@@ -10,7 +10,7 @@ Messages are durable conversation. Missions track work and results; alerts track
 
 ## In the web app
 
-Open your configured [web app](web-and-ios.md), select an agent, and use its conversation composer. Read the agent's reply and inspect any work or request it refers to. The web server must already be running; `fractal web` opens its URL but does not start it.
+Run `fractal web` to open the daemon's [local web app](web-and-ios.md), select an agent, and use its conversation composer. Read the agent's reply and inspect any work or request it refers to. The daemon serves installed web assets by default; the launcher opens a browser session rather than starting another server. Keep its one-time launch URL private.
 
 An agent's native terminal remains useful for login, trust, and provider screens. It is not the only way to inspect its work: missions, messages, and results live in the graph.
 

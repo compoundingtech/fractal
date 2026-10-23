@@ -111,4 +111,4 @@ Tell the user the installed version, startup method, worker ID, run ID, workspac
 fractal agents stop agent/garden/worker --as "person/$PERSON"
 ```
 
-The user can inspect work and messages with the CLI or a configured [web app](../guides/web-and-ios.md). Continue with [Missions in practice](../guides/missions-in-practice.md) to add review and dependencies.
+The user can inspect work and messages with the CLI or run `fractal web` to open the daemon's [local web app](../guides/web-and-ios.md). The daemon serves its installed web assets by default; no separate JavaScript server is needed for local access. Treat the browser launch URL as a credential and do not include it in your report. Continue with [Missions in practice](../guides/missions-in-practice.md) to add review and dependencies.
