@@ -26,6 +26,23 @@ Each archive has `bin/st3`, `bin/fractal` and `bin/st` (relative symlinks to `st
 libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
+The embedded web UI ships in `share/fractal-web` in both release archives and
+the Nix `st3` package. The archive installer preserves that tree at
+`../share/fractal-web` relative to the chosen bin directory, including upgrade
+rollback. On macOS it also seals a copy inside `SmallTalk.app/Contents/share/fractal-web`
+before signing, so the app's real executable can resolve its own assets.
+No Node runtime or separate web service is needed by installed releases.
+Release builders on both Linux and macOS require Nix to build those immutable
+assets; the release workflow provisions it on both platforms.
+Release staging and installers make copied assets owner-writable; Nix-store
+permissions must not prevent extraction cleanup, upgrades, or rollback.
+
+Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
+Set `services.smalltalk.webListen = null;` to disable it, or set an explicit
+listener address. Home Manager passes its package's immutable assets explicitly
+when copying the daemon into its stable state-directory bin path. Externally
+managed binaries retain the release's executable-relative asset layout.
+
 ## Install or update
 
 If a populated v0.3.4 store may have unsigned delegation grants, preserve raw state and
