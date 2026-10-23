@@ -62,38 +62,43 @@ impl PtyRuntime {
         Ok(())
     }
 
-    /// Record the destination before any server can leave its operation-owned work scope.
     /// Sidecars are immutable and independent of the worker's spawn lock.
+    pub(super) fn record_server_ownership(&self, observation: &PtyObservation) -> Result<()> {
+        let (Some(operation), Some(scope), Some(pid)) = (
+            observation.tags.get("st3.start-operation"),
+            observation.tags.get("st3.scope-unit"), observation.pid,
+        ) else { return Ok(()); };
+        let directory = self.producer_directory(&observation.name, operation);
+        let owner = directory.join("owner.json");
+        let ownership: ProducerOwnership = match File::open(&owner) {
+            Ok(file) => serde_json::from_reader(file)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(ownership.version == 1 && ownership.runtime_id == observation.name
+            && ownership.operation == *operation && ownership.scope == *scope,
+            "PTY server ownership disagrees with its publication");
+        let unit = crate::server_unit(&observation.name, pid);
+        let path = directory.join(format!("server-{pid}.json"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                serde_json::to_writer(&mut file, &unit)?;
+                file.sync_all()?;
+                File::open(&directory)?.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let recorded: String = serde_json::from_reader(File::open(&path)?)?;
+                anyhow::ensure!(recorded == unit, "PTY server scope ownership changed");
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    /// Record every destination before any server can leave its work scope.
     pub fn protect_servers(&self, observations: &[PtyObservation]) -> Result<()> {
         for observation in observations {
-            let (Some(operation), Some(scope), Some(pid)) = (
-                observation.tags.get("st3.start-operation"),
-                observation.tags.get("st3.scope-unit"), observation.pid,
-            ) else { continue; };
-            let directory = self.producer_directory(&observation.name, operation);
-            let owner = directory.join("owner.json");
-            let ownership: ProducerOwnership = match File::open(&owner) {
-                Ok(file) => serde_json::from_reader(file)?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            anyhow::ensure!(ownership.version == 1 && ownership.runtime_id == observation.name
-                && ownership.operation == *operation && ownership.scope == *scope,
-                "PTY server ownership disagrees with its publication");
-            let unit = crate::server_unit(&observation.name, pid);
-            let path = directory.join(format!("server-{pid}.json"));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    serde_json::to_writer(&mut file, &unit)?;
-                    file.sync_all()?;
-                    File::open(&directory)?.sync_all()?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let recorded: String = serde_json::from_reader(File::open(&path)?)?;
-                    anyhow::ensure!(recorded == unit, "PTY server scope ownership changed");
-                }
-                Err(error) => return Err(error.into()),
-            }
+            self.record_server_ownership(observation)?;
         }
         crate::protect_servers(observations);
         Ok(())
