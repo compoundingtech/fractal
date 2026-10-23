@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep TUI terminal attach results scoped to the selected attempt and offer Ctrl+R retry after a 100-second attach deadline.",
+  "replay": {"status": "none", "detail": "Only process-local TUI attach state changes; no event replay changes."},
+  "schema": {"status": "none", "detail": "No database or persisted state changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or member coordination changes."},
+  "compatibility": {"status": "none", "detail": "No wire or client capability changes; existing attach requests are unchanged."},
+  "downtime": {"status": "none", "detail": "No daemon restart or additional service interruption is required."},
+  "manual": {"status": "none", "detail": "No migration steps. A terminal that times out now shows a failed status and Ctrl+R retry hint."},
+  "recovery": {"status": "none", "detail": "No persistent state is modified; replacing the TUI binary needs no data recovery."}
+}

@@ -428,6 +428,7 @@ enum Fetched {
     /// A direct stream to an agent's (or a shell's) PTY session.
     Native {
         agent: String,
+        generation: u64,
         direct: Direct,
     },
     /// Attaching again after the stream dropped: the new stream, or why not.
@@ -436,10 +437,11 @@ enum Fetched {
         outcome: Result<Direct, String>,
     },
     /// A shell's attach was refused for a reason that passes; it is being tried again.
-    AttachWaiting { agent: String, reason: String },
+    AttachWaiting { agent: String, generation: u64, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
+        generation: u64,
         runtime_ids: Vec<String>,
         reason: String,
     },
@@ -617,6 +619,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut attach_started: Option<Instant> = None;
     // Why the attach in progress is waiting, when st refused it for a reason that passes.
     let mut attach_note: Option<String> = None;
+    let mut attach_fence = AttachFence::default();
     // Whether a shell's attach is still wanted: its retries stop once its tab is gone.
     let mut attach_wanted: BTreeMap<String, Arc<AtomicBool>> = BTreeMap::new();
     // The cursor shape last set, so it changes only when the attached terminal asks.
@@ -681,6 +684,19 @@ pub fn run(context: Context) -> Result<()> {
         {
             ui.flash = None;
         }
+        let (_, selected) = ui.focus();
+        if let Some(previous) = attach_fence.select(selected.as_deref()) {
+            if let Some(wanted) = attach_wanted.remove(&previous) {
+                wanted.store(false, Ordering::Relaxed);
+                if let Some(view) = ui.terminal_view_mut(&previous)
+                    && view.native.is_none()
+                {
+                    view.stale = Some("failed: selection changed · Ctrl+R to retry".into());
+                }
+            }
+            attach_started = None;
+            attach_note = None;
+        }
         // A terminal still connecting says how long it has waited, so a slow st does not look
         // like a stuck screen (Nathan, 2026-10-05: attaching took a long time).
         if let (Some(started), Some(view)) = (attach_started, ui.terminal.as_mut())
@@ -691,10 +707,15 @@ pub fn run(context: Context) -> Result<()> {
                 .as_deref()
                 .is_some_and(|stale| stale.starts_with("connecting"))
         {
-            view.stale = Some(match &attach_note {
-                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
-                None => connecting_text(started.elapsed()),
-            });
+            let elapsed = started.elapsed();
+            view.stale = Some(attach_status(elapsed, attach_note.as_deref()));
+            if elapsed >= ATTACH_DEADLINE {
+                attach_started = None;
+                attach_fence.pending.remove(&view.agent);
+                if let Some(wanted) = attach_wanted.remove(&view.agent) {
+                    wanted.store(false, Ordering::Relaxed);
+                }
+            }
         }
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
@@ -1296,9 +1317,13 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
-                Fetched::Native { agent, direct } => {
-                    attach_note = None;
-                    let waited = attach_started.take().map(|at| at.elapsed());
+                Fetched::Native { agent, generation, direct } => {
+                    if attach_fence.pending.get(&agent) != Some(&generation) { continue; }
+                    let mut waited = None;
+                    let current = attach_fence.apply_current(&agent, generation, || {
+                        attach_note = None;
+                        waited = attach_started.take().map(|at| at.elapsed());
+                    });
                     if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
                     {
                         ui.flash(format!(
@@ -1324,7 +1349,7 @@ pub fn run(context: Context) -> Result<()> {
                         ));
                         view.stale = None;
                     }
-                    ui.flash(format!("Attached · {route}"));
+                    if current { ui.flash(format!("Attached · {route}")); }
                 }
                 Fetched::Reattached { agent, outcome } => {
                     if let Some(native) = ui
@@ -1339,9 +1364,9 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                 }
-                Fetched::AttachWaiting { agent, reason } => {
+                Fetched::AttachWaiting { agent, generation, reason } => {
                     if ui.terminal_view(&agent).is_some() {
-                        if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+                        if attach_fence.current(&agent, generation) {
                             attach_note = Some(reason);
                         }
                     } else if let Some(wanted) = attach_wanted.remove(&agent) {
@@ -1351,25 +1376,28 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::NativeFailed {
                     agent,
+                    generation,
                     runtime_ids,
                     reason,
                 } => {
-                    attach_note = None;
-                    if terminal_opens.remove(&agent).is_some() {
-                        super::slo::METRICS.add("terminal_open_errors", 1);
-                    }
-                    attach_started = None;
-                    if agent.starts_with("terminal/") {
-                        // A shell has no other view to fall back to.
-                        if let Some(view) = ui.terminal_view_mut(&agent) {
-                            view.ended = Some(format!("could not attach: {reason}"));
+                    attach_fence.apply_current(&agent, generation, || {
+                        attach_note = None;
+                        if terminal_opens.remove(&agent).is_some() {
+                            super::slo::METRICS.add("terminal_open_errors", 1);
                         }
-                    } else if ui.terminal_view(&agent).is_some() {
-                        ui.flash(format!(
-                            "No direct terminal ({reason}); showing st's view of it"
-                        ));
-                        let _ = commands.send(Command::Follow { runtime_ids });
-                    }
+                        attach_started = None;
+                        if agent.starts_with("terminal/") {
+                            // A shell has no other view to fall back to.
+                            if let Some(view) = ui.terminal_view_mut(&agent) {
+                                view.ended = Some(format!("could not attach: {reason}"));
+                            }
+                        } else if ui.terminal_view(&agent).is_some() {
+                            ui.flash(format!(
+                                "No direct terminal ({reason}); showing st's view of it"
+                            ));
+                            let _ = commands.send(Command::Follow { runtime_ids });
+                        }
+                    });
                 }
             }
             changed = true;
@@ -1695,6 +1723,17 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 Effect::OpenTerminal { agent } => {
+                    if let Some(previous) = attach_fence.select(Some(&agent))
+                        && let Some(wanted) = attach_wanted.remove(&previous)
+                    {
+                        wanted.store(false, Ordering::Relaxed);
+                        if let Some(view) = ui.terminal_view_mut(&previous)
+                            && view.native.is_none()
+                        {
+                            view.stale = Some("failed: selection changed · Ctrl+R to retry".into());
+                        }
+                    }
+                    let generation = attach_fence.start(&agent);
                     terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
@@ -1757,6 +1796,7 @@ pub fn run(context: Context) -> Result<()> {
                                 |reason| {
                                     let _ = tx.send(Fetched::AttachWaiting {
                                         agent: agent.clone(),
+                                        generation,
                                         reason: reason.to_owned(),
                                     });
                                 },
@@ -1777,9 +1817,10 @@ pub fn run(context: Context) -> Result<()> {
                                 return;
                             }
                             let _ = tx.send(match attached {
-                                Ok(direct) => Fetched::Native { agent, direct },
+                                Ok(direct) => Fetched::Native { agent, generation, direct },
                                 Err(reason) => Fetched::NativeFailed {
                                     agent,
+                                    generation,
                                     runtime_ids,
                                     reason,
                                 },
@@ -3841,6 +3882,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn attach_fence_rejects_late_results_after_selection_and_retry() {
+        let mut fence = super::AttachFence::default();
+        fence.select(Some("A"));
+        let old = fence.start("A");
+        fence.select(Some("B"));
+        let current = fence.start("B");
+        let started = Instant::now();
+        let mut state = (Some(started), Some("B is waiting"), "B flash", vec!["B"]);
+        // Native and NativeFailed put selection-global mutations behind this same gate.
+        for _ in ["Native", "NativeFailed"] {
+            assert!(!fence.apply_current("A", old, || {
+                state = (None, None, "Attached A", vec!["A"]);
+            }));
+            assert_eq!(state, (Some(started), Some("B is waiting"), "B flash", vec!["B"]));
+        }
+        assert!(!fence.current("A", old)); // AttachWaiting uses the same predicate.
+        assert!(fence.current("B", current));
+        let retry = fence.start("B");
+        assert_ne!(retry, current);
+        assert!(!fence.current("B", current));
+        assert!(fence.current("B", retry));
+    }
+
+    #[test]
+    fn attach_deadline_stops_connecting_and_names_retry() {
+        let before = super::attach_status(super::ATTACH_DEADLINE - Duration::from_secs(1), None);
+        assert!(before.starts_with("connecting"));
+        for reason in [None, Some("host unavailable")] {
+            let status = super::attach_status(super::ATTACH_DEADLINE, reason);
+            assert!(status.starts_with("failed: "));
+            assert!(status.contains("retry"));
+            assert!(!status.contains("connecting"));
+        }
+    }
+
+    #[test]
+    fn attach_deadline_retry_key_reopens_the_same_terminal() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = Ui::new(crate::demo::world());
+        ui.live = true;
+        let agent = "terminal/attach-deadline-test";
+        ui.open_in_glass(
+            crate::ui::Pane::Terminal(agent.into()),
+            crate::ui::glass::Open::Here,
+        );
+        ui.terminal = Some(crate::ui::TerminalView {
+            agent: agent.into(),
+            name: "shell".into(),
+            title: "shell".into(),
+            lines: Vec::new(),
+            cursor: None,
+            stale: Some(super::attach_status(super::ATTACH_DEADLINE, None)),
+            ended: None,
+            native: None,
+        });
+        ui.effects.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(ui.effects.as_slice(), [Effect::OpenTerminal { agent: opened }] if opened == agent));
+    }
+
     use super::*;
 
     fn peer(host: &str, missing: u64, diverged: bool) -> fractal_client::SyncPeer {
@@ -5148,6 +5250,57 @@ struct Direct {
     stream: std::os::unix::net::UnixStream,
     /// How it was reached, for the person: `local PTY`, `Fabric to HOST`, or `via the daemon (…)`.
     route: String,
+}
+
+/// Selection-global status belongs only to the latest attempt for the selected agent.
+#[derive(Default)]
+struct AttachFence {
+    generation: u64,
+    selected: Option<String>,
+    pending: BTreeMap<String, u64>,
+}
+
+impl AttachFence {
+    fn select(&mut self, agent: Option<&str>) -> Option<String> {
+        if self.selected.as_deref() == agent {
+            return None;
+        }
+        self.generation += 1;
+        std::mem::replace(&mut self.selected, agent.map(str::to_owned))
+    }
+
+    fn start(&mut self, agent: &str) -> u64 {
+        self.generation += 1;
+        self.pending.insert(agent.to_owned(), self.generation);
+        self.generation
+    }
+
+    fn current(&self, agent: &str, generation: u64) -> bool {
+        self.selected.as_deref() == Some(agent)
+            && self.generation == generation
+            && self.pending.get(agent) == Some(&generation)
+    }
+
+    fn apply_current(&self, agent: &str, generation: u64, apply: impl FnOnce()) -> bool {
+        if !self.current(agent, generation) {
+            return false;
+        }
+        apply();
+        true
+    }
+}
+
+// Bounds the whole attempt, including a raw-stream request that never answers.
+const ATTACH_DEADLINE: Duration = Duration::from_secs(100);
+
+fn attach_status(waited: Duration, reason: Option<&str>) -> String {
+    if waited >= ATTACH_DEADLINE {
+        return format!("failed: {} · Ctrl+R to retry", reason.unwrap_or("attach timed out"));
+    }
+    match reason {
+        Some(reason) => format!("{} · {reason}, trying again", connecting_text(waited)),
+        None => connecting_text(waited),
+    }
 }
 
 /// A direct stream to `subject`'s PTY session: st's raw terminal stream, fenced to the
