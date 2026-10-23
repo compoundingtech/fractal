@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Fence TUI terminal attach results by selection and attempt, cancel superseded setup requests, and keep native or fallback failures retryable with phase-specific timeouts and Ctrl+R.",
+  "summary": "Fence native and fallback TUI terminal results by selection and generation, cancel superseded setup, and preserve failed/retry states across tab changes and phase timeouts.",
   "replay": {"status": "none", "detail": "Only process-local TUI attach state changes; no event replay changes."},
   "schema": {"status": "none", "detail": "No database or persisted state changes."},
   "rules": {"status": "none", "detail": "No checkpoint rules or member coordination changes."},
-  "compatibility": {"status": "none", "detail": "No wire or client capability changes; existing attach requests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Internal Rust feed commands/results carry an attempt generation and terminal subscription IDs are generation-specific. No daemon wire schema or capability contract changes; all in-repository callers migrate together."},
   "downtime": {"status": "none", "detail": "No daemon restart or additional service interruption is required."},
-  "manual": {"status": "none", "detail": "No migration steps. Failed native setup, unavailable fallback screens, and phase timeouts show a reason and Ctrl+R retry hint instead of remaining connecting."},
+  "manual": {"status": "none", "detail": "No migration steps. Native/fallback failures and phase timeouts show a reason and Ctrl+R retry hint. Failed shells retain their reason on tab return and restart setup only on explicit retry."},
   "recovery": {"status": "none", "detail": "No persistent state is modified; replacing the TUI binary needs no data recovery."}
 }

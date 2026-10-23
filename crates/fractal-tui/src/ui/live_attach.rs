@@ -78,6 +78,34 @@ impl State {
         (self.generation, wanted, serial)
     }
 
+    pub(super) fn resume_fallback(&mut self, view: &mut crate::ui::TerminalView, runtime_ids: &[String], commands: &mpsc::UnboundedSender<Command>) {
+        // A shell has no runtime-resolved fallback. Only Ctrl+R may restart its failed setup.
+        if view.agent.starts_with("terminal/") || view.native.is_some()
+            || self.selected.as_deref() != Some(view.agent.as_str())
+        {
+            return;
+        }
+        let generation = self.generation;
+        self.pending.insert(view.agent.clone(), generation);
+        if commands.send(Command::Follow { runtime_ids: runtime_ids.to_vec(), generation }).is_err() {
+            view.stale = Some(failed("fallback Follow unavailable"));
+        } else if !retryable(view) {
+            view.stale = Some("reconnecting".into());
+        }
+    }
+
+    pub(super) fn apply_terminal_update(&mut self, ui: &mut Ui, generation: u64, update: TerminalUpdate, attached: &mut Option<Following>) {
+        let (_, selected) = ui.focus();
+        self.select(ui, selected.as_deref());
+        let Some(agent) = selected.as_deref() else { return; };
+        if !self.current(agent, generation)
+            || ui.terminal.as_ref().is_none_or(|view| view.agent != agent || view.native.is_some())
+        {
+            return;
+        }
+        apply_current_terminal_update(ui, update, attached);
+    }
+
     fn current(&self, agent: &str, generation: u64) -> bool {
         self.selected.as_deref() == Some(agent) && self.generation == generation
             && self.pending.get(agent) == Some(&generation)
@@ -155,7 +183,7 @@ impl State {
                     self.cancel(&agent);
                     self.pending.remove(&agent);
                 } else if !agent.starts_with("terminal/") && ui.terminal_view(&agent).is_some() {
-                    if commands.send(Command::Follow { runtime_ids }).is_err() {
+                    if commands.send(Command::Follow { runtime_ids, generation }).is_err() {
                         let reason = format!("{reason}; fallback Follow unavailable");
                         if let Some(view) = ui.terminal_view_mut(&agent) {
                             view.stale = Some(failed(&reason));
@@ -178,7 +206,7 @@ pub(super) fn close(direct: Direct) {
 
 fn failed(reason: &str) -> String { format!("failed: {reason} · Ctrl+R to retry") }
 
-pub(super) fn apply_terminal_update(ui: &mut Ui, update: TerminalUpdate, attached: &mut Option<Following>) {
+fn apply_current_terminal_update(ui: &mut Ui, update: TerminalUpdate, attached: &mut Option<Following>) {
     match update {
         TerminalUpdate::Attached { terminal_id, attachment_id, incarnation } => {
             *attached = Some(Following { terminal_id, attachment_id, incarnation });
@@ -345,7 +373,7 @@ mod tests {
             agent: "agent/A".into(), generation, runtime_ids: vec!["runtime/A".into()],
             reason: "direct refused".into(),
         }, &tx);
-        assert!(matches!(rx.try_recv(), Ok(Command::Follow { runtime_ids }) if runtime_ids == ["runtime/A"]));
+        assert!(matches!(rx.try_recv(), Ok(Command::Follow { runtime_ids, .. }) if runtime_ids == ["runtime/A"]));
         assert!(state.started.is_none());
     }
 
@@ -369,17 +397,18 @@ mod tests {
     #[test]
     fn fallback_screen_failure_stays_failed_and_ctrl_r_starts_exactly_one_attempt() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let (mut state, mut ui, tx, mut rx) = selected("agent/A");
+        let existing = crate::ui::demo::world().agents.items()[0].id.clone();
+        let (mut state, mut ui, tx, mut rx) = selected(&existing);
         let generation = state.generation;
         state.apply_fetched(&mut ui, Fetched::NativeFailed {
-            agent: "agent/A".into(), generation, runtime_ids: vec!["runtime/A".into()],
+            agent: existing.clone(), generation, runtime_ids: vec!["runtime/A".into()],
             reason: "remote unavailable".into(),
         }, &tx);
         assert!(matches!(rx.try_recv(), Ok(Command::Follow { .. })));
         let mut attached = None;
-        apply_terminal_update(&mut ui, TerminalUpdate::Reconnecting("gateway screen unavailable".into()), &mut attached);
+        state.apply_terminal_update(&mut ui, generation, TerminalUpdate::Reconnecting("gateway screen unavailable".into()), &mut attached);
         assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: fallback screen: gateway screen unavailable · Ctrl+R to retry"));
-        apply_terminal_update(&mut ui, TerminalUpdate::Ended {
+        state.apply_terminal_update(&mut ui, generation, TerminalUpdate::Ended {
             restarted: false, reason: "screen read refused".into(),
         }, &mut attached);
         state.tick(&mut ui);
@@ -396,13 +425,92 @@ mod tests {
         let [crate::ui::Effect::OpenTerminal { agent }] = effects.as_slice() else {
             panic!("retry must emit exactly one OpenTerminal effect");
         };
-        assert_eq!(agent, "agent/A");
+        assert_eq!(agent, &existing);
         // Process the effect with the same lifecycle entry used by the live OpenTerminal arm.
         let (retry, _, _) = state.begin(&mut ui, agent);
         assert_eq!(retry, generation + 1);
         assert!(state.started.is_some());
         assert_eq!(state.pending.get(agent), Some(&retry));
         assert_eq!(state.wanted.len(), 1);
+    }
+
+    #[test]
+    fn an_old_fallback_screen_cannot_clear_a_new_failed_attempt() {
+        let (mut state, mut ui, tx, mut rx) = selected("agent/A");
+        let first = state.generation;
+        state.apply_fetched(&mut ui, Fetched::NativeFailed {
+            agent: "agent/A".into(), generation: first, runtime_ids: vec!["runtime/A".into()],
+            reason: "first direct refusal".into(),
+        }, &tx);
+        assert!(matches!(rx.try_recv(), Ok(Command::Follow { generation, .. }) if generation == first));
+        let (second, _, _) = state.begin(&mut ui, "agent/A");
+        state.apply_fetched(&mut ui, Fetched::NativeFailed {
+            agent: "agent/A".into(), generation: second, runtime_ids: vec!["runtime/A".into()],
+            reason: "second direct refusal".into(),
+        }, &tx);
+        assert!(matches!(rx.try_recv(), Ok(Command::Follow { generation, .. }) if generation == second));
+        let failure = ui.terminal.as_ref().unwrap().stale.clone();
+        let flash = ui.flash.clone();
+        let screen = || {
+            let envelope: fractal_client::Envelope<fractal_client::TerminalScreen> = serde_json::from_str(
+                include_str!("../../../../docs/st3/client-v0/fixtures/terminal-screen.json")
+            ).unwrap();
+            TerminalUpdate::Screen(Box::new(envelope.value))
+        };
+        let mut attached = None;
+        state.apply_terminal_update(&mut ui, first, screen(), &mut attached);
+        assert_eq!(ui.terminal.as_ref().unwrap().stale, failure);
+        assert!(retryable(ui.terminal.as_ref().unwrap()));
+        assert!(ui.terminal.as_ref().unwrap().lines.is_empty());
+        assert_eq!(ui.flash, flash);
+        assert!(state.started.is_none());
+        assert!(state.note.is_none());
+        assert!(attached.is_none());
+        assert!(rx.try_recv().is_err());
+        // A screen from the current follow really does recover the failed view.
+        state.apply_terminal_update(&mut ui, second, screen(), &mut attached);
+        assert!(ui.terminal.as_ref().unwrap().stale.is_none());
+    }
+
+    #[test]
+    fn returning_to_a_failed_shell_keeps_its_reason_until_ctrl_r() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let shell = "terminal/retry-shell";
+        let (mut state, mut ui, tx, mut rx) = selected(shell);
+        let generation = state.generation;
+        state.apply_fetched(&mut ui, Fetched::NativeFailed {
+            agent: shell.into(), generation, runtime_ids: vec![],
+            reason: "shell owner unavailable".into(),
+        }, &tx);
+        let failure = ui.terminal.as_ref().unwrap().stale.clone();
+        ui.open_in_glass(Pane::Mission(None), Open::Here);
+        assert_ne!(ui.focus().0, 1);
+        let (_, selected) = ui.focus();
+        state.select(&mut ui, selected.as_deref());
+        ui.open_in_glass(Pane::Terminal(shell.into()), Open::Here);
+        assert_eq!(ui.focus().0, 1);
+        let (_, selected) = ui.focus();
+        state.select(&mut ui, selected.as_deref());
+        let before_return = state.generation;
+        state.resume_fallback(ui.terminal.as_mut().unwrap(), &[], &tx);
+        assert_eq!(ui.terminal.as_ref().unwrap().stale, failure);
+        assert!(retryable(ui.terminal.as_ref().unwrap()));
+        assert!(rx.try_recv().is_err(), "shell tab return must not send Follow");
+        assert!(state.started.is_none());
+        assert!(!state.pending.contains_key(shell));
+        assert_eq!(state.generation, before_return);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, crate::ui::Effect::OpenTerminal { .. })));
+
+        ui.effects.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let effects = std::mem::take(&mut ui.effects);
+        let [crate::ui::Effect::OpenTerminal { agent }] = effects.as_slice() else {
+            panic!("only explicit Ctrl+R may restart the failed shell");
+        };
+        assert_eq!(agent, shell);
+        let (retry, _, _) = state.begin(&mut ui, agent);
+        assert_eq!(retry, before_return + 1);
+        assert!(state.started.is_some());
     }
 
     #[test]

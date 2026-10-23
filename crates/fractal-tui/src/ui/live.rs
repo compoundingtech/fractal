@@ -982,7 +982,7 @@ pub fn run(context: Context) -> Result<()> {
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
                 }
-                feed::Update::Terminal(update) => attach::apply_terminal_update(&mut ui, update, &mut attached),
+                feed::Update::Terminal { generation, update } => attach.apply_terminal_update(&mut ui, generation, update, &mut attached),
             }
         }
         while let Ok(result) = fetched.try_recv() {
@@ -1294,10 +1294,7 @@ pub fn run(context: Context) -> Result<()> {
                     attached = None;
                     if !attach::retryable(view) { view.stale = Some("paused while hidden".into()); }
                 } else if tab == 1 {
-                    let _ = commands.send(Command::Follow {
-                        runtime_ids: runtime_ids.clone(),
-                    });
-                    if !attach::retryable(view) { view.stale = Some("reconnecting".into()); }
+                    attach.resume_fallback(view, runtime_ids, &commands);
                 }
             }
             shown_tab = tab;
