@@ -32,6 +32,23 @@ fn reading(store: &Store, start: u64, value: Option<f64>) -> Observation {
     }
 }
 
+/// `source()` over a file store. The in-memory one shares a single cache between its
+/// connections, where a concurrent reader finds a table the writer holds locked at once; a file
+/// store waits on its busy timeout as production does.
+fn file_source(path: &std::path::Path) -> Store {
+    let identity = key();
+    smallclaims::store::set_thread_clock(Some(u128::from(SOURCE_START)));
+    let store = Store::open(path, "alder").unwrap();
+    smallclaims::store::set_thread_clock(None);
+    store.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
+    store.pin_fleet_anchor(identity.public()).unwrap();
+    store.set_member_key(Some(identity.clone())).unwrap();
+    admit(&store, "alder", &identity, "anchor", None);
+    store.project_replication_backlog().unwrap();
+    store.fleet_membership().unwrap();
+    store
+}
+
 fn miss(store: &Store, objective: &str) -> String {
     // The in-memory test store shares one cache between its connections, so a reader of the
     // fleet generation can find it locked by a concurrent writer; a file store (WAL) cannot.
@@ -358,7 +375,8 @@ fn an_old_registry_repair_withdraws_closure_and_matches_replay_on_current_member
 
 #[test]
 fn concurrent_misses_and_prepared_dispatches_create_one_mission() {
-    let source = Arc::new(source());
+    let directory = tempfile::tempdir().unwrap();
+    let source = Arc::new(file_source(&directory.path().join("concurrent.sqlite3")));
     let callers = (0..8).map(|_| {
         let source = source.clone();
         std::thread::spawn(move || miss(&source, "person-read"))
