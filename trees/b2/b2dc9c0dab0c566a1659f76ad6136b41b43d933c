@@ -7,3 +7,4 @@ record a63505d9fd2ab1d74049f80b1c7bc73dab5b8644 fractal-web 0 fleet/ci 2026-10-2
 record e54896a568fd43d8d65aa1655a4a046eb553f1fc linux-tests-shard-2 0 fleet/ci 2026-10-22T11:18:13Z
 record e9ed0cf3f7dcfdfd14a5f3fad29636213e60e043 mail-redelivery-canaries 0 fleet/ci 2026-10-22T11:10:01Z
 record eb27a44cd25b8937664eed6cd7817179d39e1796 linux-tests 0 fleet/ci 2026-10-22T11:16:50Z
+gc 2026-10-23T03:41:11+00:00 1e057d1a410a8d00d9805dc40f99ee64b965c5994acf8a880608bd7d1e59e080

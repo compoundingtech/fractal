@@ -7,3 +7,4 @@ record 84c4e80b1fcfa391ff77d41444e61410443d1b21 linux-fleet-compat 0 fleet/ci 20
 record b2d3c9cf64912b5957df3b8aae4196944c7b6fe5 genie-freshness 0 fleet/ci 2026-10-22T09:55:41Z
 record b486904250ffaef3d4c94b71f0e0392e2dc790de mail-redelivery-canaries 0 fleet/ci 2026-10-22T09:59:09Z
 record fbedbdc0121d1a3a31270ea8f0c1cdd86a5f85e2 isolation-vm 0 fleet/ci 2026-10-22T10:01:12Z
+gc 2026-10-23T03:41:11+00:00 1e057d1a410a8d00d9805dc40f99ee64b965c5994acf8a880608bd7d1e59e080

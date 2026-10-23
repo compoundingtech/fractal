@@ -6,3 +6,4 @@ record 72331e6eecb25066b74b4bcb2885fe3c74a64867 linux-tests-shard-2 0 fleet/ci 2
 record 95801af30edab8fce971f9efa643e220eb3bb23f isolation-vm 0 fleet/ci 2026-10-22T16:28:12Z
 record ba6f80e30e12fb3e7f83025e50ee66af15eccbdd linux-tests 0 fleet/ci 2026-10-22T16:30:55Z
 record f23461a8a9848c30701e6b10812442dc14d8b269 genie-freshness 0 fleet/ci 2026-10-22T16:18:21Z
+gc 2026-10-23T03:41:11+00:00 1e057d1a410a8d00d9805dc40f99ee64b965c5994acf8a880608bd7d1e59e080

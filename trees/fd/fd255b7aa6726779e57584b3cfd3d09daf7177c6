@@ -9,3 +9,4 @@ record 84293b134f3f7c8f9d36b460e4808cb961f5a797 linux-tests 0 fleet/ci 2026-10-1
 record ab9c08aca43a8c2ca08dfc76d2db287eaee2d4b3 isolation-vm 0 fleet/ci 2026-10-19T11:10:29Z
 record d199e8b6455ba052056db24bdc46d34bcc90fcf9 linux-clippy 0 fleet/ci 2026-10-19T10:59:00Z
 record dc88a0e85e2105aedef189d16d152a7f0668dd6a linux-fleet-compat 0 fleet/ci 2026-10-19T10:59:40Z
+gc 2026-10-23T03:41:11+00:00 1e057d1a410a8d00d9805dc40f99ee64b965c5994acf8a880608bd7d1e59e080

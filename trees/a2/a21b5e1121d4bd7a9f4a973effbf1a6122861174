@@ -9,3 +9,4 @@ record 989eec0d36c8125df064ed6cc4202c9c8b11b1ec genie-freshness 0 fleet/ci 2026-
 record 997a4fc20438ddc22b4f0fedf50b960ebd7614e2 typescript-client 0 fleet/ci 2026-10-19T22:38:28Z
 record de3eac6ffd9fc2b612c3f1eb09d4183dfa3df253 linux-tests 0 fleet/ci 2026-10-19T22:48:51Z
 record e9808e5d3884a2a7b3fdb63684e84f3ccafe7a1e mail-redelivery-canaries 0 fleet/ci 2026-10-19T22:43:45Z
+gc 2026-10-23T03:41:11+00:00 1e057d1a410a8d00d9805dc40f99ee64b965c5994acf8a880608bd7d1e59e080
