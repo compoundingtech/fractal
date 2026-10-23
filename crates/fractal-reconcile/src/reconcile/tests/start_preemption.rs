@@ -1884,9 +1884,10 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     fn new() -> Self {
         use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
         fractal_runtime::initialize_isolation(&BTreeMap::new());
+        // The tree's pty from this test's PATH (the dev shell's), not the login shell's: on NixOS a
+        // login shell rebuilds PATH, so under an isolated HOME (scripts/ci-local) it has no pty.
         let real_pty =
-            fractal_runtime::resolve_executable("pty", &crate::environment::snapshot().unwrap())
-                .unwrap();
+            fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
