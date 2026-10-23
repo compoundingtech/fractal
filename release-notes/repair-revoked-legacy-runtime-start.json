@@ -4,8 +4,8 @@
   "replay": {"status": "none", "detail": "No replay; the operator reviews a fresh st3.operational-repair.v0 plan and applies its exact token."},
   "schema": {"status": "none", "detail": "No database schema change. Repair uses the normal producer-closed cleanup transition and retains a repair.applied receipt."},
   "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
-  "compatibility": {"status": "none", "detail": "The operational repair plan gains the additive revoked-legacy-runtime-start item class. Native operation-owned launch retirement is unchanged; registry rows are not deleted."},
+  "compatibility": {"status": "changed", "detail": "The repair plan gains revoked-legacy-runtime-start items and repeatable exact subject/class filters. Filtered approval tokens embed their canonical filter and require an upgraded daemon; the CLI refuses a daemon that ignores filters. Existing unfiltered tokens remain valid. Native operation-owned launch retirement is unchanged; registry rows are not deleted."},
   "downtime": {"status": "none", "detail": "No interruption beyond the normal daemon rollout."},
-  "manual": {"status": "changed", "detail": "On the owning Linux host, review st repair dry-run --json, then apply its exact token with st repair apply TOKEN --json. Any missing or changed physical or writer-owned evidence refuses the repair."},
+  "manual": {"status": "changed", "detail": "On the owning Linux host, review st repair dry-run --class revoked-legacy-runtime-start --subject SUBJECT --json (repeat --subject for each approved seat), then apply its exact token with st repair apply TOKEN --json. Apply recomputes only that selected set; any missing or changed physical or writer-owned evidence refuses the repair."},
   "recovery": {"status": "none", "detail": "No destructive recovery or ledger edits. Keep the receipt and repeat dry-run to confirm the repaired start no longer retains admission."}
 }

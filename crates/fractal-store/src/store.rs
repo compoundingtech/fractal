@@ -4045,10 +4045,23 @@ impl Store {
         &self,
         native_evidence: &[Value],
     ) -> Result<OperationalRepairPlan> {
+        self.operational_repair_plan_with_legacy_starts_and_filter(native_evidence, &[], &[])
+    }
+
+    pub fn operational_repair_plan_with_legacy_starts_and_filter(
+        &self, native_evidence: &[Value], subjects: &[String], classes: &[String],
+    ) -> Result<OperationalRepairPlan> {
+        let filter = OperationalRepairFilter::new(subjects, classes);
         let connection = self.readers.get();
-        operational_repair_plan_with_legacy_starts_tx(
+        filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
             &connection, now_ms(), &self.origin, native_evidence,
-        )
+        )?, &filter)
+    }
+
+    /// Filters are carried inside the approval token; apply never guesses a wider plan.
+    pub fn operational_repair_token_filters(token: &str) -> Result<(Vec<String>, Vec<String>), St3Error> {
+        let (_, filter) = decode_repair_token(token)?;
+        Ok((filter.subjects, filter.classes))
     }
 
     pub fn apply_operational_repair(
@@ -4064,23 +4077,7 @@ impl Store {
         token: &str,
         native_evidence: &[Value],
     ) -> Result<OperationalRepairResult, St3Error> {
-        if !token.starts_with("orpv0:") {
-            return Err(St3Error::new(
-                "invalid-repair-token",
-                "an operational repair token must start with `orpv0:`",
-            ));
-        }
-        let digest = token.trim_start_matches("orpv0:");
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(St3Error::new(
-                "invalid-repair-token",
-                "an operational repair token must contain one lowercase SHA-256 digest",
-            ));
-        }
+        let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
@@ -4121,9 +4118,9 @@ impl Store {
             });
         }
 
-        let plan = operational_repair_plan_with_legacy_starts_tx(
+        let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
             &transaction, now_ms(), &self.origin, native_evidence,
-        ).map_err(internal)?;
+        ).map_err(internal)?, &filter).map_err(internal)?;
         if plan.token != token {
             return Err(St3Error::new(
                 "stale-repair-plan",
@@ -12564,6 +12561,60 @@ pub fn operational_repair_plan_tx(
         },
         items,
     })
+}
+
+#[derive(Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OperationalRepairFilter {
+    subjects: Vec<String>,
+    classes: Vec<String>,
+}
+
+impl OperationalRepairFilter {
+    fn new(subjects: &[String], classes: &[String]) -> Self {
+        let mut filter = Self { subjects: subjects.to_vec(), classes: classes.to_vec() };
+        filter.subjects.sort();
+        filter.subjects.dedup();
+        filter.classes.sort();
+        filter.classes.dedup();
+        filter
+    }
+}
+
+fn decode_repair_token(token: &str) -> Result<(String, OperationalRepairFilter), St3Error> {
+    let invalid = || St3Error::new("invalid-repair-token", "expected an orpv0 digest and optional canonical filter");
+    let body = token.strip_prefix("orpv0:").ok_or_else(invalid)?;
+    let (digest, encoded) = body.split_once(':').map_or((body, None), |(digest, filter)| (digest, Some(filter)));
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(invalid());
+    }
+    let filter = if let Some(encoded) = encoded {
+        if encoded.len() > 65536 { return Err(invalid()); }
+        let bytes = hex::decode(encoded).map_err(|_| invalid())?;
+        let filter: OperationalRepairFilter = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if filter == OperationalRepairFilter::default()
+            || filter != OperationalRepairFilter::new(&filter.subjects, &filter.classes)
+            || hex::encode(serde_json::to_vec(&filter).map_err(internal)?) != encoded
+        {
+            return Err(invalid());
+        }
+        filter
+    } else {
+        OperationalRepairFilter::default()
+    };
+    Ok((digest.into(), filter))
+}
+
+fn filter_repair_plan(mut plan: OperationalRepairPlan, filter: &OperationalRepairFilter) -> Result<OperationalRepairPlan> {
+    if *filter == OperationalRepairFilter::default() { return Ok(plan); }
+    plan.items.retain(|item| {
+        (filter.subjects.is_empty() || filter.subjects.binary_search(&item.subject).is_ok())
+            && (filter.classes.is_empty() || filter.classes.binary_search(&item.class).is_ok())
+    });
+    let digest = canonical_hash(&("st3.operational-repair-filter.v0", filter, &plan.items))?;
+    plan.token = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(filter)?));
+    plan.status = if plan.items.is_empty() { "clean" } else { "changes" }.into();
+    Ok(plan)
 }
 
 fn operational_repair_plan_with_legacy_starts_tx(
