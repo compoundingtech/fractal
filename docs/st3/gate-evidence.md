@@ -1072,6 +1072,13 @@ and a signer level's own `events` can only narrow it further (the verifier repor
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
 
+The `queue` level is for a merge-queue signer: a key held in an account of its own, away from every agent seat, that fetches main and the
+pull request heads itself and signs the merged tree the queue will test. Every check the `host` level signs admits it for the `wrapper`
+kind with the host's command and inputs, `"events": ["merge_group"]` and `"lane": true`, so a queue note never covers a pull request and a
+tree that edits its own lane never skips on one. It is inert until a check's own `events` gains `merge_group`: today every check lists
+`pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
+and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
+
 #### Input values (`input_order`, `shard_inputs`)
 
 `required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
@@ -1514,6 +1521,30 @@ checkout), and it is one reason the authors file must stay that short. A check's
 signed: the tree edits every lane), `failed` or `deferred`), and `evidence-presign-worker summary` prints, per class, the ready heads seen in the
 window, how many had every check covered, the median and worst wait from first seen ready to covered, the runs and their outcomes, and
 how many ticks did not start (for disk or load) and how many runs were stopped, by reason.
+
+**The shadow merge-queue signer (`scripts/evidence-queue-signer`).** It measures whether a signer could keep the merge queue from
+rebuilding what is already built, without changing anything: a host note never covers a `merge_group` run, so it skips, waits for and
+blocks nothing. Two systemd user timers run it through `scripts/evidence-queue-timer`, which reads it (and the pre-sign worker, whose host
+rules it uses) from `origin/main` of a clone per command. `observe` (every minute, seconds) reads the merge queue, fetches each group
+commit while its `gh-readonly-queue` branch exists (so a dropped entry is measured too), and records the group tree, whether `git
+merge-tree` of the pull request head onto the entry's base gives the same tree, and, depth 1, the tree predicted for the next pull
+request to be queued (from the host's optional `~/.config/evidence-queue-signer/next-command`, which prints `<number> <head sha>` lines
+in queue order) merged onto the queue's tail. When an entry has left the queue and the queue's own jobs on its group commit finished, it
+appends one line to `~/.local/state/evidence-queue-signer/entries.jsonl`: the pull request, whether it landed, the trees and whether they
+are equal, per check when the queue's gate looked (the `evidence-gate-NAME` job's start) and its result (the `NAME` job), and the
+signer's run for that tree, with whether each note was there before the gate looked and by how many minutes, and whether the results
+agree. `sign` (every minute, one run at a time) takes the prediction first, since only a tree signed before enqueue can be ready in
+time, then the queue's entries in position order, never a tree twice, and runs `st-test` with every local check on it (the group commit
+as fetched, or the prediction's merge of the same two parents, which has the same tree), signing as the host. Only our own authors'
+code runs: a tree runs when its pull request and every entry ahead of it are by a login in `~/.config/evidence-presign/authors`;
+`~/.config/evidence-queue-signer/every-author` (the operator's decision) runs every entry. Its runs go through the host's build slot
+like any `st-test`, and the worker's stop limits apply. It starts on operations' terms for the host: IO pressure under 12% (three
+points under the stop), at least 165 GiB free and 20 GiB of available memory, without the worker's wait for ten calm minutes
+(`~/.config/evidence-queue-signer/start.json` overrides them, agreed with operations). Each
+run appends a line to `attempts.jsonl` (wait from first seen to start, seconds per check, and each note's time, read back from the
+pushed notes' `observed_at`, or estimated from the start and the per-check seconds when none can be read, as `signed_at_source`
+says). A tree is run once whatever the outcome, so a tree stopped for load is not retried. `evidence-queue-signer report` sums a window, and
+`~/.config/evidence-queue-signer/off` stops both.
 
 ### When the gate says skip
 
