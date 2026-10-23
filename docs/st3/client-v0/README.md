@@ -224,7 +224,7 @@ server; it must not infer `"standing"`, `"owner"`, or `"bounded"` from other fie
 Like the other forward-compatible response enums, the wire schema accepts future strings.
 Generated clients decode an unfamiliar value as `Unknown` without dropping the roster row;
 this differs from an absent field, which means no lifecycle was declared.
-See [agent declarations](../kdl-lifecycle.md#definitions-do-not-start-work).
+See [agent declarations](../../site/reference/configuration.md#definitions-do-not-start-work).
 
 ### Agent activity and human blocking
 
@@ -576,7 +576,7 @@ a managed declaration return `not-found`; conflicting declarations or a stop wit
 unambiguous predecessor return `validation-failed`. No directory is inferred from the seat ID.
 
 For the full attach, stop/start, and suspend/resume recipe, see
-[seat lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-seat).
+[agent lifecycle](../../seat-lifecycle.md#find-a-workspace-and-return-to-an-interactive-agent).
 
 ### Applied subject definitions
 
@@ -980,7 +980,7 @@ imply that an active claim is making progress.
 
 A trusted local agent session (`--as agent/PATH` on the local Unix API) holds every scope a person's
 local session holds and may invoke every action, recorded with the agent as its actor; see
-[free mode](../kdl-lifecycle.md#free-mode). Glasses stay a person's own: an agent session reads and
+[free mode](../../site/reference/configuration.md#free-mode). Glasses stay a person's own: an agent session reads and
 writes none. Each action keeps its own fences, and a review still needs its named reviewer.
 
 `GET /v1/client/agent-queues/{agent_id}` returns one `AgentQueue` value for a seat: its

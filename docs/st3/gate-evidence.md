@@ -1362,8 +1362,14 @@ and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and m
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
-the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
-throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. When that tree has a
+the integrated tree, and a pass of the merge tree is not made here. The command always runs in a clean
+worktree of that commit, so untracked or ignored files in your checkout cannot change the result. The worktree is one of a small pool
+of persistent ones per repository (`~/.cache/st-test/<hash of the git common dir>/tree-N`), each held by an flock while a run uses it
+(a run waits for a free one and never shares one with a concurrent run); before each run the tree is reset to the commit, stripped of
+untracked and ignored files, and checked clean (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
+fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
+host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
+its directory. When that tree has a
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
 shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
@@ -1392,11 +1398,13 @@ push (no `ST_AGENT`) keep the behaviour below: nobody is refused for lacking a k
 (its exit 3); any other outcome, a crash included, lets the push go. A stub written before this change discards every exit code: it is replaced on
 the next `nix develop` from a tree that has the new `scripts/install-git-hooks`, and by running that script from main.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
-The check that builds the Rust workspace (`linux-gate`) builds in one cargo target per host kept between runs,
-`~/.cache/st-test-target` (`ST_EVIDENCE_TARGET` names another; `off` builds in the throwaway worktree as before; a `CARGO_TARGET_DIR` you set is
-left alone), so a run does not start cold: the dependencies are reused, the workspace's own crates rebuild because every run's worktree is new.
-Operations' terms: it is removed before a run once it passes 25 GB, only while no other run holds it (a lock), it is never pinned, and the host's
-scratch sweep may reclaim it when idle (then the next run is cold). Concurrent runs share it; cargo's own lock orders their builds.
+The check that builds the Rust workspace (`linux-gate`) builds in one cargo target per pool tree kept between runs,
+`~/.cache/st-test/<hash>/target-N` (outside the tree, so the cleaning keeps it; `ST_EVIDENCE_TARGET=PATH` names one shared target for all
+trees instead; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
+is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
+Operations' terms: it is removed before a run once it passes 25 GB (the run holds the tree's lock, so nobody else uses it), it is never
+pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
+no longer used by default and can be deleted.
 **The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
 --slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
 cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
