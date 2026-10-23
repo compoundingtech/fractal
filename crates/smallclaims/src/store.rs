@@ -6034,6 +6034,38 @@ impl Store {
         Ok(())
     }
 
+    /// Bind a named store to one shard before it accepts claims or exchanges. The marker is
+    /// durable, so moving an existing shard file under another shard name fails on open.
+    pub fn bind_shard(&self, id: &crate::shards::ShardId) -> Result<()> {
+        let connection = self.connection.write();
+        let stored = fleet_meta(&connection, "shard_id")?;
+        if let Some(stored) = stored {
+            anyhow::ensure!(stored == id.as_str(), "this store belongs to shard `{stored}`");
+            return Ok(());
+        }
+        // A trimmed store can have no live claims while its envelopes and checkpoints
+        // still carry authority. An empty but fleet-bound default file is also already
+        // assigned to the default replication domain.
+        let previously_used = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM batches LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM replica_envelopes LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM checkpoint_envelopes LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM checkpoints LIMIT 1)
+                 OR EXISTS(SELECT 1 FROM meta WHERE key IN ('fleet_id', 'fleet_anchor_key') LIMIT 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        anyhow::ensure!(!previously_used, "cannot bind a used default store to a shard");
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hef1ca5e8b2ef owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('shard_id', ?1)", [id.as_str()])?;
+        Ok(())
+    }
+
+    /// None names the legacy/default store and never means an absent named shard.
+    pub fn bound_shard(&self) -> Result<Option<String>> {
+        fleet_meta(&self.readers.get(), "shard_id")
+    }
+
     pub fn replication_inventory(&self) -> Result<ReplicationInventory> {
         Ok(self.replication_snapshot()?.inventory.public())
     }
@@ -6388,6 +6420,7 @@ impl Store {
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
+            shard_id: self.bound_shard()?,
             schema_digest: self.runtime.schema_digest(),
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
@@ -6491,6 +6524,7 @@ impl Store {
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
                 fleet_id: fleet_id.to_owned(),
+                shard_id: self.bound_shard()?,
                 schema_digest: self.runtime.schema_digest(),
                 projection_registry_digest: Some(self.runtime.projection_registry_digest()),
                 projection_versions: self.runtime.projection_versions(),
@@ -6545,6 +6579,7 @@ impl Store {
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
+            shard_id: self.bound_shard()?,
             schema_digest: self.runtime.schema_digest(),
             projection_registry_digest: Some(self.runtime.projection_registry_digest()),
             projection_versions: self.runtime.projection_versions(),
@@ -6666,6 +6701,12 @@ impl Store {
             return Err(St3Error::new(
                 "fleet-id-mismatch",
                 "the peer belongs to another fleet",
+            ));
+        }
+        if input.shard_id != self.bound_shard().map_err(|error| St3Error::new("shard-state", error.to_string()))? {
+            return Err(St3Error::new(
+                "shard-mismatch",
+                "the exchange belongs to another shard or the default store",
             ));
         }
         let timing = time_stage(&self.replication_timers.receipt);

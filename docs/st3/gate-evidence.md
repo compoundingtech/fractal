@@ -1374,6 +1374,14 @@ apply to such a push. Only in an emergency, `ST_EVIDENCE_OVERRIDE='reason'` lets
 push (no `ST_AGENT`) keep the behaviour below: nobody is refused for lacking a key. The installed stub blocks a push only on the hook's own refusal
 (its exit 3); any other outcome, a crash included, lets the push go. A stub written before this change discards every exit code: it is replaced on
 the next `nix develop` from a tree that has the new `scripts/install-git-hooks`, and by running that script from main.
+`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
+**The host's build cap governs the heavy checks.** Each heavy check (`linux-gate`, `mail-redelivery-canaries`) runs under ONE heavy-slot
+ticket for the whole check, taken through the cargo admission shim (`~/.local/bin/cargo --stage-slot st-test-CHECK -- ...`), inside a
+`builds.slice` scope (`systemd-run --user --scope --slice=builds.slice`). Heavy runs on a host therefore queue first in, first out behind its
+heavy slots, and everything a check starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own cargo,
+the dev shell's sccache client). Only what starts `evidence-wrap` changes; the command it records and signs does not. The shim stops a stage
+after `CARGO_STAGE_MAX_SECONDS` (default 2400 s). A host without the shim or a user systemd bus runs the check as before and says so on stderr;
+`ST_EVIDENCE_GOVERN=off` does the same.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
@@ -1416,7 +1424,12 @@ keep the caller's environment. Tests set these variables in the caller and requi
 refuse when it is started with `LD_PRELOAD`.
 
 
-**Heavy checks and Linux gate stages (`scripts/ci-local`).** A check that builds and tests the Rust workspace
+**Heavy checks and Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch, its `TMPDIR`
+included, is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another), because a dev shell's `TMPDIR` is
+under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
+`/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
+CI runner has one (the `malloc_trim` tests fail under it); and the stages run with a CI runner's umask, 022, in a scratch no one else can
+write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). A check that builds and tests the Rust workspace
 (`mail-redelivery-canaries` and `linux-gate`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
 it is named (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its
 wait. Their local command is
