@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test keeps all repositories' worktree pools together under ST_TEST_POOL_MAX_GB (default 60, 0/off for none): before a run it evicts the least recently used trees and targets whose lock is free until the pool directory fits, never one in use, and logs what it removed.",
+  "replay": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None: an evicted tree or target is simply rebuilt cold by the next run that uses it."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "ST_TEST_POOL_MAX_GB=off."
+  }
+}

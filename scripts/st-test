@@ -95,7 +95,8 @@ POOL_WAIT_SECONDS = 5
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
-POOL_SETTINGS = {}  # ST_TEST_TREES and ST_TEST_POOL as the caller set them: read before the seat scrub drops every ST_* name
+POOL_SETTINGS = {}  # ST_TEST_TREES, ST_TEST_POOL and ST_TEST_POOL_MAX_GB as the caller set them: read before the seat scrub drops every ST_* name
+POOL_MAX_GB = 60.0  # all repositories' pools together under the pool directory; ST_TEST_POOL_MAX_GB (0 or off: no cap) replaces it
 
 
 class Failure(Exception):
@@ -317,7 +318,87 @@ def pool_root():
     """This repository's pool: one directory per git common dir, so clones and worktrees of one repository share it."""
     common = text(git('rev-parse', '--path-format=absolute', '--git-common-dir'))
     key = hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:16]
-    return Path(POOL_SETTINGS.get('ST_TEST_POOL') or Path.home() / '.cache/st-test') / key
+    return pool_base() / key
+
+
+def pool_base():
+    return Path(POOL_SETTINGS.get('ST_TEST_POOL') or Path.home() / '.cache/st-test')
+
+
+def pool_max_gb():
+    value = POOL_SETTINGS.get('ST_TEST_POOL_MAX_GB', '')
+    if value in ('off', '0'):
+        return None
+    if not value:
+        return POOL_MAX_GB
+    try:
+        limit = float(value)
+    except ValueError:
+        raise Failure(f'ST_TEST_POOL_MAX_GB={value!r} must be a number of GB, 0 or "off"')
+    if limit < 0:
+        raise Failure(f'ST_TEST_POOL_MAX_GB={value!r} must not be negative')
+    return limit or None
+
+
+def du_gb(path):
+    """The disk a directory holds, in GB (du, which is far quicker than walking a 60 GB build tree from here)."""
+    done = subprocess.run(['du', '-sk', '--', str(path)], capture_output=True, text=True, check=False)
+    try:
+        return int(done.stdout.split()[0]) * 1024 / 1e9
+    except (IndexError, ValueError):
+        return size_gb(path)
+
+
+def pool_units(base):
+    """[(last used, directory of the unit's lock, N, [paths])]: every pool tree with its target, across all the repositories' pools."""
+    units = {}
+    for repo in sorted(path for path in base.iterdir() if path.is_dir()) if base.is_dir() else []:
+        for entry in repo.iterdir():
+            match = re.fullmatch(r'(tree|target)-(\d+)(\.lock)?', entry.name)
+            if match:
+                units.setdefault((repo, int(match.group(2))), []).append(entry)
+    found = []
+    for (repo, n), paths in units.items():
+        lock = repo / f'tree-{n}.lock'
+        try:
+            used = lock.stat().st_mtime
+        except OSError:
+            used = min((path.stat().st_mtime for path in paths if path.exists()), default=0)
+        found.append((used, repo, n, [path for path in paths if path.name != lock.name]))
+    return sorted(found)
+
+
+def evict_to_cap(base, limit_gb, keep=None):
+    """Keep the pool directory under `limit_gb` GB in all: before a run, remove the least recently used trees and their targets whose lock
+    is free, oldest first, until it fits. A unit someone holds is never touched (`keep` is the one this run holds). Says what it removed."""
+    units = pool_units(base)
+    sizes = {(repo, n): sum(du_gb(path) for path in paths) for _, repo, n, paths in units}
+    total = sum(sizes.values())
+    for used, repo, n, paths in units:
+        if total <= limit_gb:
+            break
+        if (repo, n) == keep:
+            continue
+        try:
+            lock = open(repo / f'tree-{n}.lock', 'a')
+        except OSError:
+            continue
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            continue
+        try:
+            for path in paths:
+                subprocess.run(['chmod', '-R', 'u+rwX', '--', str(path)], check=False, capture_output=True)
+                shutil.rmtree(path, ignore_errors=True)
+            total -= sizes[(repo, n)]
+            idle = max(0, int((time.time() - used) / 60))
+            print(f'st-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
+        finally:
+            lock.close()
+    if total > limit_gb:
+        print(f'st-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
 
 
 def acquire_tree(root, size):
@@ -499,7 +580,7 @@ def repository_of(remote):
 
 def main(argv):
     POOL_SETTINGS.clear()
-    POOL_SETTINGS.update({name: os.environ[name] for name in ('ST_TEST_TREES', 'ST_TEST_POOL') if name in os.environ})
+    POOL_SETTINGS.update({name: os.environ[name] for name in ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_POOL_MAX_GB') if name in os.environ})
     scrub_git_environment()
     scrub_seat_environment()
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
@@ -573,6 +654,8 @@ def main(argv):
             if pool_trees:
                 commit, root = target_commit(args.base), pool_root()
                 n, tree_lock = acquire_tree(root, pool_trees)
+                if pool_max_gb():
+                    evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
                 directory, commit = target_worktree(args.base, scratch)
@@ -654,6 +737,7 @@ def main(argv):
             if not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
             if tree_lock:
+                os.utime(tree_lock.name)  # last used: now, for the eviction order
                 tree_lock.close()
 
 

@@ -552,6 +552,64 @@ class StTest(unittest.TestCase):
         self.assertEqual([name for name in gone if (tree / name).exists()], [])
         self.assertEqual((tree / 'a.txt').read_text(), 'one\n')
 
+    def fake_unit(self, base, repo, n, kilobytes, used):
+        directory = base / repo
+        (directory / f'tree-{n}').mkdir(parents=True, exist_ok=True)
+        (directory / f'tree-{n}' / 'blob').write_bytes(b'x' * kilobytes * 1024)
+        (directory / f'target-{n}').mkdir(parents=True, exist_ok=True)
+        (directory / f'target-{n}' / 'blob').write_bytes(b'y' * kilobytes * 1024)
+        lock = directory / f'tree-{n}.lock'
+        lock.write_text('')
+        os.utime(lock, (used, used))
+
+    def test_the_pool_is_kept_under_a_total_cap_by_evicting_the_least_recently_used_unlocked_units(self):
+        base = Path(self.tmp.name) / 'pool'
+        self.fake_unit(base, 'repo-a', 0, 200, 1_000)   # oldest
+        self.fake_unit(base, 'repo-a', 1, 200, 3_000)
+        self.fake_unit(base, 'repo-b', 0, 200, 2_000)
+        self.fake_unit(base, 'repo-b', 1, 200, 4_000)   # newest
+        held = open(base / 'repo-a/tree-0.lock', 'a')   # the oldest is in use
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        err = io.StringIO()
+        limit = 0.0009  # GB: room for about two units of 400 KB
+        with contextlib.redirect_stderr(err):
+            st_test.evict_to_cap(base, limit, keep=(base / 'repo-b', 1))
+        left = sorted(str(path.relative_to(base)) for path in base.glob('*/t*-[0-9]'))
+        # repo-a/0 is locked, repo-b/1 is kept; repo-b/0 (used 2000) goes first, then repo-a/1 (3000)
+        self.assertEqual(left, ['repo-a/target-0', 'repo-a/tree-0', 'repo-b/target-1', 'repo-b/tree-1'])
+        self.assertRegex(err.getvalue(), r'evicted repo-b/tree-0 and target-0 \(0\.\d GB, idle \d+ min\)')
+        self.assertIn('evicted repo-a/tree-1', err.getvalue())
+
+    def test_a_pool_under_its_cap_loses_nothing_and_the_cap_can_be_turned_off(self):
+        base = Path(self.tmp.name) / 'pool'
+        self.fake_unit(base, 'repo-a', 0, 100, 1_000)
+        with contextlib.redirect_stderr(io.StringIO()):
+            st_test.evict_to_cap(base, 1.0)
+        self.assertTrue((base / 'repo-a/tree-0').exists())
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
+            self.assertEqual(st_test.pool_max_gb(), 60.0)
+        for value, expected in (('off', None), ('0', None), ('12.5', 12.5)):
+            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_MAX_GB': value}, clear=True):
+                self.assertEqual(st_test.pool_max_gb(), expected)
+        for bad in ('lots', '-3'):
+            with mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_POOL_MAX_GB': bad}, clear=True):
+                with self.assertRaises(st_test.Failure):
+                    st_test.pool_max_gb()
+
+    def test_a_run_enforces_the_cap_before_it_starts_and_never_evicts_its_own_tree(self):
+        self.commit('b.txt', 'two')
+        base = self.home / '.cache/st-test'
+        self.fake_unit(base, 'other-repo', 0, 300, 1_000)
+        code, out, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_POOL_MAX_GB': '0.0001'})
+        self.assertEqual(code, 0, err)
+        self.assertFalse((base / 'other-repo/tree-0').exists())
+        self.assertFalse((base / 'other-repo/target-0').exists())
+        self.assertIn('evicted other-repo/tree-0', err)
+        own, = [path for path in base.iterdir() if path.name != 'other-repo']
+        self.assertTrue((own / 'tree-0').is_dir())  # this run's own tree stays, whatever its size
+        self.assertEqual(self.run_st_test('--check', 'demo', extra_env={'ST_TEST_POOL_MAX_GB': '0.0001'})[0], 0)
+
     def test_a_pool_tree_that_is_not_a_worktree_of_this_repository_is_replaced(self):
         self.commit('b.txt', 'two')
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)

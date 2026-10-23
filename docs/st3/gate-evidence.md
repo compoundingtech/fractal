@@ -1399,6 +1399,9 @@ record is not a signature. `--rerun` runs the check anyway. The megarepo members
 Every check runs with one fixed `PATH` (`~/.local/bin`, `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`, `/usr/bin`,
 `/bin` and the directory of `nix`, those that exist) instead of the caller's: cargo's build scripts record `PATH`, so two seats whose
 PATHs differ would otherwise rebuild nearly the whole workspace in the same pool tree. `ST_EVIDENCE_PATH=keep` leaves the caller's `PATH`.
+All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
+tree already held, `st-test` removes the least recently used trees and their targets whose lock is free, oldest first, until the pool directory
+(`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target 25 GB guard stays.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); with `--all`, every check of the skip policy is listed, and
 one without a local command (isolation-vm, fractal-web today) reads `CI runs it`.
