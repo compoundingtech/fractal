@@ -28,6 +28,10 @@ pub struct ReplicationInventory {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<InventoryCheckpoint>,
+    /// What the sending node asks about the receiver's claim ranges. The receiver answers in its
+    /// exchange's `claim_ranges`. Older peers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_range_query: Option<ClaimRangeQuery>,
 }
 
 /// A checkpoint as an inventory advertises it.
@@ -77,6 +81,103 @@ pub struct ReplicationExchange {
     /// name both builds in the bug it records. Older peers leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// The sender's claim-range summary. Its presence says the sender speaks the claim-range
+    /// protocol; older peers leave it out and are compared by envelopes alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_ranges: Option<ClaimRangeSummary>,
+}
+
+/// The claim-range protocol version this build speaks.
+pub const CLAIM_RANGE_VERSION: u32 = 1;
+
+/// A summary of the claims a member retains, for comparing claim sets rather than envelope
+/// histories or projection outputs. It is a transport summary, not evidence: ordinary admission
+/// authenticates every claim.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeSummary {
+    pub version: u32,
+    /// Every retained claim, or `None` while the sender's range index is still folding claims in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<ClaimRangeDigest>,
+    /// Every non-empty top range, when the peer asked for the tops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tops: Option<Vec<ClaimRangeEntry>>,
+    /// The non-empty leaves of each top range the peer asked about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves: Vec<ClaimRangeLeaves>,
+    /// The retained claim IDs of each leaf range the peer asked about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<ClaimRangeIds>,
+}
+
+/// The most top ranges one query asks the leaves of, and the most leaf ranges it asks the IDs
+/// of. An answer holds at most 256 leaves and, beyond its first leaf, at most
+/// `CLAIM_RANGE_ANSWER_IDS` IDs.
+pub const CLAIM_RANGE_QUERY_TOPS: usize = 4;
+pub const CLAIM_RANGE_QUERY_LEAVES: usize = 8;
+pub const CLAIM_RANGE_ANSWER_IDS: usize = 4096;
+/// The most claims one query asks a peer to send.
+pub const CLAIM_RANGE_QUERY_CLAIMS: usize = 512;
+
+/// One step of walking a peer's claim ranges: the tops, the leaves of some tops, the IDs of some
+/// leaves, and the claims this node found it lacks. The peer sends those claims' envelopes
+/// with its ordinary exchange.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeQuery {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tops: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves_of: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids_of: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<String>,
+}
+
+/// One range's number, population and digest.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeEntry {
+    pub range: u32,
+    pub count: u64,
+    pub digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeLeaves {
+    pub top: u32,
+    pub leaves: Vec<ClaimRangeEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeIds {
+    pub leaf: u32,
+    pub ids: Vec<String>,
+}
+
+/// How a peer's claim ranges differ from this node's, as far as one answer shows.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeComparison {
+    /// Whether both retain the same claims.
+    #[serde(default)]
+    pub same: bool,
+    /// The two whole-set digests compared. A walk runs once for each pair.
+    pub pair: String,
+    /// Top ranges in the answer whose population or digest differs from this node's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tops: Vec<u32>,
+    /// Leaf ranges in the answer that differ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves: Vec<u32>,
+    /// Claim IDs the peer retains that this node neither retains nor has retired.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+}
+
+/// The population of a claim range and the hex of its 512-bit digest.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ClaimRangeDigest {
+    pub count: u64,
+    pub digest: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,6 +188,10 @@ pub struct ReplicationReceipt {
     #[serde(default)]
     pub signatures: usize,
     pub inventory: ReplicationInventory,
+    /// How the peer's claim ranges in this exchange differ from this node's, for the worker
+    /// that walks them. Local to this node; never sent to a peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_ranges: Option<ClaimRangeComparison>,
 }
 
 /// A node's first sync after it joins: it ends once the node holds the same envelopes as a
@@ -124,6 +229,11 @@ pub struct ReplicationExportRequest {
     /// Older local daemons ignore this field; it never changes the exported exchange.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_guard: bool,
+    /// Local-daemon only: the scalar guard does not consume inventory buckets. Honored only
+    /// for a summary with `authority_guard`; ordinary/default and peer exchanges stay full.
+    /// Older local daemons ignore this option and return the complete response in one call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_digest_only: bool,
     /// The other side's signature requests, to answer in the exported exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signature_requests: Vec<ReplicaEnvelopeId>,
@@ -162,6 +272,8 @@ pub struct ReplicationPeerFailureRequest {
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carrier: Option<ReplicationCarrier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ReplicationExchangeFailure>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -279,6 +391,12 @@ pub struct ReplicationWorkerStatus {
     pub phase: String,
     pub last_attempt_at_unix_ms: u128,
     pub next_retry_at_unix_ms: Option<u128>,
+    /// Selected outbound route preference. Absent when an update only changes worker phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_is_preferred: Option<bool>,
+    /// Preferred-route cooldown deadline; cleared when a route update has no pending retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_retry_at_unix_ms: Option<u128>,
 }
 
 /// The carrier attempted locally, or unknown when this host has no dial evidence.
@@ -303,6 +421,99 @@ impl ReplicationCarrier {
     }
 }
 
+/// The failing operation, independent of its route carrier.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplicationFailurePhase {
+    Dial,
+    LocalExport,
+    RequestHeaders,
+    ResponseBody,
+    Verify,
+    LocalReceive,
+    FollowUpExport,
+}
+
+/// Bounded, allowlisted diagnostic metadata, not arbitrary error display or peer prose.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReplicationExchangeFailure {
+    pub code: String,
+    pub phase: ReplicationFailurePhase,
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub cause: String,
+}
+
+impl ReplicationExchangeFailure {
+    /// Error display/source text may contain URLs, credentials or claim content.
+    /// Retain typed local codes and transport categories, never arbitrary prose.
+    pub fn from_error(
+        error: &anyhow::Error,
+        phase: ReplicationFailurePhase,
+        elapsed: std::time::Duration,
+        http_status: Option<u16>,
+    ) -> Self {
+        if let Some(failure) = error.downcast_ref::<Self>() {
+            let mut failure = failure.clone();
+            failure.elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+            if phase == ReplicationFailurePhase::FollowUpExport
+                && failure.phase == ReplicationFailurePhase::LocalExport
+            {
+                failure.phase = phase;
+            }
+            return failure;
+        }
+        let code = if let Some(error) = error.downcast_ref::<crate::error::Error>() {
+            error.code
+        } else if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+            if error.is_timeout() {
+                "replication-timeout"
+            } else if error.is_connect() {
+                "replication-connect-failed"
+            } else {
+                "replication-http-failed"
+            }
+        } else {
+            "replication-operation-failed"
+        };
+        // A typed I/O cause is useful without its possibly sensitive display/path.
+        // One category plus one ErrorKind has a fixed bound, well below 512 bytes.
+        let mut cause = if error.downcast_ref::<crate::error::Error>().is_some() {
+            "local store rejected the operation".to_owned()
+        } else if error.downcast_ref::<reqwest::Error>().is_some() {
+            "HTTP transport failed".to_owned()
+        } else {
+            "operation failed; free-form error chain withheld".to_owned()
+        };
+        if let Some(kind) = error.chain()
+            .find_map(|source| source.downcast_ref::<std::io::Error>().map(std::io::Error::kind))
+        {
+            use std::fmt::Write as _;
+            let _ = write!(cause, "; I/O kind: {kind:?}");
+        }
+        Self {
+            code: code.into(),
+            phase,
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            http_status,
+            cause,
+        }
+    }
+}
+
+impl std::fmt::Display for ReplicationExchangeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(status) = self.http_status {
+            write!(f, "{} (HTTP {status}): {}", self.code, self.cause)
+        } else {
+            write!(f, "{}: {}", self.code, self.cause)
+        }
+    }
+}
+
+impl std::error::Error for ReplicationExchangeFailure {}
+
 /// One locally initiated exchange observation. Absent after restart; never a replicated claim.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReplicationExchangeTransport {
@@ -311,6 +522,8 @@ pub struct ReplicationExchangeTransport {
     /// Fabric exposes no evidence for the direct/relay path of this particular dial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fabric_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ReplicationExchangeFailure>,
 }
 
 impl ReplicationExchangeTransport {
@@ -319,6 +532,7 @@ impl ReplicationExchangeTransport {
             at_unix_ms,
             carrier,
             fabric_route: (carrier == ReplicationCarrier::Fabric).then(|| "unknown".into()),
+            failure: None,
         }
     }
 }
@@ -400,15 +614,22 @@ pub struct ReplicationPeerSync {
     /// Until the next exchange, the peer has not seen them from this node.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub added_since_measured_envelopes: u64,
-    /// Envelopes received from the peer per second over recent exchanges.
+    /// Envelopes received from the peer per second over recent exchanges; absent after a gap
+    /// between measurements longer than `REPLICATION_SYNC_STALE_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receive_rate_per_second: Option<f64>,
-    /// How fast `peer_only_envelopes` shrinks, net of the envelopes the peer keeps writing.
+    /// How fast `peer_only_envelopes` shrinks, net of the envelopes the peer keeps writing; zero
+    /// once a window passes in which it did not shrink, and absent after a gap between
+    /// measurements longer than `REPLICATION_SYNC_STALE_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catch_up_rate_per_second: Option<f64>,
-    /// Forecast in exact JSON-safe integer seconds up to [`MAX_SAFE_DURATION_SECONDS`];
-    /// absent when no finite positive rate or representable forecast exists.
-    /// Missing a forecast does not mean the peer is caught up.
+    /// Forecast in exact JSON-safe integer seconds up to [`MAX_SAFE_DURATION_SECONDS`], from
+    /// [`ReplicationPeerSync::closing_rate_per_second`]; absent when no finite positive rate or
+    /// representable forecast exists, including while the gap is not closing and once the
+    /// measurement is `stale`, even one with nothing missing. Missing a forecast does not mean
+    /// the peer is caught up. Zero
+    /// means nothing the peer listed was missing here, at arrival: admission, projection and
+    /// visibility can lag behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_catch_up_seconds: Option<u64>,
     /// The peer recently held more envelopes than one exchange carries, so this node's views
@@ -424,10 +645,38 @@ pub struct ReplicationPeerSync {
     /// comparison found them equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_differs_since_unix_ms: Option<u128>,
+    /// When this node last compared the claims it retains with the peer's. Only a peer that sends
+    /// a claim-range summary is compared, and only while both range indexes cover every claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims_compared_at_unix_ms: Option<u128>,
+    /// When the comparisons began finding different claims; `None` while the latest found the
+    /// same ones. Claims in flight differ for a while, so this is reported and gates nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims_differ_since_unix_ms: Option<u128>,
     /// Consecutive comparisons found the same envelopes projecting different graphs. More
     /// exchanges cannot fix that, so this node's views can be wrong until it is repaired.
     #[serde(default)]
     pub diverged: bool,
+}
+
+impl ReplicationPeerSync {
+    /// The rate the forecast divides by: how fast the gap closes, capped at the rate envelopes
+    /// arrive. `None` unless both rates are known and finite, so an unknown arrival rate never
+    /// counts as progress; zero while the gap is not closing or nothing arrives.
+    ///
+    /// The cap is a guard, not a proof. The gap can also shrink without a receipt, when a
+    /// checkpoint drops envelopes or the comparison narrows. A window that spans a change of the
+    /// peer's advertised checkpoint, of this node's inventory below its tail (which its own
+    /// checkpoints move), or between range and full comparison measures no rate, but a peer
+    /// that advertises no checkpoint and a narrowing within range comparison
+    /// are not seen: when receipts coincide with such a drop, the forecast can still be too
+    /// short. It measures arrival only, not admission, projection or visibility.
+    pub fn closing_rate_per_second(&self) -> Option<f64> {
+        let usable = |rate: Option<f64>| rate.filter(|rate| rate.is_finite() && *rate >= 0.0);
+        let closing = usable(self.catch_up_rate_per_second)?;
+        let received = usable(self.receive_rate_per_second)?;
+        Some(closing.min(received))
+    }
 }
 
 /// Two members that hold the same envelopes and project one table differently. A projection is

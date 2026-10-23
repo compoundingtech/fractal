@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 readonly REQUESTER=person/eval-requester
 readonly RAW_PTY_ROOT="$PWD/raw-pty"
@@ -169,7 +171,9 @@ managed_process_has_native_id() {
 }
 
 for driver in codex claude pi omp opencode; do
-  pty_id="raw-import-$driver-${ST_MISSION_RUN##*/}"
+  # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  fractal_selected=${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}
+  pty_id="raw-import-$driver-${fractal_selected##*/}"
   before="$PWD/before-$driver.json"
   import_items | jq '[.[].id]' >"$before"
 

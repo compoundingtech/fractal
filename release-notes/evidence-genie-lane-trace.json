@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Evidence lane closure: genie-freshness traced and declared as a whole-tree lane; the trace test no longer fails when already traced",
+  "replay": {"status": "none", "detail": "No daemon replay change."},
+  "schema": {"status": "none", "detail": "No daemon claim or portable record change."},
+  "rules": {"status": "changed", "detail": "The lane file declares genie-freshness's input as the whole tree and scripts/evidence-lane-trace treats a lane whose tree_inputs is '.' as having nothing under the root uncovered. The docs record the trace result and the environment inputs outside the repository that no fingerprint captures. The trace test skips its real-strace case when the process is already traced. Nothing reads the lane file and every enforce stays false."},
+  "compatibility": {"status": "none", "detail": "No behaviour change."},
+  "downtime": {"status": "none", "detail": "No daemon downtime required."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores the previous lane file, tool and docs; no state is written."}
+}
