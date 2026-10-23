@@ -3,7 +3,7 @@
 // on-demand lists, a few actions, the collections socket, one conversation, and one terminal.
 //
 //   node demoGateway.mjs [port]      then open, in the simulator,
-//   com.compoundingtech.smalltalk.starter://pair?gateway=http://<LAN or Tailscale IP>:<port>&id=demo&code=demo
+//   com.compoundingtech.fractal.starter://pair?gateway=http://<LAN or Tailscale IP>:<port>&id=demo&code=demo
 //
 // Never point a Release build or a real device at it: nothing here is real or authenticated.
 // The phone verifies device-key proofs before it saves any credential, so the demo mints real

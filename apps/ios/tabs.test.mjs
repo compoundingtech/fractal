@@ -8,7 +8,7 @@ assert.equal(tabNamed(' Now '), 'Now');
 for (const retired of ['Home', 'Agents', 'Missions', 'Chat', 'Control', 'Usage', 'Glasses']) assert.equal(tabNamed(retired), null);
 assert.deepEqual(tabOrder(['Fleet', 'Resources', 'Now', 'Spaces']), ['Fleet', 'Resources', 'Now', 'Spaces']);
 for (const old of [['Fleet', 'Home', 'Agents', 'Missions'], ['Fleet'], ['Now', 'Now', 'Fleet', 'Spaces'], 'nonsense']) assert.deepEqual(tabOrder(old), [...TABS]);
-const scheme = 'com.compoundingtech.smalltalk.starter://';
+const scheme = 'com.compoundingtech.fractal.starter://';
 assert.deepEqual(parseDevLink(`${scheme}tab/Now`), { kind: 'tab', tab: 'Now' });
 assert.deepEqual(parseDevLink(`${scheme}tab/Resources`), { kind: 'tab', tab: 'Resources' });
 assert.deepEqual(parseDevLink(`${scheme}tab/Spaces`), { kind: 'tab', tab: 'Spaces' });

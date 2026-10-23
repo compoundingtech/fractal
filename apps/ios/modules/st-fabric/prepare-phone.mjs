@@ -15,7 +15,7 @@ const next = previous.includes('# ST3 offline Debug proof')
   ? previous.replace('export ST3_FABRIC_OFFLINE_DEBUG=1', offlineExport)
   : previous + `\n# ST3 offline Debug proof\nif [[ "\${FORCE_BUNDLING:-}" == "1" ]]; then unset SKIP_BUNDLING; ${offlineExport}; fi\n`;
 if (next !== previous) writeFileSync(updates, next);
-const delegate = new URL('smalltalk/AppDelegate.swift', native);
+const delegate = new URL('fractal/AppDelegate.swift', native);
 let source = readFileSync(delegate, 'utf8');
 const original = '#if DEBUG\n    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: ".expo/.virtual-metro-entry")';
 const replacement = '#if DEBUG\n    if let embedded = Bundle.main.url(forResource: "main", withExtension: "jsbundle") { return embedded }\n    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: ".expo/.virtual-metro-entry")';
@@ -25,13 +25,13 @@ if (!source.includes(replacement)) {
   writeFileSync(delegate, source);
 }
 
-const identifier = 'com.compoundingtech.smalltalk.fabricproof';
-const project = new URL('smalltalk.xcodeproj/project.pbxproj', native);
+const identifier = 'com.compoundingtech.fractal.fabricproof';
+const project = new URL('fractal.xcodeproj/project.pbxproj', native);
 source = readFileSync(project, 'utf8');
-if (!source.includes('PRODUCT_BUNDLE_IDENTIFIER = com.compoundingtech.smalltalk.starter;') && !source.includes(`PRODUCT_BUNDLE_IDENTIFIER = ${identifier};`)) throw new Error('Unexpected generated app identifier.');
-writeFileSync(project, source.replaceAll('PRODUCT_BUNDLE_IDENTIFIER = com.compoundingtech.smalltalk.starter;', `PRODUCT_BUNDLE_IDENTIFIER = ${identifier};`));
+if (!source.includes('PRODUCT_BUNDLE_IDENTIFIER = com.compoundingtech.fractal.starter;') && !source.includes(`PRODUCT_BUNDLE_IDENTIFIER = ${identifier};`)) throw new Error('Unexpected generated app identifier.');
+writeFileSync(project, source.replaceAll('PRODUCT_BUNDLE_IDENTIFIER = com.compoundingtech.fractal.starter;', `PRODUCT_BUNDLE_IDENTIFIER = ${identifier};`));
 
-const plist = fileURLToPath(new URL('smalltalk/Info.plist', native));
+const plist = fileURLToPath(new URL('fractal/Info.plist', native));
 const read = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plist], { encoding: 'utf8' });
 if (read.status !== 0) throw new Error('Cannot read generated app Info.plist');
 const info = JSON.parse(read.stdout);

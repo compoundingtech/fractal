@@ -56,7 +56,7 @@ enum DeviceKey {
   case enclave(SecureEnclave.P256.Signing.PrivateKey)
   case software(P256.Signing.PrivateKey)
 
-  private static let service = "com.compoundingtech.smalltalk.device-key"
+  private static let service = "com.compoundingtech.fractal.device-key"
   private static let account = "signing-key"
 
   var described: [String: String] {

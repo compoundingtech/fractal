@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-BUNDLE_ID = "com.compoundingtech.smalltalk"
+BUNDLE_ID = "com.compoundingtech.fractal"
 
 
 def run(argv, *, cwd=None, capture=False, env=None, timeout=None):
@@ -459,7 +459,7 @@ class Delivery:
                 self.persist()
             # Xcode 27 exposes executable/PID, not foreground status. Conservatively
             # treat a running daily app as active, but stop deferring at 40 minutes.
-            running = any("/smalltalk.app/" in process.get("executable", "").lower() for process in processes)
+            running = any("/fractal.app/" in process.get("executable", "").lower() for process in processes)
             if running and time.time() - pending["since"] < self.args.max_deferral:
                 self.record("install_deferred", commit=pending["commit"], reason="daily_app_running")
                 return

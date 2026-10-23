@@ -20,7 +20,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
-BUNDLE_ID = "com.compoundingtech.smalltalk"
+BUNDLE_ID = "com.compoundingtech.fractal"
 
 # These are process-boundary fixtures, not replacements for delivery logic:
 # Git, cloning, state persistence, subprocesses, and flock remain real.
@@ -61,16 +61,16 @@ if name == "pnpm":
         sys.exit(0)
     assert args[:2] == ["exec", "expo"], args
     if "config" in args:
-        print(json.dumps({"name": control.get("expo_name", "Smalltalk"), "slug": "smalltalk", "ios": {
-            "bundleIdentifier": "com.compoundingtech.smalltalk"}}))
+        print(json.dumps({"name": control.get("expo_name", "Fractal"), "slug": "fractal", "ios": {
+            "bundleIdentifier": "com.compoundingtech.fractal"}}))
     elif "prebuild" in args:
-        (Path.cwd() / "ios" / "smalltalk.xcworkspace").mkdir(parents=True, exist_ok=True)
+        (Path.cwd() / "ios" / "fractal.xcworkspace").mkdir(parents=True, exist_ok=True)
         (Path.cwd() / "ios" / "Podfile").write_text("# Fixture native project\n")
-        native = Path.cwd() / "ios" / "smalltalk"
+        native = Path.cwd() / "ios" / "fractal"
         native.mkdir(parents=True, exist_ok=True)
         with (native / "Info.plist").open("wb") as info:
-            plistlib.dump({"CFBundleIdentifier": "com.compoundingtech.smalltalk",
-                          "CFBundleExecutable": "smalltalk", "CFBundleVersion": "0",
+            plistlib.dump({"CFBundleIdentifier": "com.compoundingtech.fractal",
+                          "CFBundleExecutable": "fractal", "CFBundleVersion": "0",
                           "StBuildCommit": "unstamped"}, info)
     else:
         raise AssertionError(args)
@@ -93,7 +93,7 @@ if name == "xcodebuild":
     output = Path(args[args.index("-derivedDataPath") + 1])
     build_exit = control.get("build_exit", 0)
     if not build_exit or control.get("artifact_on_failure", False):
-        app = output / "Build" / "Products" / "Release-iphoneos" / "smalltalk.app"
+        app = output / "Build" / "Products" / "Release-iphoneos" / "fractal.app"
         app.mkdir(parents=True, exist_ok=True)
         workspace = Path(args[args.index("-workspace") + 1])
         with (workspace.parent / workspace.stem / "Info.plist").open("rb") as template:
@@ -105,7 +105,7 @@ if name == "xcodebuild":
             bundle["CFBundleVersion"] = control["built_version"]
         with (app / "Info.plist").open("wb") as info:
             plistlib.dump(bundle, info)
-        (app / "smalltalk").write_bytes(os.environ["EXPO_PUBLIC_ST3_BUILD"].encode())
+        (app / "fractal").write_bytes(os.environ["EXPO_PUBLIC_ST3_BUILD"].encode())
         # Records the external inputs the product was built with, so tests can
         # check installed content independently of the reconciler's own keys.
         (app / "inputs.json").write_text(json.dumps({
@@ -145,7 +145,7 @@ if name == "xcrun":
                 "bundleVersion": bundle["CFBundleVersion"],
             }]))
     elif "launch" in args:
-        assert "com.compoundingtech.smalltalk" in args, args
+        assert "com.compoundingtech.fractal" in args, args
         status = control.get("launch_exit", 0)
     else:
         raise AssertionError(args)
@@ -217,7 +217,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
         self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
         self.write_source("apps/ios/app.json", json.dumps({"expo": {
-            "name": "Smalltalk", "slug": "smalltalk", "ios": {"bundleIdentifier": BUNDLE_ID},
+            "name": "Fractal", "slug": "fractal", "ios": {"bundleIdentifier": BUNDLE_ID},
         }}))
         self.write_source("server/main.go", "package main\n")
         self.initial_commit = self.commit("Initial fixture")
@@ -464,7 +464,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def test_running_daily_app_defers_install_until_deadline(self):
         self.configure(processes=[{
             "processIdentifier": 123,
-            "executable": "/Applications/Smalltalk.app/Smalltalk",
+            "executable": "/Applications/Fractal.app/Fractal",
         }])
         self.reconcile()
         self.assertIn("install_deferred", self.outcomes())
@@ -1011,7 +1011,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                     self.assertLessEqual(len(new_installs), 1, message)
                     if new_installs:
                         app = Path(next(arg for arg in new_installs[0]["args"] if arg.endswith(".app")))
-                        built = self.git("rev-parse", (app / "smalltalk").read_text())
+                        built = self.git("rev-parse", (app / "fractal").read_text())
                         content = (self.app_trees(built), json.loads((app / "inputs.json").read_text()))
                         # Every install carries the most recently observed content.
                         self.assertEqual(content, expected, message)
@@ -1237,7 +1237,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 inputs = json.loads((self.state / "build-cache" / "inputs.json").read_text())
                 self.assertEqual(inputs["js_env"]["EXPO_PUBLIC_FRACTAL_BUILD"], commit[:12])
                 self.assertEqual(inputs["js_env"]["EXPO_PUBLIC_ST3_BUILD"], commit[:12])
-                bundle = self.state / "artifacts" / commit / "smalltalk.app" / "main.jsbundle"
+                bundle = self.state / "artifacts" / commit / "fractal.app" / "main.jsbundle"
                 self.assertEqual(bundle.read_text(), commit[:12])
 
     def test_js_only_changes_reuse_native_cache_but_reset_inlined_js_transforms(self):
@@ -1338,7 +1338,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(Path(self.install_commands()[-1]["cwd"]), checkout)
         self.assertEqual(len(self.prebuild_commands()), 1)
-        (checkout / "apps/ios/ios/smalltalk.xcworkspace").rmdir()
+        (checkout / "apps/ios/ios/fractal.xcworkspace").rmdir()
         self.change_js("missing-workspace")
         self.reconcile("--build-only")
         self.assertEqual(len(self.prebuild_commands()), 2)
@@ -1374,7 +1374,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.invoke()
         cache = self.state / "build-cache"
         first_inputs = json.loads((cache / "inputs.json").read_text())
-        product = cache / "derived/Build/Products/Release-iphoneos/smalltalk.app"
+        product = cache / "derived/Build/Products/Release-iphoneos/fractal.app"
         self.assertTrue((product / "Info.plist").exists())
         sentinel = cache / "derived/partial-cache-sentinel"
         sentinel.write_text("partial build cache")
@@ -1386,7 +1386,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.device_commands("launch"), [])
         artifact = self.state / "artifacts" / self.initial_commit
         self.assertFalse((artifact / "success.json").exists())
-        self.assertFalse((artifact / "smalltalk.app").exists())
+        self.assertFalse((artifact / "fractal.app").exists())
         self.assertEqual((artifact / "build.log").read_text().count("fixture build output"), 2)
         self.configure(build_exit=0)
         self.reconcile()
@@ -1401,14 +1401,14 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.configure(install_exit=1)
         self.invoke()
         first_app = Path(self.saved_state()["pending"]["app"])
-        first_bytes = (first_app / "smalltalk").read_bytes()
+        first_bytes = (first_app / "fractal").read_bytes()
         self.assertEqual(first_app.parent, self.state / "artifacts" / self.initial_commit)
         next_commit = self.change_js("snapshot-successor")
         self.configure(build_exit=65, artifact_on_failure=True)
         self.invoke("--build-only")
         # The superseded pending artifact is dropped; its snapshot stays intact.
         self.assertFalse(self.saved_state().get("pending"))
-        self.assertEqual((first_app / "smalltalk").read_bytes(), first_bytes)
+        self.assertEqual((first_app / "fractal").read_bytes(), first_bytes)
         self.assertEqual(len(self.device_commands("install")), 1)
         self.assertFalse((self.state / "artifacts" / next_commit / "success.json").exists())
         self.configure(build_exit=0)
@@ -1416,16 +1416,16 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         second_app = Path(self.saved_state()["pending"]["app"])
         self.assertEqual(second_app.parent, self.state / "artifacts" / next_commit)
         self.assertNotEqual(first_app, second_app)
-        self.assertNotEqual((second_app / "smalltalk").read_bytes(), first_bytes)
-        self.assertEqual((first_app / "smalltalk").read_bytes(), first_bytes)
-        shared_product = self.state / "build-cache/derived/Build/Products/Release-iphoneos/smalltalk.app/smalltalk"
-        self.assertEqual(shared_product.read_bytes(), (second_app / "smalltalk").read_bytes())
+        self.assertNotEqual((second_app / "fractal").read_bytes(), first_bytes)
+        self.assertEqual((first_app / "fractal").read_bytes(), first_bytes)
+        shared_product = self.state / "build-cache/derived/Build/Products/Release-iphoneos/fractal.app/fractal"
+        self.assertEqual(shared_product.read_bytes(), (second_app / "fractal").read_bytes())
         self.configure(install_exit=0)
         self.reconcile()
         self.assert_installed(next_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 3)
         self.assertIn(str(second_app), self.device_commands("install")[-1]["args"])
-        self.assertEqual((first_app / "smalltalk").read_bytes(), first_bytes)
+        self.assertEqual((first_app / "fractal").read_bytes(), first_bytes)
 
     def test_native_plist_product_and_receipt_identify_exact_commit(self):
         for iteration in range(2):
@@ -1437,7 +1437,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(receipt["commit"], commit)
                 self.assertEqual(receipt["build_version"], build_version)
                 self.assertEqual(self.saved_state()["pending"]["build_version"], build_version)
-                native = self.state / "checkout/apps/ios/ios/smalltalk/Info.plist"
+                native = self.state / "checkout/apps/ios/ios/fractal/Info.plist"
                 product = Path(receipt["app"]) / "Info.plist"
                 for path in (native, product):
                     with path.open("rb") as info:
@@ -1460,7 +1460,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(self.device_commands("launch"), [])
                 artifact = self.state / "artifacts" / self.initial_commit
                 self.assertFalse((artifact / "success.json").exists())
-                self.assertFalse((artifact / "smalltalk.app").exists())
+                self.assertFalse((artifact / "fractal.app").exists())
                 self.assertIn("Built app has stale source identity", (artifact / "build.log").read_text())
 
     def test_stale_js_bundle_stamp_never_becomes_pending_or_installed(self):
@@ -1474,7 +1474,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.device_commands("launch"), [])
         artifact = self.state / "artifacts" / self.initial_commit
         self.assertFalse((artifact / "success.json").exists())
-        self.assertFalse((artifact / "smalltalk.app").exists())
+        self.assertFalse((artifact / "fractal.app").exists())
         self.assertIn("Built app embeds a stale build stamp", (artifact / "build.log").read_text())
         # The failed build must not record the inlined stamp, so the next
         # attempt resets the transform cache again instead of trusting it.

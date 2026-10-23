@@ -128,8 +128,8 @@ enum MetricKitReports {
 // queue, so keep its callback on a separate NSObject and serialize persistence in the store.
 // This immutable subscriber only schedules work; mutable journal state stays serialized.
 final class DiagnosticMetricKitSubscriber: NSObject, MXMetricManagerSubscriber, @unchecked Sendable {
-  private static let logger = Logger(subsystem: "smalltalk.diagnostics", category: "native-storage")
-  private let processing = DispatchQueue(label: "smalltalk.diagnostics.metrickit", qos: .utility)
+  private static let logger = Logger(subsystem: "fractal.diagnostics", category: "native-storage")
+  private let processing = DispatchQueue(label: "fractal.diagnostics.metrickit", qos: .utility)
 
   func didReceive(_ payloads: [MXDiagnosticPayload]) {
     processing.async { self.persist(payloads) }

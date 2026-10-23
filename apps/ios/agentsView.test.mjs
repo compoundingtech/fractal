@@ -11,7 +11,7 @@ assert.equal(agentName({ id: 'agent/example/pty-rust/omp', name: 'example/pty-ru
 // A seat named after its host (st agents new NAME) is labelled without the host.
 assert.equal(agentName({ id: 'agent/harbor.image-sorter', name: 'harbor.image-sorter', host_id: 'host/harbor' }), 'Image Sorter');
 assert.equal(agentName({ id: 'agent/v2.parser', name: 'v2.parser', host_id: 'host/harbor' }), 'V2.parser');
-assert.equal(agentName({ id: 'agent/example/smalltalk-ci', name: 'example/smalltalk-ci' }), 'Smalltalk Ci');
+assert.equal(agentName({ id: 'agent/example/fractal-ci', name: 'example/fractal-ci' }), 'Fractal Ci');
 
 // st serves each agent's state; the phone reads it and derives nothing.
 assert.equal(agentState(served('working')), 'working');
@@ -73,11 +73,11 @@ assert.equal(filterAgentRows(rows, '  ').length, rows.length);
 
 // A folder holding only one folder joins it on one line.
 assert.deepEqual(compactFolders([
-  'fleet/smalltalk/operations/2026-10-01/operator'.split('/'),
-  'fleet/smalltalk/ci/watcher'.split('/'),
+  'fleet/fractal/operations/2026-10-01/operator'.split('/'),
+  'fleet/fractal/ci/watcher'.split('/'),
   'fleet/cos/standing/cos'.split('/'),
   ['solo'],
-]), [['fleet', 'smalltalk', 'operations/2026-10-01'], ['fleet', 'smalltalk', 'ci'], ['fleet', 'cos/standing'], []]);
+]), [['fleet', 'fractal', 'operations/2026-10-01'], ['fleet', 'fractal', 'ci'], ['fleet', 'cos/standing'], []]);
 
 // The model beside the harness is what the harness last reported, and nothing when st says none.
 assert.equal(agentModel({ usage: { context: { model: 'claude-sonnet-5-5' } } }), 'claude-sonnet-5-5');

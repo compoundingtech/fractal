@@ -15,21 +15,23 @@ const withVariant = (value, run) => {
 
 test('daily installs as Fractal with the ordinary icon', () => {
   const daily = withVariant('daily', configure);
-  assert.equal(daily.name, 'smalltalk');
+  assert.equal(daily.name, 'fractal');
+  assert.equal(daily.slug, 'fractal-starter');
   assert.equal(daily.ios.infoPlist.CFBundleDisplayName, 'Fractal');
   assert.equal(daily.ios.infoPlist.NSMicrophoneUsageDescription.length > 0, true);
   assert.equal(daily.icon, './assets/icon.png');
-  assert.equal(daily.ios.bundleIdentifier, 'com.compoundingtech.smalltalk');
+  assert.equal(daily.ios.bundleIdentifier, 'com.compoundingtech.fractal');
   assert.equal(daily.ios.supportsTablet, true);
   assert.equal(daily.updates, undefined);
 });
 
 test('default and dev keep the starter identity with the DEV-badged icon', () => {
   const dev = withVariant(undefined, configure);
-  assert.equal(dev.name, 'smalltalk');
+  assert.equal(dev.name, 'fractal');
+  assert.equal(dev.slug, 'fractal-starter');
   assert.equal(dev.ios.infoPlist.CFBundleDisplayName, 'Fractal Dev');
   assert.equal(dev.icon, './assets/icon-dev.png');
-  assert.equal(dev.ios.bundleIdentifier, 'com.compoundingtech.smalltalk.starter');
+  assert.equal(dev.ios.bundleIdentifier, 'com.compoundingtech.fractal.starter');
   assert.deepEqual(withVariant('dev', configure), dev);
 });
 

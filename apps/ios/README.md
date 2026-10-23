@@ -64,9 +64,9 @@ Native previous-launch markers yield only the **inferred** `previous-launch-uncl
 
 Use a **Debug** build paired to a real gateway granting `write.client-diagnostics`. Open these links while the app is running (a cold-start link also works after the root boundary mounts):
 
-- `com.compoundingtech.smalltalk.starter://diagnostics?mode=global` throws a real timer `TypeError`, preserving the normal RN error UI/handling.
-- `com.compoundingtech.smalltalk.starter://diagnostics?mode=rejection` creates a real unhandled rejected promise.
-- `com.compoundingtech.smalltalk.starter://diagnostics?mode=boundary` throws from a child render, showing the root's non-sensitive recovery notice. Close/reopen afterward to drain the retained report.
+- `com.compoundingtech.fractal.starter://diagnostics?mode=global` throws a real timer `TypeError`, preserving the normal RN error UI/handling.
+- `com.compoundingtech.fractal.starter://diagnostics?mode=rejection` creates a real unhandled rejected promise.
+- `com.compoundingtech.fractal.starter://diagnostics?mode=boundary` throws from a child render, showing the root's non-sensitive recovery notice. Close/reopen afterward to drain the retained report.
 
 The injection listeners/components are gated by `__DEV__`; Release does not execute them. Check node-local `client.launch` / `client.js-error` observations for bounded frames and correct severity/build metadata, and confirm the injection's deliberately private messages/URL never appear there. Repeat offline, relaunch offline, then reconnect/foreground: retained reports should drain once, with server duplicates acknowledged and queue IDs removed only after acknowledgement. With an unpaired device, locked/unavailable Keychain, or absent/ungranted diagnostic capability, verify no diagnostic POST is sent. Exercise foreground/background transitions and force quit/relaunch: an unclean marker must remain an inferred warning, never a claimed crash. MetricKit crash/hang checks require a real device and eventual OS delivery; a synthetic JS injection is not evidence of native capture.
 
@@ -77,16 +77,20 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
-With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.7.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/smalltalk.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.7.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
 
 `app.config.js` selects the installed identity with `APP_VARIANT`:
 
 | Variant | Installed identity | Bundle identifier | Use |
 | --- | --- | --- | --- |
-| `dev` (default) | Fractal Dev, amber DEV-badged icon | `com.compoundingtech.smalltalk.starter` | Debug with Metro, simulator and device smoke tests |
-| `daily` | Fractal, ordinary icon | `com.compoundingtech.smalltalk` | Release build used every day on a phone |
+| `dev` (default) | Fractal Dev, amber DEV-badged icon | `com.compoundingtech.fractal.starter` | Debug with Metro, simulator and device smoke tests |
+| `daily` | Fractal, ordinary icon | `com.compoundingtech.fractal` | Release build used every day on a phone |
 
 The two apps coexist on one phone and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily.
+
+The Expo name `fractal` and slug `fractal-starter` generate `ios/fractal.xcodeproj`, `ios/fractal.xcworkspace`, and the `fractal` target/scheme for both variants. Each variant's URL scheme matches its bundle identifier. Device signing keys use the Keychain service `com.compoundingtech.fractal.device-key`, isolated by the app's bundle identity.
+
+When moving from the former app identity, install the new app, pair it once, delete the old app by hand, and revoke the old device's grant. The new bundle identifier cannot read the old app's Keychain; there is deliberately no fallback to the former service.
 
 The DEV icon generator requires macOS (CoreGraphics, ImageIO and CoreText). Run `swift scripts/generate-dev-icon.swift assets/icon.png assets/icon-dev.png` from this directory. It makes its output read-only (0444); when regenerating, the script itself restores write permission (0644) before overwriting it, so no manual `chmod` is needed. To edit the generated PNG with another tool, first run `chmod u+w assets/icon-dev.png`.
 
@@ -96,19 +100,19 @@ Before exporting or building the daily app, run this guard from this directory i
 
 ```sh
 test "${APP_VARIANT-}" = daily &&
-  xcodebuild -project ios/smalltalk.xcodeproj -target smalltalk -configuration Release -showBuildSettings |
-  grep -Eq '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER = com[.]compoundingtech[.]smalltalk[[:space:]]*$' ||
+  xcodebuild -project ios/fractal.xcodeproj -target fractal -configuration Release -showBuildSettings |
+  grep -Eq '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER = com[.]compoundingtech[.]fractal[[:space:]]*$' ||
   { echo "Daily identity mismatch: export APP_VARIANT=daily, clean prebuild, and reinstall pods before building." >&2; exit 1; }
 ```
 
 The private-range and `.local` HTTP ATS exceptions intentionally apply to the daily Release app too: its paired gateway can be reached over encrypted Tailscale or a trusted LAN, not only public HTTPS. This does not make LAN HTTP encrypted; the credential/data exposure warning and gateway URL restrictions described above still apply. Prefer HTTPS on an untrusted LAN.
 
-Daily uses the `com.compoundingtech.smalltalk` URL scheme, separate from the dev starter scheme. It does not accept the starter-scheme pairing or `fabric-proof` links; those remain Debug-only development/proof tools, not a daily provisioning path. Pair the daily app through its form as described under Connect.
+Daily uses the `com.compoundingtech.fractal` URL scheme, separate from the dev starter scheme. It does not accept the starter-scheme pairing or `fabric-proof` links; those remain Debug-only development/proof tools, not a daily provisioning path. Pair the daily app through its form as described under Connect.
 
 ### Automatic daily Release delivery
 
 `scripts/release_delivery.py` reconciles a tracked Git ref to the daily device
-app (`com.compoundingtech.smalltalk`), without Metro, EAS, or OTA. The tracked
+app (`com.compoundingtech.fractal`), without Metro, EAS, or OTA. The tracked
 ref must support `APP_VARIANT=daily`; a ref without that variant is refused
 rather than replacing the separate Debug app. First prepare a signed artifact
 without phone access:
@@ -165,7 +169,7 @@ reused without rebuilding. Before signing, the generated app's `Info.plist` rece
 Git revision as `StBuildCommit` and the revision's commit count as
 `CFBundleVersion`. The artifact's `success.json` records both. Compare its
 `build_version` with `devicectl device info apps --bundle-id
-com.compoundingtech.smalltalk --device "$ST_IOS_DEVICE" --json-output -` to
+com.compoundingtech.fractal --device "$ST_IOS_DEVICE" --json-output -` to
 verify the installed build independently of pairing or proof-only UI.
 <!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
@@ -306,10 +310,10 @@ Debug builds resolve Metro without a network probe on the launch main thread. Th
 
 This is an application-entry-point workaround, not a React Native patch: [the upstream status-probe issue](https://github.com/react/react-native/issues/58903) tracks removing synchronous discovery waits while retaining upstream fallback semantics.
 
-The Debug app accepts a short-lived pairing deep link for headless simulator checks: `com.compoundingtech.smalltalk.starter://pair?gateway=...&id=...&code=...`. The link opens the pairing form with the code prefilled; it does not submit the code until a separately supplied fingerprint or explicit unpinned override is chosen. The handler is disabled in Release. Treat the link as a temporary credential and do not commit or log its populated form.
+The Debug app accepts a short-lived pairing deep link for headless simulator checks: `com.compoundingtech.fractal.starter://pair?gateway=...&id=...&code=...`. The link opens the pairing form with the code prefilled; it does not submit the code until a separately supplied fingerprint or explicit unpinned override is chosen. The handler is disabled in Release. Treat the link as a temporary credential and do not commit or log its populated form.
 
-For connected Debug smoke tests, `com.compoundingtech.smalltalk.starter://tab/Fleet` opens a tab (only Now, Resources, Fleet and Spaces are accepted), `com.compoundingtech.smalltalk.starter://mission?id=mission/...` opens a mission, `com.compoundingtech.smalltalk.starter://agent?id=agent/...` opens an agent's conversation, and `com.compoundingtech.smalltalk.starter://session?id=session/...` opens an exact conversation. Add `&terminal=terminal/...` to the session link to inspect its live terminal screen. `com.compoundingtech.smalltalk.starter://scroll?y=800` scrolls the visible list for screenshots. These links are disabled in Release and carry no authorization: the already-paired client still has to pass the gateway's normal checks.
-`com.compoundingtech.smalltalk.starter://attention?id=attention/...` opens one attention item's detail from Now.
+For connected Debug smoke tests, `com.compoundingtech.fractal.starter://tab/Fleet` opens a tab (only Now, Resources, Fleet and Spaces are accepted), `com.compoundingtech.fractal.starter://mission?id=mission/...` opens a mission, `com.compoundingtech.fractal.starter://agent?id=agent/...` opens an agent's conversation, and `com.compoundingtech.fractal.starter://session?id=session/...` opens an exact conversation. Add `&terminal=terminal/...` to the session link to inspect its live terminal screen. `com.compoundingtech.fractal.starter://scroll?y=800` scrolls the visible list for screenshots. These links are disabled in Release and carry no authorization: the already-paired client still has to pass the gateway's normal checks.
+`com.compoundingtech.fractal.starter://attention?id=attention/...` opens one attention item's detail from Now.
 
 <!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 The simulator asks before it opens each link it is handed, so a headless run can instead put links in `apps/ios/.env` for Metro to inline into the Debug bundle: `EXPO_PUBLIC_FRACTAL_TEST_PAIR_LINK` opens the pairing form at launch, `EXPO_PUBLIC_FRACTAL_TEST_TAB` picks the first tab, and `EXPO_PUBLIC_FRACTAL_TEST_LINKS` (space-separated) follows each link six seconds apart. Restart Metro with `--clear` after changing them.
@@ -321,7 +325,7 @@ preferred value masks the legacy value. This also applies to `FABRIC_PROOF_LINK`
 precedence for `FRACTAL_FABRIC_OFFLINE_DEBUG` and legacy `ST3_FABRIC_OFFLINE_DEBUG`;
 the offline Debug preparation script exports both names.
 
-For screenshots without a real st, `node demoGateway.mjs 8791` serves invented data: attention, missions, agents, one conversation, and one terminal. Pair a Debug simulator with `com.compoundingtech.smalltalk.starter://pair?gateway=http://<the Mac's LAN or Tailscale IPv4>:8791&id=demo&code=demo`. It is not authenticated; never point a Release build or a device at it.
+For screenshots without a real st, `node demoGateway.mjs 8791` serves invented data: attention, missions, agents, one conversation, and one terminal. Pair a Debug simulator with `com.compoundingtech.fractal.starter://pair?gateway=http://<the Mac's LAN or Tailscale IPv4>:8791&id=demo&code=demo`. It is not authenticated; never point a Release build or a device at it.
 It completes the phone's real device-key verification read-only: the unauthenticated capabilities preflight is the raw advertisement, and pairing answers with an invented host-signed person-root proof and no signing grant, so the phone still runs its own checks.
 
 Generated `ios/`, build output, signing material, local configuration, and proof screenshots are ignored by Git. Do not commit Apple team/device IDs, credentials, machine paths, or private network addresses. Expo SDK 57 needs the `expo-build-properties` scene-lifecycle opt-in for Xcode 27/iOS 27.

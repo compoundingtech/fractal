@@ -158,7 +158,7 @@ const injectDiagnostic = (link: string | null): void => {
   let mode: string | null;
   try {
     const url = new URL(link);
-    if (!/^com\.compoundingtech\.smalltalk\.starter:$/.test(url.protocol) || url.hostname !== 'diagnostics') return;
+    if (!/^com\.compoundingtech\.fractal\.starter:$/.test(url.protocol) || url.hostname !== 'diagnostics') return;
     mode = url.searchParams.get('mode');
   } catch { return; }
   if (mode === 'global') setTimeout(() => { throw new TypeError('Diagnostic injection: private message https://invalid.example/private?token=redact'); }, 0);
