@@ -19,8 +19,10 @@ An agent's native terminal remains useful for login, trust, and provider screens
 ```sh
 fractal conversations send agent/garden/worker --from person/ada \
   --subject 'README review' --body 'Explain the changes and point me to the result.'
-fractal conversations ls person/ada
+fractal conversations ls agent/garden/worker
 ```
+
+Replies appear in the agent's conversation, not in a person mailbox.
 
 Use your configured person identity. A running agent uses its bound identity rather than impersonating a person. `fractal conversations --help` lists reading, following, replying, and attachment options.
 
