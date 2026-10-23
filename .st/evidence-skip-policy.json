@@ -149,7 +149,7 @@
       "sample_one_in": 5,
       "inputs": [
         "apps/fractal-web/package.json",
-        "apps/fractal-web/packages/fractal-sdk/package.json",
+        "packages/fractal-sdk/package.json",
         "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",
@@ -316,6 +316,61 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "isolation-vm"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "isolation-vm"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
           }
         }
       }
@@ -569,6 +624,7 @@
         "nix/web-shell.nix",
         "package.json",
         "package.json.genie.ts",
+        "packages/fractal-sdk",
         "packages/fractal-ui",
         "pnpm-lock.yaml",
         "pnpm-source-inputs.json",

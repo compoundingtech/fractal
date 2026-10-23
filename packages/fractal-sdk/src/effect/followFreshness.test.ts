@@ -8,6 +8,7 @@ import type { CollectionFrame, CollectionSocket } from '@fractal/client'
 import type { CollectionName, Snapshot } from '@fractal/client'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
+import * as Layer from 'effect/Layer'
 import type * as Scope from 'effect/Scope'
 import * as Stream from 'effect/Stream'
 import * as SubscriptionRef from 'effect/SubscriptionRef'
@@ -21,10 +22,13 @@ import {
   St3,
   type SyncStatus,
   St3Live,
+  St3Platform,
+  collectionWindow,
   type WindowValue,
 } from './mod.ts'
 import type { FollowFreshness } from './freshness.ts'
 import type { St3Diagnostic } from './socket.ts'
+import { makeAdmission } from './admission.ts'
 
 /** Collections a window follow can name; the wire CollectionName also carries unfollowable ones. */
 type WindowCollection = Extract<FollowSpec, { readonly _tag: 'Window' }>['collection']
@@ -195,7 +199,7 @@ const mountWindow = (
     return yield* watchFollow(
       st3,
       followKey({ _tag: 'Window', collection, limit: 50 }),
-      st3.followWindow({ _tag: 'Window', collection, limit: 50 }),
+      st3.watch(collectionWindow({ _tag: 'Window', collection, limit: 50 })),
     )
   })
 
@@ -232,7 +236,23 @@ const runEffect = (
     socket: gateway.factory,
     fetch: gateway.fetch,
     ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
-  })
+  }).pipe(Layer.provide(Layer.succeed(St3Platform, {
+    admission: (budget) => {
+      let clock = 0
+      const priorities = new Map<string, number>()
+      return makeAdmission({
+        ...budget,
+        policy: {
+          isVisible: (key) => !priorities.has(key),
+          priority: (key) => priorities.get(key),
+          setVisible: ({ key, visible }) => {
+            if (visible) priorities.delete(key)
+            else if (!priorities.has(key)) priorities.set(key, ++clock)
+          },
+        },
+      })
+    },
+  })))
   return Effect.gen(function* () {
     yield* settle
     yield* test(gateway)
@@ -701,6 +721,32 @@ describe('follow freshness', () => {
         })
       }),
     ))
+
+  it('rejoins a resynced descriptor with an authoritative replacement snapshot on the same socket', () =>
+    run({ maxFollows: 4 }, (gateway) =>
+      Effect.gen(function* () {
+        const follow = yield* mountWindow('agents')
+        const socket = gateway.socket
+        gateway.window('agents')
+        yield* settle
+        const previous = gateway.idOf('agents')
+        gateway.send({ kind: 'resync', id: previous, collection: 'agents' })
+        yield* settle
+        yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1000))
+        yield* settle
+        const id = gateway.idOf('agents')
+        expect(id).not.toBe(previous)
+        const replacement = { ...snapshot, id: 'snapshot/after-resync', store_index: 2 }
+        gateway.send({
+          kind: 'snapshot', id, collection: 'agents', items: [], order: [],
+          has_more: false, snapshot: replacement,
+        })
+        yield* settle
+        expect(follow.lastStatus()).toMatchObject({ _tag: 'Live', snapshot: replacement })
+        expect(gateway.socket).toBe(socket)
+      }),
+    ))
+
   effectIt.live('refreshes Live window snapshot evidence without restarting its since clock', () =>
     runEffect({ maxFollows: 4 }, (gateway) =>
       Effect.gen(function* () {

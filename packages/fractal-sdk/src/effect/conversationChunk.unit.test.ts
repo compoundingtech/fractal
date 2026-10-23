@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { decodeConversationChunk } from './mod.ts'
 
 const fixtures = Schema.decodeUnknownSync(Schema.Struct({ items: Schema.Array(Schema.Unknown) }))(
-  createRequire(import.meta.url)('../../../../../../docs/st3/client-v0/fixtures/timeline-conformance.json'),
+  createRequire(import.meta.url)('../../../../docs/st3/client-v0/fixtures/timeline-conformance.json'),
 ).items
 
 const frame: Extract<CollectionFrame, { kind: 'conversation' }> = {

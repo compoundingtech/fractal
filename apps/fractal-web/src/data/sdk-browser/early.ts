@@ -17,7 +17,7 @@ import type { CollectionSocket } from '@fractal/client'
 import * as Option from 'effect/Option'
 import * as Schema from 'effect/Schema'
 
-import { isValidTraceparent } from './trace.ts'
+import { isValidTraceparent } from '@fractal/sdk/effect'
 
 /** The global the inline script in `index.html` publishes its handle under. */
 export const EARLY_COLLECTIONS_GLOBAL = '__wfEarlyCollections'

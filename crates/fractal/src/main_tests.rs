@@ -951,10 +951,15 @@ fn conversations_ls_accepts_the_read_spelling_of_its_mailbox() {
         panic!("conversations ls")
     };
     assert_eq!(args.actor.as_deref(), Some("agent/run-1/worker"));
-    assert!(
-        Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"])
-            .is_err()
-    );
+    let cli = Cli::try_parse_from([
+        "st3", "conversations", "ls", "agent/a", "--as", "agent/b",
+    ])
+    .expect("named successor may list the retired mailbox as itself");
+    let Command::Conversations { command: MessageCommand::Ls(args) } = cli.command else {
+        panic!("conversations ls")
+    };
+    assert_eq!(args.identity.as_deref(), Some("agent/a"));
+    assert_eq!(args.actor.as_deref(), Some("agent/b"));
 }
 
 #[test]
@@ -1048,6 +1053,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
         from: Some("person/operator"),
         subject: Some("Review: café & ready?"),
         subject_prefix: None,
+        acting_as: None,
     };
     for cursor in [None, Some("opaque+/=&cursor")] {
         message_page_filtered(&client, Some("agent/reader"), true, cursor, None, filters)
@@ -1064,6 +1070,7 @@ async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries()
             from: None,
             subject: None,
             subject_prefix: Some("Review_%/"),
+            acting_as: None,
         },
     )
     .await
@@ -5283,6 +5290,56 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .unwrap();
     assert_eq!(archived.status, "closed");
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn successor_who_sent_mail_still_signs_one_custody_read() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let store = Arc::new(Store::open_memory("custody-sender").unwrap());
+    use fractal_daemon::{RetirementsStore as _, SeatsStoreCore as _};
+    let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+    let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
+    store.apply_internal(&intent, "custody-sender-fixture").unwrap();
+    let message = store.append_claim(&ClaimInput {
+        subject: "message/custody-sender".into(), kind: "message.sent".into(),
+        actor: Some("agent/example/new".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("agent/example/new")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note before retirement")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-sender-send".into()),
+    }).unwrap();
+    let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+    let state = AppState {
+        store: store.clone(), notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+        state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+        client_relay: None, native_session_home: None, owning_person: None,
+        planner_default: PlannerSpec::default(),
+    };
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(socket.exists());
+    let client = Client::unix(&socket);
+    assert_eq!(read_message(&client, &message.subject).await.unwrap().status, "sent");
+    let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
+    assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
+    assert_eq!(signed.body["fields"]["acting_for"], "agent/example/old");
+    assert_eq!(read.status, "read");
+    read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
     server.abort();
 }
 

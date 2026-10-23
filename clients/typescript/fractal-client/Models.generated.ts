@@ -111,6 +111,7 @@ export type Agent = ResourceHeader & {
   kind: "agent";
   last_activity_at?: (Timestamp | null);
   lifecycle?: AgentLifecycle;
+  mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -198,6 +199,11 @@ export type AgentHandoff = {
 export type AgentId = string;
 
 export type AgentLifecycle = ("standing" | "owner" | "bounded" | string);
+
+export type AgentMailCustody = {
+  state: "pending";
+  successor: AgentId;
+};
 
 export type AgentMessageDay = {
   calibrated_messages: number;
@@ -310,6 +316,7 @@ export type AgentResumeParameters = {
 export type AgentRetireParameters = {
   agent: Id;
   reason: string;
+  successor?: Id;
 };
 
 export type AgentStartParameters = {
@@ -1429,6 +1436,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "invalid-custody-successor"
+  | "custody-pending"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"

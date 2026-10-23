@@ -4,6 +4,7 @@
 #
 #   scripts/ci-local mail-redelivery-canaries
 #   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
+#   scripts/ci-local isolation-vm                                            (the VM tests: scripts/ci-local-isolation-vm)
 #
 # Each STAGE is a scripts/ci-linux stage, run in order; every stage runs even after one fails, and the exit status is the
 # first failure's (0 when all passed). Before the stages it builds and installs the rendered hooks, as the CI job's
@@ -22,7 +23,7 @@ if [ "$#" -eq 0 ]; then
 fi
 for stage in "$@"; do
   case "$stage" in
-    tests|clippy|fleet-compat|mail-redelivery-canaries) ;;
+    tests|clippy|fleet-compat|mail-redelivery-canaries|isolation-vm) ;;
     *) echo "ci-local: stage $stage has no local lane" >&2; exit 2 ;;
   esac
 done
@@ -116,7 +117,11 @@ if command -v nice >/dev/null 2>&1; then low+=(nice -n 10); fi
 status=0
 for stage in "$@"; do
   code=0
-  "${low[@]}" bash scripts/ci-linux "$stage" || code=$?
+  if [ "$stage" = isolation-vm ]; then
+    "${low[@]}" bash scripts/ci-local-isolation-vm || code=$?
+  else
+    "${low[@]}" bash scripts/ci-linux "$stage" || code=$?
+  fi
   echo "ci-local: $stage exit $code"
   if [ "$status" -eq 0 ]; then status=$code; fi
 done
