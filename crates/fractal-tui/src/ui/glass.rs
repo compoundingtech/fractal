@@ -2011,8 +2011,9 @@ impl Ui {
                     theme::dim(),
                 );
             }
-            // A usage tab names its group whatever the list groups by, so it draws from its key.
-            Some(pane @ Pane::Usage(_)) => self.draw_pane(buf, content, &pane),
+            // A usage tab names its group whatever the list groups by, so it draws from its key;
+            // a document has no list at all.
+            Some(pane @ (Pane::Usage(_) | Pane::Document(_))) => self.draw_pane(buf, content, &pane),
             // A session has no sidebar agent selection: render the tab's subject directly.
             Some(Pane::Agent(Some(id))) if id.starts_with("session/") => {
                 self.draw_pane(buf, content, &Pane::Agent(Some(id)))
@@ -2415,6 +2416,7 @@ impl Ui {
             }
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
             Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
+            Pane::Document(name) => document_title(name),
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
@@ -3107,6 +3109,8 @@ impl Ui {
                 let name = id.trim_start_matches("machine/");
                 self.world.machines.items().iter().any(|m| m.name == name)
             }
+            // A document is read when its pane opens; one st does not have says so there.
+            Pane::Document(_) => true,
             _ => false,
         }
     }
@@ -4337,6 +4341,12 @@ fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// A document pane's title: its name, without `doc/` and the version's hash.
+pub(crate) fn document_title(reference: &str) -> String {
+    let name = reference.rsplit_once('@').map_or(reference, |(name, _)| name);
+    name.trim_start_matches("doc/").to_owned()
+}
+
 /// The pane a graph subject opens as, for links followed inside a glass.
 pub(crate) fn pane_for(id: &str) -> Option<Pane> {
     let id = id.to_owned();
@@ -4348,6 +4358,8 @@ pub(crate) fn pane_for(id: &str) -> Option<Pane> {
         Some(Pane::Agent(Some(id)))
     } else if id.starts_with("resource/") {
         Some(Pane::Resource(id))
+    } else if id.starts_with("doc/") {
+        Some(Pane::Document(id))
     } else if id.starts_with("machine/") {
         Some(Pane::Machine(Some(id)))
     } else {
@@ -5597,6 +5609,8 @@ mod tests {
     fn usage_in_a_narrow_pane_reads_whole_a_limit_to_a_line_and_notes_wrapped() {
         // Nathan, 2026-10-06: the usage view was cut off and double spaced.
         let mut ui = glass();
+        // Without objectives and budgets, which the next test covers, so the summary stays on screen.
+        ui.world.slo = Load::Ready(Vec::new());
         ui.toggle_usage();
         let shown = screen(&ui);
         let lines = shown.lines().collect::<Vec<_>>();
@@ -5711,6 +5725,45 @@ mod tests {
     }
 
     #[test]
+    fn usage_shows_objectives_and_budgets_red_when_missed_or_nearly_spent_and_charts_the_selection() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        let shown = screen(&ui);
+        for text in ["accounts", "budgets", "objectives", "request-latency", "0% left", "anthropic-weekl", "6% left"] {
+            assert!(shown.contains(text), "the Usage list shows {text}:\n{shown}");
+        }
+        // A missed objective and a nearly spent budget draw red; a met one does not.
+        let red_rows = |ui: &Ui| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .filter(|y| (0..buffer.area.width).any(|x| buffer[(x, *y)].fg == theme::RED))
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let red = red_rows(&ui);
+        assert!(red.contains("request-latency") && red.contains("anthropic-weekl"), "{red}");
+        assert!(!red.contains("openai-weekly") && !red.contains("94% left") && !red.contains("59% left"), "{red}");
+        // Selecting the missed objective opens its explanation and chart.
+        for _ in 0..40 {
+            if ui.selected_id().as_deref() == Some("slo/request-latency") {
+                break;
+            }
+            press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert_eq!(ui.selected_id().as_deref(), Some("slo/request-latency"));
+        let detail = screen(&ui);
+        assert!(detail.contains("error budget left · last 24 hours"), "{detail}");
+        assert!(detail.contains("Ninety-nine in a"), "{detail}");
+        assert!(detail.contains("100% │"), "{detail}");
+        if std::env::var_os("SLO_PANE_SCREEN").is_some() {
+            println!("{detail}");
+        }
+    }
+
+    #[test]
     fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
         let mut ui = glass();
         let initial = ui.inventories_wanted();
@@ -5732,6 +5785,7 @@ mod tests {
     #[test]
     fn usage_floats_over_the_glass_and_a_row_shows_its_spend_whatever_the_list_groups_by() {
         let mut ui = glass();
+        ui.world.slo = Load::Ready(Vec::new());
         assert_eq!(ui.usage_wanted(), None, "nothing shows usage yet");
         ui.click(Hit::Usage);
         assert_eq!(ui.usage_wanted(), Some(24));
@@ -7200,6 +7254,7 @@ mod tests {
                 word,
                 system: false,
                 updated_at: at,
+                state: String::new(),
                 ..template.clone()
             })
             .collect();
@@ -8054,5 +8109,15 @@ mod tests {
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.glasses.as_ref().unwrap().palette.is_none());
         assert_eq!(ui.tab, 0, "the sidebar's tabs do not change underneath");
+    }
+
+    #[test]
+    fn a_document_tab_is_named_without_its_prefix_or_version() {
+        assert_eq!(document_title("doc/garden/notes@4f2a"), "garden/notes");
+        assert_eq!(document_title("doc/REVIEW.md"), "REVIEW.md");
+        assert_eq!(
+            Pane::parse(&Pane::Document("doc/garden/notes@4f2a".into()).key()),
+            Some(Pane::Document("doc/garden/notes@4f2a".into()))
+        );
     }
 }

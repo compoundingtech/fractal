@@ -170,6 +170,19 @@ pub fn raw_terminal_owner_splice(
 
 pub use crate::delivery_presence::claude_channel_attached;
 
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
@@ -395,7 +408,7 @@ impl ApiError {
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
-            | "checkpoint-proof-in-progress" => StatusCode::SERVICE_UNAVAILABLE,
+            | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1448,6 +1461,28 @@ pub fn a_publication_far_behind_its_previous_one_is_not_a_freshness_sample() {
     assert!(publish_sampled(7, 8));
     assert!(publish_sampled(7, 7 + PUBLISH_SAMPLE_CLAIMS));
     assert!(!publish_sampled(7, 8 + PUBLISH_SAMPLE_CLAIMS), "after a catch-up");
+    assert_eq!(publish_collection("attention"), "attention");
+    assert_eq!(publish_collection("sessions"), "other");
+}
+
+/// Publications more than [`PUBLISH_SAMPLE_CLAIMS`] claims after the previous one, which
+/// `projection-fresh` does not sample, by `collection` (docs/st3/observability.md).
+static PUBLISH_SAMPLES_SKIPPED: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3")
+            .u64_counter("st.slo.projection_fresh.skipped")
+            .with_unit("{publication}")
+            .build()
+    });
+
+/// A publication's `collection` as a closed metric attribute.
+fn publish_collection(collection: &str) -> &'static str {
+    match collection {
+        "missions" => "missions",
+        "agents" => "agents",
+        "attention" => "attention",
+        _ => "other",
+    }
 }
 
 /// A refresher published `collection` at `cut`, after a publication at `previous`: time it
@@ -1465,6 +1500,15 @@ pub fn record_publish_latency(
     published_at_unix_ms: u128,
 ) {
     if !publish_sampled(previous, cut) {
+        if cut > previous && crate::otel::metrics_enabled() {
+            PUBLISH_SAMPLES_SKIPPED.add(
+                1,
+                &[opentelemetry::KeyValue::new(
+                    "collection",
+                    publish_collection(collection),
+                )],
+            );
+        }
         return;
     }
     let committed = match store.first_local_commit_after(previous, cut) {
@@ -2976,6 +3020,7 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                     item["state"] = json!("waiting");
                 }
             }
+            overlay_declaration_restart(item, client_now_ms());
             overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
@@ -2990,6 +3035,23 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
         overlay_subagents(store, items)?;
         Ok(())
     })
+}
+
+// A marker describes a replacement, not proof that its owner is still progressing.
+// Evaluate this on every live presentation, including retained roster cards, rather
+// than only when a new claim invalidates the fold. Expiry changes no durable fact.
+const DECLARATION_RESTART_PRESENTATION_MS: u128 = 120_000;
+
+fn overlay_declaration_restart(item: &mut Value, now: u128) {
+    let fields = item.as_object_mut().expect("agent card");
+    let previous = fields.remove("_restart_underlying_state");
+    let deadline = fields.remove("_restart_until_unix_ms").and_then(|value| value.as_u64());
+    if fields.get("state").and_then(Value::as_str) == Some("restarting")
+        && deadline.is_none_or(|deadline| now >= u128::from(deadline))
+        && let Some(previous) = previous
+    {
+        fields.insert("state".into(), previous);
+    }
 }
 
 /// How long a declared seat may take to show a running session before it is called down.
@@ -3122,10 +3184,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
@@ -3430,6 +3502,28 @@ fn client_agent_cards_presented(
                     .or_else(|| subject.desired_token.as_deref().and_then(claim_time))
             })
             .flatten();
+            // A declaration replacement carries the incarnation it is retiring. Keep
+            // that shutdown and the new harness readiness interval distinct from a first start.
+            let restarting_from = fields
+                .and_then(|fields| fields.get("restarting_from"))
+                .and_then(Value::as_str);
+            let restart_underlying_state = state;
+            let restart_until = subject.actual_claim.as_deref()
+                .and_then(|claim| actual_claim_times.as_ref().ok()?.get(claim).copied())
+                .map(|accepted| accepted.saturating_add(DECLARATION_RESTART_PRESENTATION_MS));
+            let restarting = restart_until.is_some() && restarting_from.is_some_and(|from| {
+                subject.reachability == "reachable"
+                    && !matches!(state, "waiting" | "failed")
+                    && (state == "starting"
+                        || (fields
+                            .and_then(|fields| fields.get("incarnation_id"))
+                            .and_then(Value::as_str) == Some(from)
+                            && matches!(
+                                observed,
+                                Some("running")
+                            )))
+            });
+            let state = if restarting { "restarting" } else { state };
             let handoff = subject.desired_token.as_deref()
                 .map(|token| crate::placement::handoff(store, &subject.subject, token, snapshot_index))
                 .transpose()?.flatten();
@@ -3523,6 +3617,8 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "_restart_underlying_state": restart_underlying_state,
+                "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
                 "runtime_ids": runtime_ids,
                 "owner_run_id": subject.owner_run,

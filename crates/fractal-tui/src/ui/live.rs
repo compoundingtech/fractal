@@ -29,7 +29,10 @@ use fractal_client::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     io,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex, mpsc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -53,6 +56,8 @@ struct Pending {
     /// When it was last sent (or sent again): one st has not answered for a while is said to be
     /// unconfirmed, so it can be sent again or cleared rather than wait forever.
     since: Instant,
+    /// How many times it was sent again without the person asking, once st had not confirmed it.
+    resent: usize,
 }
 
 /// How often st is asked how long a message it takes, and how soon again after it did not answer.
@@ -182,6 +187,8 @@ pub struct Context {
     pub initial_subject: Option<String>,
     /// Where seats on this machine leave requests to show something; none for a paired device.
     pub requests: Option<std::path::PathBuf>,
+    /// The demo `st demo play` runs in this interface: its advance key and typing.
+    pub playback: Option<super::playback::Playback>,
 }
 
 // Setup's initial destination waits for a live inventory, rather than cached agent data.
@@ -392,6 +399,8 @@ enum Fetched {
         took: Duration,
     },
     Preview(String, Load<MissionPreview>),
+    /// A document's text, by the reference its pane names, or why it could not be read.
+    Document(String, Result<String, String>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
@@ -401,6 +410,10 @@ enum Fetched {
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
+    /// The objectives and budgets the Usage view shows, or why st could not say.
+    Slo { generation: u64, outcome: Result<Vec<fractal_client::SloRow>, String> },
+    /// What was left of one objective or budget across the chart period.
+    SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<fractal_client::ConversationSearch, String>),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
@@ -501,6 +514,7 @@ pub fn run(context: Context) -> Result<()> {
         process_started,
         mut initial_subject,
         requests,
+        playback,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
     // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
@@ -534,6 +548,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    // A demo's agents are scripted stand-ins whose terminals stay empty: they open on their
+    // conversation, without changing this device's choice.
+    if playback.is_some() {
+        ui.conversation_first = Some(true);
+    }
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
@@ -607,6 +626,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut attach_started: Option<Instant> = None;
     // Why the attach in progress is waiting, when st refused it for a reason that passes.
     let mut attach_note: Option<String> = None;
+    // Whether a shell's attach is still wanted: its retries stop once its tab is gone.
+    let mut attach_wanted: BTreeMap<String, Arc<AtomicBool>> = BTreeMap::new();
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -627,6 +648,13 @@ pub fn run(context: Context) -> Result<()> {
     let mut inventory_grace = InventoryGrace::default();
     let mut inventory_sent: Option<Inventories> = None;
     let mut usage_wanted_hours = None;
+    // Objectives and budgets are read when the Usage view shows and again when an account's
+    // limits are measured anew, never on a timer; a chart is read once per selection and period.
+    let mut slo_shown = false;
+    let mut slo_signature: Option<u64> = None;
+    let mut slo_stale = false;
+    let mut slo_reading = false;
+    let mut slo_history_asked = BTreeSet::<(String, u64)>::new();
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -720,6 +748,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
+                    slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
@@ -1042,6 +1071,15 @@ pub fn run(context: Context) -> Result<()> {
                     encoding.remove(&(key.clone(), width, height));
                     ui.content.install_protocol(key, width, height, protocol);
                 }
+                Fetched::Document(reference, result) => {
+                    ui.documents.insert(
+                        reference,
+                        match result {
+                            Ok(text) => Load::Ready(text),
+                            Err(why) => Load::Failed(why),
+                        },
+                    );
+                }
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
                 }
@@ -1245,6 +1283,27 @@ pub fn run(context: Context) -> Result<()> {
                         InventoryRead::Usage(_, _) => {},
                     }
                 }
+                Fetched::Slo { generation, outcome } => {
+                    slo_reading = false;
+                    if generation != resources_generation { continue; }
+                    match outcome {
+                        Ok(rows) => {
+                            extras.slo = Load::Ready(rows);
+                            // A chart open now is read again beside the fresh rows.
+                            slo_history_asked.clear();
+                        }
+                        Err(why) if matches!(extras.slo, Load::Ready(_)) => ui.flash(format!("Could not read objectives and budgets again: {why}")),
+                        Err(why) => extras.slo = Load::Failed(why),
+                    }
+                }
+                Fetched::SloHistory { generation, id, outcome } => {
+                    if generation != resources_generation { continue; }
+                    match outcome {
+                        Ok(history) => { extras.slo_history.insert(id, Load::Ready(history)); }
+                        Err(why) if matches!(extras.slo_history.get(&id), Some(Load::Ready(_))) => ui.flash(format!("Could not read the chart again: {why}")),
+                        Err(why) => { extras.slo_history.insert(id, Load::Failed(why)); }
+                    }
+                }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
@@ -1291,8 +1350,13 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::AttachWaiting { agent, reason } => {
-                    if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
-                        attach_note = Some(reason);
+                    if ui.terminal_view(&agent).is_some() {
+                        if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+                            attach_note = Some(reason);
+                        }
+                    } else if let Some(wanted) = attach_wanted.remove(&agent) {
+                        // Its tab is gone (closed by any route): stop asking.
+                        wanted.store(false, Ordering::Relaxed);
                     }
                 }
                 Fetched::NativeFailed {
@@ -1338,6 +1402,22 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         resources_shown = showing_resources;
+        // A document is read once, when its pane is first shown.
+        if let Some(super::pane::Pane::Document(reference)) = ui.focused_pane()
+            && !ui.documents.contains_key(&reference)
+        {
+            ui.documents.insert(reference.clone(), Load::Loading);
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let outcome = reader
+                    .document_get(&reference)
+                    .await
+                    .map(|document| String::from_utf8_lossy(&document.value.bytes).into_owned())
+                    .map_err(|error| error.plain());
+                let _ = tx.send(Fetched::Document(reference, outcome));
+            });
+        }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.
@@ -1360,6 +1440,40 @@ pub fn run(context: Context) -> Result<()> {
         let visible = ui.inventories_wanted();
         if let Some(hours) = visible.usage_hours && usage_wanted_hours != Some(hours) {
             usage_wanted_hours = Some(hours); model.usage = None; changed = true;
+        }
+        let usage_shown = visible.usage_hours.is_some();
+        let signature = match &model.usage {
+            Some(Ok(period)) => period.limits.iter().map(|limit| limit.measured_at_unix_ms).max(),
+            _ => None,
+        };
+        if usage_shown && (!slo_shown || signature != slo_signature) { slo_stale = true; }
+        slo_shown = usage_shown;
+        slo_signature = signature;
+        if usage_shown && extras.live && slo_stale && !slo_reading {
+            slo_stale = false; slo_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = reader.slo_list().await.map(|reply| reply.value.rows).map_err(|error| super::objectives::error(&error));
+                let _ = tx.send(Fetched::Slo { generation, outcome });
+            });
+        }
+        // The chart of the objective or budget selected, or open in the focused pane.
+        let charted = selected.iter().cloned()
+            .chain(match ui.focused_pane() { Some(super::pane::Pane::Usage(Some(id))) => Some(id), _ => None })
+            .filter_map(|id| super::objectives::slo_id(&id).map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        if usage_shown && extras.live && !slo_reading {
+            let hours = ui.usage_hours.min(super::objectives::CHART_HOURS);
+            for id in charted {
+                if !slo_history_asked.insert((id.clone(), hours)) { continue; }
+                let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+                runtime.spawn(async move {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let outcome = reader.slo_history(&id, Some(now.saturating_sub(hours * 3_600_000)), None, Some(super::objectives::CHART_STEPS)).await
+                        .map(|reply| reply.value).map_err(|error| super::objectives::error(&error));
+                    let _ = tx.send(Fetched::SloHistory { generation, id, outcome });
+                });
+            }
         }
         if extras.inventory_supported == Some(true) {
             let held = inventory_grace.followed(visible, Instant::now());
@@ -1630,6 +1744,10 @@ pub fn run(context: Context) -> Result<()> {
                     attach_started = Some(Instant::now());
                     attach_note = None;
                     let _ = commands.send(Command::Unfollow);
+                    let wanted = Arc::new(AtomicBool::new(true));
+                    if let Some(earlier) = attach_wanted.insert(agent.clone(), wanted.clone()) {
+                        earlier.store(false, Ordering::Relaxed);
+                    }
                     {
                         let client = client.clone();
                         let tx = fetched_tx.clone();
@@ -1645,6 +1763,7 @@ pub fn run(context: Context) -> Result<()> {
                             };
                             let attached = retry_attach(
                                 delays,
+                                || wanted.load(Ordering::Relaxed),
                                 |reason| {
                                     let _ = tx.send(Fetched::AttachWaiting {
                                         agent: agent.clone(),
@@ -1663,6 +1782,10 @@ pub fn run(context: Context) -> Result<()> {
                                 },
                             )
                             .await;
+                            // Its tab closed while it waited: nobody is left to hear the outcome.
+                            if !wanted.load(Ordering::Relaxed) {
+                                return;
+                            }
                             let _ = tx.send(match attached {
                                 Ok(direct) => Fetched::Native { agent, direct },
                                 Err(reason) => Fetched::NativeFailed {
@@ -1693,6 +1816,11 @@ pub fn run(context: Context) -> Result<()> {
                     let _ = commands.send(Command::Unfollow);
                     attached = None;
                     terminal_runtimes = None;
+                    if let Some(view) = &ui.terminal
+                        && let Some(wanted) = attach_wanted.remove(&view.agent)
+                    {
+                        wanted.store(false, Ordering::Relaxed);
+                    }
                     ui.terminal = None;
                 }
                 Effect::TerminalKey(key) => {
@@ -1789,6 +1917,13 @@ pub fn run(context: Context) -> Result<()> {
                 });
             });
         }
+        // A send st did not confirm goes again by itself, as the same request, while the link is
+        // live; what it cannot settle that way waits for the person.
+        if matches!(ui.world.link, super::view::Link::Live) {
+            effects.extend(due_for_resend(&mut pending).into_iter().map(|token| Effect::Resend {
+                entry: format!("pending:{token}"),
+            }));
+        }
         for effect in effects {
             let (effect, token, sent) = match effect {
                 Effect::Resend { entry } => {
@@ -1853,6 +1988,7 @@ pub fn run(context: Context) -> Result<()> {
                         sent: sent.clone(),
                         echoed: false,
                         since: Instant::now(),
+                        resent: 0,
                     });
                     changed = true;
                     (effect, Some(token), Some(sent))
@@ -1966,6 +2102,14 @@ pub fn run(context: Context) -> Result<()> {
             let _ = commands.send(Command::Missions { follow: wanted });
         }
         answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
+        for typed in playback.iter().flat_map(super::playback::Playback::typed) {
+            match typed {
+                super::playback::Typed::Text(text) => ui.paste(text),
+                super::playback::Typed::Send => {
+                    ui.input_event(Event::Key(crossterm::event::KeyCode::Enter.into()));
+                }
+            }
+        }
         ui.step_voice();
         ui.step_terminal_hold();
         ui.step_default_view();
@@ -2143,6 +2287,11 @@ pub fn run(context: Context) -> Result<()> {
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
                 match input {
+                    Event::Key(key)
+                        if playback.as_ref().is_some_and(|playback| playback.take(&key)) =>
+                    {
+                        false
+                    }
                     Event::Key(key) if reconnect_key(&key, extras.live) => {
                         let _ = commands.send(Command::Reconnect);
                         true
@@ -2463,6 +2612,33 @@ async fn older_page(
         cursor = page.cursor;
     }
     Err("this session is too long to read further back here; st conversations timeline reads it all".into())
+}
+
+/// How long a message st did not confirm waits before it is sent again by itself, for each time.
+/// A repeat is the exact first request, so st answers it with the first result and never takes
+/// the message twice (Nathan, 2026-10-16: "I hate when it thinks it failed but it didn't"); after
+/// the last one the person decides.
+const AUTO_RESEND_AFTER: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+];
+
+/// The unconfirmed messages whose turn to be sent again has come. Only one st took no answer for;
+/// a message st refused is never sent again here.
+fn due_for_resend(pending: &mut [Pending]) -> Vec<String> {
+    let mut due = Vec::new();
+    for entry in pending {
+        if entry.unconfirmed
+            && entry.message_id.is_none()
+            && let Some(wait) = AUTO_RESEND_AFTER.get(entry.resent)
+            && entry.since.elapsed() >= *wait
+        {
+            entry.resent += 1;
+            due.push(entry.token.clone());
+        }
+    }
+    due
 }
 
 /// Say of each message st has not answered for a while that it is unconfirmed, so the person
@@ -3212,6 +3388,7 @@ mod tests {
                 .unwrap()
                 .block_on(retry_attach(
                     &vec![Duration::ZERO; delays],
+                    || true,
                     |reason| said.push(reason.to_owned()),
                     || {
                         let next = refusals.next();
@@ -3235,10 +3412,22 @@ mod tests {
             assert_eq!(outcome, Err(reason.to_owned()));
             assert!(said.is_empty(), "{reason} must not be retried");
         }
-        // The retried reasons are the words st's own messages use.
+        // The retried reasons are the words st's own messages use, for every code behind them:
+        // rewording one in fractal-client must not quietly stop the retries.
+        for code in [
+            fractal_client::ErrorCode::RuntimeAuthorityIndeterminate,
+            fractal_client::ErrorCode::RemoteUnavailable,
+            fractal_client::ErrorCode::RateLimited,
+            fractal_client::ErrorCode::StaleFence,
+        ] {
+            assert!(
+                super::worth_retrying(&fractal_client::plain_message(Some(&code), "")),
+                "{code:?} is not retried"
+            );
+        }
         assert!(super::worth_retrying(&fractal_client::plain_message(
-            Some(&fractal_client::ErrorCode::RuntimeAuthorityIndeterminate),
-            ""
+            Some(&fractal_client::ErrorCode::RemoteUnavailable),
+            "host/example is away"
         )));
         assert!(!super::worth_retrying(&fractal_client::plain_message(
             Some(&fractal_client::ErrorCode::NotFound),
@@ -3246,6 +3435,33 @@ mod tests {
         )));
         // A refusal that passes waits about a minute and a half before the tab gives up.
         assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+    }
+
+    #[test]
+    fn a_shells_attach_stops_retrying_once_its_tab_is_closed() {
+        let unsure = "st cannot tell yet which host runs this";
+        let wanted = std::cell::Cell::new(true);
+        let attempts = std::cell::Cell::new(0);
+        let mut said = 0;
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(retry_attach(
+                &[Duration::ZERO; 20],
+                || wanted.get(),
+                |_| {
+                    said += 1;
+                    // The tab is closed while the first wait is under way.
+                    wanted.set(false);
+                },
+                || {
+                    attempts.set(attempts.get() + 1);
+                    async move { Err::<(), _>(unsure.to_owned()) }
+                },
+            ));
+        assert_eq!(outcome, Err(unsure.to_owned()));
+        assert_eq!((attempts.get(), said), (1, 1), "no attempt after the tab is gone");
     }
 
     #[test]
@@ -4878,6 +5094,7 @@ mod tests {
             sent: Arc::new(Mutex::new(None)),
             echoed: false,
             since,
+            resent: 0,
         };
         let mut fresh = [pending(Instant::now())];
         assert!(!mark_unanswered(&mut fresh));
@@ -4887,6 +5104,45 @@ mod tests {
         assert!(waiting[0].unconfirmed && waiting[0].failed.is_some());
         // Said once.
         assert!(!mark_unanswered(&mut waiting));
+    }
+
+    #[test]
+    fn a_send_st_did_not_confirm_goes_again_by_itself_a_few_times_and_then_waits_for_the_person() {
+        let pending = |unconfirmed: bool, message_id: Option<&str>| Pending {
+            token: "t".into(),
+            agent: "agent/example/cos".into(),
+            text: "hello".into(),
+            at: "10:17".into(),
+            message_id: message_id.map(str::to_owned),
+            failed: unconfirmed.then(|| "st did not answer".into()),
+            unconfirmed,
+            effect: Effect::Send {
+                in_reply_to: None,
+                agent: "agent/example/cos".into(),
+                text: "hello".into(),
+                tags: Vec::new(),
+                images: Vec::new(),
+            },
+            sent: Arc::new(Mutex::new(None)),
+            echoed: false,
+            since: Instant::now() - Duration::from_secs(600),
+            resent: 0,
+        };
+        // Due three times in a row (each resend restarts the clock in the loop), then never.
+        let mut waiting = [pending(true, None)];
+        for turn in 1..=3 {
+            assert_eq!(due_for_resend(&mut waiting), ["t"], "turn {turn}");
+            assert_eq!(waiting[0].resent, turn);
+            waiting[0].since = Instant::now() - Duration::from_secs(600);
+        }
+        assert!(due_for_resend(&mut waiting).is_empty(), "then the person decides");
+        // Not yet: the first wait is five seconds.
+        let mut fresh = [pending(true, None)];
+        fresh[0].since = Instant::now();
+        assert!(due_for_resend(&mut fresh).is_empty());
+        // A send st refused or answered, or one still waiting for its answer, is left alone.
+        let mut refused = [pending(false, None), pending(true, Some("message/one"))];
+        assert!(due_for_resend(&mut refused).is_empty());
     }
 
     fn fixture_screen() -> fractal_client::TerminalScreen {
@@ -4984,9 +5240,11 @@ fn worth_retrying(reason: &str) -> bool {
 }
 
 /// Try `attempt` again after each delay while it fails for a reason that passes, telling `waiting`
-/// the reason before each wait; the last refusal comes back once the delays are used up.
+/// the reason before each wait; the last refusal comes back once the delays are used up, or as soon
+/// as `wanted` says nobody is waiting any more (the tab was closed).
 async fn retry_attach<T, Fut>(
     delays: &[Duration],
+    wanted: impl Fn() -> bool,
     mut waiting: impl FnMut(&str),
     mut attempt: impl FnMut() -> Fut,
 ) -> Result<T, String>
@@ -4997,10 +5255,14 @@ where
     loop {
         match attempt().await {
             Err(reason) if worth_retrying(&reason) => match delays.next() {
-                Some(delay) => {
+                Some(delay) if wanted() => {
                     waiting(&reason);
                     tokio::time::sleep(*delay).await;
+                    if !wanted() {
+                        return Err(reason);
+                    }
                 }
+                Some(_) => return Err(reason),
                 None => return Err(reason),
             },
             done => return done,

@@ -50,7 +50,6 @@
           "command": [
             "linux-gate",
             "aggregate",
-            "genie-freshness",
             "isolation-vm",
             "linux-clippy",
             "linux-fleet-compat",
@@ -61,7 +60,6 @@
             "linux-tests-shard-3",
             "linux-tests-shard-4",
             "mail-redelivery-canaries",
-            "typescript-client",
             "upgrade-impact"
           ],
           "required_inputs": [
@@ -73,6 +71,69 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "clippy_base_sha"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "tests",
+                "clippy",
+                "fleet-compat",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "clippy_base_sha"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
           }
         }
       }
@@ -81,7 +142,10 @@
       "trust_levels": [
         "fleet"
       ],
-      "enforce": false,
+      "enforce": true,
+      "events": [
+        "pull_request"
+      ],
       "sample_one_in": 5,
       "inputs": [
         "apps/fractal-web/package.json",
@@ -193,6 +257,36 @@
         "fleet"
       ],
       "enforce": false,
+      "sample_one_in": 5,
+      "inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ],
       "kinds": {
         "observed": {
           "command": [
@@ -322,6 +416,36 @@
         "fleet"
       ],
       "enforce": false,
+      "sample_one_in": 5,
+      "inputs": [
+        ".cargo",
+        ".config/nextest.toml",
+        ".github",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "claude-channel",
+        "clients",
+        "components",
+        "crates",
+        "docs/st2",
+        "docs/st3",
+        "docs/vrs",
+        "evals",
+        "examples",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "nix",
+        "plugins",
+        "scripts",
+        "slo",
+        "src",
+        "templates",
+        "tests",
+        "vendor",
+        "wit"
+      ],
       "kinds": {
         "observed": {
           "command": [
@@ -349,6 +473,155 @@
           ],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "nix",
+                "develop",
+                "-c",
+                "bash",
+                "scripts/ci-local",
+                "mail-redelivery-canaries"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
+          }
+        }
+      }
+    },
+    "fractal-web": {
+      "trust_levels": [
+        "fleet"
+      ],
+      "enforce": false,
+      "sample_one_in": 5,
+      "inputs": [
+        ".buckconfig",
+        ".buckconfig.genie.ts",
+        ".buckroot",
+        ".github/repo-settings.json",
+        ".github/repo-settings.json.genie.ts",
+        ".github/workflows/cache-audit.ts",
+        ".github/workflows/fleet.yml",
+        ".github/workflows/fleet.yml.genie.ts",
+        ".github/workflows/main-upkeep.yml",
+        ".github/workflows/main-upkeep.yml.genie.ts",
+        ".github/workflows/workspace-ci.ts",
+        "BUCK",
+        "BUCK.genie.ts",
+        "apps/fractal-web",
+        "apps/ios/package.json",
+        "buck2",
+        "clients/typescript/fractal-client",
+        "clients/typescript/fractal-scenarios",
+        "clients/typescript/fractal-views",
+        "docs/st3/client-v0/fixtures",
+        "docs/st3/client-v0/schemas",
+        "fixtures",
+        "flake.lock",
+        "flake.nix",
+        "megarepo.kdl",
+        "megarepo.lock",
+        "nix/web-shell-inputs.json",
+        "nix/web-shell.nix",
+        "package.json",
+        "package.json.genie.ts",
+        "packages/fractal-ui",
+        "pnpm-lock.yaml",
+        "pnpm-source-inputs.json",
+        "pnpm-source-inputs.json.genie.ts",
+        "pnpm-workspace.yaml",
+        "pnpm-workspace.yaml.genie.ts",
+        "scripts/check-public-repo",
+        "scripts/ci-fractal-web",
+        "scripts/ci-fractal-web-changes",
+        "scripts/ci-fractal-web-gate",
+        "scripts/ci-fractal-web-kit-graph",
+        "scripts/ci-fractal-web-licenses",
+        "scripts/ci-fractal-web-licenses-test",
+        "scripts/ci-fractal-web-test",
+        "scripts/ci-typescript-client",
+        "scripts/ci-web-shell",
+        "scripts/ci-web-shell-inputs.jq",
+        "scripts/ci-web-shell-test"
+      ],
+      "kinds": {
+        "wrapper": {
+          "command": [
+            "fractal-web",
+            "aggregate",
+            "fractal-web",
+            "fractal-web-changes",
+            "fractal-web-execution"
+          ],
+          "required_inputs": [
+            "flake_lock_sha256",
+            "toolchain_sha256",
+            "wrapper_sha256",
+            "system",
+            "attempt",
+            "kit_shard_count",
+            "shard_results",
+            "kit_inputs",
+            "kit_play_set",
+            "app_test_set"
+          ],
+          "bind_inputs": {
+            "flake_lock_sha256": "flake.lock"
+          },
+          "shard_inputs": {
+            "count": "kit_shard_count",
+            "results": "shard_results",
+            "pull_request_count": 1
+          },
+          "input_order": {
+            "kit_inputs": [
+              "true",
+              "false"
+            ]
           }
         }
       }

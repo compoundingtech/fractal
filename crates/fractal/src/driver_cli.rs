@@ -1619,6 +1619,7 @@ async fn run_pi_channel(
                     Some(fractal_daemon::mailbox::Frame::Drain { operation }) => {
                         if let Some(subscription) = &subscription { subscription.acknowledge_drain(operation); }
                     },
+                    Some(fractal_daemon::mailbox::Frame::Attachment { .. }) => {},
                     Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                         let frame = json!({"type":"seat", "seat":seat});
                         stdout.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes()).await?;

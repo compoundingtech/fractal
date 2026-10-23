@@ -23,6 +23,6 @@ package(=fractal) and binary(=integration) and test(/^boot_canaries::/) and not 
 # doctor and machines page), #3611 (every invite refusal), #3614 (the frozen-member doctor
 # warning), and the existing fractal-store fleet_admission_tests (removal fenced through a relay),
 # smallclaims fleet/membership.rs, fleet/transport.rs and sync/worker_tests.rs. Kept per PR: the
-# two fleet::action_coverage_ tests that docs/st3/action-coverage.json names, and the suite's two
+# fleet::action_coverage_ tests, the transport_prefer_ command contracts, and the suite's two
 # fast self-tests. linux-fleet-compat runs its ignored test through cargo test and is unaffected.
-package(=fractal) and binary(=integration) and test(/^fleet::/) and not test(/^fleet::(action_coverage_|fleet_workflows_have_no_path_filter$|fixture_port_reservation_excludes_other_processes_until_released$)/)
+package(=fractal) and binary(=integration) and test(/^fleet::/) and not test(/^fleet::(action_coverage_|transport_prefer_|fleet_workflows_have_no_path_filter$|fixture_port_reservation_excludes_other_processes_until_released$)/)
