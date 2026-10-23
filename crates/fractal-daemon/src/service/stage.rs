@@ -1,5 +1,5 @@
 //! Pre-install definitions only; the host migration owns state, socket bridges and activation.
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 use super::*;
 use super::install::{Commands, NativeCommands};
 

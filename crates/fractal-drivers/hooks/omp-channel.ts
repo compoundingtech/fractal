@@ -284,7 +284,7 @@ const idleProof = (ctx: ExtensionContext): boolean => {
  * `agent()`, `/tan` clones), and each copy shares the process-wide stash. A subagent that ran the
  * lifecycle below would close the seat's channel and rebind it to itself: the seat's mail is then
  * delivered into the subagent, its turns drive the seat's observed state, and the channel dies
- * with the subagent (compoundingtech/smalltalk#852). So the channel belongs to the top-level
+ * with the subagent (compoundingtech/fractal#852). So the channel belongs to the top-level
  * session alone, and a subagent's events are ignored entirely.
  *
  * omp names the running agent as `ctx.agent.kind` since 18.3.2; omp says to check it, not

@@ -4,7 +4,7 @@ Pod::Spec.new do |s|
   s.summary        = 'Bounded on-device Small Talk diagnostics'
   s.description    = 'Persists native launch breadcrumbs and sanitized MetricKit diagnostics before JavaScript starts.'
   s.author         = ''
-  s.homepage       = 'https://github.com/compoundingtech/smalltalk'
+  s.homepage       = 'https://github.com/compoundingtech/fractal'
   s.license        = 'MIT'
   s.platforms      = { :ios => '15.1' }
   s.source         = { git: '' }

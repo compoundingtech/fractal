@@ -83,7 +83,7 @@ for binary in "${binaries[@]}"; do
   chmod 0755 "$staged"
   mv -f "$staged" "$bin_dir/$binary"
 done
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 link=$(mktemp -u "$bin_dir/.st.install.XXXXXX")
 ln -s st3 "$link"
 mv -f "$link" "$bin_dir/st"

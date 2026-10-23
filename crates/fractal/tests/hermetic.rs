@@ -80,7 +80,7 @@ fn renaming_the_production_cli_does_not_bypass_mutating_actor_checks() {
     assert!(error.contains("cannot act as `person/pat`"), "{error}");
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 #[test]
 fn conflicting_agent_aliases_cannot_fall_back_to_native_driver_identity() {
     let root = tempfile::tempdir().unwrap();

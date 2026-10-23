@@ -39,7 +39,7 @@ use anyhow::{Context as _, Result};
 /// Names the instance for this process and everything it starts.
 pub const ENV: &str = "ST_INSTANCE";
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 const FRACTAL_ENV: &str = "FRACTAL_INSTANCE";
 
 /// Resolve once at each instance boundary, including explicit empty Fractal masking.
@@ -254,7 +254,7 @@ pub unsafe fn activate(name: &str) -> Result<Instance> {
         }
     }
     unsafe { env::set_var(ENV, name) };
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     // Normalize both spellings so every child observes the instance we activated.
     unsafe { env::set_var(FRACTAL_ENV, name) };
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -301,7 +301,7 @@ pub fn service_environment() -> Vec<(String, String)> {
     let Some(instance) = current() else {
         return Vec::new();
     };
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let mut variables = vec![
         (FRACTAL_ENV.to_owned(), instance.name().to_owned()),
         (ENV.to_owned(), instance.name().to_owned()),

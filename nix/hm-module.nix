@@ -21,7 +21,7 @@ let
         postBuild = ''
           rm "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
           cp ${cfg.package}/bin/st3 "$out/bin/st3"
-          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
           ln -s st3 "$out/bin/st"
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           ln -s ${cfg.ptyPackage}/bin/pty "$out/bin/pty"
@@ -74,7 +74,7 @@ let
     + "\n"
   );
   hasDeclarations = applyCommands != [ ];
-  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+  # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
   staging = cfg.fractalMigration.phase != "legacy";
   completed = cfg.fractalMigration.phase == "completed";
   targetState = "${config.xdg.stateHome}/fractal";
@@ -172,7 +172,7 @@ in
 
   options.services.smalltalk = {
     enable = mkEnableOption "the smalltalk user daemon";
-    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     fractalMigration.phase = mkOption {
       type = types.enum [ "legacy" "stage" "completed" ];
       default = "legacy";
@@ -272,7 +272,7 @@ in
   };
 
   config = mkIf cfg.enable {
-    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     assertions = lib.optional staging {
       assertion = (cfg.stateDir == legacyState || lib.hasPrefix "${legacyState}/" cfg.stateDir)
         && !(builtins.any (part: part == "." || part == "..") (lib.splitString "/" cfg.stateDir));
@@ -359,7 +359,7 @@ in
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
             fi
-            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             ${pkgs.coreutils}/bin/ln -sfn st3 "$binDir/st"
             ${if config.programs.smalltalk.fractalBinary.enable then ''
               if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then

@@ -107,7 +107,7 @@ fn incomplete_native_views_preserve_raw_records_without_invalid_projections() {
 
 #[test]
 fn daemon_sender_is_an_explicit_known_schema_gap_issue_1957() {
-    // https://github.com/compoundingtech/smalltalk/issues/1957
+    // https://github.com/compoundingtech/fractal/issues/1957
     // Pending intake amendment: genuine runtime-authored messages cannot satisfy
     // ParticipantRef. Never omit/relabel the sender or silently skip this case.
     let entry = json!({

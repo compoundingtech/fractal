@@ -2,7 +2,7 @@
 # Download a verified Fractal release, install it, and open st.
 set -eu
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-base=${FRACTAL_INSTALL_RELEASE_BASE_URL-${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/smalltalk/releases}}
+base=${FRACTAL_INSTALL_RELEASE_BASE_URL-${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/fractal/releases}}
 tag=
 edge=false
 bin_dir=${HOME:?HOME is required}/.local/bin

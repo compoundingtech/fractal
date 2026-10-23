@@ -3,7 +3,7 @@
 `st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
 a mission, a terminal, Inbox or usage. `st ui --space NAME` opens a named space. `st ui --demo`
 shows them on invented data and sends nothing. Spaces are stui's only layout: the layout from
-before them is gone ([#1166](https://github.com/compoundingtech/smalltalk/issues/1166)), and
+before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1166)), and
 `st ui --classic` refuses with what to run instead.
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
