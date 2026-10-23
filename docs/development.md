@@ -237,7 +237,15 @@ the actual execution seat without reconstructing identity from display labels.
 `Mission.step_metadata` retains each selected step's raw `blocked_reason` and `last_progress`,
 keyed by its step-run ID. These facts survive state changes independently of a step's waiting
 blocker or derived queue `note`, and are not normalized by display text policies.
-Shared widgets and other UI models are separate follow-up work, not part of this mission extraction.
+`crates/fractal-mission-ui` composes mission step rows and their progress meter without
+owning a shell or choosing a default renderer. Enable its optional `ratatui` feature
+and call `steps` with a borrowed mission, expansion keys, spinner, `Palette`,
+`Glyphs`, and the caller's shared conversation `Theme` for inline markdown.
+The returned shared `Doc<Intent>` contains styled lines and
+`Intent::ToggleStep` click targets using `step:{mission}:{name}` keys. The embedding
+application owns expansion state and the surrounding card. Token defaults reproduce
+the terminal UI; progress counts every described step, not only runnable steps.
+Header and agent-work composition remain outside this crate.
 
 ## Embedding native conversations
 
