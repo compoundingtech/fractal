@@ -1383,13 +1383,15 @@ The heavy checks (`linux-gate`, `mail-redelivery-canaries`) build in one cargo t
 left alone), so a run does not start cold: the dependencies are reused, the workspace's own crates rebuild because every run's worktree is new.
 Operations' terms: it is removed before a run once it passes 25 GB, only while no other run holds it (a lock), it is never pinned, and the host's
 scratch sweep may reclaim it when idle (then the next run is cold). Concurrent runs share it; cargo's own lock orders their builds.
-**The host's build cap governs the heavy checks.** Each heavy check (`linux-gate`, `mail-redelivery-canaries`) runs under ONE heavy-slot
-ticket for the whole check, taken through the cargo admission shim (`~/.local/bin/cargo --stage-slot st-test-CHECK -- ...`), inside a
-`builds.slice` scope (`systemd-run --user --scope --slice=builds.slice`). Heavy runs on a host therefore queue first in, first out behind its
-heavy slots, and everything a check starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own cargo,
-the dev shell's sccache client). Only what starts `evidence-wrap` changes; the command it records and signs does not. The shim stops a stage
-after `CARGO_STAGE_MAX_SECONDS` (default 2400 s). A host without the shim or a user systemd bus runs the check as before and says so on stderr;
-`ST_EVIDENCE_GOVERN=off` does the same.
+**The host's build cap governs the heavy checks.** Each heavy check runs inside a `builds.slice` scope (`systemd-run --user --scope
+--slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
+cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
+build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
+(`scripts/st3_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
+when the stage is its ancestor, so the guardian's cargo commands queued for the one heavy slot their own stage held until the stage limit
+killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having built nothing). Only what starts `evidence-wrap` changes; the command it
+records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the
+same.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing

@@ -170,32 +170,22 @@ def shared_target():
 
 
 def governed(argv, name):
-    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a heavy check: ONE heavy-slot ticket for the
-    whole check through the cargo admission shim (`cargo --stage-slot LABEL -- ...`: heavy runs queue first in, first out behind
-    the host's slots, and the shim stops a stage after CARGO_STAGE_MAX_SECONDS), and a builds.slice scope around everything it
-    starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and memory
-    limits. The recorded command is unchanged: only what starts evidence-wrap changes. A host without the shim or a user
-    systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
+    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a heavy check: a builds.slice scope around
+    everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
+    memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
+
+    No heavy-slot ticket is held for the whole check (`cargo --stage-slot`): the checks' tests run under the test guardian
+    (scripts/st3_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
+    stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
+    stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
+    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
-    prefix, missing = [], []
-    shim = Path.home() / '.local/bin/cargo'
-    try:
-        has_stage = '--stage-slot' in shim.read_text(errors='replace')
-    except OSError:
-        has_stage = False
-    if has_stage:
-        prefix += [str(shim), '--stage-slot', f'st-test-{name}', '--']
-    else:
-        missing.append('no cargo admission shim with --stage-slot at ~/.local/bin/cargo')
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     if shutil.which('systemd-run') and runtime and Path(runtime, 'bus').exists():
-        prefix += ['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--']
-    else:
-        missing.append('no user systemd bus for a builds.slice scope')
-    if missing:
-        print(f'st-test: {name} runs without the host build cap ({"; ".join(missing)})', file=sys.stderr)
-    return prefix + argv
+        return ['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
+    print(f'st-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
+    return argv
 
 
 def lane_names(base):
