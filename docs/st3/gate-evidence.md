@@ -602,8 +602,7 @@ which inputs a check must carry.
 The `linux-gate` aggregate records only the members of `linux-gate`: it leaves out the evidence gate jobs, the
 `fractal-web` lane and the two separate checks `genie-freshness` and `typescript-client`, which have their own notes
 (the note job still waits for them, to publish those notes). It refuses, making no note, when the gate of a member
-said skip (`evidence-gate-linux-gate`, `evidence-gate-mail-redelivery-canaries`, `evidence-gate-isolation-vm`; a gate
-added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
+said skip (`evidence-gate-linux-gate`; a gate added later counts too unless it belongs to a separate check) or when a member reports `skipped` (only the merge-queue
 shards may, outside a merge group), so a member that did not run never reads as success. A skip taken by the
 `genie-freshness` or `typescript-client` gate does not stop it.
 
@@ -861,8 +860,8 @@ check for the typed `nix` observation is a later slice, agreed with the Nix prod
 
 ## Evidence gate and the skip policy
 
-Six non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
-`typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`) and for the `fractal-web` lane, decide whether
+Four non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
+`typescript-client`, `genie-freshness`) and for the `fractal-web` lane, decide whether
 a trusted note already covers the run's tree. They hold `contents: read` only, write nothing and dispatch
 nothing, and every problem becomes `decision=run`. **Every required check now consumes its gate's decision**: `genie-freshness` and `typescript-client`
 (by skipping their steps), and the Linux group (below); the `fractal-web` execution shards consume theirs the same way
@@ -901,7 +900,7 @@ writes the record id to the job summary. The wiring is deliberately conservative
   (`workspace-ci.ts`) and the generated `fleet.yml`. The signing and publishing wrapper scripts are not on that list:
   they are bound by the note itself, which carries their `wrapper_sha256`, so a changed wrapper cannot produce a note
   the policy accepts.
-- A required check that is a job, `isolation-vm` and `mail-redelivery-canaries`, never reports `skipped`; under an
+- A required check that is a job (`genie-freshness`, `typescript-client`) never reports `skipped`; under an
   enforced skip it reports success with its steps skipped, so once a check is enforced the name means "covered by
   a trusted note", not "ran". Whoever reads a result (including the observer) must treat such a run as covered, not
   freshly run; the job's summary says so (`evidence covered by a trusted note`).
@@ -920,20 +919,16 @@ writes the record id to the job summary. The wiring is deliberately conservative
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
 level, which allocates no runner at all: `linux-tests` and its three shards, `linux-clippy` and
-`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards,
-`mail-redelivery-canaries` and `isolation-vm`, so it skips only when **every one of them** is covered; that
-condition is derived from theirs in the generator, never written twice. The two jobs that are required checks in
-their own right keep running and end in success with their steps skipped, so a required check never reports
-`skipped`: `mail-redelivery-canaries` is covered by its own note or by `linux-gate`'s (the aggregate note proves
-its canaries passed), `isolation-vm` by its own note; both gate their first step, the pre-check that the shared
-build succeeded.
+`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards, so
+it skips only when **every one of them** is covered; that condition is derived from theirs in the generator, never
+written twice. The VM tests (`isolation-vm`) and the mail redelivery canaries were members too, and required checks of
+their own, until 2026-10-23: they now run once a day (`daily-long.yml`), and a red daily run comments on its one open issue.
 
 `linux-gate` itself still runs always and still fails on anything but success, with one addition: it reads its gate's
 decision, and a member that reports `skipped` is accepted only when that decision was exactly `true`, only
 in the **positions** of the stages that are skipped at job level (the build, the test shards, clippy and fleet
 compatibility, derived in the generator from the very list that skips them), never for a failure or a
-cancellation, and the stage counts are still enforced. `upgrade-impact` and `mail-redelivery-canaries` are never
-accepted as skipped, so a condition that skipped them for any other reason cannot be waved through just because a
+cancellation, and the stage counts are still enforced. `upgrade-impact` is never accepted as skipped, so a condition that skipped them for any other reason cannot be waved through just because a
 note exists. A skipped job reports `skipped` to
 the aggregate evidence-note producers, which refuse to sign for a skipped member, so a skipped run writes no
 fresh `linux-gate` note.
@@ -1014,16 +1009,8 @@ those scripts. The aggregate `linux-gate` note signs its input key like a stage 
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
 
-`isolation-vm` and `mail-redelivery-canaries` declare the same list (enforced for pull requests since 2026-10-23, `sample_one_in` 5),
-so the three lanes share one input key. Both are members of the `linux-gate` aggregate, whose list already covers what its members
-read, and neither reads anything outside it. The canaries are `scripts/ci-linux mail-redelivery-canaries`, which runs
-`scripts/ci-mail-redelivery-canaries`: a fixed set of the Rust tests from `linux-test-build`'s archive, with the `ci` profile of
-`.config/nextest.toml`. `isolation-vm` builds the two VM drivers from `flake.nix`, `flake.lock`, `nix/transport-isolation-vm.nix` and
-`nix/sekrets-vm.nix` (the `pty` package is a flake input), the provider components from the workspace's Rust sources, and runs the
-same archive and the `sekrets-st3` binary of the same build, with only `Cargo.toml` copied into the VM; its other steps are
-`scripts` and the baselines under `.github`. Each job signs its key itself (`STEP_CHECK` and `STAGE_JOB` are the policy's check
-names, and both steps set `PROJECT_BASE_SHA`), and the aggregate job's publish step indexes every accepted record with a key, so
-nothing in the workflow changes.
+`isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
+run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
 
 The projection reads names as bytes and passes them NUL-terminated both ways (`ls-tree -z`, `update-index -z`),
 so a newline in a name cannot split one file into two entries; symlinks and gitlinks keep their modes. When none
@@ -1051,9 +1038,7 @@ checked. `observed` (the central observer's record of a finished job) and `wrapp
 as `fleet/ci`) are listed for **every** required check, each with the exact command that producer records:
 - `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`, without the gate jobs, `fractal-web-*`,
   `genie-freshness` and `typescript-client`;
-- `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
 - `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
-  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`;
 - `fractal-web` (shadow, `wrapper` only): `["fractal-web", "aggregate", "fractal-web", "fractal-web-changes", "fractal-web-execution"]`,
   the whole-check note the aggregate note job signs from the lane's jobs, which must also carry `kit_shard_count`, `shard_results`,
   `kit_inputs`, `kit_play_set` and `app_test_set`. A shard's own note (`["bash", "scripts/ci-fractal-web"]`) does not match it.
@@ -1086,6 +1071,13 @@ A check may also name `events` itself (optional; the same two values). It limits
 and a signer level's own `events` can only narrow it further (the verifier reports the intersection, which may be empty: then nothing skips).
 Absent means every event the gate allows. This is how a check is enforced for pull requests while the merge queue keeps testing the combined
 tree: `"enforce": true, "events": ["pull_request"]`.
+
+The `queue` level is for a merge-queue signer: a key held in an account of its own, away from every agent seat, that fetches main and the
+pull request heads itself and signs the merged tree the queue will test. Every check the `host` level signs admits it for the `wrapper`
+kind with the host's command and inputs, `"events": ["merge_group"]` and `"lane": true`, so a queue note never covers a pull request and a
+tree that edits its own lane never skips on one. It is inert until a check's own `events` gains `merge_group`: today every check lists
+`pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
+and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
 
 #### Input values (`input_order`, `shard_inputs`)
 
@@ -1127,8 +1119,6 @@ note covers.
 | `typescript-client` | true | `pull_request` | 5 | this change |
 | `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 5 | 2026-10-23 |
 | `linux-gate` | true | `pull_request` | 5 | 2026-10-23 |
-| `mail-redelivery-canaries` | true | `pull_request` | 5 | 2026-10-23 |
-| `isolation-vm` | true | `pull_request` | 5 | 2026-10-23 |
 | `genie-freshness` | true | `pull_request` | 5 | 2026-10-23 |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
@@ -1181,7 +1171,7 @@ accepted base like everything else here. Nothing calls it yet and no check sets 
 asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
 check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
 
-### Lane definitions (`.st/required-lanes.json`, nothing reads it yet)
+### Lane definitions (`.st/required-lanes.json`)
 
 A note says a check passed; what the check RAN is decided by scripts that live in the tree under test, so an agent could change them and still hold a
 valid note. `.st/required-lanes.json` (read from the accepted base, strictly validated) names, per lane, the exact `argv`, the `definition_paths`
@@ -1190,10 +1180,12 @@ valid note. `.st/required-lanes.json` (read from the accepted base, strictly val
 IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
 runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
 no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
-The committed file lists the two lanes `scripts/st-test` can run today, with the same argv (a test pins that) and deliberately wide definition paths
-(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for genie-freshness): a change to any script then always runs in CI. They are to be tightened
-only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
-this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
+The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that) and deliberately wide definition paths
+(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for most lanes): a change to any script then always runs in CI. They are to be tightened
+only with a read trace of the lane (a later change). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
+verifier holds every lane-bound signer level (`"lane": true`) to it, and the gate reads it from the base, so `.st/required-lanes.json` is one of
+the gate's protected paths. A pull request's head is held to the definition at its branch point (see "Which lane definition a pull request is held
+to").
 
 Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
 refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
@@ -1367,8 +1359,8 @@ the record it used.
 
 ### Running the checks locally (`scripts/st-test`)
 
-`scripts/st-test` runs each required check that has a local command (today `typescript-client`, `genie-freshness`,
-`mail-redelivery-canaries`, `linux-gate` and `isolation-vm`, in that order; `--list --all` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+`scripts/st-test` runs the whole per-PR suite: each required check that has a local command (today `typescript-client`, `genie-freshness`
+and `linux-gate`, in that order; `--list` prints them; `--all` is accepted and means the same) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
 records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
 request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
 many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
@@ -1406,14 +1398,14 @@ tree already held, `st-test` removes the least recently used trees and their tar
 compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
 `build-dir` points elsewhere (hetz: `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
-counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); with `--all`, every check of the skip policy is listed, and
-one without a local command (isolation-vm, fractal-web today) reads `CI runs it`.
+counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); unless `--check` names checks, every check of the skip
+policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
 
 **An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
-`scripts/st-test --all --push origin`, which signs what it ran. When `ST_AGENT` is set and this machine's signer is listed in `.st/evidence-keys` on
-main, the pre-push hook only asks `st-test --status --all` about HEAD's tree. Covered, and the push goes silently (receipt `covered`). Not covered,
+`scripts/st-test --push origin`, which signs what it ran. When `ST_AGENT` is set and this machine's signer is listed in `.st/evidence-keys` on
+main, the pre-push hook only asks `st-test --status` about HEAD's tree. Covered, and the push goes silently (receipt `covered`). Not covered,
 or the status cannot be read, and the push is refused (receipt `refused`, with the uncovered checks): the hook prints the status and the command to
-run, and never signs anything itself. That command is long (the heavy checks build and test the Rust workspace, and the machine's build cap queues
+run, and never signs anything itself. That command is long (it builds and tests the Rust workspace, and the machine's build cap queues
 it): it is run as a normal long or background shell command, and the agent waits for it. `ST_SKIP_EVIDENCE=1` and `ST_EVIDENCE_LOCAL=off` do not
 apply to such a push. Only in an emergency, `ST_EVIDENCE_OVERRIDE='reason'` lets it go: one line is printed and the receipt records outcome
 `override` with the reason; `git push --no-verify` stays git's own escape. A machine without a signer, or with one not listed on main, and a person's
@@ -1421,14 +1413,14 @@ push (no `ST_AGENT`) keep the behaviour below: nobody is refused for lacking a k
 (its exit 3); any other outcome, a crash included, lets the push go. A stub written before this change discards every exit code: it is replaced on
 the next `nix develop` from a tree that has the new `scripts/install-git-hooks`, and by running that script from main.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
-The heavy checks (`linux-gate`, `mail-redelivery-canaries`) build in one cargo target per pool tree kept between runs,
+The check that builds the Rust workspace (`linux-gate`) builds in one cargo target per pool tree kept between runs,
 `~/.cache/st-test/<hash>/target-N` (outside the tree, so the cleaning keeps it; `ST_EVIDENCE_TARGET=PATH` names one shared target for all
 trees instead; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
 Operations' terms: it is removed before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it), it is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
-**The host's build cap governs the heavy checks.** Each heavy check runs inside a `builds.slice` scope (`systemd-run --user --scope
+**The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
 --slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
 cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
 build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
@@ -1448,8 +1440,7 @@ you have checked out, the hook (for a push that the paragraph above does not ref
 silently. Otherwise it runs `st-test --push REMOTE`
 (an interactive push waits for it up to `ST_EVIDENCE_TIME_LIMIT`, default 1200 seconds, then stops it with TERM and KILL of its whole process
 group) and the push goes. A push without a terminal on stderr (a script, or an agent whose signer is not listed) runs inside a tool call with a short timeout, so there the hook
-waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 300: the light checks' 90th percentile on the signing host was about 250 s, a typical run
-about 60 s, and an agent's tool call allows 600 s), prints that signing continues in the background with its log path, and lets the push go; the notes
+waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 300; an agent's tool call allows 600 s), prints that signing continues in the background with its log path, and lets the push go; the notes
 are pushed when the run finishes. `typescript-client` runs first because it is signed for nearly every tree, and each note is pushed as soon as its
 check is signed, so a note signed within the wait is on the remote before git sends the branch (the hook finishes before git updates any ref) and the
 first CI run sees it. A tree that edits a lane's definition is not signed for that lane: st-test says "not signed" for it without running it and exits
@@ -1479,30 +1470,32 @@ keep the caller's environment. Tests set these variables in the caller and requi
 refuse when it is started with `LD_PRELOAD`.
 
 
-**The VM tests (`scripts/ci-local isolation-vm`).** `isolation-vm`'s local command is `nix develop -c bash scripts/ci-local
-isolation-vm`, which runs `scripts/ci-local-isolation-vm` in the stages' own home: it probes `/dev/kvm` (read-write, and a VM can be
+**The VM tests (`scripts/ci-local isolation-vm`).** `isolation-vm` runs daily, not per pull request (2026-10-23), so st-test does not
+run it and no policy accepts a local note for it; `nix develop -c bash scripts/ci-local isolation-vm` still runs it by hand, which runs `scripts/ci-local-isolation-vm` in the stages' own home: it probes `/dev/kvm` (read-write, and a VM can be
 created), builds in place what CI's isolation-vm job downloads from linux-test-build (the workspace test archive, `cargo nextest
 archive` with CI's own filter, and the standalone production gateway, refused when it carries `test-support` or a test profile), then
 builds and runs the transport isolation VM driver with that archive and the sekrets VM driver with that gateway, with `TMPDIR` in the
 run's scratch. Its lane (`.st/required-lanes.json`) declares `.config/nextest.toml`, `.st`, `flake.lock`, `flake.nix`,
-`nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`; its wrapper rule admits `host` and `agent` notes for
-`pull_request` with that command (`by_level`, `lane: true`), and the check-level trust stays `fleet`, so the `observed` kind stays CI's.
-A machine without a usable `/dev/kvm` cannot sign it: the run fails and CI runs the check.
+`nix/sekrets-vm.nix`, `nix/transport-isolation-vm.nix` and `scripts`. A machine without a usable `/dev/kvm` fails it.
 
-**Heavy checks and Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch, its `TMPDIR`
-included, is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another), because a dev shell's `TMPDIR` is
+**Linux gate stages (`scripts/ci-local`).** The stages see a CI runner's temporary directory, not the caller's: the run's scratch
+is on the account's disk under `~/.cache/ci-local` (`CI_LOCAL_SCRATCH_ROOT` names another) and its `TMPDIR` is a short directory,
+`/dev/shm/cl.XXXXXX` when `/dev/shm` has 20 GiB free and `/var/tmp/cl.XXXXXX` on disk otherwise (`CI_LOCAL_TMP_ROOT` names another root;
+tests put Unix sockets several levels below it, and a socket path is limited to 108 bytes, which the daemons' sockets in the delivery-probe
+and seat tests exceeded under the scratch; in RAM the tests' SQLite commits do not wait for a disk sync: on a build host the linux-gate tests
+took 849 s there against 1518 s on disk, and 519 s with 12 threads, at about 3.3 GB of `/dev/shm`), because a dev shell's `TMPDIR` is
 under `/tmp`, which on some build hosts is a small tmpfs (tests that need tens of GB of scratch are refused there) or holds a stray
 `/tmp/.git` (tests that look for the enclosing repository find it); a host's preloaded allocator (`LD_PRELOAD`) is dropped, as no
 CI runner has one (the `malloc_trim` tests fail under it); the stages compile without sccache (`RUSTC_WRAPPER` is unset, as CI compiles
 when its cache is unavailable), because a cache server started inside the run keeps the run's `HOME` and `TMPDIR`, removed at exit, and the
-account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache); and the
+account's builds share that one server, so every compile through it failed afterwards (the kept build directory is the local cache);
+each test process gets a `TMPDIR` of its own under the run's (`scripts/ci-test-tmpdir`, set as the cargo target runner, which nextest
+honours for every test and every listing), because one test that left an empty `.git` at the top of a shared `TMPDIR` made every later
+test there see a repository that is not one (a CI runner is fresh for every job); and the
 stages run with a CI runner's umask, 022, in a scratch no one else can
-write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). A check that builds and tests the Rust workspace
-(`mail-redelivery-canaries`, `linux-gate` and `isolation-vm`) is heavy: minutes to tens of minutes of a shared build host. st-test runs it only when
-it is named (`--check NAME`) or with `--all`, never by default, so the pre-push hook keeps signing the light checks within its
-wait. Their local command is
-`nix develop -c bash scripts/ci-local STAGE...`; `linux-gate`'s runs the four stages a `linux-gate` skip covers, `tests clippy
-fleet-compat mail-redelivery-canaries` (the test build with them, after preparing what CI's test-build job does for the tests: the
+write to (the secrets gateway's tests refuse a group-writable directory, and some hosts' umask is 002). st-test runs every check by
+default, `linux-gate` with the others: there is no subset for signing. `linux-gate`'s local command is
+`nix develop -c bash scripts/ci-local tests clippy fleet-compat`, the three stages a `linux-gate` skip covers (the test build with them, after preparing what CI's test-build job does for the tests: the
 provider components the resource-provider tests load and the previous release the messaging compatibility tests run against; `upgrade-impact` is not skipped and runs in CI), with clippy's
 ratchet compared with the base (as CI compares with the event's base): st-test gives the stage the base commit it has just
 fetched (`CLIPPY_BASE_SHA`) and records it in the note as the input `clippy_base_sha`, which a host or agent `linux-gate` note must
@@ -1515,7 +1508,7 @@ since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the
 configuration or credentials, and no PATH entry inside the account's st state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache) and `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues: the
 stage takes an ordinary heavy admission slot, with no priority of its own. Test binaries run outside that gate, so on a
-shared host the stages' tests run 6 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
+shared host the stages' tests run 12 at a time (`CI_TEST_THREADS`; CI's runners use 8 on a machine of their own) under
 `ionice -c 3` and `nice -n 10`: an unbounded run (one test per core) held the dev host's IO pressure above its alarm line. The shim is handed the dev shell's own cargo as
 `CARGO_REAL` (`CI_LOCAL_CARGO`, or the first cargo on PATH outside the account's home that is not the shim): a build host's
 default real cargo may source a saved dev shell environment from another day, and on 2026-10-22 one such file put an older
@@ -1529,7 +1522,7 @@ stages 1592 s wall with a warm target and the tests' scratch on `/dev/shm` (test
 120 s), at 6 test threads, peak IO pressure 12.6%. A cold target adds about 10 minutes and roughly 19 GB of writes.
 
 **The pre-sign worker (`scripts/evidence-presign-worker`).** Signing at push time depends on the push: a push with `ST_SKIP_EVIDENCE=1`
-does not wait, a push made where no hook runs signs nothing, and no push signs the heavy checks. The worker closes that gap on the signing
+does not wait, and a push made where no hook runs signs nothing. The worker closes that gap on the signing
 host, from the tools' side. Two systemd user timers (`scripts/evidence-presign-light.timer` every 2 minutes, `scripts/evidence-presign-heavy.timer`
 every 5) each run one tick of one class through `scripts/evidence-presign-timer`, which reads the worker from `origin/main` of a clone the
 worker owns (one per class, so a light tick never moves the checkout under a heavy run). A tick lists the open pull requests and keeps the
@@ -1538,7 +1531,8 @@ ready ones (not drafts) that target `main`, come from the repository itself (no 
 or with no login in it, the worker refuses to run, and an outside author's code is never run (it would run with the host's key within
 reach). Newest first, it takes the first head with a check of its class that `st-test --status` does not call covered and that it has not
 run for that tree before, runs `st-test --check NAME... --push origin` on it, records the result and stops: one head per tick, serially per
-class (a lock; a tick still running skips the next). The light class is st-test's default checks; the heavy class is what `--all` adds. A
+class (a lock; a tick still running skips the next). The light class is what `st-test --list` prints, now every check (st-test has no
+subset for signing since 2026-10-23); the heavy class is what `--all` adds to that, which is nothing. Both timers are off on the signing host. A
 failure or a lane-edit refusal is a result, recorded and not retried for that tree (CI runs the check); a run stopped for load is not, and
 that head waits 30 minutes before it is tried again. Load, for the heavy class: it starts only after IO pressure (some avg60) stayed under
 8% for 10 minutes with no admitted heavy build active and at least 140 GiB free (it clears nothing to make room), runs with `TMPDIR` on
@@ -1618,7 +1612,7 @@ Limits, stated plainly:
 - For a pull request the tree is the merge-ref tree, so a note matches only a branch that is current
   with main.
 - With no age limit (`max_age_s` null), an old success on the identical tree can skip checks that depend
-  on the hosted image or on timing (`typescript-client`, `isolation-vm`). That is a choice, recorded in
+  on the hosted image or on timing (`typescript-client`). That is a choice, recorded in
   the known defects; `age_s` in the decision line is there to audit it.
 
 ### Skips are not recorded as fresh runs
@@ -1673,7 +1667,7 @@ With a check listed, it writes one notice annotation and the job summary:
 > `scripts/st-test --push origin` before marking the pull request ready, and CI can skip them. How: (#3621). This never fails a
 > check or blocks a merge.
 
-`--all` is added when `mail-redelivery-canaries` is listed. Every run also prints one counting line,
+The command is the same whatever is listed: st-test runs the whole suite. Every run also prints one counting line,
 `evidence-presign-notice v1 pr=… listed=…|- passed_over=check:reason,…|-`. If the lanes file or the file list cannot be read,
 the affected checks are passed over, never listed.
 

@@ -333,6 +333,11 @@ exit 1
         .unwrap();
         let mut command = Command::new("timeout");
         environment(&mut command, root, &socket);
+        // Nix's zsh reads its own zshenv even under -f, and on NixOS that sources
+        // /etc/set-environment unless this marker is set. A service's environment (a CI runner's
+        // or a build host's) lacks it, so the zsh in zpty would rebuild PATH without the dev
+        // shell's zsh and the test's st, and the widget would never finish.
+        command.env("__NIXOS_SET_ENVIRONMENT_DONE", "1");
         let zsh_binary = shell("zsh");
         let output = command
             .arg("60")
