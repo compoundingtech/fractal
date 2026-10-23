@@ -6430,17 +6430,22 @@ async fn run_up(args: UpArgs) -> Result<()> {
     };
     let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
         .parent().context("executable directory")?.join("../share/fractal-web"));
+    let web = fractal_daemon::web::prepare(
+        &args.web_listen, web_dist, &state.state_dir, config.person.clone(),
+    ).await?;
+    let web_status = axum::Extension(web.status.clone());
     let web_state = state.clone();
-    let web_person = config.person.clone();
     tokio::try_join!(
         fractal_daemon::api::serve_reserved_unix_with_ready(
             local_reserved,
-            router(state.clone()),
+            router(state.clone()).layer(web_status.clone()),
             Some(state.store.clone()),
             ready
         ),
-        fractal_daemon::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), None, ready),
-        fractal_daemon::web::serve(&args.web_listen, web_dist, web_state, web_person),
+        fractal_daemon::api::serve_reserved_unix_with_ready(
+            gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+        ),
+        web.serve(web_state),
     )?;
     telemetry.shutdown();
     Ok(())

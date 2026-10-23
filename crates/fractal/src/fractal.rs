@@ -17,14 +17,15 @@ pub fn dispatch(arguments: &mut [OsString]) -> Dispatch {
         == Some(OsStr::new("fractal"));
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
     // st and st3 retain their existing CLI parser, display strings and bare-program behavior.
+    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("web") {
+        return Dispatch::Web;
+    }
     if !fractal {
         return Dispatch::Cli;
     }
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-    match arguments.get(1).and_then(|argument| argument.to_str()) {
-        Some("tui") => arguments[1] = "ui".into(),
-        Some("web") => return Dispatch::Web,
-        _ => {}
+    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("tui") {
+        arguments[1] = "ui".into();
     }
     Dispatch::Cli
 }
@@ -158,6 +159,8 @@ mod tests {
     #[test]
     fn fractal_dispatch_web() {
         assert_eq!(route(&["fractal", "web"]).0, Dispatch::Web);
+        assert_eq!(route(&["st", "web"]).0, Dispatch::Web);
+        assert_eq!(route(&["st3", "web"]).0, Dispatch::Web);
     }
 
     #[test]

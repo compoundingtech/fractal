@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Option D transport smoke; supply --dist to exercise real built web assets."""
+"""Exercise the embedded browser boundary against built web assets and an isolated daemon."""
 import argparse
 import http.client
 import json
@@ -13,19 +13,15 @@ from urllib.parse import urlsplit
 
 parser = argparse.ArgumentParser()
 parser.add_argument("binary", type=Path)
-parser.add_argument("--dist", type=Path)
+parser.add_argument("--dist", type=Path, required=True)
 args = parser.parse_args()
 with tempfile.TemporaryDirectory(prefix="fractal-embedded-web-") as temporary:
     root = Path(temporary)
     state = root / "state"
     state.mkdir(mode=0o700)
-    dist = args.dist.resolve() if args.dist else root / "dist"
-    if not args.dist:
-        dist.mkdir()
-        (dist / "index.html").write_text('<!doctype html><script>window.spike=true</script><div>embedded spike</div>')
-        (dist / "build-identity.json").write_text('{"prototype_fixture":true}')
+    dist = args.dist.resolve()
     config = root / "config.toml"
-    config.write_text('person = "person/embedded-smoke"\n')
+    config.write_text('person = "person/robin"\n')
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -80,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix="fractal-embedded-web-") as temporary:
             status, _, capabilities = request("/v1/client/capabilities", cookie)
             assert status == 200, (status, capabilities)
             json.loads(capabilities)
-            print(json.dumps({"result": "pass", "asset_kind": "built-dist" if args.dist else "transport-fixture",
+            print(json.dumps({"result": "pass", "asset_kind": "built-dist",
                               "checks": ["index", "SPA", "build-identity", "single-use-token", "cookie", "host", "origin", "client-GET", "admin-denied"]}))
         finally:
             daemon.terminate()

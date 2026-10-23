@@ -327,6 +327,14 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 
+/// Server-established browser admission, never deserialized from a request header.
+/// This grants client API capabilities only; it is not an administrative bearer.
+#[derive(Clone, Debug)]
+pub struct LocalWebSession {
+    pub person: String,
+    pub id: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
@@ -588,6 +596,15 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
+    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+        let mut session = ClientSession::local(Some(&web.person))?;
+        session.actor = format!("client/local-web/{}", web.id);
+        session.transport = "local-web";
+        session.custom_forms = custom_forms;
+        session.conversation_blocks = conversation_blocks;
+        session.messages_paging = messages_paging;
+        return Ok(session);
+    }
     let Some(value) = request.headers().get(AUTHORIZATION) else {
         if transport == "unix" {
             let person = request

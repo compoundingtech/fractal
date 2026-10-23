@@ -1,4 +1,4 @@
-//! Option D spike: loopback browser admission around the existing in-process client router.
+//! Loopback browser admission around the in-process client router.
 use std::{collections::VecDeque, net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use axum::{Router, body::Body, extract::{Request, State}, http::{header, Method, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}};
 use base64::Engine as _;
@@ -36,43 +36,88 @@ fn publish(path: &Path, port: u16, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `off` disables the listener. Assets are external so a Nix store path can be supplied.
-pub async fn serve(listen: &str, dist: PathBuf, state: crate::api::AppState, person: Option<String>) -> anyhow::Result<()> {
-    if listen == "off" { return std::future::pending().await; }
-    let address: SocketAddr = listen.parse()?;
-    anyhow::ensure!(address.ip() == Ipv4Addr::LOCALHOST && address.port() != 0, "web-listen requires 127.0.0.1 and a nonzero port");
-    let person = person.ok_or_else(|| anyhow::anyhow!("local web requires a configured concrete person; use --web-listen off without one"))?;
-    anyhow::ensure!(person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7, "local web requires a concrete person");
+pub struct Prepared {
+    listener: Option<(TcpListener, Web)>,
+    pub status: crate::api::operations::LocalWebStatus,
+}
+
+impl Prepared {
+    pub async fn serve(self, state: crate::api::AppState) -> anyhow::Result<()> {
+        let Some((listener, web)) = self.listener else {
+            return std::future::pending().await;
+        };
+        let app = crate::api::router(state)
+            .fallback_service(Router::new().fallback(static_asset).with_state(web.clone()))
+            .layer(middleware::from_fn_with_state(web, admission));
+        axum::serve(listener, app).await?;
+        Ok(())
+    }
+}
+
+async fn assets(dist: PathBuf, person: Option<String>) -> anyhow::Result<(PathBuf, String, String)> {
+    let person = person.ok_or_else(|| anyhow::anyhow!("no configured person"))?;
+    anyhow::ensure!(person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7, "a concrete person is required");
     let _: axum::http::HeaderValue = person.parse()?;
     let dist = tokio::fs::canonicalize(dist).await?;
     let html = tokio::fs::read_to_string(dist.join("index.html")).await?;
+    Ok((dist, person, html))
+}
+
+/// Missing assets or person disables only the browser listener, never the daemon.
+pub async fn prepare(listen: &str, dist: PathBuf, state_dir: &Path, person: Option<String>) -> anyhow::Result<Prepared> {
+    let credential_path = state_dir.join("web-launch-url");
+    match tokio::fs::remove_file(&credential_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let status = |status: &str, message: String| crate::api::operations::LocalWebStatus(crate::model::DoctorCheck {
+        name: "local-web".into(), status: status.into(), message,
+    });
+    if listen == "off" {
+        return Ok(Prepared { listener: None, status: status("pass", "disabled by --web-listen off".into()) });
+    }
+    let address: SocketAddr = listen.parse()?;
+    anyhow::ensure!(address.ip() == Ipv4Addr::LOCALHOST && address.port() != 0, "web-listen requires 127.0.0.1 and a nonzero port");
+    let (dist, person, html) = match assets(dist, person).await {
+        Ok(assets) => assets,
+        Err(error) => {
+            let message = format!("local web unavailable: {error:#}; configure a person and install share/fractal-web or set --web-dist");
+            eprintln!("fractal: warning: {message}");
+            return Ok(Prepared { listener: None, status: status("warn", message) });
+        }
+    };
     let listener = TcpListener::bind(address).await?;
     let token = secret()?;
-    let credential_path = state.state_dir.join("web-launch-url");
     publish(&credential_path, address.port(), &token)?;
     let web = Web {
         port: address.port(), person, dist, policy: policy(&html, address.port()), credential_path,
         credentials: Arc::new(Mutex::new(Credentials { token, sessions: VecDeque::new() })),
     };
-    // No forwarding to the privileged socket: the outer boundary permits only /v1/client/*.
-    // Unix person admission is reused only after removing every caller-controlled credential.
-    let app = crate::api::router(state)
-        .fallback_service(Router::new().fallback(static_asset).with_state(web.clone()))
-        .layer(middleware::from_fn_with_state(web, admission));
     eprintln!("fractal: local web listening at http://{address}; launch with fractal web");
-    axum::serve(listener, app).await?;
-    Ok(())
+    Ok(Prepared { listener: Some((listener, web)), status: status("pass", format!("listening at http://{address}")) })
 }
 
-async fn admission(State(web): State<Web>, mut request: Request, next: Next) -> Response {
+async fn admission(State(web): State<Web>, request: Request, next: Next) -> Response {
+    let mut response = admit(&web, request, next).await;
+    response.headers_mut().insert("content-security-policy", web.policy.parse().expect("generated CSP"));
+    response.headers_mut().insert("referrer-policy", "no-referrer".parse().unwrap());
+    response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response.headers_mut().insert("x-content-type-options", "nosniff".parse().unwrap());
+    response
+}
+
+async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
     let host = request.headers().get(header::HOST).and_then(|value| value.to_str().ok()).unwrap_or("");
     if host != format!("127.0.0.1:{}", web.port) && host != format!("localhost:{}", web.port) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let origin = format!("http://{host}");
     let websocket = request.headers().contains_key(header::UPGRADE);
-    if (websocket || !matches!(*request.method(), Method::GET | Method::HEAD))
-        && request.headers().get(header::ORIGIN).and_then(|value| value.to_str().ok()) != Some(origin.as_str()) {
+    let supplied_origin = request.headers().get(header::ORIGIN).and_then(|value| value.to_str().ok());
+    if supplied_origin.is_some_and(|value| value != origin)
+        || ((websocket || !matches!(*request.method(), Method::GET | Method::HEAD))
+            && supplied_origin != Some(origin.as_str())) {
         return StatusCode::FORBIDDEN.into_response();
     }
     // Never serve an administrative route or let a missing API route become an SPA response.
@@ -83,7 +128,8 @@ async fn admission(State(web): State<Web>, mut request: Request, next: Next) -> 
     let token = (request.method() == Method::GET && path == "/").then(|| request.uri().query())
         .flatten().and_then(|query| query.strip_prefix("token="));
     let cookie = request.headers().get(header::COOKIE).and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("fractal_local=")));
+        .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("fractal_local=")))
+        .map(str::to_owned);
     let result = {
         let mut credentials = web.credentials.lock().expect("web credentials poisoned");
         credentials.sessions.retain(|(_, issued)| issued.elapsed() < SESSION_LIFETIME);
@@ -104,21 +150,20 @@ async fn admission(State(web): State<Web>, mut request: Request, next: Next) -> 
                 ]).into_response()),
                 Err(_) => Some(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             }
-        } else if !credentials.sessions.iter().any(|(session, _)| Some(session.as_str()) == cookie) {
+        } else if !credentials.sessions.iter().any(|(session, _)| Some(session.as_str()) == cookie.as_deref()) {
             Some(StatusCode::UNAUTHORIZED.into_response())
         } else { None }
     };
-    let mut response = if let Some(response) = result { response } else {
+    if let Some(response) = result { response } else {
         request.headers_mut().remove(header::AUTHORIZATION);
         request.headers_mut().remove("x-fractal-person");
-        request.headers_mut().insert("x-st3-person", web.person.parse().expect("validated person header"));
+        request.headers_mut().remove("x-st3-person");
+        request.extensions_mut().insert(crate::api::client_v0::LocalWebSession {
+            person: web.person.clone(),
+            id: hex::encode(Sha256::digest(cookie.expect("admitted cookie").as_bytes())),
+        });
         next.run(request).await
-    };
-    response.headers_mut().insert("content-security-policy", web.policy.parse().expect("generated CSP"));
-    response.headers_mut().insert("referrer-policy", "no-referrer".parse().unwrap());
-    response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    response.headers_mut().insert("x-content-type-options", "nosniff".parse().unwrap());
-    response
+    }
 }
 
 async fn static_asset(State(web): State<Web>, request: Request) -> Response {
@@ -179,17 +224,17 @@ mod tests {
     async fn token_cookie_host_origin_and_client_boundary() {
         let root = tempfile::tempdir().unwrap();
         let web = Web {
-            port: 7410, person: "person/prototype".into(), dist: root.path().into(),
+            port: 7410, person: "person/robin".into(), dist: root.path().into(),
             policy: policy("<script>one()</script><style>body{}</style>", 7410),
             credential_path: root.path().join("web-launch-url"),
             credentials: Arc::new(Mutex::new(Credentials { token: "once".into(), sessions: VecDeque::new() })),
         };
         let app = Router::new().fallback(|request: Request| async move {
-            request.headers().get("x-st3-person").unwrap().to_str().unwrap().to_owned()
+            request.extensions().get::<crate::api::client_v0::LocalWebSession>().unwrap().person.clone()
         }).layer(middleware::from_fn_with_state(web.clone(), admission));
         let call = |uri: &str, method: &str, host: &str, cookie: Option<&str>, origin: Option<&str>, upgrade: bool| {
             let mut request = Request::builder().uri(uri).method(method).header(header::HOST, host)
-                .header("x-st3-person", "person/forged").header(header::AUTHORIZATION, "Bearer forged");
+                .header("x-st3-person", "person/other").header(header::AUTHORIZATION, "Bearer forged");
             if let Some(cookie) = cookie { request = request.header(header::COOKIE, cookie); }
             if let Some(origin) = origin { request = request.header(header::ORIGIN, origin); }
             if upgrade { request = request.header(header::UPGRADE, "websocket"); }
@@ -209,6 +254,6 @@ mod tests {
         let accepted = call("/v1/client/agents", "GET", "127.0.0.1:7410", Some(cookie), None, false).await.unwrap();
         assert_eq!(accepted.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(accepted.into_body(), 1024).await.unwrap();
-        assert_eq!(&bytes[..], b"person/prototype");
+        assert_eq!(&bytes[..], b"person/robin");
     }
 }
