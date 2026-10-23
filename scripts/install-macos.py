@@ -159,6 +159,13 @@ def verify(app, expected=None):
 def prepare(home, job, built):
     resolve_identity()
     payload = {name: sha(path) for name, path in built.items() if name != HELPER}
+    # Archive installs carry the embedded web UI beside bin/. Source-only callers
+    # may not have built it; include it whenever present, before signing the app.
+    web = Path(built['st3']).parent.parent / 'share/fractal-web'
+    if web.is_dir():
+        for path in sorted(web.rglob('*')):
+            if path.is_file():
+                payload['web/' + path.relative_to(web).as_posix()] = sha(path)
     if HELPER in built:
         payload['st-listen'] = sha(helper_executable(built[HELPER]))
     desired = {'hashes': payload, 'certificate': CERTIFICATE, 'team': TEAM, 'identifier': IDENTIFIER}
@@ -176,6 +183,8 @@ def prepare(home, job, built):
     resources.mkdir()
     for name, path in paths.items():
         shutil.copy2(built[name], path); os.chmod(path, 0o755)
+    if web.is_dir():
+        shutil.copytree(web, app / 'Contents/share/fractal-web')
     info = {'CFBundleIdentifier': IDENTIFIER, 'CFBundleExecutable': 'st3', 'CFBundleName': 'St3',
             'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'LSUIElement': True}
     if HELPER in built:

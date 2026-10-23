@@ -78,6 +78,15 @@ class Installer(unittest.TestCase):
         else:
             os.replace(staged, destination)
 
+    def test_embedded_web_assets_are_signed_and_identified(self):
+        web = self.built['st3'].parent.parent / 'share/fractal-web'
+        web.mkdir(parents=True)
+        (web / 'index.html').write_text('embedded web')
+        with patch.object(m, 'command', side_effect=self.command):
+            app, _, payload = m.prepare(self.home, self.job, self.built)
+        self.assertEqual((app / 'Contents/share/fractal-web/index.html').read_text(), 'embedded web')
+        self.assertEqual(payload['web/index.html'], m.sha(web / 'index.html'))
+
     def test_unconfigured_never_searches_keychain_and_signs_ad_hoc(self):
         with patch.object(m, 'command', side_effect=self.command):
             app, identity, _ = m.prepare(self.home, self.job, self.built)
@@ -632,6 +641,8 @@ class Installer(unittest.TestCase):
         package = self.home / 'package'; package.mkdir()
         shutil.copy2(repo / 'scripts/install-release', package / 'install.sh')
         shutil.copytree(self.source, package / 'bin')
+        (package / 'share/fractal-web').mkdir(parents=True)
+        (package / 'share/fractal-web/index.html').write_text('<!doctype html><title>Fractal</title>')
         second = self.home / 'release-bin'
         subprocess.run([str(package / 'install.sh'), '--bin-dir', str(second)],
                        env=env, check=True, stdout=subprocess.PIPE)
