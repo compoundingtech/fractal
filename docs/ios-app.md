@@ -25,7 +25,7 @@ Clone into a new directory, or use your existing checkout:
 
 ```sh
 mkdir -p ~/src
-git clone --depth 1 https://github.com/compoundingtech/smalltalk.git ~/src/smalltalk
+git clone --depth 1 https://github.com/compoundingtech/fractal.git ~/src/smalltalk
 cd ~/src/smalltalk
 corepack enable # Outside the Nix web shell
 pnpm install --frozen-lockfile

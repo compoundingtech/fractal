@@ -12,7 +12,7 @@ machine and GitHub integration can wait until you need them.
 Run this in your terminal:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
 ```
 
 The installer detects your platform, downloads the latest release and its SHA256

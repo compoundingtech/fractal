@@ -15,7 +15,7 @@ Until **2026-11-01**, each target also ships a `smalltalk-<target>.tar.gz` compa
 archive and checksum. Its root directory keeps the historical `smalltalk-<target>`
 name, while the canonical archive uses `fractal-<target>`; all files, modes and links
 otherwise match, and publication verifies both layouts. This bridge is
-`arn:lmig:smalltalk:2026-10-20-release-artifact-aliases` in [#3032](https://github.com/compoundingtech/smalltalk/issues/3032).
+`arn:lmig:smalltalk:2026-10-20-release-artifact-aliases` in [#3032](https://github.com/compoundingtech/fractal/issues/3032).
 Old installers and release consumers can keep their asset names during this window.
 The current download installer prefers `fractal-*` and falls back to `smalltalk-*`
 only on HTTP 404 (for retained tags); checksum or other download failures fail closed.
@@ -36,7 +36,7 @@ signature warnings from already-sealed affected payloads.
 Install the latest release with curl; neither GitHub CLI nor Rust is required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh | sh
 ```
 
 The script detects Linux x86_64 or Apple Silicon macOS, downloads the archive and
@@ -45,7 +45,7 @@ terminal input for the `curl | sh` form. To select an exact release or install
 without opening the interface (`vX.Y.Z` below is a placeholder; choose a published tag):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh -o install.sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh -o install.sh
 sh install.sh --tag vX.Y.Z --no-run
 ```
 
@@ -117,7 +117,7 @@ and combined checksum/source validation. They upload `smalltalk-release` as an A
 (kept 7 days) and never publish a GitHub release, so release breakage fails on `main` and not at tag
 time. Each native job also uploads its own archive and checksum as `release-<target>`, for example
 `release-x86_64-unknown-linux-gnu`; once a main commit's run has succeeded,
-`gh run download RUN_ID --repo compoundingtech/smalltalk --name release-x86_64-unknown-linux-gnu`
+`gh run download RUN_ID --repo compoundingtech/fractal --name release-x86_64-unknown-linux-gnu`
 fetches that commit's Linux archive without building it (find RUN_ID with
 `gh run list --workflow release-smalltalk.yml --branch main --commit SHA`). Tag pushes use the same jobs, then verify that the tag still
 points at the built commit, upload a draft, and publish it only after every asset is present.

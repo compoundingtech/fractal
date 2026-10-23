@@ -403,7 +403,7 @@ class ReleaseNotes(unittest.TestCase):
         source = self.git('rev-parse', 'HEAD')
         notes, report = render(self.repo, 'v0.3.0', source, 'v0.3.1')
         self.assertEqual(list(report['coverage']), [source])
-        self.assertIn('[Add a feature](https://github.com/compoundingtech/smalltalk/pull/42)', notes)
+        self.assertIn('[Add a feature](https://github.com/compoundingtech/fractal/pull/42)', notes)
 
     def test_unknown_conditional_replay_manual_steps_and_observations(self):
         value = fragment()

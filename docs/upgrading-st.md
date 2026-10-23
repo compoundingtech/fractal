@@ -71,7 +71,7 @@ raw capture. Preserve workspace repositories and native harness sessions separat
 backup is a command to overwrite a running member's database. An offline claim export opens
 and migrates its input: use an additional consistent SQLite copy, never the untouched original.
 
-Choose a tag from [releases](https://github.com/compoundingtech/smalltalk/releases). Run this on **each machine**, entering the same tag; it downloads without touching running services:
+Choose a tag from [releases](https://github.com/compoundingtech/fractal/releases). Run this on **each machine**, entering the same tag; it downloads without touching running services:
 
 For releases shipping the rename, use the canonical `fractal-*` archives. The
 `smalltalk-*` copies remain available through 2026-11-01; when deliberately
@@ -88,7 +88,7 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) archive=fractal-aarch64-apple-darwin.tar.gz ;;
   *) echo 'This guide covers Linux x86_64 and Apple Silicon only'; exit 1 ;;
 esac
-release="https://github.com/compoundingtech/smalltalk/releases/download/$st_tag"
+release="https://github.com/compoundingtech/fractal/releases/download/$st_tag"
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
 curl -fLO "$release/RELEASE.json"

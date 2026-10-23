@@ -290,12 +290,12 @@ async fn real_shells_complete_live_terminals_through_the_installed_stub() {
         assert_eq!(bash.trim(), "agent/example/solo-worker", "bash: {bash}");
 
         // ci1's interactive zpty never invokes the completion widget, even after ZLE/prompt
-        // readiness. Temporary zsh-only gate: https://github.com/compoundingtech/smalltalk/issues/1344.
+        // readiness. Temporary zsh-only gate: https://github.com/compoundingtech/fractal/issues/1344.
         // Bash/Fish above and every other completion test still run; Namespace/local zsh runs too.
         if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
             && std::env::var_os("CI_LOCAL_CARGO_HOME").is_some_and(|path| !path.is_empty())
         {
-            eprintln!("ci1 zsh phase temporarily gated: https://github.com/compoundingtech/smalltalk/issues/1344");
+            eprintln!("ci1 zsh phase temporarily gated: https://github.com/compoundingtech/fractal/issues/1344");
             return;
         }
 

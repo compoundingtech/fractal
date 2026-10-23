@@ -111,7 +111,7 @@ def main():
         say(f'{tag} already exists; refusing to reuse a tag')
         return 1
     try:
-        rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/smalltalk'), since)
+        rendered, impact = render(repo, previous, sha, tag, os.environ.get('GH_REPO', 'compoundingtech/fractal'), since)
     except ImpactError as error:
         say(str(error))
         return 1

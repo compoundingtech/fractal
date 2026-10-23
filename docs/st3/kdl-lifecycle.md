@@ -341,7 +341,7 @@ default. Every seat in a fleet runs as that person's Unix user, so per-agent che
 boundary there. A person can restrict what agents may write with `st rules`: `st rules lockdown --as person/NAME`
 sets the preset rules in audit mode, `st rules audit` lists the writes they would have refused, and
 `st rules mode` turns one off or enforces it. Signed principals and grants are not built
-([#867](https://github.com/compoundingtech/smalltalk/issues/867), [#882](https://github.com/compoundingtech/smalltalk/issues/882)).
+([#867](https://github.com/compoundingtech/fractal/issues/867), [#882](https://github.com/compoundingtech/fractal/issues/882)).
 
 An agent publishes, starts, revises, cancels, and retires missions in any namespace, sets a run's
 outcome, retries and wakes any step, applies, starts, and stops any seat (including its own), moves

@@ -114,7 +114,7 @@ test = false
 doctest = false
 doc = false
 
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 # Keep the existing executable target; fractal dispatches through installed links to it.
 [[bin]]
 name = "st3"
