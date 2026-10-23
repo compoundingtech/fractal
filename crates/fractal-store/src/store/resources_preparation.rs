@@ -4,7 +4,19 @@ use super::*;
 const PREPARATION_VERSION: &str = "1";
 const RELEVANT: &str = "(substr(claims.subject,1,9)='resource/' OR claims.kind='resource.observed'
     OR EXISTS (SELECT 1 FROM local_resource_preparation state WHERE state.subject=claims.subject))";
-const PREPARATION_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc674146d8179 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */ r#"
+
+// CROSS JOIN fixes the loop order even with STAT4: an empty queue must never scan claims.
+pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT claims.id,claims.subject FROM local_resource_preparation_pending pending
+     CROSS JOIN claims ON claims.id=pending.claim_id
+     CROSS JOIN batches ON batches.id=claims.batch_id
+     ORDER BY {CANONICAL_ORDER}"
+    )
+});
+const PREPARATION_SCHEMA: &str =
+    /* sqlite-large-value: allow-for-now lv-hc674146d8179 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
+    r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
     actual TEXT,
@@ -53,26 +65,35 @@ mod work_signal {
     unsafe extern "C" fn destroy(pointer: *mut std::ffi::c_void) {
         // SAFETY: SQLite releases exactly the strong reference transferred by
         // install, including allocation failure in sqlite3_set_clientdata.
-        unsafe { drop(Arc::from_raw(pointer.cast::<AtomicBool>())); }
+        unsafe {
+            drop(Arc::from_raw(pointer.cast::<AtomicBool>()));
+        }
     }
 
     pub(super) fn install(connection: &Connection) -> Result<()> {
-        if state(connection).is_some() { return Ok(()); }
+        if state(connection).is_some() {
+            return Ok(());
+        }
         let pending = Arc::new(AtomicBool::new(false));
         // SAFETY: SQLite owns this strong reference after the call and releases it
         // with the matching destructor. Clones also back the safe callbacks.
         let result = unsafe {
             rusqlite::ffi::sqlite3_set_clientdata(
-                connection.handle(), NAME.as_ptr(),
-                Arc::into_raw(pending.clone()).cast_mut().cast(), Some(destroy),
+                connection.handle(),
+                NAME.as_ptr(),
+                Arc::into_raw(pending.clone()).cast_mut().cast(),
+                Some(destroy),
             )
         };
         if result != rusqlite::ffi::SQLITE_OK {
-            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(result), None).into());
+            return Err(
+                rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(result), None).into(),
+            );
         }
         let inserted = pending.clone();
         connection.create_scalar_function(
-            "resource_preparation_work_pending", 0,
+            "resource_preparation_work_pending",
+            0,
             rusqlite::functions::FunctionFlags::SQLITE_UTF8
                 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
             move |_| {
@@ -114,11 +135,16 @@ mod work_signal {
                 ).unwrap();
                 assert!(pending(&transaction));
                 assert!(!pending(&other));
-                transaction.execute("DELETE FROM local_resource_preparation_dirty", []).unwrap();
+                transaction
+                    .execute("DELETE FROM local_resource_preparation_dirty", [])
+                    .unwrap();
                 // Draining is not an outer boundary: a savepoint could restore it.
                 assert!(pending(&transaction));
-                if commit { transaction.commit().unwrap(); }
-                else { transaction.rollback().unwrap(); }
+                if commit {
+                    transaction.commit().unwrap();
+                } else {
+                    transaction.rollback().unwrap();
+                }
                 assert!(!pending(&connection));
             }
         }
@@ -132,12 +158,20 @@ mod work_signal {
             transaction.execute(
                 "INSERT INTO local_resource_preparation_dirty(subject) VALUES('resource/example-savepoint')", [],
             ).unwrap();
-            transaction.execute_batch("SAVEPOINT preparation_flush;
+            transaction
+                .execute_batch(
+                    "SAVEPOINT preparation_flush;
                 DELETE FROM local_resource_preparation_dirty;
-                ROLLBACK TO preparation_flush; RELEASE preparation_flush;").unwrap();
-            let restored: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_dirty)", [], |row| row.get(0),
-            ).unwrap();
+                ROLLBACK TO preparation_flush; RELEASE preparation_flush;",
+                )
+                .unwrap();
+            let restored: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_dirty)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert!(restored);
             assert!(pending(&transaction));
             transaction.rollback().unwrap();
@@ -147,7 +181,9 @@ mod work_signal {
 }
 
 pub(super) fn flush_if_pending(transaction: &Transaction<'_>) -> Result<()> {
-    if work_signal::pending(transaction) { flush(transaction)?; }
+    if work_signal::pending(transaction) {
+        flush(transaction)?;
+    }
     Ok(())
 }
 
@@ -159,17 +195,26 @@ pub struct PreparationObservation {
 }
 
 /// A single point lookup on the caller's connection and therefore the caller's read cut.
-pub fn preparation_observation(connection: &Connection, subject: &str) -> Result<PreparationObservation> {
+pub fn preparation_observation(
+    connection: &Connection,
+    subject: &str,
+) -> Result<PreparationObservation> {
     let row: Option<(Option<String>, Option<String>, String)> = connection.prepare_cached(
         "SELECT actual,kind,observed_at FROM local_resource_preparation WHERE subject=?1",
     )?.query_row(/* sqlite-large-value: allow-for-now lv-ha22cf6bb4692 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
     match row {
         Some((actual, kind, observed_at)) => Ok(PreparationObservation {
-            actual: actual.map(|value| serde_json::from_str(&value)).transpose()?,
+            actual: actual
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?,
             kind,
             observed_at: observed_at.parse().unwrap_or(0),
         }),
-        None => Ok(PreparationObservation { actual: None, kind: None, observed_at: 0 }),
+        None => Ok(PreparationObservation {
+            actual: None,
+            kind: None,
+            observed_at: 0,
+        }),
     }
 }
 
@@ -199,7 +244,11 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
     let relevant = RELEVANT;
     // Keep notifications body-free. An unchanged canonical key (for example sealing a local
     // batch) is discarded at flush rather than needlessly refolding that subject's history.
-    for (table, identity) in [("claims", "id"), ("replica_records", "claim_id"), ("claim_positions", "claim_id")] {
+    for (table, identity) in [
+        ("claims", "id"),
+        ("replica_records", "claim_id"),
+        ("claim_positions", "claim_id"),
+    ] {
         for (event, row) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")] {
             connection.execute_batch(&format!(
                 /* sqlite-large-value: allow-for-now lv-he182e1d1c072 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_{event} AFTER {event} ON {table} BEGIN
@@ -211,7 +260,10 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
         }
     }
     // UPDATE can move an identity as well as changing its canonical inputs.
-    for (table, identity) in [("replica_records", "claim_id"), ("claim_positions", "claim_id")] {
+    for (table, identity) in [
+        ("replica_records", "claim_id"),
+        ("claim_positions", "claim_id"),
+    ] {
         connection.execute_batch(&format!(
             /* sqlite-large-value: allow-for-now lv-h47aaff9ea590 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_{table}_old_update AFTER UPDATE ON {table} BEGIN
              INSERT INTO local_resource_preparation_pending(claim_id)
@@ -223,7 +275,9 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
     for (event, row) in [("UPDATE", "OLD"), ("DELETE", "OLD")] {
         let rank_changed = if event == "UPDATE" {
             "(OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index)"
-        } else { "1" };
+        } else {
+            "1"
+        };
         connection.execute_batch(&format!(
             /* sqlite-large-value: allow-for-now lv-h72f718a8af1e owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{event} AFTER {event} ON claims BEGIN
              INSERT INTO local_resource_preparation_dirty(subject) SELECT {row}.subject
@@ -240,7 +294,9 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
         let row = if event == "DELETE" { "OLD" } else { "NEW" };
         let condition = if event == "UPDATE" {
             " WHEN OLD.id IS NOT NEW.id OR OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_sequence"
-        } else { "" };
+        } else {
+            ""
+        };
         connection.execute_batch(&format!(
             /* sqlite-large-value: allow-for-now lv-h62edd0c24636 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_batches_{event} AFTER {event} ON batches{condition} BEGIN
              INSERT INTO local_resource_preparation_dirty(subject)
@@ -305,9 +361,13 @@ fn create_repair_triggers(connection: &Connection) -> Result<()> {
 pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
     capture_work(transaction)?;
     create_tracking_triggers(transaction)?;
-    let version: Option<String> = transaction.query_row(
-        "SELECT value FROM meta WHERE key='resource_preparation_version'", [], |row| row.get(0),
-    ).optional()?;
+    let version: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key='resource_preparation_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     if version.as_deref() != Some(PREPARATION_VERSION) {
         rebuild_preparation(transaction)?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h9843ae4c1661 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('resource_preparation_version',?1)
@@ -319,10 +379,12 @@ pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 fn supported(connection: &Connection, subject: &str) -> Result<bool> {
-    Ok(subject.starts_with("resource/") || connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='resource.observed')",
-        [subject], |row| row.get::<_, bool>(0),
-    )?)
+    Ok(subject.starts_with("resource/")
+        || connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='resource.observed')",
+            [subject],
+            |row| row.get::<_, bool>(0),
+        )?)
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
@@ -343,10 +405,12 @@ fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     if !supported(transaction, subject)? {
         return Ok(());
     }
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
-        "SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 ORDER BY {CANONICAL_ORDER}"
-    ));
+        )
+    });
     let mut statement = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h28691152dda6 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?;
     let mut rows = statement.query([subject])?;
     while let Some(row) = rows.next()? {
@@ -358,40 +422,63 @@ fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
 }
 
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
-    let dirty = transaction.prepare("SELECT subject FROM local_resource_preparation_dirty ORDER BY subject")?
-        .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let dirty = transaction
+        .prepare("SELECT subject FROM local_resource_preparation_dirty ORDER BY subject")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     for subject in dirty {
         rebuild_subject(transaction, &subject)?;
     }
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hde81dd267781 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_dirty", [])?;
+    // Dirty subjects must be rebuilt even when no new claims are pending.
+    if !transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_pending)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
     // Process new claims in canonical order, even when one transaction admits several rows.
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
-        "SELECT claims.id,claims.subject FROM claims JOIN batches ON batches.id=claims.batch_id
-         JOIN local_resource_preparation_pending pending ON pending.claim_id=claims.id
-         ORDER BY {CANONICAL_ORDER}"
-    ));
-    let pending = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-he337585ac427 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?
+    let pending = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d9bf7e6df3c owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &PENDING_QUERY)?
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, subject) in pending {
-        if !supported(transaction, &subject)? { continue; }
+        if !supported(transaction, &subject)? {
+            continue;
+        }
         let key = sort_key(transaction, &id)?;
-        let previous: Option<Vec<u8>> = transaction.query_row(
-            "SELECT sort_key FROM local_resource_preparation_claims WHERE claim_id=?1", [&id], |row| row.get(0),
-        ).optional()?;
-        if previous.as_ref() == Some(&key) { continue; }
-        let latest: Option<Vec<u8>> = transaction.query_row(
-            "SELECT actual_key FROM local_resource_preparation WHERE subject=?1", [&subject], |row| row.get(0),
-        ).optional()?.flatten();
+        let previous: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT sort_key FROM local_resource_preparation_claims WHERE claim_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if previous.as_ref() == Some(&key) {
+            continue;
+        }
+        let latest: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT actual_key FROM local_resource_preparation WHERE subject=?1",
+                [&subject],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
         if previous.is_some() || latest.as_ref().is_some_and(|latest| key <= *latest) {
             rebuild_subject(transaction, &subject)?;
         } else {
             // A subject first becoming a resource may already have eligible flat claims.
             let has_state: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM local_resource_preparation WHERE subject=?1)", [&subject], |row| row.get(0),
+                "SELECT EXISTS(SELECT 1 FROM local_resource_preparation WHERE subject=?1)",
+                [&subject],
+                |row| row.get(0),
             )?;
-            if !has_state { rebuild_subject(transaction, &subject)?; }
-            else { advance(transaction, &subject, &id, key)?; }
+            if !has_state {
+                rebuild_subject(transaction, &subject)?;
+            } else {
+                advance(transaction, &subject, &id, key)?;
+            }
         }
     }
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hcdda1d8d7ef2 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_pending", [])?;
@@ -407,14 +494,19 @@ fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
     fn text(output: &mut Vec<u8>, value: &str) {
         for byte in value.bytes() {
             output.push(byte);
-            if byte == 0 { output.push(255); }
+            if byte == 0 {
+                output.push(255);
+            }
         }
         output.extend_from_slice(&[0, 0]);
     }
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
-        format!("SELECT {} FROM claims WHERE id=?1", canonical::components("claims").join(","))
-    );
-    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4746913336a7 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h151e6a39c85e owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [id], |row| {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "SELECT {} FROM claims WHERE id=?1",
+            canonical::components("claims").join(",")
+        )
+    });
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he337585ac427 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h151e6a39c85e owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [id], |row| {
         let accepted = row.get_ref(1)?.as_str()?;
         let origin = match row.get_ref(2)? {
             rusqlite::types::ValueRef::Null => None,
@@ -437,11 +529,13 @@ fn sort_key(connection: &Connection, id: &str) -> Result<Vec<u8>> {
     })?)
 }
 fn advance(transaction: &Transaction<'_>, subject: &str, id: &str, key: Vec<u8>) -> Result<()> {
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
         "SELECT kind,body,accepted_at_unix_ms,({ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM})
          FROM claims WHERE id=?1"
-    ));
-    let (kind, body, accepted, eligible): (String, String, String, bool) = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2fff82c875a5 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?
+    )
+    });
+    let (kind, body, accepted, eligible): (String, String, String, bool) = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4746913336a7 owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ &QUERY)?
         .query_row(/* sqlite-large-value: allow-for-now lv-h86a6d29b4dfb owner=fractal_store::store::resources_preparation TODO=trace-statement-and-value-representation */ [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hdfd806b3e120 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_preparation(subject) VALUES(?1) ON CONFLICT(subject) DO NOTHING", [subject])?;
     if eligible || kind == "resource.observed" {
@@ -461,10 +555,14 @@ fn advance(transaction: &Transaction<'_>, subject: &str, id: &str, key: Vec<u8>)
         }
         if eligible {
             let old: Option<String> = transaction.query_row(
-                "SELECT actual FROM local_resource_preparation WHERE subject=?1", [subject], |row| row.get(0),
+                "SELECT actual FROM local_resource_preparation WHERE subject=?1",
+                [subject],
+                |row| row.get(0),
             )?;
             let mut merged: serde_json::Map<String, Value> = old
-                .map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or_default();
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?
+                .unwrap_or_default();
             merge_actual_value(&mut merged, &kind, parsed);
             transaction.execute(/* sqlite-large-value: allow-for-now lv-h836ef04ed28a owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_resource_preparation SET actual=?2,actual_key=?3 WHERE subject=?1",
                 params![subject, canonical_json_text(&Value::Object(merged))?, &key])?;

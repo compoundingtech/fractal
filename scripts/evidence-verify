@@ -19,6 +19,8 @@ principal before the first slash, and is never read from the record itself.
 """
 import argparse
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -793,6 +795,92 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
     }
 
 
+def sibling(name):
+    """A script that sits next to this one (the gate copies the accepted base's both)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    if not os.path.isfile(path):
+        raise Failure('error', f'{name} is not next to the verifier')
+    loader = importlib.machinery.SourceFileLoader('evidence_sibling_' + name.replace('-', '_'), path)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def member_keys(repo, tree, policy_base):
+    """{crate: key} for every workspace member of `tree`: the member list and closure from the tree's manifests, the declared extras from
+    .st/rust-test-inputs.json at the accepted base, the code from the accepted base's scripts/rust-test-keys (docs/per-crate-test-signing.md)."""
+    if not policy_base:
+        raise Failure('error', '--members needs --policy-from: the keys are defined by the accepted base')
+    rtk = sibling('rust-test-keys')
+    # The manifests are read with plain git, never fetched on demand: in a blob:none clone a missing one is a refusal ('error'), and the
+    # caller prefetches them in one request (a lazy read of every manifest would be one round trip each).
+    previous = os.environ.get('GIT_NO_LAZY_FETCH')
+    os.environ['GIT_NO_LAZY_FETCH'] = '1'
+    try:
+        members = {crate: key for crate, (key, _) in rtk.keys(repo, tree, rtk.read_inputs(repo, policy_base), project).items()}
+    except rtk.Failure as failure:
+        raise Failure('error', f'per-crate keys: {failure}')
+    finally:
+        if previous is None:
+            os.environ.pop('GIT_NO_LAZY_FETCH', None)
+        else:
+            os.environ['GIT_NO_LAZY_FETCH'] = previous
+    if not members:
+        raise Failure('error', 'the tree has no workspace member: nothing to cover is not a pass')
+    return members
+
+
+def member_refspecs(check, key):
+    """The refspecs that fetch the records indexed under this check and key, in both namespaces (the layout evidence-publish and
+    evidence-wrap write), so the gate builds one fetch from the verifier's output."""
+    return [f'+{INPUT_TAGS}{check}/{key}/*:{INPUT_TAGS}{check}/{key}/*', f'+{INPUT_NOTES}{check}/{key}/*:{INPUT_NOTES}{check}/{key}/*']
+
+
+def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, rules, lane, level_lane, run_inputs,
+                   policy_base):
+    """`check` holds for the tree when EVERY workspace member has a satisfying note for its own key (a per-crate check, scripts/rust-test-keys).
+
+    One verify() per member (the same rules as any note, with the member's crate and key). Satisfied only when none is missing; the result
+    names the oldest note's time and the weakest signer level so the gate's age and trust conditions judge the weakest link, and a
+    combined key (the sha1 of the sorted crate=key lines) for the gate's sampling seed."""
+    members = member_keys(repo, tree, policy_base)
+    lane_cache = []
+
+    def memoized_level_lane():
+        if not lane_cache:
+            lane_cache.append(level_lane() if level_lane else None)
+        return lane_cache[0]
+
+    found, missing = {}, {}
+    for crate, key in sorted(members.items()):
+        if key is None:
+            missing[crate] = 'no_key'
+            continue
+        try:
+            found[crate] = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, None, rules, lane,
+                                    memoized_level_lane if level_lane else None, run_inputs, (crate, key))
+        except Failure as failure:
+            missing[crate] = failure.reason
+    if missing:
+        raise Failure('crate_uncovered', f'{len(missing)} of {len(members)} crates have no satisfying note for their key: '
+                      + ', '.join(f'{crate} ({reason})' for crate, reason in list(missing.items())[:12]) + (' ...' if len(missing) > 12 else ''),
+                      missing=missing, members=len(members))
+    order = {'host': 1, 'agent': 2}
+    notes = list(found.values())
+    oldest = min(notes, key=lambda note: parse_time(note['observed_at']))
+    weakest = max(notes, key=lambda note: order.get(note['trust_level'], 0))
+    combined = hashlib.sha1('\n'.join(f'{crate}={key}' for crate, key in sorted(members.items())).encode()).hexdigest()
+    events = rules.get('events') if rules is not None else None
+    for note in notes:
+        events = narrowed_events(events, note['events']) if note['events'] is not None else events
+    result = dict(oldest)
+    result.update({'record': oldest['record'], 'signer': oldest['signer'], 'trust_level': weakest['trust_level'],
+                   'match': 'inputs' if any(note['match'] == 'inputs' for note in notes) else 'tree', 'source_inputs': combined,
+                   'events': events, 'members': len(members), 'crates': {crate: note['record'] for crate, note in sorted(found.items())},
+                   'attempts': max(note['attempts'] for note in notes)})
+    return result
+
+
 def read_policy(repo, commit):
     try:
         return git(repo, 'show', '--end-of-options', f'{commit}:{POLICY_PATH}').decode()
@@ -943,6 +1031,10 @@ def main(argv):
     parser.add_argument('--project', action='store_true',
                         help='print the input key of the tree for the check\'s declared paths and exit (needs no keys)')
     parser.add_argument('--paths', metavar='PATH[,PATH...]', help='with --project: declared paths instead of the policy\'s')
+    parser.add_argument('--members', action='store_true',
+                        help='a per-crate check: satisfied only when every workspace member of the tree has a satisfying note for its own key '
+                             '(needs --policy-from; accepts --lane-base; reads manifests without fetching; the keys come from scripts/rust-test-keys next to this script and .st/rust-test-inputs.json at '
+                             'the base). With --project: print the member keys and stop')
     parser.add_argument('--crate-key', metavar='CRATE=KEY',
                         help='a per-crate check (docs/per-crate-test-signing.md): only records that signed this crate and this input key count, '
                              'whichever tree they are for (scripts/rust-test-keys prints the keys)')
@@ -1036,6 +1128,12 @@ def main(argv):
             tree = git(args.repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{tree}').decode().strip()
         if not OID.match(tree):
             raise Failure('error', 'expected a full lowercase Git tree ID')
+        if args.project and args.members:
+            members = member_keys(args.repo, tree, args.policy_from)
+            print(json.dumps({'crates': {crate: {'key': key, 'refspecs': member_refspecs(args.check, key) if key else []}
+                                         for crate, key in sorted(members.items())},
+                              'members': len(members), 'tree': tree, 'check': args.check}, indent=2))
+            return 0
         if args.project:
             rules = None
             if args.policy_from:
@@ -1096,11 +1194,16 @@ def main(argv):
             if not sep or not crate or not OID.match(key):
                 raise Failure('error', f'--crate-key must be CRATE=KEY with a git tree id, not {args.crate_key!r}')
             crate_key = (crate, key)
+        level_lane = (lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check,
+                                       args.lane_base)) if policy_base else None
+        if args.members:
+            result = verify_members(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix, trust_levels,
+                                    rules, lane_for(args.repo, tree, lanes, args.check, args.lane_base), level_lane, run_inputs, policy_base)
+            print(json.dumps(result, indent=2))
+            return 0
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
                         trust_levels, crate_key=crate_key, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
-                        level_lane=(lambda: lane_for(args.repo, tree, (read_lanes(args.repo, policy_base), policy_base), args.check,
-                                                     args.lane_base))
-                        if policy_base else None, log_keys=log_keys, run_inputs=run_inputs)
+                        level_lane=level_lane, log_keys=log_keys, run_inputs=run_inputs)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:
