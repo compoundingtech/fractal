@@ -171,3 +171,109 @@ pub fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeStartOperation> 
         receipted: row.get(10)?,
     })
 }
+pub fn bind_runtime_start_result(operation: &RuntimeStartOperation, origin: &str, result: &mut Value) {
+    result["operation_id"] = Value::from(operation.id.clone());
+    result["subject"] = Value::from(operation.subject.clone());
+    result["owner"] = Value::from(operation.owner.clone());
+    result["origin"] = Value::from(origin);
+    result["runtime_id"] = operation.body["member"]["runtime_id"].clone();
+    result["terminal"] = operation.body["member"]["terminal"].clone();
+    result["runtime_kind"] = Value::from(if result["terminal"] == true {
+        "pty"
+    } else {
+        "exec"
+    });
+    for key in [
+        "selected_token",
+        "desired_token",
+        "expected_incarnation",
+        "start_request",
+        "control_request",
+    ] {
+        result[key] = operation.body[key].clone();
+    }
+}
+
+pub fn retain_runtime_start_closure(
+    operation: &RuntimeStartOperation,
+    origin: &str,
+    result: &mut Value,
+    witness: Value,
+) -> Result<()> {
+    bind_runtime_start_result(operation, origin, result);
+    let proof = json!({"version":1,"operation_id":operation.id,"subject":operation.subject,
+        "owner":operation.owner,"origin":origin,"runtime_id":result["runtime_id"],
+        "terminal":result["terminal"],"runtime_kind":result["runtime_kind"],
+        "selected_token":result["selected_token"],"desired_token":result["desired_token"],
+        "expected_incarnation":result["expected_incarnation"],"incarnation":result["incarnation"],
+        "verification":result["verification"],"start_request":result["start_request"],
+        "start_request_receipt":operation.body["start_request_receipt"],"start_request_position":operation.body["start_request_position"],
+        "control_request":result["control_request"],"control_request_receipt":operation.body["control_request_receipt"],
+        "requester_restart":operation.body["request"],"witness":witness});
+    result["closure_proof_id"] = Value::from(format!("start-proof/{}", canonical_hash(&proof)?));
+    result["closure_proof"] = proof;
+    Ok(())
+}
+
+pub fn closed_runtime_start_result(
+    operation: &RuntimeStartOperation,
+    origin: &str,
+    result: &mut Value,
+) -> Result<()> {
+    bind_runtime_start_result(operation, origin, result);
+    if result["error"].is_string() && result["producer_closed"] == true {
+        result["verification"] = Value::from("producer-closed");
+        result["phase"] = Value::from("failed");
+        let kind = result["closure_kind"]
+            .as_str()
+            .unwrap_or("positive-producer-proof")
+            .to_owned();
+        retain_runtime_start_closure(operation, origin, result, json!({"kind":kind}))?;
+    }
+    Ok(())
+}
+pub fn release_evidence(tx: &Transaction<'_>, operation: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-h6440938fe6f6 owner=fractal_store::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_runtime_start_evidence WHERE operation_id=?1 AND EXISTS (
+        SELECT 1 FROM local_runtime_starts WHERE id=?1 AND finished=1 AND applied=1
+          AND (revoked_by IS NULL OR cleanup_verified=1)
+          AND (json_extract(result,'$.error') IS NULL OR cleanup_verified=1))",
+        [operation],
+    )?;
+    Ok(())
+}
+
+/// Shared writer transition for an exact producer-closure witness. Physical
+/// evidence is supplied only by the daemon; admission/result binding stays here.
+pub fn retain_runtime_start_producer_closed_tx(
+    tx: &Transaction<'_>,
+    origin: &str,
+    id: &str,
+    native_evidence: Option<&Value>,
+) -> Result<()> {
+    let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+    anyhow::ensure!(
+        operation.finished && operation.revoked_by.is_some(),
+        "closure needs a returned revoked operation"
+    );
+    let mut result = operation.result.clone().context("closed operation has no result")?;
+    if result["error"].is_null() {
+        result["error"] = Value::from("revoked producer closed without a verified launch");
+    }
+    result["producer_closed"] = Value::from(true);
+    closed_runtime_start_result(&operation, origin, &mut result)?;
+    if let Some(evidence) = native_evidence {
+        retain_runtime_start_closure(
+            &operation,
+            origin,
+            &mut result,
+            json!({"kind":"positive-producer-proof","native_evidence":evidence}),
+        )?;
+    }
+    tx.execute(
+        /* sqlite-large-value: allow-for-now lv-hf567cc96b71e owner=fractal_store::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+        params![id, serde_json::to_string(&result)?],
+    )?;
+    release_evidence(tx, id)?;
+    Ok(())
+}
