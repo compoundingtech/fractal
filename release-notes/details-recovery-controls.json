@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Avoid rendering unchanged Details Recovery fixture controls on every matrix transition.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Story fixture only; no product behavior change. All controls, matrix cases, remounts, waits, assertions and accessibility checks remain unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

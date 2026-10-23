@@ -47,13 +47,20 @@ const meta = {
     const [observation, setObservation] = React.useState<Observation>(() => observationFor(initialState))
     const [generation, setGeneration] = React.useState(0)
     const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
-    const recover = () => setObservation(observationFor('busy'))
-    const reset = (content: DetailsState) => { setObservation(observationFor(content)); setIntent({ hiddenSections: [] }); setGeneration(value => value + 1) }
-    return <div {...stylex.props(styles.root, ...baselineTheme, ...(args.scheme === 'light' ? lightTheme : []))}>
+    const recover = React.useCallback(() => setObservation(observationFor('busy')), [])
+    // These controls depend only on stable state setters, not on the observed pane.
+    // Keep their React Aria trees mounted without rendering them on every matrix edge.
+    const controls = React.useMemo(() => {
+      const reset = (content: DetailsState) => { setObservation(observationFor(content)); setIntent({ hiddenSections: [] }); setGeneration(value => value + 1) }
+      return <>
       <div {...stylex.props(styles.controls)}>{[118, 159, 160, 240, 320, 400, 520].map(value => <Button key={value} size="sm" data-recovery-width={value} onPress={() => setWidth(value)}>{value}px</Button>)}{states.map(state => <Button key={state} size="sm" data-recovery-reset={state} onPress={() => reset(state)}>Start {state}</Button>)}</div>
       <div {...stylex.props(styles.controls)}>{variants.map((value, index) => <Button key={index} size="sm" data-recovery-variant={index} onPress={() => setVariant(index)}>{value.overview}{value.context}{value.spend}</Button>)}</div>
       <div {...stylex.props(styles.controls)}><Button size="sm" data-recovery-action="loading" onPress={() => setObservation(observationFor('loading'))}>Loading</Button><Button size="sm" data-recovery-action="failed" onPress={() => setObservation(current => ({ ...current, sync: failed }))}>Fail details</Button><Button size="sm" data-recovery-action="busy" onPress={recover}>Busy</Button></div>
       <div {...stylex.props(styles.controls)}>{(['forbidden', 'unsupported'] as const).flatMap(code => [false, true].map(retained => <Button key={`${code}-${retained}`} size="sm" data-recovery-failure-code={code} data-recovery-prior={String(retained)} onPress={() => setObservation({ content: retained ? 'busy' : 'loading', sync: { _tag: 'Failed', cause: { _tag: 'Server', code, message: code === 'forbidden' ? 'Access to this agent was denied.' : 'This gateway does not provide agent details.' } } })}>{code} · {retained ? 'retained' : 'first load'}</Button>))}</div>
+      </>
+    }, [recover])
+    return <div {...stylex.props(styles.root, ...baselineTheme, ...(args.scheme === 'light' ? lightTheme : []))}>
+      {controls}
       <section aria-label="Mounted Details recovery" data-recovery-stage style={{ width }} {...stylex.props(styles.stage)}><ThemePortal><Workbench {...args} key={generation} workspaceId={`${args.workspaceId}-${generation}`} focusedPaneKey={paneKey(details)} renderPane={pane => pane.view === 'details' ? <DetailsPane {...detailsStoryInputs(observation.content)} variants={variants[variant]!} state={observation.content} syncStatus={observation.sync} hasPriorContent={observation.content !== 'loading' && observation.content !== 'error' && observation.content !== 'new'} intent={intent} onIntentChange={setIntent} onOpen={() => { throw new Error('Recovery gate unexpectedly opened a resource') }} onRetry={recover} /> : args.renderPane?.(pane)} /></ThemePortal></section>
     </div>
   },
