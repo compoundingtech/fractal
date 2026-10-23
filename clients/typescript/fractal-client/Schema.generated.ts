@@ -469,12 +469,23 @@ export const PersonStepParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonStepParameters = typeof PersonStepParameters.Type
 export type PersonStepParametersEncoded = typeof PersonStepParameters.Encoded
 
-/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {"0":[1],"1":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). */
+export const DelegationProof = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String,
+  "message": Schema.String,
+  "person": Schema.String,
+  "policy": Schema.String,
+  "quote": Schema.String
+}).annotate({ identifier: "DelegationProof" }))()
+export type DelegationProof = typeof DelegationProof.Type
+export type DelegationProofEncoded = typeof DelegationProof.Encoded
+
+/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {"0":[1],"1":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor. */
 export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
   "answer": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(16384)),
+  "delegation": optionalKey(DelegationProof),
   "episode": Schema.String,
   "target_id": Id
-}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit)." }))()
+}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor." }))()
 export type PromptRespondParameters = typeof PromptRespondParameters.Type
 export type PromptRespondParametersEncoded = typeof PromptRespondParameters.Encoded
 
@@ -1180,7 +1191,8 @@ export const PageInfo = /*#__PURE__*/ (() => Schema.Struct({
   "cursor_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "has_more": Schema.Boolean,
   "limit": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200)),
-  "next_cursor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+  "next_cursor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "omitted_items": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE)
 }).annotate({ identifier: "PageInfo" }))()
 export type PageInfo = typeof PageInfo.Type
 export type PageInfoEncoded = typeof PageInfo.Encoded
@@ -1641,6 +1653,47 @@ export const AttentionBlocked = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionBlocked = typeof AttentionBlocked.Type
 export type AttentionBlockedEncoded = typeof AttentionBlocked.Encoded
 
+export const AttentionActor = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Id,
+  /** The name a person reads. */
+  "label": Schema.String.annotate({ description: "The name a person reads." })
+}).annotate({ identifier: "AttentionActor" }))()
+export type AttentionActor = typeof AttentionActor.Type
+export type AttentionActorEncoded = typeof AttentionActor.Encoded
+
+export const AttentionWaiting = /*#__PURE__*/ (() => Schema.Struct({
+  /** The step's name within its mission. */
+  "path": Schema.String.annotate({ description: "The step's name within its mission." }),
+  "step": StepRunId
+}).annotate({ identifier: "AttentionWaiting" }))()
+export type AttentionWaiting = typeof AttentionWaiting.Type
+export type AttentionWaitingEncoded = typeof AttentionWaiting.Encoded
+
+export const AttentionPresentation = /*#__PURE__*/ (() => Schema.Struct({
+  /** Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff. */
+  "agent": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." }),
+  /** The card; null for a row that is no card (an unread message stays in its conversation). */
+  "kind": Schema.OptionFromNullOr(Schema.Literals([
+  "review",
+  "feedback",
+  "request",
+  "update",
+  "launch",
+  "revision",
+  "prompt",
+  "login",
+  "fault"
+])).annotate({ description: "The card; null for a row that is no card (an unread message stays in its conversation)." }),
+  /** Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission. */
+  "raised_by": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." }),
+  /** The Now group, by its fixtures/clients/words.json tier id; null for a row that is not a Now card. */
+  "tier": Schema.OptionFromNullOr(Schema.Literals(["stopped","alert","today","later"])).annotate({ description: "The Now group, by its fixtures/clients/words.json tier id; null for a row that is not a Now card." }),
+  /** The step it holds. */
+  "waiting": Schema.OptionFromNullOr(AttentionWaiting).annotate({ description: "The step it holds." })
+}).annotate({ identifier: "AttentionPresentation" }))()
+export type AttentionPresentation = typeof AttentionPresentation.Type
+export type AttentionPresentationEncoded = typeof AttentionPresentation.Encoded
+
 export const AttentionTargetState = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "since": optionalKey(Timestamp),
@@ -1720,6 +1773,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "mission_run_id": optionalKey(Id),
   "operational": optionalKey(Operational),
   "person_id": Id,
+  /** st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons. */
+  "presentation": optionalKey(AttentionPresentation),
   "preview": Schema.OptionFromOptionalNullOr(LaunchPreview, NULL_NONE),
   "preview_token": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "priority": Schema.Literals(["critical","high","normal","low"]),

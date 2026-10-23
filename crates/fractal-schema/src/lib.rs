@@ -4104,7 +4104,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         fields.insert("assistant_owner".into(), reference_to(&["person"]));
         fields.insert("assistant_session_actor".into(), string());
     }
-    if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
+    if matches!(
+        kind,
+        "work.person-done" | "gate.result" | "message.closed" | "harness.diagnostic"
+    ) {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
     }

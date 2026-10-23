@@ -378,7 +378,7 @@ edits and removes retired subjects without changing unfiltered reads.
 | scroll, follow and search conversations | local UI state; no daemon mutation, restart fence not applicable | [`a_conversation_follows_new_lines_until_scrolled_up`](https://github.com/compoundingtech/fractal/blob/main/crates/fractal-tui/src/ui/mod.rs) |
 | copy selected text | local UI state; no daemon mutation, restart fence not applicable | [`selection_copies_only_its_own_pane`](https://github.com/compoundingtech/fractal/blob/main/crates/fractal-tui/src/ui/mod.rs) |
 | edit or discard a draft | local UI state; no daemon mutation, restart fence not applicable | [`drafts_take_the_terminal_editing_keys`](https://github.com/compoundingtech/fractal/blob/main/crates/fractal-tui/src/ui/mod.rs) |
-| simplify or expand tool detail | local UI state; no daemon mutation, restart fence not applicable | [`shift_o_simplifies_every_conversation_and_back`](https://github.com/compoundingtech/fractal/blob/main/crates/fractal-tui/src/ui/mod.rs) |
+| simplify or expand tool detail | local UI state; no daemon mutation, restart fence not applicable | [`ctrl_p_simplifies_every_conversation_and_back`](https://github.com/compoundingtech/fractal/blob/main/crates/fractal-tui/src/ui/mod.rs) |
 | dismiss/remind me later | local UI state; no daemon mutation, restart fence not applicable | [`remind_me_later_hides_a_message_and_the_badge_counts_what_is_left`](https://github.com/compoundingtech/fractal/blob/main/crates/fractal-tui/src/ui/mod.rs) |
 
 ## Diagnostic client commands
