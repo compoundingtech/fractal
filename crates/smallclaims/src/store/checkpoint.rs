@@ -659,7 +659,7 @@ fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::Proof
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
     // belongs on disk, not in an allocation proportional to the database's size. The copy is
     // discarded after the proof, so its commits need not wait for the disk.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd107c49c5ec5 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h8f1ffacf1528 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ &format!(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
          PRAGMA cache_size = -{}; PRAGMA temp_store = FILE; PRAGMA mmap_size = 0;",
         CHECKPOINT_COPY_CACHE_KIB,
