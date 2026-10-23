@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """scripts/st-test against real repositories: the tree it signs (the head), the lag, failures, refusals."""
 import contextlib
+import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -258,7 +259,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertRegex(out, r'demo +lane edit: CI runs it +this tree edits its lane \(scripts/lane\.sh\)')
 
-    def test_status_all_names_every_policy_check_and_one_without_a_local_command_is_ci_s(self):
+    def test_status_names_every_policy_check_and_one_without_a_local_command_is_ci_s(self):
         policy = json.loads(json.dumps(POLICY))
         policy['checks']['vm-only'] = {'trust_levels': ['fleet'], 'kinds': {'wrapper': {'command': ['vm-only', 'driver']}}}
         self.commit('.st/evidence-skip-policy.json', json.dumps(policy), branch='main')
@@ -266,14 +267,15 @@ class StTest(unittest.TestCase):
         git(self.work, 'checkout', '-q', 'feature')
         git(self.work, 'merge', '-q', 'main')
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--all', '--status')
+        code, out, err = self.run_st_test('--status')
         self.assertEqual(code, 3, out + err)  # demo has no note yet
         self.assertRegex(out, r'demo +not covered ')
         self.assertRegex(out, r'vm-only +CI runs it +no local command')
-        self.assertEqual(self.run_st_test('--all')[0], 0)
-        code, out, err = self.run_st_test('--all', '--status')
+        self.assertEqual(self.run_st_test()[0], 0)
+        code, out, err = self.run_st_test('--status')
         self.assertEqual(code, 0, out + err)  # demo signed, vm-only is CI's
-        self.assertNotIn('vm-only', self.run_st_test('--check', 'demo', '--status')[1])  # only with --all
+        self.assertEqual(self.run_st_test('--all', '--status'), (code, out, err))  # --all is accepted and means the same
+        self.assertNotIn('vm-only', self.run_st_test('--check', 'demo', '--status')[1])  # a named check asks about that check only
 
     def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
         self.commit('b.txt', 'two')
@@ -430,13 +432,16 @@ class StTest(unittest.TestCase):
         self.commit('d.txt', 'another change')
         self.assertEqual(self.run_st_test('--check', 'demo', '--status')[0], 3)
 
-    def test_a_heavy_check_builds_in_the_kept_target_and_a_light_one_does_not(self):
+    def pool(self):
+        return next((self.home / '.cache/st-test').iterdir())
+
+    def test_a_check_that_builds_uses_its_trees_kept_target_and_another_does_not(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
         command = ['sh', '-c', f'echo "${{CARGO_TARGET_DIR:-none}}" >> {seen}']
-        target = self.home / '.cache/st-test-target'
-        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+            target = self.pool() / 'target-0'
             (target / 'junk').write_bytes(b'x' * 4096)
             with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
                 self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
@@ -446,8 +451,114 @@ class StTest(unittest.TestCase):
             self.assertFalse((target / 'junk').exists())
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
-        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # not heavy: no kept target
-        self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', 'none'])
+            shared = self.home / 'shared-target'
+            self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': str(shared)})[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
+        self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
+
+    def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'pwd -P >> {seen}; cat a.txt >> {seen}; ls stray 2>/dev/null >> {seen}; true']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        self.commit('c.txt', 'three')
+        tree = (self.pool() / 'tree-0').resolve()
+        (tree / 'a.txt').write_text('left by a killed run\n')  # a tracked change an earlier run left
+        (tree / 'stray').write_text('untracked')
+        (tree / 'target').mkdir()
+        (tree / 'target/ignored.o').write_text('x')
+        (self.pool() / 'target-0').mkdir(exist_ok=True)
+        (self.pool() / 'target-0/kept').write_text('build output')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        self.assertEqual(seen.read_text().split(), [str(tree), 'one', str(tree), 'one'])  # a.txt reset, stray removed
+        self.assertFalse((tree / 'target').exists())
+        self.assertEqual((self.pool() / 'target-0/kept').read_text(), 'build output')  # build output is outside the tree
+        self.assertTrue(tree.is_dir())
+        self.assertIn(str(tree), git(self.work, 'worktree', 'list'))
+        self.assertEqual(git(tree, 'rev-parse', 'HEAD'), git(self.work, 'rev-parse', 'HEAD'))
+
+    def test_a_pool_tree_in_use_is_never_shared_with_a_concurrent_run(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'pwd -P >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        held = open(self.pool() / 'tree-0.lock', 'w')
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        paths = seen.read_text().split()
+        self.assertEqual([Path(p).name for p in paths], ['tree-0', 'tree-1'])
+
+    def test_a_run_waits_for_a_tree_when_every_tree_is_in_use(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        held = open(self.pool() / 'tree-0.lock', 'w')
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with mock.patch.object(st_test.time, 'sleep', side_effect=lambda seconds: held.close()):  # the other run ends while this one waits
+            code, _, err = self.run_st_test('--check', 'demo', extra_env={'ST_TEST_TREES': '1'})
+        self.assertEqual(code, 0)
+        self.assertIn('all 1 pool trees are in use', err)
+
+    def test_the_pool_holds_the_heavy_slots_plus_one_trees_unless_told_otherwise(self):
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
+            self.assertEqual(st_test.pool_size(), 2)
+            (self.home / '.config/cargo-heavy-slots').write_text('3\n')
+            self.assertEqual(st_test.pool_size(), 4)
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_TREES': '7'}, clear=True):
+            self.assertEqual(st_test.pool_size(), 7)
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_TREES': 'off'}, clear=True):
+            self.assertIsNone(st_test.pool_size())
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {'ST_TEST_TREES': '0'}, clear=True):
+            with self.assertRaises(st_test.Failure):
+                st_test.pool_size()
+
+    def test_a_tree_that_cannot_be_made_clean_is_a_refusal(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        tree = self.pool() / 'tree-0'
+        real = st_test.git
+        with mock.patch.object(st_test, 'git', wraps=real) as spy:
+            def fake(*args, **kwargs):
+                if args[:1] == ('status',) and kwargs.get('cwd') == tree:
+                    return subprocess.CompletedProcess(args, 0, b' M scripts/x\n', b'')
+                return real(*args, **kwargs)
+            spy.side_effect = fake
+            code, _, _ = self.run_st_test('--check', 'demo')
+        self.assertIn('is not clean', str(code))
+
+    def test_read_only_directories_a_check_left_in_the_tree_do_not_stop_the_cleaning(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        tree = self.pool() / 'tree-0'
+        (tree / '.devenv/store/deep').mkdir(parents=True)
+        (tree / '.devenv/store/deep/file').write_text('copied from the store')
+        for path in ((tree / '.devenv/store/deep'), (tree / '.devenv/store')):
+            path.chmod(0o555)
+        self.addCleanup(subprocess.run, ['chmod', '-R', 'u+rwX', str(tree)])
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertFalse((tree / '.devenv/store').exists())
+
+    def test_a_pool_tree_that_is_not_a_worktree_of_this_repository_is_replaced(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        tree = self.pool() / 'tree-0'
+        shutil.rmtree(tree)
+        tree.mkdir()
+        (tree / 'junk').write_text('not a worktree')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertFalse((tree / 'junk').exists())
+        self.assertEqual(git(tree, 'rev-parse', 'HEAD'), git(self.work, 'rev-parse', 'HEAD'))
+
+    def test_with_the_pool_off_a_run_uses_a_fresh_worktree_that_is_removed_after(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'pwd -P >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_TEST_TREES': 'off'})[0], 0)
+        path = Path(seen.read_text().strip())
+        self.assertTrue(path.parent.name.startswith('st-test-'))
+        self.assertFalse(path.exists())
+        self.assertFalse((self.home / '.cache/st-test').exists())
 
     def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
         self.commit('b.txt', 'two')
@@ -563,9 +674,9 @@ class StTest(unittest.TestCase):
     def test_the_real_table_lists_only_checks_with_a_command_and_prints_them(self):
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list'], capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness'])
+        self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], ['typescript-client', 'genie-freshness', 'linux-gate', 'fractal-web'])
 
-    def test_a_heavy_check_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
+    def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
         tmp = Path(self.tmp.name)
         calls = tmp / 'calls'
@@ -580,7 +691,7 @@ class StTest(unittest.TestCase):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime)}
-        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
@@ -601,7 +712,7 @@ class StTest(unittest.TestCase):
             self.assertFalse(calls.exists())  # neither a scope nor a ticket
         self.commit('e.txt', 'five')
         self.assertEqual(self.run_st_test('--check', 'demo', extra_env=env)[0], 0)
-        self.assertFalse(calls.exists())  # a light check is not wrapped
+        self.assertFalse(calls.exists())  # a check that builds nothing is not wrapped
 
     def test_fractal_web_is_not_relevant_when_no_web_input_changed_by_the_base_s_own_rules(self):
         (self.work / 'scripts').mkdir(exist_ok=True)
@@ -640,11 +751,11 @@ class StTest(unittest.TestCase):
         standard = {'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt'}  # evidence-wrap's own
         self.assertEqual(set(host['required_inputs']), standard | set(st_test.WEB_INPUTS))
 
-    def test_a_heavy_check_runs_only_when_named_or_with_all(self):
-        # The pre-push hook runs st-test with no --check: a check that builds the whole workspace must not start on every push.
-        for args, names in (([], ['typescript-client', 'genie-freshness']),
-                            (['--all'], ['typescript-client', 'genie-freshness', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm', 'fractal-web']),
-                            (['--check', 'mail-redelivery-canaries'], ['mail-redelivery-canaries'])):
+    def test_every_check_of_the_per_pr_suite_runs_by_default_and_all_means_the_same(self):
+        # No subset for signing: with no flag st-test runs the whole per-PR suite; --all is an accepted alias; --check selects.
+        # The VM tests and the mail redelivery canaries run daily, not here.
+        suite = ['typescript-client', 'genie-freshness', 'linux-gate', 'fractal-web']
+        for args, names in (([], suite), (['--all'], suite), (['--check', 'linux-gate'], ['linux-gate'])):
             done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', *args], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertEqual([line.split(':')[0] for line in done.stdout.splitlines()], names, args)

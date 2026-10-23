@@ -110,7 +110,7 @@ inspection instead of overwriting it.
 The installer does not restart
 anything or erase state. On macOS it installs `st3` in the fixed `~/Applications/SmallTalk.app` bundle, registers it with Launch Services, and updates existing daemon/replication LaunchAgent paths. Configure `ST_MACOS_SIGNING_IDENTITY` and optionally `ST_MACOS_SIGNING_TEAM` for persistent signing; no identity uses ad-hoc signing. A configured missing identity fails rather than falling back. See [macOS installation and signing](macos-installation.md). Keep the previous archive as recovery material. Installing it again is a supported rollback
 only when its database, claim and driver contracts can read the current state; see
-[upgrade and recovery](../upgrading-st.md#swap-back-or-roll-forward) and the
+[upgrade and recovery](../site/guides/upgrading.md#rollback-is-a-compatibility-decision) and the
 [0.x compatibility policy](compatibility.md). Forward-only migrations require roll-forward
 unless the release explicitly documents a downgrade. Before upgrading a healthy populated
 store, make a [claim backup](backups.md) and preserve excluded local data separately.

@@ -27,8 +27,8 @@ CHECK = 'genie-freshness'
 
 
 # Every check is enforced now, so the flip has nothing left to do in this repository. These tests still need checks in shadow:
-# SHADOW holds the files the flip edits with these four put back in shadow, exactly as they were before they were flipped.
-IN_SHADOW = ('linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'genie-freshness')
+# SHADOW holds the files the flip edits with these two put back in shadow, exactly as they were before they were flipped.
+IN_SHADOW = ('linux-gate', 'genie-freshness')
 
 
 def in_shadow(path, text):
@@ -43,8 +43,8 @@ def in_shadow(path, text):
         return json.dumps(policy, indent=2) + '\n'
     if path == flip.DOC:
         rows = ''.join(f'| `{check}` | true | `pull_request` | 5 | 2026-10-23 |\n' for check in IN_SHADOW)
-        assert rows in text, 'the enforced rows of the four checks moved: update in_shadow'
-        return text.replace(rows, '| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |\n')
+        assert rows in text, 'the enforced rows of the two checks moved: update in_shadow'
+        return text.replace(rows, '| `genie-freshness`, `linux-gate` | false | - | 5 or 1 | - |\n')
     for test_path, name in flip.TEST_LISTS:
         if path == test_path:
             found = re.search(r'^( *)' + name + r' = (\(.*\))$', text, re.M)
@@ -359,8 +359,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(sorted(members), ['fractal-web', 'linux-gate'])  # the checks whose wrapper command is an aggregate
         self.assertEqual(members['fractal-web'], ('fractal-web-execution',))
         self.assertEqual(members['linux-gate'], ('linux-clippy', 'linux-fleet-compat', 'linux-test-build', 'linux-tests',
-                                                 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
-                                                 'mail-redelivery-canaries'))
+                                                 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'))
         for always in ('upgrade-impact', 'fractal-web-changes'):  # members that always run: their red is never hidden
             self.assertNotIn(always, members['fractal-web'] + members['linux-gate'])
         with self.assertRaises(ValueError):
@@ -498,7 +497,7 @@ class FlipReady(unittest.TestCase):
         before['checks'][CHECK] = policy['checks'][CHECK]
         self.assertEqual(policy, before)  # nothing else changed
         self.assertIn(f'| `{CHECK}` | true | `pull_request` | 5 | 2026-10-22 |\n', files[flip.DOC])
-        self.assertIn('| `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |\n', files[flip.DOC])
+        self.assertIn('| `linux-gate` | false | - | 5 or 1 | - |\n', files[flip.DOC])
         # The check is appended to each pinned tuple as it stands (it grows with every flip).
         for path, name in flip.TEST_LISTS:
             current = ast.literal_eval(re.search(r'^ *' + name + r' = (\(.*\))$', SHADOW[path], re.M).group(1))
@@ -548,9 +547,9 @@ class FlipReady(unittest.TestCase):
 
     def test_a_policy_not_in_json_dumps_form_gets_a_minimal_textual_edit(self):
         text = SHADOW[flip.POLICY].replace('"version": 1,', '"version":  1,')
-        new, entry = flip.flip_policy(text, 'isolation-vm')
+        new, entry = flip.flip_policy(text, 'genie-freshness')
         self.assertEqual(entry['sample_one_in'], 5)
-        self.assertEqual(json.loads(new)['checks']['isolation-vm'], entry)
+        self.assertEqual(json.loads(new)['checks']['genie-freshness'], entry)
         self.assertIn('"version":  1,', new)
         new, entry = flip.flip_policy(text, 'linux-gate')  # sample_one_in is kept where it is
         self.assertEqual(list(entry)[1:4], ['enforce', 'events', 'sample_one_in'])
