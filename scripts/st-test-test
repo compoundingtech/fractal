@@ -477,6 +477,18 @@ class StTest(unittest.TestCase):
             code, _, _ = self.run_st_test('--check', 'demo')
         self.assertIn('is not clean', str(code))
 
+    def test_read_only_directories_a_check_left_in_the_tree_do_not_stop_the_cleaning(self):
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        tree = self.pool() / 'tree-0'
+        (tree / '.devenv/store/deep').mkdir(parents=True)
+        (tree / '.devenv/store/deep/file').write_text('copied from the store')
+        for path in ((tree / '.devenv/store/deep'), (tree / '.devenv/store')):
+            path.chmod(0o555)
+        self.addCleanup(subprocess.run, ['chmod', '-R', 'u+rwX', str(tree)])
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertFalse((tree / '.devenv/store').exists())
+
     def test_a_pool_tree_that_is_not_a_worktree_of_this_repository_is_replaced(self):
         self.commit('b.txt', 'two')
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)

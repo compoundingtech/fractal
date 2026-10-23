@@ -331,7 +331,10 @@ def prepare_tree(root, n, commit):
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
     else:
         git('worktree', 'add', '--detach', '--force', '-q', str(directory), commit)
-    git('clean', '-ffdxq', cwd=directory)
+    if git('clean', '-ffdxq', cwd=directory, check=False).returncode != 0:
+        # A check can leave read-only directories (copies of nix store paths, under .devenv/ and repos/): make them writable, once.
+        subprocess.run(['chmod', '-R', 'u+rwX', '--', str(directory)], check=False, capture_output=True)
+        git('clean', '-ffdxq', cwd=directory)
     dirty = text(git('status', '--porcelain', cwd=directory))
     if dirty:
         raise Failure(f'pool tree {directory} is not clean after resetting it to {commit[:12]}: {dirty.splitlines()[0]}')
