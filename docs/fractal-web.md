@@ -98,10 +98,51 @@ roster with no results offers Clear filters. A failed roster read exposes Retry 
 Those actions reacquire failed or ended follows without restarting healthy follows.
 Authorization and capability refusals retain their distinct explanations.
 
-## Hosting the web app on a tailnet
+## Local daemon web app
 
-`apps/fractal-web/server/main.mts` runs the built app for one person. It listens on loopback
-only, and `tailscale serve` publishes it over HTTPS on the tailnet. The server injects one paired
+The daemon serves the web app by default at `http://127.0.0.1:7410`.
+Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
+overrides the default installed assets at `../share/fractal-web` relative to the
+daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
+The assets stay separate from the daemon binary so a UI change does not require
+recompiling or relinking Rust.
+
+Missing assets or a missing configured concrete `person` degrade web availability
+without taking down the daemon's API listeners. `fractal doctor` reports the web
+finding and the configuration or installation to repair. An occupied listener port
+is still a startup error; use another loopback port or `--web-listen off`.
+
+Run `fractal web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
+the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
+to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
+expiry or daemon restart. The launch token is not printed by the daemon.
+`FRACTAL_WEB_URL` remains an explicit override. Do not publish this listener through
+Tailscale Serve: it is a same-machine browser boundary, not the tailnet publisher.
+
+Only `/v1/client/*` reaches the existing API in-process. Caller credentials/person
+headers are replaced by the configured person after cookie admission. Host must
+be exactly `127.0.0.1:PORT` or `localhost:PORT`; unsafe methods and WebSocket
+upgrades need the exact matching HTTP Origin. Static paths support SPA fallback,
+HEAD, MIME types, traversal/symlink escape refusal, and `build-identity.json`.
+Inline script/style CSP hashes mirror trusted Vite output plus React Aria's fixed
+hashes. This is not a general HTML parser or proven browser-policy parity.
+
+Current local-host limits: no runtime deployment-ID injection, br/gzip,
+conditional/range responses, per-asset caching, session revocation, token expiry,
+or live session expiry enforcement on an already open WebSocket. Static files
+are read into memory per request. Trusted Unix person-session semantics are
+reused behind the browser boundary, so audit transport still says Unix. CSP is
+not yet a shared build artifact. Cookie transport is plain loopback HTTP, and
+same-user processes can read the launch rendezvous. Asset changes require a
+daemon restart; missing assets/person do not disable the API listeners.
+
+## Opt-in tailnet publisher
+
+`apps/fractal-web/server/main.mts` remains a separate, opt-in publisher for one
+person; the daemon does not start it. The example uses loopback port `7411`, separate
+from the daemon's local browser port `7410`. `tailscale serve` publishes this
+publisher over HTTPS on the tailnet. The server injects one paired
 bearer into every admitted request, so admission is the whole authorization. With a full-control
 pairing, any script running in the app holds that person's full st authority. A request must
 carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for tailnet users. Any
@@ -112,14 +153,17 @@ user is already trusted with that person's st.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
-WF_PORT=7410 \
-WF_PUBLIC_ORIGIN=https://atlas.example.ts.net:8443 \
-WF_TAILNET_LOGINS=river@example.com \
+WF_PORT=7411 \
+WF_PUBLIC_ORIGIN="$TAILNET_HTTPS_ORIGIN" \
+WF_TAILNET_LOGINS=robin@example.com \
 WF_ST_GATEWAY=$XDG_RUNTIME_DIR/st3-client.sock \
 WF_ST_AUTHORIZATION_FILE=/path/to/paired-bearer \
   pnpm --dir apps/fractal-web start
-tailscale serve --bg --https=8443 http://127.0.0.1:7410
+tailscale serve --bg --https=8443 http://127.0.0.1:7411
 ```
+
+Set `TAILNET_HTTPS_ORIGIN` to the exact HTTPS origin published by Serve, including
+its port when non-default.
 
 The settings:
 
@@ -128,6 +172,7 @@ The settings:
   The host refuses to start unless the file belongs to its user and nobody else can read it.
 - `WF_DIST` defaults to `dist/web`.
 - `WF_HOST` must be a loopback address.
+- `WF_PORT` is required; use `7411` to keep it separate from the daemon's local browser port.
 - `WF_DEPLOYMENT_ID` defaults to the published host.
 
 Before relying on a published endpoint, prove that `tailscale serve` replaces a forged login. A request

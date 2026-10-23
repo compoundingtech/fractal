@@ -403,6 +403,49 @@ class EndToEnd(unittest.TestCase):
         self.assertRegex(fields['policy_sha256'], r'^[0-9a-f]{16}$')
         self.assertRegex(fields['keys_sha256'], r'^[0-9a-f]{16}$')
 
+    LANES = {'version': 1, 'lanes': {'linux-gate': {'argv': ['make', 'test'], 'definition_paths': ['scripts/lane.sh', 'scripts/lane.json']}}}
+
+    def lane_bound(self, head_files=None):
+        """A pull request whose base admits a host note held to the lane (by_level lane: true), after main changed a lane script."""
+        self.host = self.f.key('host', 'host/box')
+        policy = skip_policy(trust_levels=['fleet', 'host'], kinds={
+            'observed': {'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
+                         'runner_prefix': 'github:{repository}/'},
+            'wrapper': {'command': ['make', 'test'], 'trust_levels': ['host'],
+                        'by_level': {'host': {'command': ['make', 'test'], 'events': ['pull_request'], 'lane': True}}}})
+        return self.pull_request(policy=policy, base_files={'scripts/lane.sh': 'run the tests\n', 'scripts/lane.json': '{}\n',
+                                                                   '.st/required-lanes.json': json.dumps(self.LANES)},
+                                 main_files={'scripts/lane.sh': 'run the tests, and more, on main\n'}, head_files=head_files)
+
+    def lane_digest(self, s, at):
+        rules = fixtures.evidence_verify.lane_rules(json.dumps(self.LANES), 'linux-gate')
+        return fixtures.evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', at + '^{tree}'), s['head_tree'], rules)
+
+    def host_note(self, s, digest):
+        return self.note(s['head'], s['head_tree'], key=self.host, signer='host/box', runner='wrapper', command=('make', 'test'),
+                         inputs={'lane_definition_sha256': digest}, seconds=1)
+
+    def test_a_head_that_only_lags_a_lane_change_on_main_skips_on_a_note_for_its_branch_points_definition(self):
+        s = self.lane_bound()
+        self.assertEqual(self.lane_digest(s, s['tip'])['changed'], ['scripts/lane.sh'])  # against main's tip it reads as a lane edit
+        record = self.host_note(s, self.lane_digest(s, s['base'])['sha256'])
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s, BASE_SHA=s['tip']))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['outcome'], outputs['record']), ('skip', 'head', 'satisfied', record))
+
+    def test_a_note_for_main_tips_definition_does_not_cover_a_head_that_lags_it(self):
+        s = self.lane_bound()
+        self.host_note(s, self.lane_digest(s, s['tip'])['sha256'])
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, BASE_SHA=s['tip']))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['outcome']), ('run', 'head', 'rejected'), fields)
+        self.assertIn('wrong_definition', fields['reason'])
+
+    def test_a_head_that_edits_its_own_lane_still_runs(self):
+        s = self.lane_bound(head_files={'scripts/lane.json': '{"fewer": true}\n'})
+        self.host_note(s, self.lane_digest(s, s['base'])['sha256'])
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, BASE_SHA=s['tip']))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['outcome']), ('run', 'head', 'rejected'), fields)
+        self.assertIn('definition_changed', fields['reason'])
+
     def test_a_head_tree_is_used_only_up_to_the_staleness_bound(self):
         bound = gate.HEAD_TREE_MAX_BEHIND
         for commits, expected in ((bound, 'head'), (bound + 1, 'merge')):
@@ -832,7 +875,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
-        enforced = ('typescript-client', 'fractal-web')
+        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'mail-redelivery-canaries', 'isolation-vm', 'genie-freshness')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))

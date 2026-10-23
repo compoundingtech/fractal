@@ -1,7 +1,7 @@
 # Disposable scratch scopes for agent preflight
 
-Status: proposed design for [#832](https://github.com/compoundingtech/smalltalk/issues/832)
-and [#841](https://github.com/compoundingtech/smalltalk/issues/841). This note grants no
+Status: proposed design for [#832](https://github.com/compoundingtech/fractal/issues/832)
+and [#841](https://github.com/compoundingtech/fractal/issues/841). This note grants no
 authority and implements no command. Nathan's 2026-10-14 disposition cancels Slice 0
 and the scratch-pair proof on our machines. Johannes's agent runs that replication proof
 on Johannes's machines; requests for needed st changes go to #832. No Docker or container
@@ -195,7 +195,7 @@ is not evidence that hostile code cannot access production credentials.
 
 ## Relation to delegated grants
 
-[#882](https://github.com/compoundingtech/smalltalk/issues/882) describes scoped, expiring,
+[#882](https://github.com/compoundingtech/fractal/issues/882) describes scoped, expiring,
 person-issued grants with the agent remaining the actor. Its original proposal explicitly
 does not solve fresh scratch bootstrap; later comments place grants in the coherent principals
 system and retain free mode meanwhile. Do not revive its earlier permission checks or build
@@ -326,7 +326,7 @@ first-run dates are void. Completed source and security reviews remain historica
 not execution authority or evidence of replication, isolation or cleanup.
 
 Johannes's agent performs the replication proof on Johannes's machines. Factory watches
-[#832](https://github.com/compoundingtech/smalltalk/issues/832) for requests for needed st
+[#832](https://github.com/compoundingtech/fractal/issues/832) for requests for needed st
 changes. Our machines run our work; a machine request from Johannes's side stays on his
 machines unless Nathan explicitly directs otherwise.
 
