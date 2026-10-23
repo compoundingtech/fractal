@@ -1360,6 +1360,13 @@ run with `--push` then starts that unit without waiting (`systemctl --user start
 2-minute pull. The pull itself is the unit's, with the log key's grant; st-test never signs the log. Asking is best effort and never
 changes the result.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
+**The host's build cap governs the heavy checks.** Each heavy check (`linux-gate`, `mail-redelivery-canaries`) runs under ONE heavy-slot
+ticket for the whole check, taken through the cargo admission shim (`~/.local/bin/cargo --stage-slot st-test-CHECK -- ...`), inside a
+`builds.slice` scope (`systemd-run --user --scope --slice=builds.slice`). Heavy runs on a host therefore queue first in, first out behind its
+heavy slots, and everything a check starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own cargo,
+the dev shell's sccache client). Only what starts `evidence-wrap` changes; the command it records and signs does not. The shim stops a stage
+after `CARGO_STAGE_MAX_SECONDS` (default 2400 s). A host without the shim or a user systemd bus runs the check as before and says so on stderr;
+`ST_EVIDENCE_GOVERN=off` does the same.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
