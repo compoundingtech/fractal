@@ -325,6 +325,10 @@ fn older_than_member(client: &str, member: &str) -> bool {
 // ------------------------------------------------------------------ attention
 
 fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
+    let question_agents: std::collections::BTreeSet<_> = model.agents()
+        .filter(|agent| extras.agents_live && agent.ask.as_deref() == Some("question"))
+        .map(|agent| agent.header.id.as_str())
+        .collect();
     model
         .attention()
         .filter_map(|item| {
@@ -446,6 +450,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                         seat: requester_name(model, Some(&item.source_id)),
                         seat_id: item.source_id.clone(),
                         text: clean_message_text(&item.detail),
+                        question: question_agents.contains(item.source_id.as_str()),
                         answers: item
                             .action_parameters
                             .get("prompt.respond")
@@ -2096,6 +2101,25 @@ mod tests {
         let items = attention(&model, &Extras::default());
         let AttentionKind::Prompt { answers, .. } = &items[0].kind else { panic!() };
         assert!(answers.is_empty());
+    }
+
+    #[test]
+    fn tab_badge_question_identity_survives_missing_client_answer_actions() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/atlas", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-10T12:00:00Z", "name": "example/atlas",
+            "state": "running", "reachability": "local", "harness_state": "blocked",
+            "ask": "question", "runtime_ids": [], "under": [],
+        })]);
+        model.now.items.push(serde_json::from_value(prompt_card(false)).unwrap());
+        let extras = Extras { agents_live: true, ..Extras::default() };
+        let items = attention(&model, &extras);
+        let AttentionKind::Prompt { question, answers, .. } = &items[0].kind else { panic!() };
+        assert!(*question);
+        assert!(answers.is_empty());
+        assert!(items[0].actions.is_empty());
     }
 
     #[test]
