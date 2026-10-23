@@ -721,6 +721,23 @@ class StTest(unittest.TestCase):
             entries = st_test.check_path().split(':')
         self.assertEqual(entries[:2], [str(self.home / '.local/bin'), str(self.home / '.cargo/bin')])
 
+    def test_checks_build_without_incremental_state_unless_the_caller_chose(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{CARGO_INCREMENTAL:-unset}}" >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'CARGO_INCREMENTAL': '1'})[0], 0)
+        self.assertEqual(seen.read_text().split(), ['0', '1'])
+
+    def test_a_heavy_run_says_how_big_its_target_ended(self):
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'HEAVY', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, err)
+        self.assertRegex(out, r'target-0: \d+\.\d GB \(emptied before a run past 80 GB')
+        code, out, _ = self.run_st_test('--check', 'demo', '--rerun')  # not heavy now: nothing to say
+        self.assertNotIn('target-0', out)
+
     def test_the_callers_path_is_kept_when_asked(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'

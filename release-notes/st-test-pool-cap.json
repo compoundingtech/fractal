@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "scripts/st-test keeps all repositories' worktree pools together under ST_TEST_POOL_MAX_GB (default 60, 0/off for none): before a run it evicts the least recently used trees and targets whose lock is free until the pool directory fits, never one in use, and logs what it removed.",
+  "summary": "scripts/st-test keeps all repositories' worktree pools together under ST_TEST_POOL_MAX_GB (default 60, 0/off for none): before a run it evicts the least recently used trees and targets whose lock is free until the pool directory fits, never one in use, and logs what it removed. Checks build with CARGO_INCREMENTAL=0 unless the caller chose (as CI does; incremental state was ~40% of a target), the per-target limit before a run is 80 GB (one run ends near 60 GB, so 25 emptied it every time), and a heavy run prints its target's size.",
   "replay": {
     "status": "none",
     "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."

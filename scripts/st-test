@@ -88,7 +88,10 @@ BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 # the tree's lock, so nobody else uses it). ST_EVIDENCE_TARGET=PATH names one shared target for all trees instead (kept as before:
 # trimmed only while no other run uses it); ST_EVIDENCE_TARGET=off builds in the tree itself; a CARGO_TARGET_DIR the caller set is
 # left alone.
-TARGET_MAX_GB = 25.0  # operations' terms for a kept target on a shared host (as the pre-sign worker had)
+# One run (test build + clippy + fleet-compat profiles) ends near 60 GB; with incremental compilation on, a quarter to a half of that is debug/incremental
+# (hetz2, 2026-10-23: target-0 99 GB of which incremental 40, deps 55, examples 5). The check is only made before a run, so a limit below one run's
+# size would empty the target every time and nothing would ever be warm: 80 GB lets one run's output stay.
+TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 5
@@ -707,6 +710,7 @@ def main(argv):
                 if args.push:
                     wrap += ['--push', args.push]
                 environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                 if target and name in HEAVY:
                     environment['CARGO_TARGET_DIR'] = str(target)
                 if name in BASE_BOUND:
@@ -730,6 +734,9 @@ def main(argv):
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
+            if tree_target and target and target == tree_target and target.exists():
+                print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB; the pool is capped at the sum of all, '
+                      f'ST_TEST_POOL_MAX_GB)')
             if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
                 line = nudge_log()
                 if line:
