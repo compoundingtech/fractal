@@ -39,8 +39,9 @@ Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**
 cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
 down/stopped/retired, `◆` waiting on a person/login, `!` fault, `~` starting/unknown.
 `◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
-A separate `?` marks a pending question tool call, not an ordinary permission prompt.
-Mission tabs aggregate their agents' pending questions; Inbox aggregates all of them.
+A separate `?` marks a current question-tool answer prompt from live attention, not an
+ordinary permission prompt or a cached unanswered tool call. Mission tabs aggregate
+their agents' current question prompts; Inbox aggregates all of them.
 Counts drop first in a narrow strip; type, activity and question markers precede the
 truncated name. Overflow markers still reach hidden tabs.
 

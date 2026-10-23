@@ -22,6 +22,93 @@ struct TabBadge {
     needs_person: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SubjectBadge {
+    alerts: usize,
+    ask: bool,
+    activity: &'static str,
+    needs_person: bool,
+}
+
+impl SubjectBadge {
+    fn observe(&mut self, ask: bool) {
+        self.alerts += 1;
+        self.ask |= ask;
+    }
+}
+
+/// Membership indexes rebuilt when observations change, never while drawing each tab.
+#[derive(Default)]
+pub(super) struct TabStatuses {
+    loaded: bool,
+    agents: BTreeMap<String, SubjectBadge>,
+    missions: BTreeMap<String, SubjectBadge>,
+    items: BTreeMap<String, SubjectBadge>,
+    inbox: SubjectBadge,
+}
+
+impl TabStatuses {
+    pub(super) fn new(world: &World, closed: &HashSet<String>, snoozed: &HashSet<String>) -> Self {
+        let mut status = Self { loaded: world.attention.ready().is_some(), ..Self::default() };
+        let agent_missions: BTreeMap<_, _> = world.agents.items().iter()
+            .filter_map(|agent| agent.mission.as_deref().map(|mission| (agent.id.as_str(), mission)))
+            .collect();
+        for agent in world.agents.items() {
+            let activity = match agent.state {
+                AgentState::Working | AgentState::Compacting => ">",
+                AgentState::Idle => "-",
+                AgentState::Down | AgentState::Stopped | AgentState::Retired => "x",
+                AgentState::NeedsYou | AgentState::NeedsLogin => "◆",
+                AgentState::Fault => "!",
+                AgentState::Starting | AgentState::Unknown => "~",
+            };
+            status.agents.insert(agent.id.clone(), SubjectBadge {
+                activity, needs_person: activity == "◆", ..SubjectBadge::default()
+            });
+        }
+        for mission in world.missions.items() {
+            if mission.decision.is_some() {
+                status.missions.entry(mission.id.clone()).or_default().needs_person = true;
+            }
+        }
+        for item in world.attention.items().iter().filter(|item| {
+            item.is_alert() && !closed.contains(&item.id) && !snoozed.contains(&item.id)
+        }) {
+            // An open answer prompt is current attention authority. Cached unanswered tool
+            // calls alone cannot establish that a person is still being asked.
+            let question_seat = match (&world.link, &item.kind) {
+                (Link::Live, AttentionKind::Prompt { seat_id, answers, .. })
+                    if answers.iter().any(|answer| answer == "answer") => Some(seat_id.as_str()),
+                _ => None,
+            };
+            let ask = question_seat.is_some();
+            status.inbox.observe(ask);
+            status.items.entry(item.id.clone()).or_default().observe(ask);
+            if item.conversations.is_empty() {
+                if let Some(agent) = &item.agent {
+                    status.agents.entry(agent.clone()).or_default().observe(ask);
+                }
+            } else {
+                for (index, agent) in item.conversations.iter().enumerate() {
+                    if !item.conversations[..index].contains(agent) {
+                        status.agents.entry(agent.clone()).or_default().observe(ask);
+                    }
+                }
+            }
+            if let Some(mission) = &item.mission {
+                status.missions.entry(mission.clone()).or_default().observe(ask);
+            }
+            if let Some(seat) = question_seat {
+                status.agents.entry(seat.to_owned()).or_default().ask = true;
+                if let Some(mission) = agent_missions.get(seat) {
+                    status.missions.entry((*mission).to_owned()).or_default().ask = true;
+                }
+            }
+        }
+        status
+    }
+}
+
 impl TabBadge {
     fn width(self, title: &str) -> usize {
         let count = match self.alerts {
@@ -2344,10 +2431,13 @@ impl Ui {
             (title, self.tab_badge(tab, pane.as_ref()))
         }).collect();
         let available = area.width.saturating_sub(x - area.x);
-        let label_width = usize::from(available).min(28);
-        // Lose numeric detail before type/activity/question identity or a whole tab.
-        let counts = tabs.iter().map(|(title, badge)| badge.width(title).min(label_width) + 1)
+        let counts = tabs.iter().map(|(title, badge)| badge.width(title).min(28) + 1)
             .sum::<usize>() <= usize::from(available);
+        // Reserve both overflow markers and a tab gap before shortening any label. A selected
+        // tab must never consume the space needed to reach its hidden neighbors.
+        let marker = if tabs.len() > 1 { tabs.len().ilog10() as usize + 3 } else { 0 };
+        let label_width = if counts { usize::from(available) }
+            else { usize::from(available).saturating_sub(2 * marker + 1) }.min(28);
         let labels: Vec<_> = tabs.iter()
             .map(|(title, badge)| (badge.label(title, label_width, counts), badge.needs_person))
             .collect();
@@ -2461,67 +2551,27 @@ impl Ui {
             TabKind::Inbox => "I",
             TabKind::Other => return TabBadge::default(),
         };
-        let agent = match pane {
-            Some(Pane::Agent(Some(id)) | Pane::Terminal(id)) => Some(id.as_str()),
+        let statuses = &self.tab_statuses;
+        let subject = match pane {
+            Some(Pane::Agent(Some(id)) | Pane::Terminal(id)) => statuses.agents.get(id),
+            Some(Pane::Mission(Some(id)) | Pane::Declaration(Some(id))) => statuses.missions.get(id),
+            Some(Pane::Home(Some(id))) => statuses.items.get(id),
+            Some(Pane::List(0)) => Some(&statuses.inbox),
             _ => None,
-        };
-        let mission = match pane {
-            Some(Pane::Mission(Some(id)) | Pane::Declaration(Some(id))) => Some(id.as_str()),
-            _ => None,
-        };
-        let includes = |item: &Attention| match pane {
-            Some(Pane::List(0)) => true,
-            Some(Pane::Home(id)) => id.as_deref() == Some(item.id.as_str()),
-            _ => agent.is_some_and(|id| item.is_in(id))
-                || mission.is_some_and(|id| item.mission.as_deref() == Some(id)),
-        };
-        let alerts = self.world.attention.ready().map(|items| {
-            items.iter().filter(|item| item.is_alert() && includes(item)).count()
-        });
-        let ask = self.world.pending_calls.iter().any(|(id, calls)| {
-            let in_scope = match pane {
-                Some(Pane::List(0)) => true,
-                _ => agent == Some(id.as_str())
-                    || mission.is_some_and(|mission| self.world.agents.items().iter()
-                        .any(|a| a.id == *id && a.mission.as_deref() == Some(mission)))
-                    || self.world.attention.items().iter()
-                        .any(|item| includes(item) && item.is_in(id)),
-            };
-            in_scope && calls.iter().any(|call| {
-                matches!(call.tool.as_str(), "AskUserQuestion" | "request_user_input")
-            })
-        });
-        let activity = agent.and_then(|id| self.world.agents.items().iter().find(|a| a.id == id))
-            .map_or(if tab.kind() == TabKind::Agent { "~" } else { "" }, |agent| match agent.state {
-                AgentState::Working | AgentState::Compacting => ">",
-                AgentState::Idle => "-",
-                AgentState::Down | AgentState::Stopped | AgentState::Retired => "x",
-                AgentState::NeedsYou | AgentState::NeedsLogin => "◆",
-                AgentState::Fault => "!",
-                AgentState::Starting | AgentState::Unknown => "~",
-            });
+        }.copied().unwrap_or_default();
         TabBadge {
-            kind, activity, alerts, ask,
-            needs_person: ask || alerts.is_some_and(|count| count > 0)
-                || pane.is_some_and(|pane| self.pane_needs_person(pane)),
+            kind,
+            activity: if tab.kind() == TabKind::Agent && subject.activity.is_empty() { "~" } else { subject.activity },
+            alerts: statuses.loaded.then_some(subject.alerts),
+            ask: subject.ask,
+            needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
         }
     }
 
-    fn pane_needs_person(&self, pane: &Pane) -> bool {
-        match pane {
-            Pane::Agent(Some(id)) => self
-                .world
-                .agents
-                .items()
-                .iter()
-                .any(|agent| {
-                    &agent.id == id
-                        && matches!(agent.state, AgentState::NeedsYou | AgentState::NeedsLogin)
-                }),
-            Pane::Mission(Some(id)) => self.mission_decision(id).is_some(),
-            _ => false,
-        }
+    pub(super) fn refresh_tab_statuses(&mut self) {
+        self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
     }
+
 
     /// Where Enter will open the choice, said on the palette's edge.
     fn palette_target(&self, enter: Open) -> String {
@@ -4526,6 +4576,7 @@ mod tests {
 
     fn tab_badge_world() -> Ui {
         let mut ui = glass();
+        ui.world.link = Link::Live;
         let template = ui.world.agents.items()[0].clone();
         let mut agents = Vec::new();
         for (id, state) in [("agent/a", AgentState::Working), ("agent/b", AgentState::Idle), ("agent/c", AgentState::Stopped)] {
@@ -4541,6 +4592,11 @@ mod tests {
         alert.agent = Some("agent/a".into());
         alert.conversations = vec!["agent/a".into()];
         alert.mission = Some("mission/m".into());
+        alert.kind = AttentionKind::Prompt {
+            seat: "Atlas".into(), seat_id: "agent/a".into(), text: "Choose".into(),
+            answers: vec!["answer".into()], episode: "episode/question".into(),
+            call: Some(Some("call/question".into())),
+        };
         let mut second = alert.clone();
         second.id = "attention/b".into();
         let mut update = alert.clone();
@@ -4558,6 +4614,7 @@ mod tests {
             ].into_iter().map(|(pane, title)| Tab { pane: pane.into(), title: Some(title.into()) }).collect(),
             current: 0,
         });
+        ui.refresh_tab_statuses();
         ui
     }
 
@@ -4580,16 +4637,97 @@ mod tests {
     #[test]
     fn tab_badge_live_updates_clear_questions_and_preserve_unknown_counts() {
         let mut ui = tab_badge_world();
-        ui.world.pending_calls.clear();
-        ui.world.attention = Load::Ready(Vec::new());
+        let mut next = ui.world.clone();
+        next.pending_calls.clear();
+        next.attention = Load::Ready(Vec::new());
+        ui.set_world(next);
         let tab = Tab::pane("agent:agent/a");
         let pane = Pane::parse(&tab.pane);
         let badge = ui.tab_badge(&tab, pane.as_ref());
         assert_eq!(badge.alerts, Some(0));
         assert!(!badge.ask);
         assert_eq!(badge.label("Atlas", 28, true), " A> Atlas ");
-        ui.world.attention = Load::Loading;
+        let mut next = ui.world.clone();
+        next.attention = Load::Loading;
+        ui.set_world(next);
         assert_eq!(ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true), " A> ◆? Atlas ");
+    }
+
+    #[test]
+    fn tab_badge_excludes_retained_closed_cards_after_set_world() {
+        let mut ui = tab_badge_world();
+        ui.world.link = Link::Live;
+        let mut next = ui.world.clone();
+        next.attention = Load::Ready(Vec::new());
+        ui.set_world(next);
+        assert!(ui.closed.contains("attention/a"));
+        assert!(ui.world.attention.items().iter().any(|item| item.id == "attention/a"));
+        for key in ["agent:agent/a", "mission:mission/m", "list:home", "home:attention/a"] {
+            let tab = Tab::pane(key);
+            assert_eq!(ui.tab_badge(&tab, Pane::parse(key).as_ref()).alerts, Some(0), "{key}");
+        }
+    }
+
+    #[test]
+    fn tab_badge_clears_cached_questions_when_answered_after_switching_tabs() {
+        let mut ui = tab_badge_world();
+        ui.world.link = Link::Live;
+        ui.show_tab(1);
+        let mut next = ui.world.clone();
+        next.attention = Load::Ready(Vec::new());
+        // Its unsubscribed timeline remains cached and has not received the answer.
+        assert!(!next.pending_calls["agent/a"].is_empty());
+        ui.set_world(next);
+        for key in ["agent:agent/a", "mission:mission/m", "list:home"] {
+            let tab = Tab::pane(key);
+            assert!(!ui.tab_badge(&tab, Pane::parse(key).as_ref()).ask, "{key}");
+        }
+    }
+
+    #[test]
+    fn tab_badge_does_not_claim_cached_offline_attention_is_a_live_question() {
+        let mut ui = tab_badge_world();
+        let mut next = ui.world.clone();
+        next.link = Link::Offline("disconnected".into());
+        ui.set_world(next);
+        let tab = Tab::pane("list:home");
+        assert!(!ui.tab_badge(&tab, Some(&Pane::List(0))).ask);
+    }
+
+    #[test]
+    fn tab_badge_small_strips_keep_both_overflow_targets_inside_the_strip() {
+        let mut ui = tab_badge_world();
+        for current in [0, 2, 4] {
+            ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
+            for width in [12, 14, 18] {
+                ui.frame.borrow_mut().hits.clear();
+                let shown = tab_badge_strip(&ui, width);
+                assert!(!shown.contains("◆2"), "{width}: {shown}");
+                if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
+                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
+                for (rect, hit) in &ui.frame.borrow().hits {
+                    if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
+                        assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_uses_update_indexes_instead_of_scanning_world_on_draw() {
+        let mut ui = tab_badge_world();
+        let tab = Tab::pane("agent:agent/a");
+        let pane = Pane::parse(&tab.pane);
+        let before = ui.tab_badge(&tab, pane.as_ref());
+        if let Load::Ready(agents) = &mut ui.world.agents {
+            agents[0].state = AgentState::Stopped;
+        }
+        for _ in 0..100 {
+            assert_eq!(ui.tab_badge(&tab, pane.as_ref()), before);
+        }
+        ui.set_world(ui.world.clone());
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).activity, "x");
     }
 
     /// The focused group, the tab it shows (Home is group 0's 0), and every group's pane keys.

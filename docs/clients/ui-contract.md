@@ -147,10 +147,12 @@ reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
 `◆` needs person/login, `!` fault, `~` starting/unknown). `◆N` is the number of
 open alerts in that subject's attention window, excluding informational updates and
 recently closed items; zero is omitted, and an unavailable window shows `◆?`.
-A separate `?` means an active question tool call is pending on the person. Mission
-tabs include pending questions of agents assigned to that mission; Inbox includes
-all pending questions. Counts disappear before type/activity/question identity when
-space is tight. This is live chrome, not new persisted or protocol state.
+A separate `?` means live attention reports an open question-tool answer prompt.
+Cached conversation calls alone never establish that a question is still pending.
+Mission tabs include current question prompts of agents assigned to that mission;
+Inbox includes all current question prompts. Counts disappear before
+type/activity/question identity when space is tight. Subject membership indexes are
+rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
 
 
 ### Now: what needs you
