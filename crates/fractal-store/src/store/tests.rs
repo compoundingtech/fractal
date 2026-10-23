@@ -51,7 +51,7 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
     let path = directory.path().join("state.sqlite3");
     let store = Store::open(&path, "node").unwrap();
     let evidence = legacy_repair_fixture(&store);
-    let plan = store.operational_repair_plan_with_legacy_starts(&[evidence.clone()]).unwrap();
+    let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
     assert_eq!(plan.items.len(), 1);
     assert_eq!(plan.items[0].class, "revoked-legacy-runtime-start");
     assert_eq!(plan.items[0].details["native_evidence"], evidence);
@@ -74,12 +74,12 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
     }
     let wrong_token = format!("orpv0:{}", "0".repeat(64));
     assert_eq!(
-        store.apply_operational_repair_with_legacy_starts(&wrong_token, &[evidence.clone()])
+        store.apply_operational_repair_with_legacy_starts(&wrong_token, std::slice::from_ref(&evidence))
             .unwrap_err().code,
         "stale-repair-plan",
     );
     let result = store.apply_operational_repair_with_legacy_starts(
-        &plan.token, &[evidence.clone()],
+        &plan.token, std::slice::from_ref(&evidence),
     ).unwrap();
     assert_eq!(result.applied, 1);
     assert_eq!(result.affected_subjects, vec!["agent/example-legacy"]);
@@ -169,7 +169,7 @@ fn legacy_runtime_repair_token_binds_every_local_operation_field() {
     ] {
         let store = Store::open_memory("node").unwrap();
         let evidence = legacy_repair_fixture(&store);
-        let plan = store.operational_repair_plan_with_legacy_starts(&[evidence.clone()]).unwrap();
+        let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
         store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb1926b4fb61f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ update, []).unwrap();
         assert_eq!(store.apply_operational_repair_with_legacy_starts(
             &plan.token, &[evidence],
