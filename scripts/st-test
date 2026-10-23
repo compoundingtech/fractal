@@ -372,6 +372,14 @@ RUST_TEST_KEYS = 'scripts/rust-test-keys'
 RUST_TEST_INPUTS = '.st/rust-test-inputs.json'
 
 
+def only_crates(keys, names):
+    """(keys narrowed to `names`, or None and why a name is not a workspace crate of this tree)."""
+    unknown = [name for name in names if name not in keys]
+    if unknown:
+        return None, f'not a workspace crate of this tree: {", ".join(unknown)}'
+    return ({name: keys[name] for name in names} if names else keys), None
+
+
 def judged_by_policy(base):
     """Whether the accepted base's skip policy names rust-tests; until it does (docs/per-crate-test-signing.md, step 3) a note counts by its
     signature, crate and key alone, which is all this machine's own skip decision needs."""
@@ -430,6 +438,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     """The `rust-tests` check: one nextest run of the crates that have no passing note for their key, on the workspace build CI makes,
     then one signature per crate over that crate's part of the run. Returns the summary rows."""
     keys, error = crate_keys(args.base, directory, tree, scratch)
+    if not error:
+        keys, error = only_crates(keys, args.crate)
     if error:
         return [('rust-tests', 'NOT RUN', 0, f'cannot compute the per-crate keys: {error}')], True
     fetch_crate_notes(args.push or 'origin', keys)
@@ -497,6 +507,7 @@ def main(argv):
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     parser.add_argument('--push', metavar='REMOTE', help='push the signed notes here after they verify')
     parser.add_argument('--repository', metavar='OWNER/NAME', help='default: from the remote\'s GitHub URL; without it the policy is not applied')
+    parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
     parser.add_argument('--attempt', default='1')
     parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
@@ -536,6 +547,8 @@ def main(argv):
                     rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})'))
                 elif name == RUST_TESTS:
                     keys, error = crate_keys(args.base, Path('.'), tree, scratch)
+                    if not error:
+                        keys, error = only_crates(keys, args.crate)
                     if error:
                         rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}'))
                     else:

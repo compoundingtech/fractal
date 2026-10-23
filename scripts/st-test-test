@@ -727,6 +727,15 @@ class PerCrate(StTest):
         self.assertEqual(self.crate_records(), [])
         self.assertIn('no crate was signed', out)
 
+    def test_crate_narrows_the_run_to_the_named_crates_and_refuses_a_name_that_is_not_one(self):
+        code, out, err = self.run_crates('--crate', 'base')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base'])
+        self.assertEqual(self.crate_records(), [('base', 0)])
+        code, out, err = self.run_crates('--crate', 'nope')
+        self.assertEqual(code, 1, out + err)
+        self.assertIn('not a workspace crate of this tree: nope', out)
+
     def test_status_names_the_crates_to_run(self):
         code, out, err = self.run_st_test('--status', '--check', 'rust-tests')
         self.assertEqual(code, 3, out + err)
