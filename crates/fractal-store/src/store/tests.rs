@@ -28,6 +28,7 @@ use proptest::prelude::*;
 
 fn legacy_repair_fixture(store: &Store) -> Value {
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-haf973508711e owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
          VALUES('legacy-op','agent/example-legacy','worker-owner',?1,'stop-request',1,?2,1,0,1,1)",
         params![
@@ -127,7 +128,7 @@ fn legacy_runtime_repair_rejects_ineligible_local_rows_and_evidence() {
             value => rusqlite::types::Value::Text(value.to_string()),
         };
         store.connection.write().execute(
-            &format!("UPDATE local_runtime_starts SET {column}=?1 WHERE id='legacy-op'"),
+            &format!(/* sqlite-large-value: allow-for-now lv-h936ac0b978c0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET {column}=?1 WHERE id='legacy-op'"),
             [sql_value],
         ).unwrap();
         assert!(store.operational_repair_plan_with_legacy_starts(&[evidence]).unwrap().items.is_empty(),
@@ -148,17 +149,23 @@ fn legacy_runtime_repair_rejects_ineligible_local_rows_and_evidence() {
 #[test]
 fn legacy_runtime_repair_token_binds_every_local_operation_field() {
     for update in [
+        /* sqlite-large-value: allow-for-now lv-hf155f0a6aecc owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET revoked_by='another-stop'",
+        /* sqlite-large-value: allow-for-now lv-hf8a0350b3acd owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET result='{\"error\":\"changed\"}'",
+        /* sqlite-large-value: allow-for-now lv-hc656b9055239 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET owner='another-owner'",
+        /* sqlite-large-value: allow-for-now lv-hb359d984f1b4 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET receipted=0",
+        /* sqlite-large-value: allow-for-now lv-h422c075ced29 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET dispatched=0",
+        /* sqlite-large-value: allow-for-now lv-hff01ab86b211 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET body=json_set(body,'$.desired_token','changed')",
     ] {
         let store = Store::open_memory("node").unwrap();
         let evidence = legacy_repair_fixture(&store);
         let plan = store.operational_repair_plan_with_legacy_starts(&[evidence.clone()]).unwrap();
-        store.connection.write().execute(update, []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb1926b4fb61f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ update, []).unwrap();
         assert_eq!(store.apply_operational_repair_with_legacy_starts(
             &plan.token, &[evidence],
         ).unwrap_err().code, "stale-repair-plan");
@@ -170,6 +177,7 @@ fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
     let store = Store::open_memory("node").unwrap();
     let selected = legacy_repair_fixture(&store);
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hfe21be49c4b0 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO local_runtime_starts
          SELECT 'unselected-op','agent/example-unselected',owner,
            json_set(body,'$.member.runtime_id','unselected-runtime'),
@@ -206,6 +214,7 @@ fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
             .unwrap_err().code, "stale-repair-plan");
     }
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h316e34fd2d7a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET result='{\"error\":\"unselected changed\"}' WHERE id='unselected-op'",
         [],
     ).unwrap();
@@ -236,6 +245,7 @@ fn filtered_legacy_runtime_repair_refuses_changed_selected_set_and_class() {
         &evidence, &subjects, &["revoked-legacy-runtime-start".into()],
     ).unwrap();
     store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h1dbcb8c5613a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET revoked_by='changed-stop' WHERE id='legacy-op'", [],
     ).unwrap();
     assert_eq!(store.apply_operational_repair_with_legacy_starts(&selected.token, &evidence)

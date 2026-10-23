@@ -123,7 +123,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

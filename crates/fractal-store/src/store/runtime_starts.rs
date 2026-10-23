@@ -234,7 +234,7 @@ pub fn closed_runtime_start_result(
 }
 pub fn release_evidence(tx: &Transaction<'_>, operation: &str) -> rusqlite::Result<()> {
     tx.execute(
-        /* sqlite-large-value: allow-for-now lv-h22e06cd45265 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_runtime_start_evidence WHERE operation_id=?1 AND EXISTS (
+        /* sqlite-large-value: allow-for-now lv-h6440938fe6f6 owner=fractal_store::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_runtime_start_evidence WHERE operation_id=?1 AND EXISTS (
         SELECT 1 FROM local_runtime_starts WHERE id=?1 AND finished=1 AND applied=1
           AND (revoked_by IS NULL OR cleanup_verified=1)
           AND (json_extract(result,'$.error') IS NULL OR cleanup_verified=1))",
@@ -271,7 +271,7 @@ pub fn retain_runtime_start_producer_closed_tx(
         )?;
     }
     tx.execute(
-        "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+        /* sqlite-large-value: allow-for-now lv-hf567cc96b71e owner=fractal_store::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
         params![id, serde_json::to_string(&result)?],
     )?;
     release_evidence(tx, id)?;
