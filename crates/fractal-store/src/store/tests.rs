@@ -31,9 +31,12 @@ fn legacy_repair_fixture(store: &Store) -> Value {
         "INSERT INTO local_runtime_starts(id,subject,owner,body,revoked_by,finished,result,applied,cleanup_verified,dispatched,receipted)
          VALUES('legacy-op','agent/example-legacy','worker-owner',?1,'stop-request',1,?2,1,0,1,1)",
         params![
-            json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":true},
+            json!({"member":{"host":"node","runtime_id":"legacy-runtime","terminal":true,
+                    "environment":{"PRIVATE_TOKEN":"private-launch-secret"}},
+                "launch_member":{"environment":{"PRIVATE_TOKEN":"private-launch-secret"}},
                 "desired_token":"legacy-desired","selected_token":"legacy-selected"}).to_string(),
-            json!({"error":"legacy start returned without closure proof"}).to_string(),
+            json!({"error":"legacy start returned without closure proof",
+                "private_result":"private-result-secret"}).to_string(),
         ],
     ).unwrap();
     // Internal-only fixture: the native layer owns the physical-fact schema.
@@ -52,6 +55,13 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
     assert_eq!(plan.items[0].class, "revoked-legacy-runtime-start");
     assert_eq!(plan.items[0].details["native_evidence"], evidence);
     assert_eq!(plan.items[0].details["operation"]["revoked_by"], "stop-request");
+    assert!(plan.items[0].details["operation_fence"].is_string());
+    assert!(plan.items[0].details["operation"].get("body").is_none());
+    assert!(plan.items[0].details["operation"].get("result").is_none());
+    let public_plan = serde_json::to_string(&plan).unwrap();
+    for private in ["environment", "private-launch-secret", "private-result-secret"] {
+        assert!(!public_plan.contains(private), "repair plan exposed {private}");
+    }
 
     let mut changed = evidence.clone();
     changed["native_fixture"]["capture"] = json!("second");

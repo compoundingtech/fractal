@@ -39,12 +39,14 @@ pub struct LegacyStartClosureProof {
 impl PtyRuntime {
     fn legacy_operation_owner_absent(&self, id: &str, operation: &str) -> Result<bool> {
         let digest = Sha256::digest(operation.as_bytes());
-        let owner = self.spawn_state_path(id, "producers")
-            .join(format!("{digest:x}")).join("owner.json");
-        match std::fs::symlink_metadata(&owner) {
+        // Even an interrupted native prepare (without owner.json yet) is not
+        // legacy evidence. Refuse every operation-specific producer entry.
+        let directory = self.spawn_state_path(id, "producers")
+            .join(format!("{digest:x}"));
+        match std::fs::symlink_metadata(&directory) {
             Ok(_) => Ok(false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(error).context("inspect operation ownership record"),
+            Err(error) => Err(error).context("inspect operation producer directory"),
         }
     }
 }
@@ -369,6 +371,9 @@ mod tests {
         let digest = Sha256::digest(b"operation");
         let directory = runtime.spawn_state_path("work", "producers").join(format!("{digest:x}"));
         std::fs::create_dir_all(&directory).unwrap();
+        assert!(!runtime.legacy_operation_owner_absent("work", "operation").unwrap());
+        std::fs::write(directory.join("owner.next"), "{}").unwrap();
+        assert!(!runtime.legacy_operation_owner_absent("work", "operation").unwrap());
         std::fs::write(directory.join("owner.json"), "{}").unwrap();
         assert!(!runtime.legacy_operation_owner_absent("work", "operation").unwrap());
         assert!(runtime.legacy_operation_owner_absent("other-work", "operation").unwrap());

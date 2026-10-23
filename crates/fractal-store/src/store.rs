@@ -12458,7 +12458,20 @@ fn operational_repair_plan_with_legacy_starts_tx(
             vec![operation.subject.clone()],
             "the owner daemon proved the revoked legacy terminal producer physically closed",
             BTreeMap::from([
-                ("operation".into(), serde_json::to_value(&operation)?),
+                // Bind private admission/result data without returning launch
+                // environments or other secrets in the public repair plan.
+                ("operation_fence".into(), Value::from(canonical_hash(&operation)?)),
+                ("operation".into(), json!({
+                    "id": operation.id,
+                    "subject": operation.subject,
+                    "owner": operation.owner,
+                    "revoked_by": operation.revoked_by,
+                    "finished": operation.finished,
+                    "applied": operation.applied,
+                    "cleanup_verified": operation.cleanup_verified,
+                    "dispatched": operation.dispatched,
+                    "receipted": operation.receipted,
+                })),
                 ("owner_host".into(), Value::from(origin)),
                 ("native_evidence".into(), evidence.clone()),
             ]),
