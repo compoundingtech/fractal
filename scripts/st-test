@@ -139,6 +139,17 @@ def target_commit(base):
     return text(git('rev-parse', 'HEAD'))
 
 
+def branch_point(commit, base):
+    """Where the branch left the base (the base itself when the branch holds it): the commit whose lane definition the tree is
+    held to. The CI gate judges a pull request head the same way (docs/st3/gate-evidence.md, "Which lane definition a pull request
+    is held to"): a branch that only lags main changed no lane file itself. When the lane file itself changed on main since then, the
+    base: the gate never uses such a head's tree (the lane file is one of the files that decide a skip).
+    """
+    point = text(git('merge-base', commit, base))
+    lanes = [git('rev-parse', '--verify', '-q', f'{at}:.st/required-lanes.json', check=False).stdout for at in (point, base)]
+    return point if lanes[0] == lanes[1] else base
+
+
 def size_gb(path):
     total = 0
     for root, _, files in os.walk(path):
@@ -220,7 +231,7 @@ def policy_checks(base):
 
 
 def lane_edits(verifier_path, directory, base, check, tree):
-    """The paths of `check`'s lane definition that `tree` changes relative to `base` (empty when it changes none). evidence-wrap refuses
+    """The paths of `check`'s lane definition that `tree` changes relative to `base`, the branch point (empty when it changes none). evidence-wrap refuses
     to sign such a tree; asking first lets the run say so plainly, as "not signed", instead of reporting a failed check."""
     loader = importlib.machinery.SourceFileLoader('evidence_verify_for_st_test', verifier_path)
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
@@ -296,10 +307,12 @@ def reap_stale():
     git('worktree', 'prune', check=False)
 
 
-def covered(verifier, directory, tree, check, base, repository):
+def covered(verifier, directory, tree, check, base, repository, lane_base=None):
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
     if repository:
         command += ['--policy-from', base, '--repository', repository]
+        if lane_base and b'--lane-base' in Path(verifier).read_bytes():
+            command += ['--lane-base', lane_base]
     done = subprocess.run(command, capture_output=True, text=True)
     try:
         result = json.loads(done.stdout)
@@ -385,6 +398,7 @@ def main(argv):
     if args.status:
         commit = target_commit(args.base)
         tree = text(git('rev-parse', f'{commit}^{{tree}}'))
+        lane_base = branch_point(commit, base_commit)
         with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
             verifier = Path(scratch) / 'evidence-verify'
             verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
@@ -392,11 +406,11 @@ def main(argv):
             lanes, rows = lane_names(args.base), []
             for name in checks:
                 # A tree that edits a check's lane cannot be signed here (evidence-wrap refuses it): CI runs that check.
-                edits = lane_edits(str(verifier), Path('.'), args.base, name, tree) if name in lanes else []
+                edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
                 if edits:
                     rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})'))
                 else:
-                    is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository)
+                    is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
                     rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why))
             if args.all and not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
@@ -422,6 +436,7 @@ def main(argv):
             directory, commit = target_worktree(args.base, scratch)
             lag = behind(args.base)
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
+            lane_base = branch_point(commit, base_commit)
             repository = args.repository or repository_of(remote or 'origin')
             # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
@@ -434,7 +449,7 @@ def main(argv):
                     rows.append((name, 'NOT RUN', 0, unmaterialized))
                     failed = True
                     continue
-                edits = lane_edits(tools['evidence-verify'], directory, args.base, name, tree) if name in lanes else []
+                edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in lanes else []
                 if edits:
                     rows.append((name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'))
                     unsigned = True
@@ -442,8 +457,9 @@ def main(argv):
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
                 if name in lanes:
-                    # The base defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not signed.
-                    wrap += ['--lanes-from', args.base]
+                    # The branch point defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not
+                    # signed. It is the base itself when the branch holds the base's tip.
+                    wrap += ['--lanes-from', lane_base]
                 if args.toolchain_sha256:
                     wrap += ['--toolchain-sha256', args.toolchain_sha256]
                 if args.push:
@@ -465,7 +481,7 @@ def main(argv):
                 seconds = round(time.monotonic() - started)
                 ok = code == 0
                 failed = failed or not ok
-                is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository)
+                is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
                 rows.append((name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why))
             print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             for name, result, seconds, why in rows:
