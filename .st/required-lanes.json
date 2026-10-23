@@ -54,6 +54,7 @@
         "nix/web-shell.nix",
         "package.json",
         "package.json.genie.ts",
+        "packages/fractal-sdk",
         "packages/fractal-ui",
         "pnpm-lock.yaml",
         "pnpm-source-inputs.json",

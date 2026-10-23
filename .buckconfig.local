@@ -1,4 +1,0 @@
-# BEGIN effect-utils file watcher admission
-[buck2]
-  file_watcher = watchman
-# END effect-utils file watcher admission
