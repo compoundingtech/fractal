@@ -58,6 +58,10 @@ pub struct Config {
     /// default, so a config this build writes still loads in a build without checkpoints.
     #[serde(skip_serializing_if = "CheckpointConfig::is_default")]
     pub checkpoint: CheckpointConfig,
+    /// Whether this member trims on its own instead of by checkpoint agreement. Written only
+    /// when it differs from the default.
+    #[serde(skip_serializing_if = "TrimConfig::is_default")]
+    pub trim: TrimConfig,
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
@@ -154,6 +158,23 @@ impl Default for CheckpointConfig {
 }
 
 impl CheckpointConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// `[trim]`: `local = true` makes this member trim on its own, without checkpoint agreement. It
+/// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
+/// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
+/// other members until a person excuses this one. Off by default; nothing changes unless a
+/// member opts in.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrimConfig {
+    pub local: bool,
+}
+
+impl TrimConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -477,6 +498,7 @@ impl Default for Config {
             github: GithubConfig::default(),
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
+            trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
             codex_work_without_asking: None,
@@ -1308,6 +1330,18 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(!config.checkpoint.enabled);
         assert!(toml::to_string(&config).unwrap().contains("[checkpoint]"));
         assert!(toml::from_str::<Config>("[checkpoint]\nenabled = true\nlag = 3\n").is_err());
+    }
+
+    #[test]
+    fn local_trim_is_off_unless_chosen_and_absent_from_a_written_default_config() {
+        let config = Config::default();
+        assert!(!config.trim.local);
+        // An older build refuses unknown sections, so a default config never names it.
+        assert!(!toml::to_string(&config).unwrap().contains("[trim]"));
+        let config: Config = toml::from_str("[trim]\nlocal = true\n").unwrap();
+        assert!(config.trim.local);
+        assert!(toml::to_string(&config).unwrap().contains("[trim]"));
+        assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
     }
 
     #[test]

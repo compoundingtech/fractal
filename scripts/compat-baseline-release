@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINES = ('.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json')
@@ -33,6 +34,8 @@ HISTORICAL_V0317 = {
         'f4cec96e414fee2a780910730b019fe6bdbddc1d',
         '9cfdde671712439309bfc1b9b05689ad3b5d084de2916d7131df92ed310b3a0a'),
 }
+# Seconds to wait before asking again after an empty release listing; one try more than delays.
+EMPTY_LISTING_DELAYS = (1, 2, 4)
 
 
 class BaselineError(ValueError):
@@ -69,13 +72,22 @@ def stable_releases(rows):
 
 
 def published_releases():
-    try:
-        pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
-                               f'repos/{repository()}/releases?per_page=100'))
-    except subprocess.CalledProcessError as error:
-        raise ReleaseAPIError('release API unreachable; baseline freshness could not be determined: '
-                              + error.stderr.strip()) from error
-    return stable_releases([row for page in pages for row in page])
+    # GitHub sometimes answers the listing with no releases at all, or with an empty page. That
+    # means the listing could not be read, not that nothing was published, so ask again and
+    # never report it as "no releases".
+    for delay in (*EMPTY_LISTING_DELAYS, None):
+        try:
+            pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                                   f'repos/{repository()}/releases?per_page=100'))
+        except subprocess.CalledProcessError as error:
+            raise ReleaseAPIError('release API unreachable; baseline freshness could not be determined: '
+                                  + error.stderr.strip()) from error
+        if pages and all(pages):
+            return stable_releases([row for page in pages for row in page])
+        if delay is None:
+            raise ReleaseAPIError('release API unreachable; baseline freshness could not be determined: '
+                                  f'the release listing was empty {len(EMPTY_LISTING_DELAYS) + 1} times')
+        time.sleep(delay)
 
 
 def validate(pin, label):

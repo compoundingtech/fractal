@@ -742,3 +742,12 @@ test('message provenance retains its serving model and reads historical absence 
     assert.throws(() => decode({ ...historical, authorization_model: null }));
     assert.throws(() => decode({ ...historical, undeclared_authority: true }));
 });
+
+
+test('schedule schema tolerates future state strings and retains raw declaration fields', async () => {
+    const fs = require('node:fs'); const path = require('node:path');
+    const [{ Schema }, Rich] = await modules;
+    const wire = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/schedules-page.json'), 'utf8')).value;
+    const decoded = Rich.decodeUnknownSync(Rich.SchedulesPage, 'tolerant')(wire);
+    assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), wire);
+});

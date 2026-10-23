@@ -617,7 +617,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   `nix/fractal-web*.nix`, `nix/web-shell*`, `scripts/ci-fractal-web*`, `scripts/ci-web-shell*`,
   `scripts/ci-typescript-client*`,
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
-  and `.github/repo-settings.json*`.
+  `.github/repo-settings.json*`, and what the lane reads although no web source names it:
+  `apps/ios/package.json` (a workspace member of the frozen install), `docs/st3/client-v0/fixtures/**`
+  (an SDK unit test's fixture), `pnpm-source-inputs.json*` (published by the web shell hook) and
+  `scripts/check-public-repo` (run by the scenario privacy lane).
 - `fractal-web-execution` runs only for relevant changes after successful detection
   and `genie-freshness`, with a 25-minute timeout and no retries. It runs
   `scripts/ci-web-shell run bash scripts/ci-fractal-web`, which is
@@ -729,8 +732,10 @@ reason=…`): `fractal-web` (the lane, the detector's relevant paths) and `fract
 (the kit plays, its kit paths). The key is `evidence-verify --project` over the check's
 inputs; a skip is only a trusted signed passing record with the same key, found by
 `evidence-verify` under the base skip policy. Inputs, detector, verifier and keys come
-from the base. Until the base policy declares a web check (and something signs it with
-input keys), every web decision is `run` with `reason=no-record`. `claims PATH…` and
+from the base. A matching record skips only when the base policy turns skipping on for
+the check (`enforce: true`); under a shadow entry the line reads `decision=run reason=shadow`
+and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
+its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
 `scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
@@ -1148,11 +1153,11 @@ machine type differ by about 2x, and the 1.6 to 2.1 s replication-exchange p99s 
 all came from the slower ones.
 
 At those rates the run also sees reads refused while a published list is withdrawn: a retryable 503
-"still being prepared", or a window's resync before its first snapshot. Today the store withdraws
-every list once per chunk while it projects a replication backlog, so these come in bursts of a
-few seconds ([#3553](https://github.com/compoundingtech/fractal/issues/3553)). The report keeps
-them apart from failed requests, under `unavailable` with the seconds they spanned, and the step
-summary shows them. They fail nothing until the store fix lands and turns `AVAILABILITY_GATED` on.
+"still being prepared", or a window's resync before its first snapshot. The store keeps serving
+each list while it projects a replication backlog in chunks and refolds it once the backlog is in
+([#3553](https://github.com/compoundingtech/fractal/issues/3553)), so none is expected. The
+report keeps them apart from failed requests, under `unavailable` with the seconds they spanned,
+the step summary shows them, and any fails the run (`AVAILABILITY_GATED`).
 Generated usage history contains cumulative response rollups for long-lived standing sessions
 with stable attribution, so this scenario exercises many observations per series and period
 baselines and totals rather than an empty report or one series per observation.

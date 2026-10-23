@@ -576,6 +576,31 @@ export const PhoneFocusNoHover: StoryObj<{ scheme: Scheme }> = {
 }
 export const PhoneFocusNoHoverLight: StoryObj<{ scheme: Scheme }> = { ...PhoneFocusNoHover, name: 'Phone · native RM1 focus never opens hover UI · light', args: { scheme: 'light' } }
 
+export const ReportedDetails: Story = {
+  name: 'Live row · only reported status in Details',
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A live row with unreported status exercises the shared Details dialog; a display-only row with the same props must expose no actions.' } },
+  args: { row: base },
+  render: () => <main {...stylex.props(styles.root)}><ThemePortal><section aria-label="Live sidebar" {...stylex.props(styles.column)}>
+    <MilestoneAgentRow row={{ ...base, title: 'Session without status', status: 'unobserved', statusLabel: 'Unobserved' }} reportedStatusOnly now={storyNow} />
+    <div data-display-only-check><MilestoneAgentRow row={{ ...base, title: 'Observed subagent' }} reportedStatusOnly displayOnly now={storyNow} /></div>
+  </section></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    const passive = canvasElement.querySelector('[data-display-only-check]')!
+    await expect(passive.querySelector('button, [data-agent-menu], [aria-haspopup]')).toBeNull()
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Actions for Session without status' }))
+    await userEvent.click(await within(document.body).findByRole('menuitem', { name: 'Reported agent details' }))
+    const dialog = await within(document.body).findByRole('dialog', { name: 'Reported details for Session without status' })
+    await expect(within(dialog).getByText('Name', { exact: true })).toBeVisible()
+    await expect(within(dialog).getByText('Session without status', { exact: true })).toBeVisible()
+    await expect(within(dialog).queryByText('Status', { exact: true })).toBeNull()
+    await expect(dialog).not.toHaveTextContent('Unobserved')
+    await waitFor(() => expect(dialog).toHaveFocus())
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(within(document.body).queryByRole('dialog')).toBeNull())
+  },
+}
+
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   matrix: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
