@@ -118,6 +118,24 @@ SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
 KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
 
 
+# The directories every check's PATH is made of, in this order (those that exist), plus the one `nix` is in: cargo's build scripts record
+# PATH, so two seats whose PATHs differ (their own tools, state directories, dev shells) would rebuild nearly the whole workspace in one
+# pool tree. The perf dev shell fixes its PATH the same way. ST_EVIDENCE_PATH=keep leaves the caller's PATH alone.
+CHECK_PATH = ('~/.local/bin', '/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin', '/usr/bin', '/bin')
+
+
+def check_path():
+    entries = [os.path.expanduser(entry) for entry in CHECK_PATH]
+    nix = shutil.which('nix')
+    if nix:
+        entries.append(os.path.dirname(nix))
+    kept = []
+    for entry in entries:
+        if os.path.isdir(entry) and entry not in kept:
+            kept.append(entry)
+    return ':'.join(kept)
+
+
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
     settings), and the checks must see what CI sees: tests that read them fail or behave differently under a seat (the ci-local-gate
@@ -220,8 +238,9 @@ def governed(argv, name):
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if shutil.which('systemd-run') and runtime and Path(runtime, 'bus').exists():
-        return ['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
+    scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
+    if scope and runtime and Path(runtime, 'bus').exists():
+        return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
     print(f'st-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
     return argv
 
@@ -602,12 +621,14 @@ def main(argv):
                     wrap += ['--toolchain-sha256', args.toolchain_sha256]
                 if args.push:
                     wrap += ['--push', args.push]
-                environment = dict(os.environ, CARGO_TARGET_DIR=str(target)) if target and name in HEAVY else None
+                environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                if target and name in HEAVY:
+                    environment['CARGO_TARGET_DIR'] = str(target)
                 if name in BASE_BOUND:
                     # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
                     wrap += ['--input', f'clippy_base_sha={base_commit}']
-                    environment = dict(environment or os.environ, CLIPPY_BASE_SHA=base_commit)
+                    environment['CLIPPY_BASE_SHA'] = base_commit
                 started = time.monotonic()
                 try:
                     command = wrap + ['--'] + LOCAL[name]

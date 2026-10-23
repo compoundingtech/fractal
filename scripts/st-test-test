@@ -589,7 +589,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
         code, out, _ = self.run_st_test('--check', 'demo', '--rerun')
         self.assertEqual(code, 0)
-        self.assertEqual(len(self.statements()), 2)
+        self.assertRegex(out, r'demo +passed +\d+s')  # it ran: the same note again, or a new one
         self.assertNotIn('already signed', out)
 
     def test_a_failed_signature_is_not_already_signed(self):
@@ -641,6 +641,27 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
             self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
         self.assertEqual(len(calls), 1)
+
+    def test_the_checks_see_one_fixed_path_whatever_the_callers_is(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$PATH" >> {seen}']
+        callers = os.environ.get('PATH', '') + ':/seat-one/state/bin'
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'PATH': callers})[0], 0)
+        self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'PATH': '/seat-two/bin:' + callers})[0], 0)
+        first, second = seen.read_text().splitlines()
+        self.assertEqual(first, second)
+        self.assertNotIn('/seat-', first)
+        self.assertTrue(all(os.path.isdir(entry) for entry in first.split(':')))
+        self.assertIn('/usr/bin', first.split(':'))
+        self.assertEqual(len(set(first.split(':'))), len(first.split(':')))
+
+    def test_the_callers_path_is_kept_when_asked(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$PATH" >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'PATH': os.environ['PATH'] + ':/seat-one/bin', 'ST_EVIDENCE_PATH': 'keep'})[0], 0)
+        self.assertTrue(seen.read_text().strip().endswith('/seat-one/bin'))
 
     def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
         self.commit('b.txt', 'two')

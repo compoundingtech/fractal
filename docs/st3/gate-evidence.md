@@ -1396,6 +1396,9 @@ changes the result.
 A check the tree already has a passing signature for (the verifier's answer, the same one `st-test` asks after a run) is not run again:
 it prints `already signed` and, with `--push`, pushes that note as it is, so re-running on an unchanged tree is near instant. A failed
 record is not a signature. `--rerun` runs the check anyway. The megarepo members are fetched only once a check has to run.
+Every check runs with one fixed `PATH` (`~/.local/bin`, `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`, `/usr/bin`,
+`/bin` and the directory of `nix`, those that exist) instead of the caller's: cargo's build scripts record `PATH`, so two seats whose
+PATHs differ would otherwise rebuild nearly the whole workspace in the same pool tree. `ST_EVIDENCE_PATH=keep` leaves the caller's `PATH`.
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not). A check whose lane the tree edits
 counts as covered and reads `lane edit: CI runs it` (it cannot be signed from a checkout); with `--all`, every check of the skip policy is listed, and
 one without a local command (isolation-vm, fractal-web today) reads `CI runs it`.
