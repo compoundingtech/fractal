@@ -73,6 +73,8 @@ fn storage_fence(state: &AppState, mut fence: Fence) -> Result<Fence, ApiError> 
     Ok(fence)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod ownership_process_tests;
 
 pub async fn subscribe(
     State(state): State<AppState>,
@@ -86,7 +88,7 @@ pub async fn subscribe(
     let binding = fence.clone();
     let peer = peer.expect("authorize checked the native peer").0;
     let checked_peer = peer.clone();
-    let native = blocking_action(move || {
+    let (native, primary_wrapper) = blocking_action(move || authority::with_claude_primary(&checked_state, &binding, &checked_peer, None, || {
         if !cfg!(target_os = "linux") { return checked_state.store.check_mailbox(&binding).map(|_| false); }
         if authority::with_argv_channel(&checked_state, &binding, &checked_peer, |member, validate| {
             if binding.epoch == 0 {
@@ -102,10 +104,10 @@ pub async fn subscribe(
             checked_state.store.repair_mailbox_checked(&binding, owner, validate).map(|_| ())
         }
         }).map(|_| true)
-    }).await?;
+    })).await?;
     // Wake the predecessor immediately, even when no graph content changed.
     signal_local_change(&state);
-    Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native)))
+    Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native, primary_wrapper)))
 }
 
 pub async fn bind(
@@ -117,7 +119,7 @@ pub async fn bind(
     authorize(&request, peer.as_ref().map(|p| &p.0))?;
     let bind_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
-    let bound = blocking_action(move || {
+    let bound = blocking_action(move || authority::with_claude_primary(&bind_state, &request, &peer, None, || {
         if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
             bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
@@ -125,9 +127,9 @@ pub async fn bind(
         authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
-    }).await?;
+    })).await?;
     signal_local_change(&state);
-    Ok(Json(bound))
+    Ok(Json(bound.0))
 }
 
 // Explicit already-admitted protocol fixtures lack a physical PTY/provider lease.
@@ -168,7 +170,7 @@ pub async fn attachment(
     let store = state.store.clone();
     let checked_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
-    let attached = blocking_action(move || {
+    let attached = blocking_action(move || authority::with_claude_primary(&checked_state, &fence, &peer, None, || {
         // Classified from this daemon's own state, never from the request. A push-capable
         // binding's GET is not thereby proven to be an admission.
         crate::profile::note(if delivery_presence::push_capable(&fence) {
@@ -191,9 +193,9 @@ pub async fn attachment(
             &fence.subject,
             &fence.incarnation,
         ))
-    })
+    }))
     .await?;
-    Ok(Json(crate::mailbox::Attachment { attached }))
+    Ok(Json(crate::mailbox::Attachment { attached: attached.0 }))
 }
 
 fn authorize(fence: &Fence, peer: Option<&NativeDeliveryPeer>) -> Result<(), ApiError> {
@@ -256,7 +258,7 @@ pub async fn receipt(
     let checked_state = state.clone();
     let checked_peer = peer.expect("authorize checked the native peer").0;
     let kind = input.kind.clone();
-    let (record, appended, work_wake) = blocking_action(move || {
+    let ((record, appended, work_wake), _) = blocking_action(move || authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, |owner, validate| {
                 validate()?;
@@ -273,7 +275,7 @@ pub async fn receipt(
             .flatten()
             .is_none_or(|message| super::is_work_wake(&message.tags));
         Ok((record, appended, work_wake))
-    })
+    }))
     .await?;
     // A repeated or already-settled receipt changes nothing; only a new claim wakes readers.
     if appended {
@@ -624,7 +626,8 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
 /// Maximum gap between durable change checks, including when a notification is missed.
 const MAILBOX_RECHECK: Duration = Duration::from_secs(30);
 
-async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDeliveryPeer, native: bool) {
+async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDeliveryPeer, native: bool,
+    primary_wrapper: Option<fractal_drivers::claude_process::Process>) {
     #[cfg(feature = "test-support")]
     let mut control = crate::test_support::fixture_mailbox_transport(&state.store, &fence.subject);
     #[cfg(feature = "test-support")]
@@ -641,7 +644,9 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         timer.tick().await;
         Some(((), timer))
     });
-    let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, StreamControl::new(native.then(|| peer.clone())));
+    let mut stream_control = StreamControl::new(native.then(|| peer.clone()));
+    stream_control.primary_peer = (peer.transport == "claude-channel").then(|| (peer.clone(), primary_wrapper));
+    let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, stream_control);
     #[cfg(not(feature = "test-support"))]
     stream.await;
     #[cfg(feature = "test-support")]
@@ -683,15 +688,64 @@ fn safety_timer(fence: &Fence) -> tokio::time::Interval {
     timer
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProofDecision {
+    Valid,
+    Unavailable,
+    Refused,
+}
+struct StreamProof {
+    fence: Fence,
+    failures: u8,
+    owner: u64,
+}
+impl StreamProof {
+    fn new(fence: Fence) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            fence,
+            failures: 0,
+            owner: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+    fn observe<T, E>(&mut self, result: Result<Result<T, St3Error>, E>) -> ProofDecision {
+        match result {
+            Ok(Ok(_)) => {
+                self.failures = 0;
+                delivery_presence::clear_proof_pending(&self.fence, self.owner, true);
+                ProofDecision::Valid
+            }
+            Ok(Err(error)) if error.code == "stale-mailbox-session" => ProofDecision::Refused,
+            _ => {
+                let before = self.failures;
+                self.failures = self.failures.saturating_add(1).min(3);
+                delivery_presence::proof_pending(&self.fence, self.owner, self.failures);
+                if before == 0 || (before < 3 && self.failures == 3) {
+                    // Only two bounded diagnostics per episode: the first and the cap crossing.
+                    tracing::warn!(subject = %self.fence.subject, checks = self.failures,
+                        "Claude ownership proof unavailable; established stream retained; new effects held");
+                }
+                ProofDecision::Unavailable
+            }
+        }
+    }
+}
+impl Drop for StreamProof {
+    fn drop(&mut self) {
+        delivery_presence::clear_proof_pending(&self.fence, self.owner, false);
+    }
+}
+
 struct StreamControl {
     peer: Option<NativeDeliveryPeer>,
+    primary_peer: Option<(NativeDeliveryPeer, Option<fractal_drivers::claude_process::Process>)>,
     #[cfg(any(test, feature = "test-support"))]
     dirty_gate: Option<Arc<FixtureDirtyGate>>,
 }
 
 impl StreamControl {
     fn new(peer: Option<NativeDeliveryPeer>) -> Self {
-        Self { peer, #[cfg(any(test, feature = "test-support"))] dirty_gate: None }
+        Self { peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None }
     }
 }
 
@@ -704,6 +758,7 @@ async fn stream_with_timers_inner<F, S, H>(
     H: futures_util::Stream<Item = ()> + Send + 'static,
 {
     let peer = control.peer;
+    let primary_peer = control.primary_peer;
     let _pushed = ForgetPushed(fence.clone());
     futures_util::pin_mut!(safety, heartbeat);
     let since = client_now_ms();
@@ -726,6 +781,7 @@ async fn stream_with_timers_inner<F, S, H>(
     let mut order = MailboxOrder::new();
     let own_posts = own_post_reactor(&state, &fence);
     let mut dirty = true;
+    let mut proof = StreamProof::new(fence.clone());
     let mut pending_caller = crate::otel::MailboxFenceCaller::DirtyPass;
     let mut last: Option<(crate::store::MailboxWatermark, Snapshot)> = None;
     // Attachment push, once this title stream's driver reports `attachment_push`. The value is
@@ -743,6 +799,17 @@ async fn stream_with_timers_inner<F, S, H>(
         #[cfg(not(test))]
         let process_dirty = true;
         if dirty && process_dirty {
+            if let Some((primary, wrapper)) = primary_peer.clone() {
+                let state = state.clone();
+                let fence = fence.clone();
+                let admitted = crate::api::read_deadline::spawn_blocking(move ||
+                    authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
+                match proof.observe(admitted) {
+                    ProofDecision::Valid => {},
+                    ProofDecision::Refused => return,
+                    ProofDecision::Unavailable => { dirty = false; continue; },
+                }
+            }
             // Retain consumed replay across ordinary wakes. A new unresolved loss
             // or changed authority input requires a fresh proof of the same nonce.
             if let (Some(proof), Some(peer)) = (replay_proven.take(), peer.as_ref()) {
@@ -932,6 +999,15 @@ async fn stream_with_timers_inner<F, S, H>(
             .await;
             match evaluated {
                 Ok(Some(proof)) => {
+                    // While another stream's ownership proof for this binding is pending, a new
+                    // attachment is a new effect and is held: only a stream that already pushed
+                    // `attached: true` keeps it. The poll answers the same way. The pending
+                    // proof's clearing wakes this stream again.
+                    let held = proof.is_some()
+                        && !matches!(attachment_sent, Some((true, _)))
+                        && delivery_presence::pending_proof(&fence.subject, &fence.incarnation)
+                            .is_some();
+                    let proof = if held { None } else { proof };
                     // The proof holds through `until` inclusive, so wake just after it.
                     attachment_deadline = proof
                         .as_ref()
@@ -989,6 +1065,20 @@ async fn stream_with_timers_inner<F, S, H>(
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Text(report))) => {
+                    // A Claude primary proves its physical generation before its report is admitted.
+                    if let Some((primary, wrapper)) = primary_peer.clone()
+                        && state.store.check_mailbox(&fence).is_ok()
+                    {
+                        let state = state.clone();
+                        let fence = fence.clone();
+                        let checked = crate::api::read_deadline::spawn_blocking(move ||
+                            authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
+                        match proof.observe(checked) {
+                            ProofDecision::Valid => {},
+                            ProofDecision::Refused => return,
+                            ProofDecision::Unavailable => { dirty = false; continue; },
+                        }
+                    }
                     let authenticated = if let Some(peer) = peer.clone() {
                         let checked_state = state.clone();
                         let binding = fence.clone();
@@ -1330,6 +1420,53 @@ mod tests {
         assert!(admitted_report(&title, &report).is_none());
     }
 
+    #[test]
+    fn established_stream_unavailable_is_unknown_not_loss_and_refusal_is_distinct() {
+        let fence = Fence::new("agent/stream-proof-unit", "fixture", "delivery");
+        let mut old = StreamProof::new(fence.clone());
+        for _ in 0..4 {
+            assert_eq!(old.observe::<(), ()>(Ok(Err(St3Error::new("mailbox-authority-unavailable", "fixture")))), ProofDecision::Unavailable);
+        }
+        assert_eq!(old.failures, 3);
+        let assessment = delivery_presence::assess_current(&fence.subject, "claude", Some(&fence.incarnation));
+        assert_eq!(assessment.state, "unknown");
+        assert!(assessment.reason.unwrap().contains("suspect after three checks"));
+        let mut next = StreamProof::new(fence.clone());
+        assert_eq!(next.observe::<(), ()>(Ok(Ok(()))), ProofDecision::Valid);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
+        assert_eq!(next.observe::<(), ()>(Err(())), ProofDecision::Unavailable);
+        drop(old);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_some(), "old stream drop cannot clear the replacement's uncertainty");
+        assert_eq!(next.observe::<(), ()>(Ok(Err(St3Error::new("stale-mailbox-session", "proven mismatch")))), ProofDecision::Refused);
+        drop(next);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
+    }
+
+    #[test]
+    fn protected_claude_admission_cannot_downgrade_or_rotate_the_primary_epoch() {
+        let root=tempfile::tempdir().unwrap();
+        let state=crate::api::tests_shared::state(root.path());
+        crate::store::mailbox_tests::ready(&state.store,"current");
+        let subject="agent/eval.worker";
+        let current=state.store.bind_mailbox(&Fence::new(subject,"current","delivery")).unwrap();
+        let candidate=Fence::new(subject,"current","delivery");
+        let peer=NativeDeliveryPeer { agent:subject.into(),transport:"claude-channel",
+            pid:std::process::id(),archives_inbox:false };
+        let physical=fractal_drivers::claude_process::process(std::process::id()).unwrap();
+        // This gate is outside the platform switch: Darwin cannot fall through to its old
+        // unfenced bind when a previously admitted protected generation loses its witness.
+        let rejected=authority::with_claude_primary(&state,&candidate,&peer,Some(physical),||
+            state.store.bind_mailbox(&candidate));
+        assert!(rejected.is_err());
+        state.store.check_mailbox(&current).unwrap();
+        // Explicit legacy admission is a separate compatibility branch, not primary proof.
+        let legacy=authority::with_claude_primary(&state,&candidate,&peer,None,||
+            state.store.bind_mailbox(&candidate)).unwrap();
+        assert!(legacy.1.is_none());
+        state.store.check_mailbox(&legacy.0).unwrap();
+        assert!(state.store.check_mailbox(&current).is_err());
+    }
+
     #[tokio::test]
     async fn attachment_checks_both_runtime_and_current_delivery_epoch() {
         let root = tempfile::tempdir().unwrap();
@@ -1476,6 +1613,44 @@ mod tests {
             !delivery_presence::push_capable(&other),
             "only the exact pushed binding"
         );
+    }
+
+    // While another stream's ownership proof for the binding is pending, a new push stream is
+    // told "not attached" (the poll answers the same), and the clearing of that proof pushes the
+    // attachment. A stream that already pushed `attached: true` keeps it when a proof goes
+    // pending, even across a beat refresh.
+    #[tokio::test]
+    async fn pending_ownership_proof_holds_a_new_attachment_push_but_not_an_established_one() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let subject = "agent/attachment-push-pending-proof";
+        let (title, delivery) = attachment_seat(&state, subject);
+        // As in the wake test above: the deadline must not stand in for the wake under test.
+        delivery_presence::shorten_window(subject, Duration::from_secs(120));
+        delivery_presence::proof_pending(&delivery, 1, 1);
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert_eq!(next_attachment(&mut stream).await, (false, None));
+        assert!(
+            !crate::api::claude_channel_attached(&state.store, subject, "current"),
+            "the poll agrees while the proof is pending"
+        );
+        delivery_presence::clear_proof_pending(&delivery, 1, true);
+        assert_eq!(
+            next_attachment(&mut stream).await,
+            (true, Some(delivery.epoch))
+        );
+        delivery_presence::proof_pending(&delivery, 2, 1);
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), next(&mut stream.socket))
+                .await
+                .is_err(),
+            "an established stream keeps its attachment while a proof is pending"
+        );
+        delivery_presence::clear_proof_pending(&delivery, 2, true);
     }
 
     // Planned T3: a channel that stops reporting is pushed unattached at its own deadline.
@@ -3038,7 +3213,7 @@ mod tests {
                                             receiver.recv().await.map(|()| ((), receiver))
                                         },
                                     ),
-                                    StreamControl { peer, dirty_gate: Some(fixture_gate) },
+                                    StreamControl { peer, primary_peer: None, dirty_gate: Some(fixture_gate) },
                                 )
                             })
                         }

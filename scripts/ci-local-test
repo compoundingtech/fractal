@@ -12,7 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 RECORD = '''#!/usr/bin/env bash
 # a stand-in for the build admission shim, which exports CARGO_SHIM_DEPTH
-python3 -I -c 'import json, os, sys; print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ)}))' "$@" >> "$CI_LOCAL_TEST_LOG"
+python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "umask": u}))' "$@" >> "$CI_LOCAL_TEST_LOG"
 '''
 
 
@@ -46,6 +46,7 @@ class CiLocal(unittest.TestCase):
         (self.home / '.local/bin/cargo').write_text('#!/bin/sh\n')
         (self.home / '.local/bin/cargo').chmod(0o755)
         self.stage_exits = []
+        self.umask = 0o022
 
     def run_local(self, *stages, **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
@@ -63,12 +64,13 @@ class CiLocal(unittest.TestCase):
                'SEKRETS_PROFILE': 'p', 'XDG_STATE_HOME': str(self.home / '.local/state'),
                'ST2_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite', 'FRACTAL_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite',
                'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', **extra}
-        done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True)
+        done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True,
+                              preexec_fn=lambda: os.umask(self.umask))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
 
     def test_the_stages_run_in_a_home_of_their_own_without_the_account_s_variables(self):
-        done, calls = self.run_local('mail-redelivery-canaries')
+        done, calls = self.run_local('mail-redelivery-canaries', LD_PRELOAD='/nix/store/x-jemalloc/lib/libjemalloc.so.2')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual([call['argv'] for call in calls],
                          [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install'], [], ['mail-redelivery-canaries']])
@@ -77,8 +79,12 @@ class CiLocal(unittest.TestCase):
             scratch = Path(env['HOME'])
             self.assertNotEqual(scratch, self.home)
             self.assertTrue(str(scratch).startswith(self.tmp.name), scratch)
-            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY'):
+            for name in ('XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'TMPDIR'):
                 self.assertTrue(env[name].startswith(str(scratch.parent)), (name, env[name]))
+            # The scratch and the stages' TMPDIR are on the account's disk, never the caller's TMPDIR (a dev shell's, under /tmp).
+            self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/run.'), scratch)
+            self.assertEqual(env['TMPDIR'], str(scratch.parent / 'tmp'))
+            self.assertNotIn('LD_PRELOAD', env)  # a host's preloaded allocator: CI preloads nothing
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
                          'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
@@ -91,7 +97,17 @@ class CiLocal(unittest.TestCase):
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
         self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
-        self.assertEqual(list(Path(self.tmp.name).glob('ci-local.*')), [], 'the scratch home is removed afterwards')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_on_a_host_whose_umask_is_002_the_stages_get_ci_s_022_and_no_group_writable_scratch(self):
+        self.umask = 0o002
+        root = self.home / '.cache/ci-local'
+        root.mkdir(parents=True)
+        root.chmod(0o775)  # left group-writable by an earlier run under umask 002
+        done, calls = self.run_local('mail-redelivery-canaries')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual({call['umask'] for call in calls}, {0o022})
+        self.assertEqual(root.stat().st_mode & 0o022, 0)
 
     def test_ci_local_cargo_names_the_cargo_and_without_a_dev_shell_cargo_nothing_runs(self):
         done, calls = self.run_local('mail-redelivery-canaries', CI_LOCAL_CARGO='/chosen/cargo')
@@ -177,6 +193,23 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries')
         self.assertEqual(done.returncode, 9)
         self.assertEqual([call['argv'] for call in calls], [['build', '--locked', '-p', 'fractal-drivers', '--bin', 'ci-hooks-install']])
+
+    def test_the_isolation_vm_stage_runs_its_own_script_in_the_stage_s_home_and_scratch(self):
+        (self.work / 'scripts/ci-local-isolation-vm').write_text(RECORD)
+        done, calls = self.run_local('mail-redelivery-canaries', 'isolation-vm')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        stage_calls = calls[-2:]  # after cargo's hook build and the hook install: ci-linux, then the VM script
+        self.assertEqual([call['argv'] for call in stage_calls], [['mail-redelivery-canaries'], []])
+        vm = stage_calls[-1]
+        self.assertNotEqual(vm['env']['HOME'], str(self.home))
+        self.assertTrue(vm['env']['RUNNER_TEMP'].startswith(self.tmp.name))
+        self.assertIn('ci-local: isolation-vm exit 0', done.stdout)
+
+    def test_the_isolation_vm_script_runs_only_under_ci_local(self):
+        done = subprocess.run(['bash', str(ROOT / 'scripts/ci-local-isolation-vm')], capture_output=True, text=True,
+                              env={k: v for k, v in os.environ.items() if k != 'RUNNER_TEMP'})
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('ci-local-isolation-vm runs under scripts/ci-local', done.stderr)
 
     def test_no_stage_or_a_stage_without_a_local_lane_is_refused_before_anything_runs(self):
         for stages in ((), ('conversation-model',), ('mail-redelivery-canaries', 'nonesuch')):

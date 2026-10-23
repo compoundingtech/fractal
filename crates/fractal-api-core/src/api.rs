@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;
@@ -168,7 +169,11 @@ pub fn raw_terminal_owner_splice(
     Box::pin(raw_terminal_splice(socket, transport, None, None, None, None, None))
 }
 
-pub use crate::delivery_presence::claude_channel_attached;
+pub use crate::delivery_presence::{claude_channel_attached, claude_channel_proof_pending};
+
+pub fn configure_claude_ownership_observation(root: &Path, enabled: bool) {
+    delivery_presence::configure_observation(root, enabled);
+}
 
 /// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
 /// the instant the proof lapses by itself. Both come from one presence predicate, so a push
@@ -391,6 +396,7 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -1720,6 +1726,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
@@ -3662,6 +3670,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
@@ -6405,7 +6420,7 @@ fn native_delivery_identity(
 }
 
 #[cfg(target_os = "linux")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     stream
         .peer_cred()
         .ok()?
@@ -6414,7 +6429,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd as _;
     let mut pid: libc::pid_t = 0;
     let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
@@ -6432,7 +6447,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
     None
 }
 
@@ -7971,6 +7986,9 @@ fn doctor_report_with_operation_drift(
                 .iter()
                 .filter(|agent| {
                     agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                        || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                            .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                                || reason.starts_with("ownership proof unavailable"))
                 })
                 .map(|agent| {
                     format!(

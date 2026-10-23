@@ -744,7 +744,7 @@ def source_literal(value, crates, packages):
         value = value.replace('clients/typescript/st3-' + stem, 'clients/typescript/fractal-' + stem)
     value = value.replace('clients/swift/St3Client', 'clients/swift/FractalClient')
     value = value.replace('Sources/St3Client', 'Sources/FractalClient').replace('Tests/St3ClientTests', 'Tests/FractalClientTests')
-    value = value.replace('apps/fractal-web/packages/st3-sdk', 'apps/fractal-web/packages/fractal-sdk')
+    value = value.replace('apps/fractal-web/packages/st3-sdk', 'packages/fractal-sdk')
     value = value.replace('packages/st3-sdk', 'packages/fractal-sdk')
     for old, new in packages.items():
         value = value.replace(old, new)

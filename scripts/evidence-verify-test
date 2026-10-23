@@ -502,8 +502,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
 ENFORCED = ('typescript-client',)
 # The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
-HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries', 'linux-gate'})
-HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries', 'linux-gate'})
+HOST_CHECKS = frozenset({'genie-freshness', 'typescript-client', 'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
+HOST_LANE_BOUND = frozenset({'mail-redelivery-canaries', 'linux-gate', 'isolation-vm'})
 
 
 def policy_text(**overrides):
@@ -1295,7 +1295,7 @@ class CommittedPolicy(unittest.TestCase):
             'docs/st2', 'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
             'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
             'slo', 'src', 'templates', 'tests', 'vendor', 'wit']), 'typescript-client': sorted([
-            'apps/fractal-web/package.json', 'apps/fractal-web/packages/fractal-sdk/package.json',
+            'apps/fractal-web/package.json', 'packages/fractal-sdk/package.json',
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
             'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
@@ -1306,7 +1306,7 @@ class CommittedPolicy(unittest.TestCase):
             '.github/workflows/main-upkeep.yml', '.github/workflows/main-upkeep.yml.genie.ts', '.github/workflows/workspace-ci.ts',
             'BUCK', 'BUCK.genie.ts', 'apps/fractal-web', 'buck2', 'clients/typescript/fractal-client', 'clients/typescript/fractal-scenarios',
             'clients/typescript/fractal-views', 'docs/st3/client-v0/schemas', 'fixtures', 'flake.lock', 'flake.nix', 'megarepo.kdl',
-            'megarepo.lock', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-ui',
+            'megarepo.lock', 'nix/web-shell-inputs.json', 'nix/web-shell.nix', 'package.json', 'package.json.genie.ts', 'packages/fractal-sdk', 'packages/fractal-ui',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-workspace.yaml.genie.ts', 'scripts/ci-fractal-web', 'scripts/ci-fractal-web-changes',
             'scripts/ci-fractal-web-gate', 'scripts/ci-fractal-web-kit-graph', 'scripts/ci-fractal-web-licenses',
             'scripts/ci-fractal-web-licenses-test', 'scripts/ci-fractal-web-test', 'scripts/ci-typescript-client', 'scripts/ci-web-shell',

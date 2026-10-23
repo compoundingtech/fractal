@@ -6,8 +6,7 @@ export const diagnosticsPackages = [devbarPkg]
 
 /**
  * The root pnpm workspace's members, listed explicitly: no `apps/**`, `packages/**` or
- * `clients/**` globs. `packages/fractal-ui`, `apps/fractal-web` and its nested
- * `packages/fractal-sdk` join this list in the change that adds each package.
+ * `clients/**` globs. App-independent SDK and UI packages live under `packages/`.
  */
 export const workspaceMembers = [
   'clients/typescript/fractal-client',
@@ -16,7 +15,7 @@ export const workspaceMembers = [
   'apps/ios',
   'packages/fractal-ui',
   'apps/fractal-web',
-  'apps/fractal-web/packages/fractal-sdk',
+  'packages/fractal-sdk',
 ] as const
 
 export default packageJson.aggregateFromPackages({

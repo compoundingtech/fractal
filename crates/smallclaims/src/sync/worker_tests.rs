@@ -114,6 +114,97 @@ fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
     Store::open(path, origin, Arc::new(Plain))
 }
 
+#[tokio::test]
+async fn signed_default_answer_cannot_draw_envelopes_from_a_named_shard() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().unwrap();
+    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
+    let shard = Arc::new(plain_open(&root.path().join("github.sqlite3"), "birch").unwrap());
+    shard
+        .bind_shard(&crate::shards::ShardId::parse("github").unwrap())
+        .unwrap();
+    shard.bind_fleet(auth.fleet_id()).unwrap();
+    shard
+        .append_claim(&ClaimInput {
+            subject: "note/github".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let default = plain_open(&root.path().join("default.sqlite3"), "cedar").unwrap();
+    default.bind_fleet(auth.fleet_id()).unwrap();
+    let answer = default.export_replication_summary(auth.fleet_id()).unwrap();
+    assert_eq!(answer.shard_id, None);
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let signing = auth.clone();
+    let app = Router::new().route(
+        EXCHANGE_PATH,
+        post(move |body: Bytes| {
+            let count = count.clone();
+            let signing = signing.clone();
+            let answer = answer.clone();
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                let query: ReplicationExchange = serde_json::from_slice(&body).unwrap();
+                assert_eq!(query.shard_id.as_deref(), Some("github"));
+                assert!(
+                    query.envelopes.is_empty(),
+                    "scope check precedes payload push"
+                );
+                let envelope = PeerResponse::new("cedar", 0, answer);
+                let bytes = serde_json::to_vec(&envelope).unwrap();
+                let mut response = (StatusCode::OK, bytes.clone()).into_response();
+                response.headers_mut().extend(
+                    signing
+                        .response_headers_for(
+                            EXCHANGE_PATH,
+                            "cedar",
+                            &bytes,
+                            &FleetAuth::body_digest(&body),
+                        )
+                        .unwrap(),
+                );
+                response
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    let error = exchange(
+        &replication_http_client(),
+        &Local(shard.clone()),
+        "birch",
+        &peer,
+        &auth,
+        &fleet,
+    )
+    .await
+    .unwrap_err();
+    let mismatch = error.downcast_ref::<PeerShardMismatch>().unwrap();
+    assert_eq!(mismatch.expected.as_deref(), Some("github"));
+    assert_eq!(mismatch.actual, None);
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert!(
+        default
+            .replication_inventory()
+            .unwrap()
+            .envelopes
+            .is_empty()
+    );
+    server.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
@@ -584,6 +675,7 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
+        shard_id: None,
         schema_digest: Plain.schema_digest(),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -695,6 +787,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
+        shard_id: None,
         schema_digest: Plain.schema_digest(),
         projection_registry_digest: None,
         projection_versions: Default::default(),

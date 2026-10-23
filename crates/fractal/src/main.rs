@@ -74,6 +74,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod demo;
 mod setup;
 mod onboarding;
 mod change_cli;
@@ -213,6 +214,16 @@ enum Command {
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
+    /// Play a scripted demo of st in the terminal interface, in its own instance.
+    ///
+    /// A demo is one KDL file: the agents, missions, conversations and documents it starts
+    /// from, and beats that each do one visible thing after a delay or when you press the
+    /// advance key. Its agents are scripted, so it costs no tokens and plays the same every
+    /// time. See docs/st3/demos.md and examples/demos.
+    Demo {
+        #[command(subcommand)]
+        command: DemoCommand,
+    },
     /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
     Changes(change_cli::ChangesArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
@@ -426,6 +437,36 @@ enum Command {
     ReplicationWorker(ReplicationWorkerArgs),
     #[command(hide = true)]
     Driver(DriverArgs),
+}
+
+#[derive(Subcommand)]
+enum DemoCommand {
+    /// Reset the instance, seed the demo, and play it in the terminal interface.
+    ///
+    /// Needs an instance, so your own fleet is never touched: st --instance demo demo play
+    /// FILE. Each run erases that instance's graph and starts from the beginning. It refuses
+    /// an instance that holds a graph or config a demo did not make, unless --reset. Press the
+    /// advance key (F8 unless the file names another) for each beat that waits for a key, and
+    /// Ctrl+Q to end; the demo's daemon and agents stop with it.
+    Play {
+        /// The demo file.
+        file: PathBuf,
+        /// Erase an instance a demo did not make: its graph, its interface cache and its
+        /// config. Without it, a demo plays only in a new instance or one a demo made.
+        #[arg(long)]
+        reset: bool,
+    },
+    /// Check a demo file and list its beats, without playing it.
+    Check {
+        /// The demo file.
+        file: PathBuf,
+    },
+    /// The process a scripted agent runs: it waits for the demo player to end.
+    #[command(hide = true)]
+    Seat {
+        #[arg(long)]
+        player: u32,
+    },
 }
 
 #[derive(Args)]
@@ -3129,6 +3170,9 @@ struct AgentRetireArgs {
     actor: String,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     reason: String,
+    /// Existing eligible agent identity, bare name or agent/NAME.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    successor: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: String,
 }
@@ -4045,9 +4089,9 @@ struct MessageListArgs {
     /// Mailbox identity; defaults to the non-empty ST_AGENT value.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     identity: Option<String>,
-    /// The same mailbox identity, spelled like `conversations read --as`.
+    /// Actor reading the mailbox. A retired mailbox requires its signed successor.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", conflicts_with = "identity")]
+    #[arg(long = "as")]
     actor: Option<String>,
     #[arg(long)]
     archive: bool,
@@ -4598,6 +4642,9 @@ fn cli_main() -> ExitCode {
     if let Command::Ui(options) = cli.command {
         return run_terminal_ui(options, cli.endpoint.as_deref());
     }
+    if let Command::Demo { command } = cli.command {
+        return run_demo(command);
+    }
     // Set the CLI identity only after the TUI path has chosen its stui client identity.
     fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
@@ -4643,6 +4690,60 @@ fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> Ex
             }
         }
         fractal_tui::run(options)
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("st: {}", plain_error(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `st demo`: like the terminal interface, it runs before the CLI runtime, because it opens one.
+fn run_demo(command: DemoCommand) -> ExitCode {
+    let result = (|| -> Result<()> {
+        match command {
+            DemoCommand::Check { file } => {
+                let demo = demo::load(&file)?;
+                println!(
+                    "{}: {} agents, {} seed actions, {} beats; advance key {}",
+                    demo.title.as_deref().unwrap_or(&demo.name),
+                    demo.agents.len(),
+                    demo.seed.len(),
+                    demo.beats.len(),
+                    demo.advance.to_uppercase()
+                );
+                for (index, beat) in demo.beats.iter().enumerate() {
+                    let wait = match beat.wait {
+                        demo::Wait::Key => "key".to_owned(),
+                        demo::Wait::For(delay) => format!("{:.1}s", delay.as_secs_f64()),
+                    };
+                    println!(
+                        "{:>3}  line {:<4} {wait:>6}  {}",
+                        index + 1,
+                        beat.line,
+                        beat.action.describe()
+                    );
+                }
+                Ok(())
+            }
+            DemoCommand::Seat { player } => demo::seat(player),
+            DemoCommand::Play { file, reset } => {
+                let instance = fractal_daemon::instance::current().context(
+                    "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
+                )?;
+                let demo = demo::load(&file)?;
+                // The demo acts as its own people and agents; a seat's identity must not leak in.
+                for name in ["ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION"] {
+                    // SAFETY: no other thread exists yet; the player starts after this.
+                    unsafe { std::env::remove_var(name) };
+                }
+                demo::play(demo, &instance, reset, |playback| {
+                    fractal_tui::run(fractal_tui::Args::default().with_playback(playback))
+                })
+            }
+        }
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -5073,6 +5174,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
+        Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
@@ -6102,6 +6204,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
+        config.claude_primary_ownership_observe == Some(true));
     // Tiles this daemon's user supervises reach it only through their restricted endpoint.
     #[cfg(target_os = "linux")]
     fractal_daemon::api::spawn_tile_endpoints(state.clone());
@@ -6117,7 +6221,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup_phases.reconciler_ms = phase_elapsed_ms();
@@ -7073,7 +7177,7 @@ async fn publish_text_with_expected(
                 idempotency_key: idempotency(&resolved.kdl, &mission.subject_tokens),
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
-                actor: Some(actor),
+                actor: Some(actor.clone()),
             },
         )
         .await
@@ -12368,6 +12472,9 @@ fn render_client_agent(
         }
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
+    if let Some(custody) = &agent.mail_custody {
+        let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}", custody.successor);
+    }
     let _ = writeln!(
         output,
         "HARNESS      {} · {}",
@@ -13259,6 +13366,7 @@ struct MessagePageFilters<'a> {
     from: Option<&'a str>,
     subject: Option<&'a str>,
     subject_prefix: Option<&'a str>,
+    acting_as: Option<&'a str>,
 }
 
 /// One mailbox page. A seat's delivery process passes its delivery report, which the daemon
@@ -13303,6 +13411,7 @@ async fn message_page_filtered(
         ("from", filters.from),
         ("subject", filters.subject),
         ("subject_prefix", filters.subject_prefix),
+        ("acting_as", filters.acting_as),
     ] {
         if let Some(value) = value {
             path.push_str(&format!("&{name}={}", urlencoding::encode(value)));
@@ -13674,7 +13783,25 @@ async fn read_message_after_lifecycle(
     let actor = normalize_message_subject(actor);
     if actor == message.from && actor != message.to {
         anyhow::ensure!(!archive, "a sender cannot archive the recipient's message");
-        return Ok(message);
+        if !message.to.starts_with("agent/") {
+            return Ok(message);
+        }
+        let detail: Option<Value> = match client.get(&format!(
+            "/v1/client/agents/{}", urlencoding::encode(&message.to),
+        )).await {
+            Ok(detail) => Some(detail),
+            Err(error)
+                if fractal_daemon::client::api_error_parts(&error)
+                    .is_some_and(|(status, _, _, _)| status == 404) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if detail.as_ref().and_then(|detail| detail["mail_custody"]["successor"].as_str())
+            != Some(actor.as_str()) {
+            return Ok(message);
+        }
     }
     accept_message(client, &message, &actor).await?;
     if archive {
@@ -13682,22 +13809,23 @@ async fn read_message_after_lifecycle(
     }
     // Lifecycle writes are synchronous, so refetching makes JSON and other machine-readable
     // output describe the state that this command actually committed instead of its input state.
-    read_message(client, &message.subject).await
+    let mut result = read_message(client, &message.subject).await?;
+    if actor != message.to {
+        // A successor's signed receipt can be canonically ordered alongside the
+        // original send. The command has just committed its read or close, so
+        // present that result here without changing the shared mailbox view.
+        result.status = if archive { "closed" } else { "read" }.into();
+    }
+    Ok(result)
 }
 
 async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> Result<()> {
     let actor = normalize_message_subject(actor);
-    anyhow::ensure!(
-        actor == message.to,
-        "message `{}` belongs to `{}`, not `{actor}`",
-        message.subject,
-        message.to
-    );
-    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered") {
+    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered" | "read") {
         return Ok(());
     }
     let reference = message.subject.trim_start_matches("message/");
-    if matches!(message.status.as_str(), "sent" | "staged") {
+    if actor == message.to && matches!(message.status.as_str(), "sent" | "staged") {
         deliver_message(
             client,
             reference,
@@ -13706,18 +13834,25 @@ async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> 
         )
         .await?;
     }
+    if message.status == "read" && actor == message.to {
+        return Ok(());
+    }
     let _: ClaimRecord = client
         .post(
             &format!("/v1/messages/{}/claims", urlencoding::encode(reference)),
             &MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "read".into(),
-                actor: Some(actor),
+                actor: Some(actor.clone()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: format!("message-read:{}", message.subject),
+                idempotency_key: if actor == message.to {
+                    format!("message-read:{}", message.subject)
+                } else {
+                    format!("message-custody-read:{}:{actor}", message.subject)
+                },
             },
         )
         .await?;
@@ -13777,18 +13912,19 @@ async fn stage_message(
 
 async fn close_message(client: &Client, reference: &str, actor: &str) -> Result<ClaimRecord> {
     let reference = normalize_message_reference(reference);
+    let actor = normalize_message_subject(actor);
     client
         .post(
             &format!("/v1/messages/{}/claims", urlencoding::encode(&reference)),
             &MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "closed".into(),
-                actor: Some(normalize_message_subject(actor)),
+                actor: Some(actor.clone()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: format!("message-closed:{reference}"),
+                idempotency_key: format!("message-closed:{reference}:{actor}"),
             },
         )
         .await
