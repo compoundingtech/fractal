@@ -458,6 +458,11 @@
           e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
         ) st3Exclusions;
 
+        fractalWeb = import ./nix/fractal-web.nix {
+          inherit effect-utils system version buildStamp;
+          source = self;
+        };
+
         st3Check = pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
@@ -647,6 +652,8 @@
             pkgs.lsof
           ];
           postInstall = ''
+            mkdir -p "$out/share"
+            cp -r ${fractalWeb}/share/fractal-web "$out/share/fractal-web"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             ln -s st3 $out/bin/st
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
@@ -1013,6 +1020,7 @@
         # The release target still links through the pinned Zig/glibc-baseline wrapper.
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
+        packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
@@ -1078,6 +1086,19 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
+          assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
+          assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
+          assert pkgs.lib.hasInfix "--web-dist" args;
+          assert pkgs.lib.hasInfix "${package}/share/fractal-web" args;
+          assert (
+            let
+              disabled = (mkHmModuleEval { webListen = null; }).config;
+              disabledArgs = if pkgs.stdenv.hostPlatform.isLinux then
+                disabled.systemd.user.services.smalltalk.Service.ExecStart
+              else
+                builtins.concatStringsSep " " disabled.launchd.agents.smalltalk.config.ProgramArguments;
+            in pkgs.lib.hasInfix (if pkgs.stdenv.hostPlatform.isLinux then ''"--web-listen" "off"'' else "--web-listen off") disabledArgs
+          );
           # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
           # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
           assert (if pkgs.stdenv.hostPlatform.isLinux then

@@ -1,6 +1,6 @@
 # iPhone design direction
 
-The iPhone app follows system typography, appearance and navigation. The web supplies information structure: agent identity and status, conversations with disclosed work, and related resources. This direction for [#2784](https://github.com/compoundingtech/smalltalk/issues/2784) was confirmed on 2026-10-14. Merge it before rebuilding screens.
+The iPhone app follows system typography, appearance and navigation. The web supplies information structure: agent identity and status, conversations with disclosed work, and related resources. This direction for [#2784](https://github.com/compoundingtech/fractal/issues/2784) was confirmed on 2026-10-14. Merge it before rebuilding screens.
 
 ## Shared rules and surface ownership
 
@@ -26,7 +26,7 @@ For [Now], use an inset grouped list: connection and freshness notice, nonzero a
 
 The badge and heading count only open alerts for the paired person. Updates ask nothing; messages stay in conversations. Preserve closed items until cleared and explicit Mark read for updates. Pick the phone's rule over web Sidebar's local ReadInbox-on-open to preserve deliberate acknowledgment: opening never reads an update or resolves a request ([Now], [homeView], [web Sidebar]).
 
-Keep alerts answerable above their conversation ([Alerts], [Conversation], [#1959](https://github.com/compoundingtech/smalltalk/issues/1959)), with disclosure and existing capability-gated actions. Preserve full pending-call context before Allow. Coordinate [#2783](https://github.com/compoundingtech/smalltalk/issues/2783) on IDs, count and destination: future push opens detail after sync, showing closed if resolved; notification contents never authorize answers. APNs and Release alert links are separate work.
+Keep alerts answerable above their conversation ([Alerts], [Conversation], [#1959](https://github.com/compoundingtech/fractal/issues/1959)), with disclosure and existing capability-gated actions. Preserve full pending-call context before Allow. Coordinate [#2783](https://github.com/compoundingtech/fractal/issues/2783) on IDs, count and destination: future push opens detail after sync, showing closed if resolved; notification contents never authorize answers. APNs and Release alert links are separate work.
 
 ## Screen slice order
 

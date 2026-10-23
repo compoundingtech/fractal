@@ -18,6 +18,7 @@ use super::*;
     verification_hidden: AtomicBool,
     provenance_error: AtomicBool,
     ending_unverified: AtomicBool,
+    closed_operation: std::sync::OnceLock<String>,
 }
 
     impl RuntimeControl for BarrierRuntime {
@@ -74,7 +75,10 @@ use super::*;
         self.start_guarded(member, &|| Ok(()))
     }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
-        if member.runtime_id == "example.worker" || member.runtime_id.starts_with("example.held") {
+        if member.runtime_id == "example.worker"
+            || member.runtime_id == "example-worker.main"
+            || member.runtime_id.starts_with("example.held")
+        {
             self.operations.lock().unwrap().insert(
                 member.runtime_id.clone(),
                 member.tags[start_jobs::OPERATION_TAG].clone(),
@@ -125,6 +129,11 @@ use super::*;
         Ok(self.operations.lock().unwrap().get(id).cloned())
     }
     fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+        if self.closed_operation.get().is_some()
+            && self.closed_operation.get() == member.tags.get(start_jobs::OPERATION_TAG)
+        {
+            return Ok(true);
+        }
         // The held fixture has no detached producer or work scope after its
         // exact operation-owned runtime has exited. A running row is no proof.
         let ended = self.inner.ptys.lock().unwrap().iter().any(|observation| {
@@ -273,6 +282,7 @@ use super::*;
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        closed_operation: std::sync::OnceLock::new(),
     });
     let reconciler = Arc::new(Reconciler::new(
         store.clone(),
@@ -614,6 +624,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
         ending_unverified: AtomicBool::new(false),
+        closed_operation: std::sync::OnceLock::new(),
     });
     let notify = Arc::new(Notify::new());
     let reconciler = Arc::new(
@@ -1260,6 +1271,74 @@ async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
             .unwrap()
             .is_none()
     );
+}
+
+    #[tokio::test]
+async fn revoked_pidless_pty_requires_operation_fenced_producer_closure() {
+    for different_operation in [false, true] {
+        let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
+        let subject = "agent/example-worker/main";
+        apply_source(
+            &store,
+            "version 2\nagent \"example-worker/main\" { workspace \"/tmp\"; command \"true\" }",
+            "pidless-revoked-start",
+        );
+        assert!(launch(&reconciler, subject));
+        tokio::time::timeout(Duration::from_secs(30), entered.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let operation = store.runtime_start_for(subject).unwrap().unwrap();
+        reconciler.revoke_start(subject).unwrap();
+        {
+            let mut rows = runtime.inner.ptys.lock().unwrap();
+            rows[0].status = "vanished".into();
+            rows[0].incarnation_id = None;
+        }
+        if different_operation {
+            runtime.operations.lock().unwrap().insert(
+                "example-worker.main".into(),
+                "older-start-operation".into(),
+            );
+        }
+        // Neither a terminal row nor an unrelated operation tag is closure proof.
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(!store.runtime_start_for(subject).unwrap().unwrap().cleanup_verified);
+        assert!(!launch(&reconciler, subject));
+        release.0.send(()).unwrap();
+        workers_done(&reconciler).await;
+        reconciler.reconcile_start_jobs().unwrap();
+        let retained = store.runtime_start_for(subject).unwrap().unwrap();
+        assert!(retained.finished);
+        assert!(!retained.cleanup_verified);
+        assert!(retained.result.as_ref().unwrap()["closure_proof"].is_null());
+        assert!(!launch(&reconciler, subject));
+        assert!(store.observations_for(subject, "harness.diagnostic").unwrap().iter()
+            .any(|claim| claim.body["fields"]["code"] == "start-revocation-unverified"));
+
+        // Even positive closure cannot retire a non-terminal incarnation-less row.
+        runtime.closed_operation.set(operation.id.clone()).unwrap();
+        runtime.inner.ptys.lock().unwrap()[0].status = "running".into();
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(subject).unwrap().is_some());
+        assert!(store.observations_for(subject, "harness.diagnostic").unwrap().iter()
+            .any(|claim| claim.body["fields"]["reason"].as_str()
+                .is_some_and(|reason| reason.contains("not terminal"))));
+
+        runtime.inner.ptys.lock().unwrap()[0].status = "vanished".into();
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(subject).unwrap().is_none());
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+        assert!(runtime.inner.stops.lock().unwrap().is_empty());
+        let result: String = store.readers.get().query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id],
+            |row| row.get(0),
+        ).unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_proof"]["verification"], "producer-closed");
+        assert_eq!(runtime.inner.ptys.lock().unwrap().len(), 1);
+    }
 }
 
     #[tokio::test]
@@ -2083,6 +2162,87 @@ async fn unreadable_start_provenance_does_not_block_an_authorized_fenced_stop() 
         .unwrap();
     assert!(operation.revoked_by.is_some() && !operation.cleanup_verified);
     assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 1));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_scoped_pidless_start_retires_only_after_its_producer_scope_is_empty() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let environment = crate::environment::snapshot().unwrap();
+    fractal_runtime::initialize_isolation(&environment);
+    if fractal_runtime::isolation_mode() != fractal_runtime::Isolation::Scope {
+        eprintln!("requires a real systemd user manager; native scope coverage unavailable");
+        return;
+    }
+    for different_operation in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let pty = root.path().join("pty");
+        let child_pid = root.path().join("producer.pid");
+        std::fs::write(&pty, format!(
+            "#!/bin/sh\nsleep 120 </dev/null >/dev/null 2>&1 &\nprintf '%s' \"$!\" > {:?}\nexit 1\n",
+            child_pid.display().to_string(),
+        )).unwrap();
+        std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = root.path().join("registry");
+        std::fs::create_dir(&registry).unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        apply_source(&store, &format!(
+            "version 2\nagent \"example-native/worker\" {{ workspace {:?}; argv {:?} \"120\"; }}",
+            root.path().display().to_string(), sleep_program(),
+        ), "native-pidless");
+        let desired = store.desired_subjects_named(&["agent/example-native/worker".into()])
+            .unwrap().remove(0);
+        let mut member = desired.member.as_ref().unwrap().clone();
+        member.environment.insert("PATH".into(), format!("{}:${{PATH}}", root.path().display()));
+        let row = registry.join(format!("{}.json", member.runtime_id));
+        std::fs::write(&row, serde_json::json!({
+            "createdAt": "older", "tags": {"st3.start-operation": "older-operation"}
+        }).to_string()).unwrap();
+        let runtime = Arc::new(NativeRuntime::new(root.path(), Some(&registry), &pty));
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new()));
+        assert!(reconciler.dispatch_start(start_jobs::PreparedStart {
+            subject: desired.clone(), launch_member: member.clone(), member,
+            reason: "native pidless scope regression".into(), request: None,
+            desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(), start_request: String::new(),
+            start_request_receipt: None, control_request: None, control_request_receipt: None,
+            expected_incarnation: None, resume_operation: None,
+        }).unwrap());
+        let operation = store.runtime_start_for(&desired.subject).unwrap().unwrap();
+        assert!(operation.finished && operation.revoked_by.is_some());
+        let prepared: start_jobs::PreparedStart = serde_json::from_value(operation.body.clone()).unwrap();
+        let pid: i32 = std::fs::read_to_string(&child_pid).unwrap().parse().unwrap();
+        struct KillOnDrop(i32);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) { unsafe { libc::kill(self.0, libc::SIGKILL); } }
+        }
+        let child = KillOnDrop(pid);
+        std::fs::write(&row, serde_json::json!({
+            "createdAt": "older", "tags": {"st3.start-operation":
+                if different_operation { "older-operation" } else { &operation.id }}
+        }).to_string()).unwrap();
+        let snapshot = runtime.snapshot_ptys().unwrap();
+        assert_eq!(snapshot[0].status, "vanished");
+        assert!(snapshot[0].incarnation_id.is_none());
+        assert!(!runtime.start_operation_closed(&prepared.launch_member).unwrap());
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(!store.runtime_start_for(&desired.subject).unwrap().unwrap().cleanup_verified);
+        drop(child);
+        // Wait for real manager/cgroup evidence, not an elapsed-time absence claim.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !runtime.start_operation_closed(&prepared.launch_member).unwrap() {
+            assert!(std::time::Instant::now() < deadline, "producer scope did not empty");
+            std::thread::yield_now();
+        }
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+        assert!(row.exists(), "retirement must not delete the retained registry row");
+    }
 }
 
 #[test]
