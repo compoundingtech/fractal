@@ -18,6 +18,145 @@ const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Clone, Copy, Debug)]
+enum PtyTeardownReason {
+    SpawnPrevious,
+    EndLeftovers,
+    Stop,
+    Kill,
+    Signal,
+    IncarnationCheck,
+}
+
+struct PtyTeardownEvidence<'a> {
+    runtime_id: &'a str,
+    reason: PtyTeardownReason,
+    operation_id: Option<&'a str>,
+    expected_incarnation: Option<&'a str>,
+    observed_incarnation: Option<String>,
+    status: Option<&'a str>,
+    pid: Option<i64>,
+    created_at: Option<&'a str>,
+    exit_code: Option<i64>,
+    recorded_scope: Option<&'a str>,
+    tagged_scope: Option<&'a str>,
+    scope: Option<&'a str>,
+    spawn_lock: &'a str,
+    guard_decision: &'a str,
+}
+
+impl PtyTeardownEvidence<'_> {
+    fn emit(&self, acting: bool) {
+        macro_rules! event {
+            ($level:ident) => {
+                tracing::$level!(
+                    caller = "pty",
+                    reason = ?self.reason,
+                    runtime_id = self.runtime_id,
+                    operation_id = self.operation_id,
+                    expected_incarnation = self.expected_incarnation,
+                    observed_incarnation = self.observed_incarnation.as_deref(),
+                    registry_status = self.status,
+                    registry_pid = self.pid,
+                    registry_created_at = self.created_at,
+                    registry_exit_code = self.exit_code,
+                    recorded_scope = self.recorded_scope,
+                    tagged_scope = self.tagged_scope,
+                    scope = self.scope,
+                    spawn_lock = self.spawn_lock,
+                    guard_decision = self.guard_decision,
+                    acting,
+                    "PTY teardown boundary"
+                );
+            };
+        }
+        if acting {
+            event!(info);
+        } else {
+            event!(debug);
+        }
+    }
+}
+
+// Keep one field schema for registry-backed control and recorded-scope cleanup.
+#[allow(clippy::too_many_arguments)]
+fn log_previous_teardown(
+    id: &str,
+    observed: Option<&PtyObservation>,
+    recorded_scope: Option<&str>,
+    tagged_scope: Option<&str>,
+    operation_id: Option<&str>,
+    expected_incarnation: Option<&str>,
+    reason: PtyTeardownReason,
+    spawn_lock: &str,
+    guard_decision: &str,
+    acting: bool,
+    scope: Option<&str>,
+) {
+    if !(tracing::enabled!(tracing::Level::DEBUG)
+        || acting && tracing::enabled!(tracing::Level::INFO))
+    {
+        return;
+    }
+    PtyTeardownEvidence {
+        runtime_id: id,
+        reason,
+        operation_id: operation_id.or_else(|| {
+            observed.and_then(|row| row.tags.get("st3.start-operation").map(String::as_str))
+        }),
+        expected_incarnation,
+        observed_incarnation: observed.and_then(observation_incarnation),
+        status: observed.map(|row| row.status.as_str()),
+        pid: observed.and_then(|row| row.pid.map(i64::from)),
+        created_at: observed.and_then(|row| row.created_at.as_deref()),
+        exit_code: observed.and_then(|row| row.exit_code),
+        recorded_scope,
+        scope,
+        tagged_scope: tagged_scope.or_else(|| {
+            observed.and_then(|row| row.tags.get("st3.scope-unit").map(String::as_str))
+        }),
+        spawn_lock,
+        guard_decision,
+    }
+    .emit(acting);
+}
+
+fn log_session_teardown(
+    session: &SessionInfo,
+    reason: PtyTeardownReason,
+    expected_incarnation: Option<&str>,
+    scope: Option<&str>,
+    guard_decision: &str,
+    acting: bool,
+) {
+    if !(tracing::enabled!(tracing::Level::DEBUG)
+        || acting && tracing::enabled!(tracing::Level::INFO))
+    {
+        return;
+    }
+    let metadata = session.metadata.as_ref();
+    PtyTeardownEvidence {
+        runtime_id: &session.name,
+        reason,
+        operation_id: metadata
+            .and_then(|row| row.tags.as_ref())
+            .and_then(|tags| tags.get("st3.start-operation"))
+            .map(String::as_str),
+        expected_incarnation,
+        observed_incarnation: session_incarnation(session),
+        status: Some(session.status.as_str()),
+        pid: session.pid.map(i64::from),
+        created_at: metadata.map(|row| row.created_at.as_str()),
+        exit_code: metadata.and_then(|row| row.exit_code.map(i64::from)),
+        recorded_scope: None,
+        tagged_scope: scope,
+        scope,
+        spawn_lock: "not_acquired",
+        guard_decision,
+    }
+    .emit(acting);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PtySpawnTimeoutPhase {
     Lock,
@@ -376,6 +515,13 @@ impl PtyRuntime {
                 }
         }
         if before.as_ref().is_some_and(observation_is_live) {
+            log_previous_teardown(
+                id, before.as_ref(), None, None,
+                env.get("ST3_START_OPERATION").map(String::as_str),
+                cutover.map(|(predecessor, _)| predecessor),
+                PtyTeardownReason::SpawnPrevious, "acquired", "existing_live_incarnation",
+                false, None,
+            );
             anyhow::ensure!(
                 guard.is_none() || cutover.is_some(),
                 "guarded start cannot attribute an existing incarnation to a new launch"
@@ -384,7 +530,13 @@ impl PtyRuntime {
         }
         // What the previous incarnation left running ends before its replacement starts. Each
         // launch has a scope of its own, so this never reaches the replacement.
-        if let Err(error) = self.end_previous_scopes(id, before.as_ref()) {
+        if let Err(error) = self.end_previous_scopes(
+            id,
+            before.as_ref(),
+            PtyTeardownReason::SpawnPrevious,
+            env.get("ST3_START_OPERATION").map(String::as_str),
+            cutover.map(|(predecessor, _)| predecessor),
+        ) {
             eprintln!(
                 "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
@@ -657,9 +809,17 @@ impl PtyRuntime {
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.generation.as_deref());
+        log_session_teardown(
+            &session, PtyTeardownReason::Stop, expected_incarnation,
+            work_scope(&session), "generation_fenced_stop", true,
+        );
         let stopped =
             pty_client::stop_in(&self.root, id, generation).map_err(|error| match error {
                 StopError::GenerationChanged { .. } => {
+                    log_session_teardown(
+                        &session, PtyTeardownReason::Stop, expected_incarnation,
+                        work_scope(&session), "generation_changed_during_stop", false,
+                    );
                     anyhow::anyhow!("PTY `{id}` changed incarnation before the control action")
                 }
                 error => anyhow::anyhow!("stop PTY failed: {error}"),
@@ -669,6 +829,10 @@ impl PtyRuntime {
         // exited, or a process group started after the measurement, is still in the session's
         // work scope, and ends with it.
         if let Some(unit) = work_scope(&session) {
+            log_session_teardown(
+                &session, PtyTeardownReason::Stop, expected_incarnation,
+                Some(unit), "daemon_stopped_end_scope", true,
+            );
             crate::end_scope(unit, crate::SCOPE_GRACE)?;
         }
         if stopped.verified_empty() {
@@ -706,6 +870,12 @@ impl PtyRuntime {
                 session.pid.and_then(|pid| u32::try_from(pid).ok()),
             )
         });
+        log_session_teardown(
+            &session, PtyTeardownReason::Kill, expected_incarnation,
+            work_scope(&session),
+            if unit.is_some() { "server_apart_end_scope" } else { "no_scope_or_server_not_apart" },
+            unit.is_some(),
+        );
         self.signal_if(id, expected_incarnation, libc::SIGKILL)?;
         if let Some(unit) = unit {
             crate::end_scope(unit, Duration::ZERO)?;
@@ -736,6 +906,12 @@ impl PtyRuntime {
         .map_err(|error| anyhow::anyhow!("read PTY process identity failed: {error}"))?;
         let stats: PtyStats =
             serde_json::from_str(&status).context("parse PTY process identity")?;
+        if stats.name != id || stats.daemon.pid != daemon_pid || !stats.process.alive {
+            log_session_teardown(
+                &session, PtyTeardownReason::Signal, expected_incarnation,
+                work_scope(&session), "terminal_identity_not_verified", false,
+            );
+        }
         anyhow::ensure!(
             stats.name == id,
             "PTY stats returned `{}` for `{id}`",
@@ -755,9 +931,36 @@ impl PtyRuntime {
             .with_context(|| format!("PTY `{id}` has no terminal process identity"))?;
         // kill(2) reads 0, 1, a negative pid, and this process's own group as more than one
         // program.
+        let safe_pid = pid > 1 && pid != unsafe { libc::getpgrp() };
+        if !safe_pid {
+            log_session_teardown(
+                &session, PtyTeardownReason::Signal, expected_incarnation,
+                work_scope(&session), "unsafe_terminal_pid", false,
+            );
+        }
         anyhow::ensure!(
-            pid > 1 && pid != unsafe { libc::getpgrp() },
+            safe_pid,
             "PTY `{id}` reported the process identity {pid}, which cannot be signalled alone"
+        );
+        tracing::info!(
+            caller = "pty",
+            reason = ?PtyTeardownReason::Signal,
+            runtime_id = id,
+            operation_id = session.metadata.as_ref()
+                .and_then(|row| row.tags.as_ref())
+                .and_then(|tags| tags.get("st3.start-operation")).map(String::as_str),
+            expected_incarnation,
+            observed_incarnation = session_incarnation(&session).as_deref(),
+            registry_status = session.status.as_str(),
+            registry_pid = daemon_pid,
+            registry_created_at = session.metadata.as_ref().map(|row| row.created_at.as_str()),
+            registry_exit_code = session.metadata.as_ref().and_then(|row| row.exit_code),
+            recorded_scope = tracing::field::Empty,
+            tagged_scope = work_scope(&session),
+            spawn_lock = "not_acquired",
+            guard_decision = "daemon_and_terminal_identity_verified",
+            signal, terminal_pid = pid,
+            "PTY teardown boundary"
         );
         let group = unsafe { libc::kill(-pid, signal) };
         if group != 0 {
@@ -781,6 +984,10 @@ impl PtyRuntime {
         if expected_incarnation
             .is_some_and(|expected| session_incarnation(&session).as_deref() != Some(expected))
         {
+            log_session_teardown(
+                &session, PtyTeardownReason::IncarnationCheck, expected_incarnation,
+                work_scope(&session), "incarnation_mismatch", false,
+            );
             anyhow::bail!("PTY `{id}` changed incarnation before the control action");
         }
         Ok(session)
@@ -793,6 +1000,10 @@ impl PtyRuntime {
     pub fn end_leftovers(&self, id: &str) -> Result<()> {
         // A launch under way ends its predecessor's scope itself, and its own is no leftover.
         let Some(_lock) = self.try_spawn_lock(id)? else {
+            log_previous_teardown(
+                id, None, None, None, None, None, PtyTeardownReason::EndLeftovers,
+                "busy", "spawn_in_progress", false, None,
+            );
             return Ok(());
         };
         let session = self
@@ -806,15 +1017,25 @@ impl PtyRuntime {
             .as_ref()
             .is_some_and(|session| matches!(session.status.as_str(), "running" | "unknown"))
         {
+            log_previous_teardown(
+                id, session.as_ref(), None, None, None, None,
+                PtyTeardownReason::EndLeftovers, "acquired", "running_or_unknown", false, None,
+            );
             return Ok(());
         }
-        self.end_previous_scopes(id, session.as_ref())
+        self.end_previous_scopes(
+            id, session.as_ref(), PtyTeardownReason::EndLeftovers, None, None,
+        )
     }
 
     /// [`Self::end_leftovers`] on a background worker, when the last launch of `id` left a scope
     /// to end. Otherwise it costs one file lookup.
     pub fn end_leftovers_later(&self, id: &str) {
         if !self.spawn_state_path(id, "scope").is_file() {
+            log_previous_teardown(
+                id, None, None, None, None, None, PtyTeardownReason::EndLeftovers,
+                "not_acquired", "no_recorded_scope", false, None,
+            );
             return;
         }
         let (runtime, id) = (self.clone(), id.to_owned());
@@ -828,29 +1049,46 @@ impl PtyRuntime {
     /// Ends the work scopes of `id`'s last launch: the one spawn recorded and the one `ended`,
     /// its session if the record is still there, names. Then it forgets the recorded one. The
     /// caller holds the spawn lock.
-    fn end_previous_scopes(&self, id: &str, ended: Option<&PtyObservation>) -> Result<()> {
+    fn end_previous_scopes(
+        &self,
+        id: &str,
+        ended: Option<&PtyObservation>,
+        reason: PtyTeardownReason,
+        operation_id: Option<&str>,
+        expected_incarnation: Option<&str>,
+    ) -> Result<()> {
         let recorded = self.spawn_state_path(id, "scope");
-        let mut units = BTreeSet::new();
-        match std::fs::read_to_string(&recorded) {
-            Ok(unit) => {
-                units.insert(unit.trim().to_owned());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let recorded_scope = match std::fs::read_to_string(&recorded) {
+            Ok(unit) => Some(unit),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("read PTY scope {}", recorded.display()));
             }
+        };
+        let tagged_scope = ended
+            .and_then(|session| session.tags.get("st3.scope-unit"))
+            .map(String::as_str);
+        let mut units = BTreeSet::new();
+        units.extend(recorded_scope.as_deref().map(str::trim));
+        units.extend(tagged_scope);
+        if units.is_empty() {
+            log_previous_teardown(
+                id, ended, None, tagged_scope, operation_id, expected_incarnation,
+                reason, "acquired", "no_scopes", false, None,
+            );
         }
-        units.extend(
-            ended
-                .and_then(|session| session.tags.get("st3.scope-unit"))
-                .cloned(),
-        );
         // A server that wrote its exit record can still be shutting down.
         let server = ended.and_then(|session| session.pid);
         let mut done = true;
         for unit in &units {
-            if server_apart(id, unit, server) {
+            let apart = server_apart(id, unit, server);
+            log_previous_teardown(
+                id, ended, recorded_scope.as_deref().map(str::trim), tagged_scope, operation_id,
+                expected_incarnation, reason, "acquired",
+                if apart { "server_apart_end_scope" } else { "server_not_apart" }, apart, Some(unit),
+            );
+            if apart {
                 crate::end_scope(unit, crate::SCOPE_GRACE)?;
             } else {
                 done = false;
