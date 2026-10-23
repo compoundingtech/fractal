@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A member can choose local trim with [trim] local = true: it then takes no part in checkpoint agreement and adopts no peer's manifest, finishing only a trim it had already committed. Off by default",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No database or claim schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. No claim family is trimmed locally yet."},
+  "compatibility": {"status": "changed", "detail": "No wire, stored format or claim kind change. A new optional [trim] config section; a default config does not write it. With local = true the member seals, verifies and adopts no checkpoint, and its adopt endpoint refuses with trim-is-local. Every participant must seal, so the other members' checkpoints stop until a person excuses it, as with [checkpoint] enabled = false."},
+  "downtime": {"status": "none", "detail": "None. The setting is read at startup."},
+  "manual": {"status": "none", "detail": "No manual step. Nothing changes unless a member opts in."},
+  "recovery": {"status": "none", "detail": "Remove the setting and restart: the member takes part in checkpoints again and adopts the newest stable one from a peer as a returning node does."}
+}

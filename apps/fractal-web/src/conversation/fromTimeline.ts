@@ -1,12 +1,13 @@
 // Project decoded st3 conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineEntry } from '@smalltalk/st3-client/schema'
-import type { ConversationChunk, UnrecognizedEntry } from '@st3/sdk/effect'
+import { TimelineEntryId, Timestamp, type TimelineEntry } from '@fractal/client/schema'
+import type { ConversationChunk, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
 import type { ConversationItem, ToolCallItem, ToolResult } from './model.ts'
 import { contentEvent, proseItem, withoutShownDeliveries } from './semantics.ts'
+import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the st3 wire contract.
@@ -156,10 +157,35 @@ const itemOf = ({
 }): ConversationItem => {
   switch (entry.type) {
     case 'content': {
+      // Native text blocks can carry only {body_ref:true}, not their own prose:
+      // external_sessions.rs:3698-3728,4813-4832; Schema.generated.ts:2639-2662.
+      // Mixed bodies therefore need a visible disclosure, not guessed text boundaries.
+      // This mixed-content path goes away once TimelineBlock carries per-block text or body ranges.
+      const blocks = entry.body.blocks?.filter((block) => block.kind !== 'source_record')
+      if (blocks?.some((block) =>
+        block.visibility === 'internal' || block.visibility === 'hidden-by-harness',
+      )) {
+        const mixedContent = blocks.some((block) =>
+          block.visibility !== 'internal' && block.visibility !== 'hidden-by-harness',
+        )
+        const primaryType = blocks[0]?.view?.type
+        return {
+          _tag: 'UnknownEvent',
+          id: entry.id,
+          at: entryTimestamp(entry),
+          eventType: typeof primaryType === 'string' ? primaryType : primaryType?.raw ?? 'internal native content',
+          ...(mixedContent ? { mixedContent: true } : {}),
+          data: entry.body,
+        }
+      }
       const internal = unrecognizedOmpItem(entry)
       if (internal !== undefined) return internal
       const reasoning = parseNativeReasoning(entry)
       if (reasoning !== undefined) return reasoning
+      const notice = entry.body.media_type === 'text/plain' && entry.role === 'system' && entry.final
+        ? q101OmpEnvelopeStopgap({ id: entry.id, role: entry.role, text: entry.body.text ?? '', at: entryTimestamp(entry) })
+        : undefined
+      if (notice !== undefined) return notice
       const event = contentEvent({
         id: entry.id,
         text: entry.body.text ?? '',

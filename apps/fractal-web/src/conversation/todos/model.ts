@@ -1,8 +1,10 @@
-import type { Agent, AgentTodo, HarnessPhase } from '@smalltalk/st3-client/schema'
+import type { AgentTodo, HarnessPhase } from '@fractal/client/schema'
+import type { DecodedAgent, Open } from '@fractal/sdk/effect'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 
 import type { DataSource, Feed } from '../../data/source.ts'
+import type { FeedSyncObservation } from '../../data/feedSync.ts'
 
 /** Todo observation availability or accepted progress with phase, source totals and freshness. */
 export type TodoState =
@@ -11,9 +13,9 @@ export type TodoState =
   | { readonly _tag: 'Missing' }
   | {
       readonly _tag: 'Observed'
-      readonly todo: AgentTodo
-      readonly stale: boolean
-      readonly phase: HarnessPhase | undefined
+      readonly todo: Open<AgentTodo>
+      readonly binding: 'current' | 'pending' | 'stale'
+      readonly phase: Open<HarnessPhase> | undefined
       readonly completed: number
       readonly total: number
     }
@@ -22,9 +24,11 @@ export type TodoState =
 export const projectTodos = ({
   feed,
   agentRef,
+  sync,
 }: {
-  feed: Feed<readonly Agent[]>
+  feed: Feed<readonly DecodedAgent[]>
   agentRef: string
+  sync?: FeedSyncObservation['status']
 }): TodoState => {
   if (feed._tag !== 'Observed') return feed
   const agent = feed.value.find((row) => row.id === agentRef)
@@ -47,10 +51,11 @@ export const projectTodos = ({
     phase,
     completed,
     total: completed + pending + in_progress + blocked + abandoned,
-    stale:
-      todo.stale ||
-      feed.freshness === 'stale' ||
-      (incarnation !== undefined && incarnation !== snapshot.incarnation_id),
+    binding: sync?._tag === 'Connecting' || sync?._tag === 'Requested' || sync?._tag === 'Progress'
+      ? 'pending'
+      : todo.stale || feed.freshness === 'stale' || (incarnation !== undefined && incarnation !== snapshot.incarnation_id)
+        ? 'stale'
+        : 'current',
   }
 }
 
@@ -68,7 +73,11 @@ export const agentTodosAtom = ({
   let family = sources.get(source)
   if (family === undefined) {
     family = Atom.family((ref: string) =>
-      Atom.make((get) => projectTodos({ feed: get(source.agents), agentRef: ref })),
+      Atom.make((get) => projectTodos({
+        feed: get(source.agents),
+        agentRef: ref,
+        sync: source.sync === undefined ? undefined : get(source.sync.agents).sync.status,
+      })),
     )
     sources.set(source, family)
   }

@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, writeFileSync, readFileSync, mkdirSync, openSy
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('ST_') && !name.startsWith('ST3_') && !name.startsWith('FABRIC_')));
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — an isolated member must inherit neither namespace.
+const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('FRACTAL_') && !name.startsWith('ST_') && !name.startsWith('ST3_') && !name.startsWith('SMALLTALK_') && !name.startsWith('FABRIC_')));
 const kind = 'st-fabric-isolated-proof-v1';
 // The phone is granted inbound-only, which needs fabric 0.2.41 or later.
 const expectedVersion = process.env.FABRIC_EXPECTED_VERSION ?? '0.2.41+84c3208';

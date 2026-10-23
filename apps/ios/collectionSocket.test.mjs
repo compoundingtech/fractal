@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { St3Client } from '../../clients/typescript/st3-client/index.ts';
+import { FractalClient } from '../../clients/typescript/fractal-client/index.ts';
 import { collectionSocketFactory } from './collectionSocket.ts';
 
 const flush = async () => { for (let n = 0; n < 5; n++) await Promise.resolve(); };
@@ -16,7 +16,7 @@ function bridge() {
 
 test('the native socket forwards authentication, commands, frames and protocol ping without a read', async () => {
   const native = bridge(), socketFactory = collectionSocketFactory(native);
-  const client = new St3Client({ baseUrl: 'https://gateway.invalid', credential: async () => 'test-credential' });
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid', credential: async () => 'test-credential' });
   let pings = 0, ended = 0;
   const frames = [];
   const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: () => ended++, socket: (...args) => {
@@ -33,7 +33,10 @@ test('the native socket forwards authentication, commands, frames and protocol p
   assert.deepEqual(JSON.parse(native.sent[0][1]), { kind: 'subscribe', id: 'usage-24', collection: 'usage', limit: 200, since_ms: 123, until_ms: 456 });
   native.emit({ id, kind: 'ping' });
   assert.equal(pings, 1); assert.equal(native.sent.length, 1, 'SocketRocket answers pong natively; JS sends nothing');
-  native.emit({ id, kind: 'message', data: JSON.stringify({ kind: 'snapshot', id: 'usage-24' }) });
+  native.emit({ id, kind: 'message', data: JSON.stringify({
+    kind: 'snapshot', id: 'usage-24', collection: 'usage', items: [], order: [], has_more: false,
+    snapshot: { id: 'snapshot/test', host_id: 'host/test', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-09-20T00:00:00Z' },
+  }) });
   assert.equal(frames.length, 1);
   stream.close();
   assert.deepEqual(native.closed, [[id, 1000]]);

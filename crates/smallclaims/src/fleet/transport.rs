@@ -278,9 +278,9 @@ async fn run(program: &Path, arguments: &[&str]) -> Result<String> {
 }
 
 /// Fabric builds older than 0.2.41 have no `--json` and no error codes: they print the
-/// address or path alone and say a refusal only in words on stderr. This is the single place
-/// st still reads those words, and it turns them into the same [`FabricError`] a current
-/// build prints, so nothing downstream matches text.
+/// address, path, NodeID or tab-separated peer rows alone and say a refusal only in words on
+/// stderr. This is the single place st still reads that text, and it turns a refusal into the
+/// same [`FabricError`] a current build prints, so nothing downstream matches text.
 ///
 /// Remove this module, and `Ok(None)` from [`run_json`], once no fleet member runs Fabric
 /// older than 0.2.41. A member updates Fabric with `fabric update`, which is how a fleet
@@ -296,6 +296,19 @@ mod legacy {
         ),
         ("node is not in fabric allow-list", "peer_not_in_allow_list"),
     ];
+
+    /// `fabric peers` rows: a NodeID, the local name (possibly empty), and the peer's grants.
+    pub(super) fn parse_peers(printed: &str) -> Vec<(String, String)> {
+        printed
+            .lines()
+            .filter_map(|line| {
+                let mut columns = line.split('\t');
+                let node = columns.next()?.trim();
+                let name = columns.next().unwrap_or_default().trim();
+                (!node.is_empty()).then(|| (node.to_owned(), name.to_owned()))
+            })
+            .collect()
+    }
 
     /// The code the old words stand for, for a refusal said only in prose.
     pub(super) fn refusal_code(text: &str) -> Option<&'static str> {
@@ -327,19 +340,6 @@ mod legacy {
 /// The addresses `tailscale ip` reports.
 pub async fn tailscale_addresses(tailscale: &Path) -> Result<Vec<IpAddr>> {
     Ok(parse_tailscale_ips(&run(tailscale, &["ip"]).await?))
-}
-
-/// `fabric peers` rows: a NodeID, the local name (possibly empty), and the peer's grants.
-fn parse_fabric_peers(printed: &str) -> Vec<(String, String)> {
-    printed
-        .lines()
-        .filter_map(|line| {
-            let mut columns = line.split('\t');
-            let node = columns.next()?.trim();
-            let name = columns.next().unwrap_or_default().trim();
-            (!node.is_empty()).then(|| (node.to_owned(), name.to_owned()))
-        })
-        .collect()
 }
 
 /// The default Fabric protocol for a fleet, so a throwaway fleet never collides with another.
@@ -382,7 +382,10 @@ impl Fabric {
 
     /// This machine's Fabric NodeID.
     pub async fn id(&self) -> Result<String> {
-        let id = run(&self.program, &["id"]).await?.trim().to_owned();
+        let id = match run_json(&self.program, &["id"]).await? {
+            Some(value) => value["id"].as_str().unwrap_or_default().to_owned(),
+            None => run(&self.program, &["id"]).await?.trim().to_owned(),
+        };
         anyhow::ensure!(!id.is_empty(), "fabric id printed nothing");
         Ok(id)
     }
@@ -423,7 +426,22 @@ impl Fabric {
 
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
     pub async fn peers(&self) -> Result<Vec<(String, String)>> {
-        Ok(parse_fabric_peers(&run(&self.program, &["peers"]).await?))
+        let Some(value) = run_json(&self.program, &["peers"]).await? else {
+            return Ok(legacy::parse_peers(&run(&self.program, &["peers"]).await?));
+        };
+        let peers = value["peers"]
+            .as_array()
+            .context("fabric peers printed no peers")?;
+        Ok(peers
+            .iter()
+            .filter_map(|peer| {
+                let node = peer["node"].as_str().filter(|node| !node.is_empty())?;
+                Some((
+                    node.to_owned(),
+                    peer["name"].as_str().unwrap_or_default().to_owned(),
+                ))
+            })
+            .collect())
     }
 
     /// Whether the peer's Fabric refuses this machine for `protocol`, asked with a fresh
@@ -513,6 +531,36 @@ pub enum Route {
     Fabric { node: String, protocol: String },
 }
 
+impl Route {
+    /// Classify the actual dial route, including config overrides. A Fabric tunnel's
+    /// ephemeral loopback URL must never be classified as a loopback carrier.
+    pub fn carrier(&self) -> crate::replication::ReplicationCarrier {
+        use crate::replication::ReplicationCarrier;
+        match self {
+            Self::Fabric { .. } => ReplicationCarrier::Fabric,
+            Self::Http(url) => {
+                let host = reqwest::Url::parse(url).ok().and_then(|url| {
+                    url.host_str()
+                        .map(|host| host.trim_matches(['[', ']']).to_owned())
+                });
+                match host.as_deref() {
+                    Some(host) if host.eq_ignore_ascii_case("localhost") => {
+                        ReplicationCarrier::Loopback
+                    }
+                    Some(host) => match host.parse::<IpAddr>() {
+                        Ok(address) if address.is_loopback() => ReplicationCarrier::Loopback,
+                        Ok(address) if is_tailnet_address(&address) => {
+                            ReplicationCarrier::Tailscale
+                        }
+                        _ => ReplicationCarrier::Unknown,
+                    },
+                    None => ReplicationCarrier::Unknown,
+                }
+            }
+        }
+    }
+}
+
 /// A lasting peer route. HTTP stays on loopback or the encrypted tailnet; Fabric names
 /// the remote peer/protocol, never an ephemeral local tunnel address.
 pub fn parse_route(route: &str) -> Option<Route> {
@@ -545,15 +593,39 @@ pub fn parse_route(route: &str) -> Option<Route> {
     .then(|| Route::Http(route.trim_end_matches('/').into()))
 }
 
-/// What this machine can use to dial.
+/// What this machine can use to dial, filtered and ordered by its local configuration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalTransports {
     pub tailscale: bool,
     pub fabric: bool,
+    pub fabric_first: bool,
 }
 
-/// A member's routes from its advertised endpoints, in the design's order after any config
-/// override: Tailscale, then Fabric, then loopback. Endpoints this machine cannot use, and any
+impl LocalTransports {
+    /// Apply an explicit transport list to current availability. Without a fleet file,
+    /// retain the legacy Tailscale-first order and allow every available transport.
+    pub fn configured(transports: Option<&[String]>, tailscale: bool, fabric: bool) -> Self {
+        let Some(transports) = transports else {
+            return Self {
+                tailscale,
+                fabric,
+                fabric_first: false,
+            };
+        };
+        let tailscale_position = transports.iter().position(|name| name == "tailscale");
+        let fabric_position = transports.iter().position(|name| name == "fabric");
+        Self {
+            tailscale: tailscale && tailscale_position.is_some(),
+            fabric: fabric && fabric_position.is_some(),
+            fabric_first: fabric_position.is_some_and(|fabric| {
+                tailscale_position.is_none_or(|tailscale| fabric < tailscale)
+            }),
+        }
+    }
+}
+
+/// A member's routes from its advertised endpoints, in the local configured order after
+/// any config override, with loopback last. Endpoints this machine cannot use, and any
 /// address that is neither loopback nor tailnet, are skipped.
 pub fn routes_from_endpoints(endpoints: &[Value], local: LocalTransports) -> Vec<Route> {
     let text = |endpoint: &Value, field: &str| endpoint[field].as_str().map(str::to_owned);
@@ -563,34 +635,33 @@ pub fn routes_from_endpoints(endpoints: &[Value], local: LocalTransports) -> Vec
             .filter(|address| is_permitted_route_address(&address.ip()))
             .map(|address| Route::Http(format!("http://{address}")))
     };
+    let tailscale = endpoints
+        .iter()
+        .filter(|endpoint| local.tailscale && endpoint["transport"] == "tailscale")
+        .filter_map(address)
+        .filter(|route| match route {
+            Route::Http(url) => url
+                .trim_start_matches("http://")
+                .parse::<SocketAddr>()
+                .is_ok_and(|address| is_tailnet_address(&address.ip())),
+            Route::Fabric { .. } => false,
+        });
+    let fabric = endpoints
+        .iter()
+        .filter(|endpoint| local.fabric && endpoint["transport"] == "fabric")
+        .filter_map(|endpoint| {
+            Some(Route::Fabric {
+                node: text(endpoint, "node")?,
+                protocol: text(endpoint, "protocol")?,
+            })
+        });
     let mut routes = Vec::new();
-    if local.tailscale {
-        routes.extend(
-            endpoints
-                .iter()
-                .filter(|endpoint| endpoint["transport"] == "tailscale")
-                .filter_map(address)
-                .filter(|route| match route {
-                    Route::Http(url) => url
-                        .trim_start_matches("http://")
-                        .parse::<SocketAddr>()
-                        .is_ok_and(|address| is_tailnet_address(&address.ip())),
-                    Route::Fabric { .. } => false,
-                }),
-        );
-    }
-    if local.fabric {
-        routes.extend(
-            endpoints
-                .iter()
-                .filter(|endpoint| endpoint["transport"] == "fabric")
-                .filter_map(|endpoint| {
-                    Some(Route::Fabric {
-                        node: text(endpoint, "node")?,
-                        protocol: text(endpoint, "protocol")?,
-                    })
-                }),
-        );
+    if local.fabric_first {
+        routes.extend(fabric);
+        routes.extend(tailscale);
+    } else {
+        routes.extend(tailscale);
+        routes.extend(fabric);
     }
     routes.extend(
         endpoints
@@ -613,6 +684,32 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn carrier_comes_from_the_dial_route_including_overrides() {
+        use crate::replication::ReplicationCarrier;
+        for (route, carrier) in [
+            ("http://127.0.0.1:4000", ReplicationCarrier::Loopback),
+            ("http://[::1]:4000", ReplicationCarrier::Loopback),
+            ("http://localhost:4000", ReplicationCarrier::Loopback),
+            ("http://100.101.102.103:4000", ReplicationCarrier::Tailscale),
+            (
+                "http://[fd7a:115c:a1e0::1]:4000",
+                ReplicationCarrier::Tailscale,
+            ),
+            ("fabric://birch/st3-peer-v1", ReplicationCarrier::Fabric),
+        ] {
+            assert_eq!(parse_route(route).unwrap().carrier(), carrier, "{route}");
+        }
+        assert_eq!(
+            Route::Http("http://example.invalid:4000".into()).carrier(),
+            ReplicationCarrier::Unknown
+        );
+        assert_eq!(
+            Route::Http("malformed".into()).carrier(),
+            ReplicationCarrier::Unknown
+        );
+    }
 
     #[test]
     fn tailnet_ranges_are_exact() {
@@ -655,10 +752,7 @@ mod tests {
             json!({"transport": "tailscale", "address": "192.168.1.4:31313"}),
             json!({"transport": "loopback", "address": "192.168.1.4:4000"}),
         ];
-        let all = LocalTransports {
-            tailscale: true,
-            fabric: true,
-        };
+        let all = LocalTransports::configured(None, true, true);
         assert_eq!(
             routes_from_endpoints(&endpoints, all),
             vec![
@@ -676,6 +770,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn configured_transports_filter_availability_and_preserve_local_order() {
+        for (names, tailscale, fabric, fabric_first) in [
+            (None, true, true, false),
+            (Some(vec!["tailscale", "fabric"]), true, true, false),
+            (Some(vec!["fabric", "tailscale"]), true, true, true),
+            (Some(vec!["tailscale"]), true, false, false),
+            (Some(vec!["fabric"]), false, true, true),
+            (Some(vec![]), false, false, false),
+        ] {
+            let names = names.map(|names| names.into_iter().map(String::from).collect::<Vec<_>>());
+            for (available_tailscale, available_fabric) in
+                [(true, true), (false, true), (true, false), (false, false)]
+            {
+                assert_eq!(
+                    LocalTransports::configured(
+                        names.as_deref(),
+                        available_tailscale,
+                        available_fabric,
+                    ),
+                    LocalTransports {
+                        tailscale: tailscale && available_tailscale,
+                        fabric: fabric && available_fabric,
+                        fabric_first,
+                    },
+                    "{names:?}, available: tailscale={available_tailscale}, fabric={available_fabric}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn routes_follow_local_order_and_filter_disabled_transports_with_loopback_last() {
+        let endpoints = [
+            json!({"transport": "loopback", "address": "127.0.0.1:4000"}),
+            json!({"transport": "tailscale", "address": "100.101.102.103:31313"}),
+            json!({"transport": "fabric", "node": "abc", "protocol": "st3/fleet/x"}),
+        ];
+        let tailscale = Route::Http("http://100.101.102.103:31313".into());
+        let fabric = Route::Fabric {
+            node: "abc".into(),
+            protocol: "st3/fleet/x".into(),
+        };
+        let loopback = Route::Http("http://127.0.0.1:4000".into());
+        for (names, expected) in [
+            (
+                vec!["fabric", "tailscale"],
+                vec![fabric.clone(), tailscale.clone(), loopback.clone()],
+            ),
+            (
+                vec!["tailscale", "fabric"],
+                vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            ),
+            (vec!["fabric"], vec![fabric, loopback.clone()]),
+            (vec!["tailscale"], vec![tailscale, loopback.clone()]),
+            (vec![], vec![loopback]),
+        ] {
+            let names = names.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(
+                routes_from_endpoints(
+                    &endpoints,
+                    LocalTransports::configured(Some(&names), true, true),
+                ),
+                expected,
+                "{names:?}"
+            );
+        }
+    }
+
     fn shim(root: &Path, body: &str) -> PathBuf {
         let path = root.join("fabric");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -690,7 +853,7 @@ mod tests {
         let fabric = Fabric::new(shim(
             root.path(),
             &format!(
-                "echo \"$@\" >> {log}\ncase \"$1\" in id) echo node-a;; dial) echo '{{\"address\":\"127.0.0.1:45678\"}}';; *) ;; esac",
+                "echo \"$@\" >> {log}\ncase \"$1\" in id) echo '{{\"id\":\"node-a\"}}';; dial) echo '{{\"address\":\"127.0.0.1:45678\"}}';; *) ;; esac",
                 log = log.display()
             ),
         ));
@@ -707,7 +870,7 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert_eq!(
             calls,
-            "id\ndial node-b st3/fleet/x --tcp 127.0.0.1:0 --json\n\
+            "id --json\ndial node-b st3/fleet/x --tcp 127.0.0.1:0 --json\n\
              expose st3/fleet/x --tcp 127.0.0.1:31313\nunexpose st3/fleet/x\n"
         );
 
@@ -825,6 +988,40 @@ mod tests {
                 "case \" $* \" in *' --json '*) echo \"error: unexpected argument '--json'\" >&2; exit 2;; esac\n{dial}"
             ),
         ))
+    }
+
+    #[tokio::test]
+    async fn an_older_fabric_without_json_still_names_itself_and_lists_its_peers() {
+        let root = tempfile::tempdir().unwrap();
+        let fabric = old_build(
+            root.path(),
+            "case \"$1\" in id) echo node-a;; \
+             peers) printf 'node-b\\tBox\\techo,st3/pty/x\\nnode-c\\t\\techo\\n';; esac",
+        );
+        assert_eq!(fabric.id().await.unwrap(), "node-a");
+        assert_eq!(
+            fabric.peers().await.unwrap(),
+            vec![
+                ("node-b".to_owned(), "Box".to_owned()),
+                ("node-c".to_owned(), String::new()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn id_and_peers_report_fabric_failures_by_code() {
+        let root = tempfile::tempdir().unwrap();
+        let down = fails_with(root.path(), "daemon_not_running", "fault", 69);
+        for error in [
+            down.id().await.unwrap_err(),
+            down.peers().await.unwrap_err(),
+        ] {
+            let fault = error.downcast_ref::<FabricError>().unwrap();
+            assert_eq!(fault.code, "daemon_not_running");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let empty = Fabric::new(shim(root.path(), "echo '{\"id\":\"\"}'"));
+        assert!(empty.id().await.is_err());
     }
 
     #[tokio::test]
@@ -958,7 +1155,7 @@ mod tests {
             root.path(),
             &format!(
                 "echo \"$@\" >> {log}\ncase \"$1\" in \
-                 peers) printf 'node-b\\tBox\\techo,st3/pty/x\\nnode-c\\t\\techo\\n';; \
+                 peers) echo '{{\"peers\":[{{\"node\":\"node-b\",\"name\":\"Box\",\"allow\":[\"echo\",\"st3/pty/x\"]}},{{\"node\":\"node-c\",\"name\":null,\"allow\":[\"echo\"]}}]}}';; \
                  dial) echo '{{\"socket\":\"/run/fabric/dials/node-b.sock\"}}';; *) ;; esac",
                 log = log.display()
             ),
@@ -986,7 +1183,7 @@ mod tests {
         assert_eq!(
             calls,
             "expose st3/pty/x --socket /run/st/terminals.sock\n\
-             expose st3/pty/x --exec -- /bin/st terminals serve-fabric\npeers\n\
+             expose st3/pty/x --exec -- /bin/st terminals serve-fabric\npeers --json\n\
              dial node-b st3/pty/x --json\n"
         );
 

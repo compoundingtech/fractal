@@ -2,7 +2,7 @@
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
-#   ST_ISOLATION_ARCHIVE    workspace archive containing the retained st2 controls and st-runtime tests
+#   ST_ISOLATION_ARCHIVE    workspace archive containing the retained st2 controls and fractal-runtime tests
 #   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; the test binary's compiled-in
 #                           st2 path lies below it, so the archive is extracted at the same path.
 #                           nextest also requires each selected package's working directory.
@@ -15,44 +15,44 @@ let
   uid = 1000;
   controls = [
     {
-      package = "st2";
+      package = "fractal-legacy-runner";
       binary = "integration";
       kind = "test";
       name = "transport_isolation::exec_task_survives_transport_cgroup_cascade";
     }
     {
-      package = "st2";
+      package = "fractal-legacy-runner";
       binary = "integration";
       kind = "test";
       name = "transport_isolation::pty_task_survives_transport_cgroup_cascade";
     }
     {
-      package = "st2";
+      package = "fractal-legacy-runner";
       binary = "integration";
       kind = "test";
       name = "nomad_survival::managed_agent_color_contract_crosses_systemd_scope";
     }
     {
-      package = "st-runtime";
+      package = "fractal-runtime";
       binary = "scope_cascade";
       kind = "test";
       name = "exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops";
     }
     {
-      package = "st-runtime";
+      package = "fractal-runtime";
       binary = "scope_cascade";
       kind = "test";
       name = "pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops";
     }
     {
-      package = "st-runtime";
+      package = "fractal-runtime";
       binary = "scope_cascade";
       kind = "test";
       name = "literal_environment_is_preserved_across_a_work_scope";
     }
     {
-      package = "st-runtime";
-      binary = "st_runtime";
+      package = "fractal-runtime";
+      binary = "fractal_runtime";
       kind = "lib";
       name = "isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor";
     }
@@ -169,9 +169,12 @@ pkgs.testers.runNixOSTest {
     import shlex
     import time
 
-    archive = os.environ["ST_ISOLATION_ARCHIVE"]
-    workspace = os.environ["ST_ISOLATION_WORKSPACE"]
-    build_workspace = os.environ["ST_ISOLATION_BUILD_WORKSPACE"]
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    archive = (os.environ["FRACTAL_ISOLATION_ARCHIVE"] if "FRACTAL_ISOLATION_ARCHIVE" in os.environ else os.environ["ST_ISOLATION_ARCHIVE"])
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    workspace = (os.environ["FRACTAL_ISOLATION_WORKSPACE"] if "FRACTAL_ISOLATION_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_WORKSPACE"])
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    build_workspace = (os.environ["FRACTAL_ISOLATION_BUILD_WORKSPACE"] if "FRACTAL_ISOLATION_BUILD_WORKSPACE" in os.environ else os.environ["ST_ISOLATION_BUILD_WORKSPACE"])
 
     started = time.monotonic()
     machine.wait_for_unit("multi-user.target")
@@ -182,8 +185,8 @@ pkgs.testers.runNixOSTest {
 
     machine.copy_from_host(archive, "/tmp/isolation.tar.zst")
     # Archives carry built binaries, not package source directories. Provision the manifests
-    # and working directories for the selected root st2 and crates/st-runtime packages.
-    for manifest in ("Cargo.toml", "crates/st-runtime/Cargo.toml"):
+    # and working directories for the selected root fractal-legacy-runner and crates/fractal-runtime packages.
+    for manifest in ("Cargo.toml", "crates/fractal-runtime/Cargo.toml"):
         path = os.path.join(workspace, manifest)
         directory = shlex.quote(os.path.dirname(path))
         machine.succeed(f"mkdir -p {directory} && chown ${user} {directory}")
@@ -201,7 +204,8 @@ pkgs.testers.runNixOSTest {
     print(output)
     assert re.search(r"\b7 tests run: 7 passed\b", output), "all seven explicitly selected systemd-scope cases must run and pass"
 
-    with open(os.environ["ST_ISOLATION_TIMINGS"], "w") as timings:
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    with open((os.environ["FRACTAL_ISOLATION_TIMINGS"] if "FRACTAL_ISOLATION_TIMINGS" in os.environ else os.environ["ST_ISOLATION_TIMINGS"]), "w") as timings:
         json.dump({"boot_seconds": round(boot_seconds, 1), "test_seconds": round(test_seconds, 1)}, timings)
   '';
 }
