@@ -75,7 +75,7 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 ## Build locally
 
-For a step-by-step setup, see [build and run the iOS app](../../docs/ios-app.md), including prerequisites, simulator and device builds, and pairing.
+For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
 With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.7.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/smalltalk.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
 
