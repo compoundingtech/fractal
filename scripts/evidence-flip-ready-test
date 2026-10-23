@@ -53,12 +53,15 @@ class FakeGitHub:
         self.empty_window = 0  # the created= listing answers an empty page this many times (True: always)
         self.short_window = 0  # ... or a page one run short of its total_count
 
-    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None, actor='otter-bot', base=None):
+    def run(self, run_id, created, lines, real=None, attempt=1, check=CHECK, members=None, actor='otter-bot', base=None,
+            conclusion='success', branch=None, sha=None, ended=None):
         """One run whose gate job for `check` printed `lines`; `real` is the conclusion of the check's own job, `members` those
         of other jobs in the same attempt (an aggregate's members)."""
         if run_id not in self.jobs:
             self.runs.append({'id': run_id, 'status': 'completed', 'created_at': stamp(created), 'actor': {'login': actor},
-                              'pull_requests': [{'base': {'sha': base}}] if base else []})
+                              'pull_requests': [{'base': {'sha': base}}] if base else [], 'conclusion': conclusion,
+                              'head_repository': {'full_name': 'org/repo'}, 'head_branch': branch or f'b{run_id}',
+                              'head_sha': sha or f'{run_id:040x}'})
             self.jobs[run_id] = []
         job_id = run_id * 100 + len(self.jobs[run_id])
         self.jobs[run_id].append({'id': job_id, 'name': f'evidence-gate-{check}', 'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt})
@@ -66,7 +69,7 @@ class FakeGitHub:
             self.jobs[run_id].append({'id': job_id + 50, 'name': check, 'status': 'completed', 'conclusion': real, 'run_attempt': attempt})
         for offset, (name, conclusion) in enumerate((members or {}).items()):
             self.jobs[run_id].append({'id': job_id + 60 + offset, 'name': name, 'status': 'completed', 'conclusion': conclusion,
-                                      'run_attempt': attempt})
+                                      'run_attempt': attempt, 'completed_at': stamp(ended or created)})
         self.logs[job_id] = '\x1b[36mnoise\x1b[0m\n' + TEMPLATE + '\n' + ''.join(f'2026-10-22T05:58:36.1Z \x1b[0m{text}\n' for text in lines)
 
     def __call__(self, command, **kwargs):
@@ -110,7 +113,7 @@ class FlipReady(unittest.TestCase):
         self.origin, self.repo = tmp / 'origin.git', tmp / 'repo'
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], check=True)
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
-        for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS)):
+        for path in (flip.POLICY, flip.DOC, flip.WORKFLOW, *(path for path, _ in flip.TEST_LISTS)):
             (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / path, self.repo / path)
         git(self.repo, 'config', 'user.name', 'Test')
@@ -149,7 +152,7 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((code, result['window_s'], result['as_of']), (0, 86400, '2026-10-22T12:00:00Z'))
         entry = result['checks'][CHECK]
         self.assertEqual(entry, {'enforce': False, 'lines': 29, 'satisfied_log_ok': 29, 'log_missing': 0, 'unlogged_pass_unexplained': 0,
-                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'old_base_lines': {}, 'ready': False,
+                                 'hidden_red': [], 'visible_red': [], 'log_window_start': stamp(at(25)), 'old_base_lines': {}, 'superseded_red': [], 'ready': False,
                                  'why_not': ['29 satisfied lines with log=ok, fewer than 30']})  # the first run is in the lookback, not the window
         self.gh.run(2000, at(1), [decision()], real='success')
         self.assertEqual(self.check()['why_not'], [])
@@ -291,15 +294,54 @@ class FlipReady(unittest.TestCase):
         entry = self.check_of('linux-gate')
         self.assertEqual((entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([6000, 6001], [], ['2 runs with a hidden red']))
 
-    def test_the_members_a_linux_gate_skip_skips_are_the_jobs_whose_condition_reads_its_skip_output(self):
-        text = (ROOT / '.github/workflows/fleet.yml').read_text()
-        gated = set()
-        for found in re.finditer(r'^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)', text, re.M):
-            condition = re.search(r'^    if: (.*(?:\n      .*)*)', found.group(2), re.M)  # the job's own if, not a step's
-            if condition and 'needs.evidence-gate-linux-gate.outputs.skip' in condition.group(1):
-                gated.add(found.group(1))
-        self.assertEqual(sorted(gated), sorted(flip.SKIPPED_MEMBERS['linux-gate']))
-        self.assertNotIn('upgrade-impact', gated)
+    def test_a_wrapper_red_from_a_run_a_newer_push_cancelled_is_superseded_and_a_timeout_or_failure_is_not(self):
+        # Run 39882080994: a push of a new head cancelled the run; fractal-web-execution was cancelled, so the wrapper failed.
+        def superseded_run(execution='cancelled', conclusion='cancelled', newer=-60, newer_sha='b' * 40):
+            self.gh = FakeGitHub()
+            self.ready_history(count=40, check='fractal-web')
+            self.gh.run(7000, at(5), [decision(check='fractal-web')], real='failure', check='fractal-web', conclusion=conclusion,
+                        branch='x', sha='a' * 40, ended=at(5, -300),
+                        members={'fractal-web-execution': execution, 'upgrade-impact': 'failure'})  # an unrelated red does not count
+            if newer is not None:
+                self.gh.run(7001, at(5, newer), [decision(check='fractal-web')], real='success', check='fractal-web', branch='x',
+                            sha=newer_sha)
+            return self.check_of('fractal-web')
+        entry = superseded_run()
+        self.assertEqual((entry['superseded_red'], entry['hidden_red'], entry['visible_red'], trigger_reasons(entry)), ([7000], [], [], []))
+        for name, kwargs in (('no newer run: a timeout or a manual cancel', {'newer': None}),
+                             ('the newer run came after the cancel', {'newer': -600}),
+                             ('the execution job failed', {'execution': 'failure'}),
+                             ('a re-run of the same head', {'newer_sha': 'a' * 40}),
+                             ('the run did not conclude cancelled', {'conclusion': 'failure'})):
+            with self.subTest(name):
+                entry = superseded_run(**kwargs)
+                self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([], [7000], ['1 runs with a hidden red']))
+
+    def test_an_aggregates_members_are_the_jobs_that_read_its_skip_output_and_one_with_none_is_unreadable(self):
+        policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
+        members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
+        self.assertEqual(sorted(members), ['fractal-web', 'linux-gate'])  # the checks whose wrapper command is an aggregate
+        self.assertEqual(members['fractal-web'], ('fractal-web-execution',))
+        self.assertEqual(members['linux-gate'], ('linux-clippy', 'linux-fleet-compat', 'linux-test-build', 'linux-tests',
+                                                 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
+                                                 'mail-redelivery-canaries'))
+        for always in ('upgrade-impact', 'fractal-web-changes'):  # members that always run: their red is never hidden
+            self.assertNotIn(always, members['fractal-web'] + members['linux-gate'])
+        with self.assertRaises(ValueError):
+            flip.skipped_members('jobs:\n  linux-gate:\n    steps: []\n', policy)
+
+    def test_a_superseded_aggregate_with_a_failed_member_stays_hidden_and_an_unrelated_red_does_not_block(self):
+        def run(members):
+            self.gh = FakeGitHub()
+            self.ready_history(count=40, check='linux-gate')
+            self.gh.run(8000, at(5), [decision(check='linux-gate')], real='failure', check='linux-gate', conclusion='cancelled',
+                        branch='y', sha='c' * 40, ended=at(5, -300), members=members)
+            self.gh.run(8001, at(5, -60), [decision(check='linux-gate')], real='success', check='linux-gate', branch='y', sha='d' * 40)
+            return self.check_of('linux-gate')
+        entry = run({'linux-tests': 'cancelled', 'upgrade-impact': 'failure'})  # the unrelated red does not block
+        self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([8000], [], []))
+        entry = run({'linux-tests': 'cancelled', 'linux-clippy': 'failure'})  # a member the skip would skip failed
+        self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([], [8000], ['1 runs with a hidden red']))
 
     def test_job_logs_are_cached_by_job_id_and_template_lines_are_ignored(self):
         self.ready_history(count=31)

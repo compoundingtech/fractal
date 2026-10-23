@@ -49,11 +49,8 @@ LOOKBACK_S = 2 * 3600  # also read a little before the window, to see whether th
 MIN_SATISFIED_LOG_OK = 30
 LATENCY_S = 240  # two pulls of the log timer (every 2 minutes)
 NOT_FRESH = ('stale', 'absent', 'unsigned', '-')  # '-': the base did not pin the log key, so the window has not started
-# The members of the aggregate `linux-gate` that a skip decision skips at job level: the jobs whose `if` reads
-# needs.evidence-gate-linux-gate.outputs.skip (generated from .github/workflows/fleet.yml.genie.ts; the test checks this
-# list against fleet.yml). Every other member, upgrade-impact first, always runs, so its red is never hidden by a skip.
-SKIPPED_MEMBERS = {'linux-gate': ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
-                                  'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat')}
+WORKFLOW = '.github/workflows/fleet.yml'
+JOB = re.compile(r'^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)', re.M)
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 # The gate prints its line on its own, after the runner's timestamp; the step's shell text (echoed before it) has the
 # line too, as a template with `$CHECK`, behind other text.
@@ -149,7 +146,22 @@ def pr_runs(github, since, until, tries=4):
         page += 1
 
 
-def collect(github, checks, since, until):
+def skipped_members(workflow, policy):
+    """For each aggregate check (its wrapper command is `CHECK aggregate ...`), the jobs a skip of it skips: every other job of
+    the workflow that reads needs.evidence-gate-CHECK.outputs.skip, in its `if` or its steps. Any other member (upgrade-impact,
+    fractal-web-changes) always runs, so its red is never hidden by a skip."""
+    jobs = {found.group(1): found.group(2) for found in JOB.finditer(workflow)}
+    members = {}
+    for check, entry in policy.items():
+        if (((entry.get('kinds') or {}).get('wrapper') or {}).get('command') or [])[1:2] == ['aggregate']:
+            members[check] = tuple(sorted(name for name, body in jobs.items()
+                                          if name != check and f'needs.evidence-gate-{check}.outputs.skip' in body))
+            if not members[check]:
+                raise ValueError(f'no job of {WORKFLOW} reads the skip output of the aggregate {check}')
+    return members
+
+
+def collect(github, checks, since, until, members):
     """One row per gate job that printed a line for a known check: the run, its creation time, the line's fields and
     the conclusion of the check's own job in the same attempt."""
     runs = pr_runs(github, since, until)
@@ -157,6 +169,9 @@ def collect(github, checks, since, until):
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         job_lists = list(pool.map(
             lambda run: github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=all', 'jobs'), finished))
+    newer = {}  # (head repository, head branch) -> [(created, head sha)], for superseded()
+    for run in runs:
+        newer.setdefault(head_of(run), []).append((parse_time(run.get('created_at')), run.get('head_sha')))
     wanted = []
     for run, jobs in zip(finished, job_lists):
         real = {(job.get('name'), job.get('run_attempt')): job.get('conclusion') for job in jobs}
@@ -166,19 +181,40 @@ def collect(github, checks, since, until):
                 continue
             attempt = job.get('run_attempt')
             wanted.append((run, job, check, real.get((check, attempt)),
-                           [name for name in SKIPPED_MEMBERS.get(check, ()) if real.get((name, attempt)) in ('failure', 'cancelled')]))
+                           [name for name in members.get(check, ()) if real.get((name, attempt)) in ('failure', 'cancelled')],
+                           superseded(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()),
+                                      newer)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         logs = list(pool.map(lambda item: github.decision_lines(item[1]['id']), wanted))
     rows = []
-    for (run, job, check, conclusion, members_red), lines in zip(wanted, logs):
+    for (run, job, check, conclusion, members_red, was_superseded), lines in zip(wanted, logs):
         for text in lines:
             fields = fields_of(text)
             if fields.get('check') == check:
                 rows.append({'check': check, 'run': run['id'], 'created_at': parse_time(run.get('created_at')),
                              'actor': ((run.get('actor') or {}).get('login') or '-'),
                              'base': (((run.get('pull_requests') or [{}])[0] or {}).get('base') or {}).get('sha'),
-                             'fields': fields, 'real': conclusion, 'members_red': members_red})
+                             'fields': fields, 'real': conclusion, 'aggregate': check in members, 'members_red': members_red,
+                             'superseded': was_superseded})
     return rows
+
+
+def head_of(run):
+    return ((run.get('head_repository') or {}).get('full_name'), run.get('head_branch'))
+
+
+def superseded(run, jobs, needed, newer):
+    """Whether an aggregate's red in this attempt came only from a push that replaced the run: the run concluded cancelled;
+    of the jobs a skip of the check would skip (`needed`), none failed and at least one was cancelled; and a run of a
+    different head on the same branch was created before the first of those was cancelled. A timeout, a cancel with no
+    newer run, or a failed member stays a hidden red; a red of a member that always runs stays visible."""
+    conclusions = {job.get('name'): job for job in jobs if job.get('name') in needed}
+    cancelled = [parse_time(job.get('completed_at')) for job in conclusions.values() if job.get('conclusion') == 'cancelled']
+    if run.get('conclusion') != 'cancelled' or not cancelled or None in cancelled \
+            or any(job.get('conclusion') == 'failure' for job in conclusions.values()):
+        return False
+    created = parse_time(run.get('created_at'))
+    return any(created < when < min(cancelled) and sha != run.get('head_sha') for when, sha in newer.get(head_of(run), ()) if when)
 
 
 def old_base(root, row, runner, seen):
@@ -225,8 +261,10 @@ def evaluate(rows, enforce, now):
                 unexplained += 1
     red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
     # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
-    hidden = sorted({row['run'] for row in red if row['check'] not in SKIPPED_MEMBERS or row['members_red']})
-    visible = sorted({row['run'] for row in red} - set(hidden))
+    # A red from a run that a newer push replaced (superseded) is neither: it is reported on its own.
+    replaced = sorted({row['run'] for row in red if row.get('superseded')})
+    hidden = sorted({row['run'] for row in red if not row['aggregate'] or row['members_red']} - set(replaced))
+    visible = sorted({row['run'] for row in red} - set(hidden) - set(replaced))
     # The log window began with the first line that has a log value after the last line without one. An old base's line
     # (old_base) neither starts nor restarts it; the report counts those it set aside.
     ignored = {}
@@ -242,6 +280,7 @@ def evaluate(rows, enforce, now):
         'satisfied_log_ok': sum(1 for row, value in zip(window, log) if value == 'ok' and row['fields'].get('outcome') == 'satisfied'),
         'log_missing': log.count('missing'), 'unlogged_pass_unexplained': unexplained, 'hidden_red': hidden,
         'visible_red': visible, 'log_window_start': iso(window_start), 'old_base_lines': ignored,
+        'superseded_red': replaced,
     }
     verified = [value for row, value in zip(window, log) if not row.get('old_base')]
     why = [f'{verified.count(value)} lines with log={value}' for value in NOT_FRESH if value in verified]
@@ -486,7 +525,8 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         git(root, 'fetch', '-q', 'origin', 'main', runner=runner)
         policy = json.loads(git(root, 'show', f'origin/main:{POLICY}', runner=runner))['checks']
         since = now - datetime.timedelta(seconds=WINDOW_S + LOOKBACK_S)
-        rows = collect(github, set(policy), since, now)
+        members = skipped_members(git(root, 'show', f'origin/main:{WORKFLOW}', runner=runner), policy)
+        rows = collect(github, set(policy), since, now, members)
         seen = {}
         for row in rows:
             row['old_base'] = old_base(root, row, runner, seen)
