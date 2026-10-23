@@ -93,6 +93,11 @@ const lifecycleOf = (row: DecodedAgent): Agent['lifecycle'] => {
   }
 }
 
+const workFromLabel = (work: NonNullable<DecodedAgent['current_work']>[number]): NonNullable<Agent['currentWork']>[number] => ({
+  id: work.id, missionId: work.mission_id, runId: work.mission_run_id,
+  path: work.path, title: Option.getOrUndefined(work.title), state: leafText(work.state),
+})
+
 const agentFromRow = (row: DecodedAgent): Agent => {
   const driver = Option.getOrUndefined(row.driver)
   const harness = harnesses.find((candidate) => candidate === driver)
@@ -118,6 +123,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     state: leafText(row.state),
     ...(description === undefined ? {} : { description }),
     usage: usageOf(row),
+    incarnationId: Option.getOrUndefined(row.incarnation_id),
     checkout: fromOption(row.checkout),
     workspace: fromOption(row.workspace),
     startedAt: unknown,
@@ -127,6 +133,8 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     ask: fromOption(row.ask),
     ...(suspendedAt === undefined ? {} : { statusSince: DateTime.toEpochMillis(suspendedAt) }),
     ...(mission === undefined ? {} : { mission }),
+    currentWork: row.current_work?.map(workFromLabel),
+    upcomingWork: row.upcoming_work?.map(workFromLabel),
     ...(row.subagents === undefined ? {} : { subagents: row.subagents.map(child => ({
       id: child.id, driver: child.driver,
       description: Option.getOrUndefined(child.description),
@@ -265,6 +273,14 @@ const sameSubagents = (a: Agent['subagents'], b: Agent['subagents']): boolean =>
       child.lease_expires_at === other.lease_expires_at
   }))
 
+// oxlint-disable-next-line overeng/named-args -- Retained work projection comparator.
+const sameWork = (a: Agent['currentWork'], b: Agent['currentWork']): boolean =>
+  a === b || (a !== undefined && b !== undefined && a.length === b.length && a.every((work, index) => {
+    const other = b[index]!
+    return work.id === other.id && work.missionId === other.missionId && work.runId === other.runId &&
+      work.path === other.path && work.title === other.title && work.state === other.state
+  }))
+
 // oxlint-disable-next-line overeng/named-args -- Retained Agent projection comparator; fixed positional Equivalence shape.
 const sameAgent = (a: Agent, b: Agent): boolean =>
   a.ref === b.ref &&
@@ -282,12 +298,16 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   sameKnown(a.startedAt, b.startedAt) &&
   sameKnown(a.endedAt, b.endedAt) &&
   sameKnown(a.usage, b.usage, decodedUsageEquivalence) &&
+  a.incarnationId === b.incarnationId &&
+  a.contextObservedAfter === b.contextObservedAfter &&
   sameKnown(a.checkout, b.checkout, sameCheckout) &&
   sameKnown(a.workspace, b.workspace) &&
   sameKnown(a.blockedOn, b.blockedOn) &&
   sameKnown(a.ask, b.ask) &&
   a.statusSince === b.statusSince &&
   a.mission === b.mission &&
+  sameWork(a.currentWork, b.currentWork) &&
+  sameWork(a.upcomingWork, b.upcomingWork) &&
   sameSubagents(a.subagents, b.subagents) &&
   a.connected === b.connected
 
@@ -315,13 +335,23 @@ export const createProjections = (): {
       if (rows === previousRows && previousFleet !== undefined) return previousFleet
       const previousAgents = new Map(previousFleet?.agents.map((agent) => [agent.ref, agent]))
       const projected = rows.map((row) => {
-        let agent = agents.get(row)
-        if (agent === undefined) {
-          const candidate = agentFromRow(row)
-          const previous = previousAgents.get(row.id)
-          agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
-          agents.set(row, agent)
+        let candidate = agents.get(row)
+        if (candidate === undefined) {
+          candidate = agentFromRow(row)
+          agents.set(row, candidate)
         }
+        const previous = previousAgents.get(row.id)
+        // Cumulative usage can retain old occupancy across incarnations. Even a cached native
+        // DTO must inherit the transition fence; only strictly newer evidence restores context.
+        const context = candidate.usage._tag === 'Known' ? candidate.usage.value.context : undefined
+        const previousContext = previous?.usage._tag === 'Known' ? previous.usage.value.context : undefined
+        const contextObservedAfter = previous !== undefined && previous.incarnationId !== candidate.incarnationId
+          ? Math.max(previous.contextObservedAfter ?? 0, DateTime.toEpochMillis(row.updated_at),
+            previousContext === undefined ? 0 : DateTime.toEpochMillis(previousContext.observed_at_unix_ms),
+            context === undefined ? 0 : DateTime.toEpochMillis(context.observed_at_unix_ms))
+          : previous?.contextObservedAfter
+        if (contextObservedAfter !== undefined) candidate = { ...candidate, contextObservedAfter }
+        const agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
         return agent
       })
       const connected = new Map<string, boolean>()

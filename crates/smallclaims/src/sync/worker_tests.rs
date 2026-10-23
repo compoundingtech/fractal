@@ -580,6 +580,7 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
     };
     let exchange = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
@@ -691,6 +692,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
     };
     let exchange = ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: "source".into(),
         fleet_id: fleet.into(),
@@ -1032,6 +1034,131 @@ fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
             ),
         ])
     );
+}
+
+fn transport_order_view() -> FleetView {
+    let member = |name: &str, endpoints| crate::fleet::MemberView {
+        name: name.into(),
+        member_key: format!("{name}-key"),
+        state: "current".into(),
+        mode: "listening".into(),
+        endpoints,
+        start: 1,
+        end: None,
+        ended: None,
+        removed_by: None,
+        removal_reason: None,
+    };
+    FleetView {
+        members: vec![
+            member(
+                "modern",
+                vec![
+                    serde_json::json!({"transport": "loopback", "address": "127.0.0.1:4000"}),
+                    serde_json::json!({"transport": "tailscale", "address": "100.101.102.103:31313"}),
+                    serde_json::json!({"transport": "fabric", "node": "modern-node", "protocol": "st3/fleet/x"}),
+                ],
+            ),
+            // An older member need not advertise Fabric to remain reachable.
+            member(
+                "legacy",
+                vec![
+                    serde_json::json!({"transport": "tailscale", "address": "100.101.102.104:31313"}),
+                ],
+            ),
+        ],
+        ..FleetView::default()
+    }
+}
+
+#[test]
+fn dial_targets_follow_local_transport_order_with_mixed_legacy_endpoints() {
+    let view = transport_order_view();
+    let tailscale = Route::Http("http://100.101.102.103:31313".into());
+    let fabric = Route::Fabric {
+        node: "modern-node".into(),
+        protocol: "st3/fleet/x".into(),
+    };
+    let loopback = Route::Http("http://127.0.0.1:4000".into());
+    for (names, expected, legacy_enabled) in [
+        (
+            None,
+            vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            true,
+        ),
+        (
+            Some(vec!["fabric", "tailscale"]),
+            vec![fabric.clone(), tailscale.clone(), loopback.clone()],
+            true,
+        ),
+        (
+            Some(vec!["tailscale", "fabric"]),
+            vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            true,
+        ),
+        (
+            Some(vec!["fabric"]),
+            vec![fabric, loopback.clone()],
+            false,
+        ),
+        (
+            Some(vec!["tailscale"]),
+            vec![tailscale, loopback.clone()],
+            true,
+        ),
+        (Some(vec![]), vec![loopback], false),
+    ] {
+        let names = names.map(|names| names.into_iter().map(String::from).collect::<Vec<_>>());
+        let targets = dial_targets(
+            &view,
+            "own",
+            &[],
+            LocalTransports::configured(names.as_deref(), true, true),
+        );
+        let mut expected = BTreeMap::from([("modern".to_owned(), expected)]);
+        if legacy_enabled {
+            expected.insert(
+                "legacy".into(),
+                vec![Route::Http("http://100.101.102.104:31313".into())],
+            );
+        }
+        assert_eq!(targets, expected, "{names:?}");
+    }
+}
+
+#[test]
+fn explicit_peer_routes_precede_local_order_and_bypass_disabled_transports() {
+    let view = transport_order_view();
+    let peers = [
+        PeerConfig {
+            name: "modern".into(),
+            url: "http://100.101.102.105:31313".into(),
+        },
+        PeerConfig {
+            name: "legacy".into(),
+            url: "fabric://legacy-node/st3/fleet/x".into(),
+        },
+        PeerConfig {
+            name: "config-only".into(),
+            url: "fabric://config-node/st3/fleet/x".into(),
+        },
+    ];
+    for names in [vec!["fabric", "tailscale"], vec![]] {
+        let names = names.into_iter().map(String::from).collect::<Vec<_>>();
+        let local = LocalTransports::configured(Some(&names), true, true);
+        let targets = dial_targets(&view, "own", &peers, local);
+        for member in &view.members {
+            let peer = peers.iter().find(|peer| peer.name == member.name).unwrap();
+            let mut expected = vec![parse_route(&peer.url).unwrap()];
+            expected.extend(routes_from_endpoints(&member.endpoints, local));
+            assert_eq!(targets[&member.name], expected, "{names:?}");
+        }
+        assert_eq!(
+            targets["config-only"],
+            vec![parse_route(&peers[2].url).unwrap()],
+            "{names:?}"
+        );
+    }
 }
 
 fn fleet_claim(store: &Store, kind: &str, subject: &str, fields: Value) {
@@ -5503,4 +5630,192 @@ async fn signed_backend_metadata_auth_and_protocol_errors_keep_the_current_route
         );
         assert_eq!(fallback_attempts.load(Ordering::SeqCst), 0, "{code}");
     }
+}
+
+fn claim_walk_note(store: &Store, subject: &str) -> String {
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap()
+        .id
+}
+
+/// Walk `target`'s view of `source`'s claim ranges to the end, the way the worker does, with
+/// each query carried on an inventory that matches the source's own: envelope transport has
+/// nothing to move, so only the walk can bring a claim over. Returns the queries sent.
+fn walk_to_the_end(source: &Store, target: &Store, fleet: &str) -> Vec<crate::replication::ClaimRangeQuery> {
+    let first = target
+        .receive_replication_exchange("source", fleet, &source.export_replication_summary(fleet).unwrap())
+        .unwrap();
+    let Some(comparison) = first.claim_ranges.filter(|comparison| !comparison.same) else {
+        return Vec::new();
+    };
+    let mut walk = ClaimWalk::new(&comparison.pair);
+    let mut queries = Vec::new();
+    while let Some(query) = walk.next_query() {
+        assert!(queries.len() < 32, "a walk ends");
+        queries.push(query.clone());
+        let mut inventory = source.export_replication_summary(fleet).unwrap().inventory;
+        inventory.claim_range_query = Some(query);
+        let answer = source.export_replication_exchange(fleet, &inventory).unwrap();
+        let receipt = target.receive_replication_exchange("source", fleet, &answer).unwrap();
+        target.validate_replication_backlog().unwrap();
+        if let Some(comparison) = &receipt.claim_ranges {
+            walk.absorb(comparison);
+        }
+    }
+    queries
+}
+
+fn claim_walk_pair(fleet: &str) -> (Store, Store) {
+    let source = plain_memory("source").unwrap();
+    let target = plain_memory("target").unwrap();
+    source.bind_fleet(fleet).unwrap();
+    target.bind_fleet(fleet).unwrap();
+    for n in 0..20 {
+        claim_walk_note(&source, &format!("note/shared-{n}"));
+    }
+    let push = source
+        .export_replication_exchange(fleet, &ReplicationInventory::default())
+        .unwrap();
+    target.receive_replication_exchange("source", fleet, &push).unwrap();
+    target.validate_replication_backlog().unwrap();
+    (source, target)
+}
+
+fn fold_claim_ranges(stores: &[&Store]) {
+    for store in stores {
+        store.fold_claim_ranges_paced(|_| {}).unwrap();
+    }
+}
+
+#[test]
+fn a_claim_walk_fetches_exactly_the_claims_a_node_lacks() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3";
+    let (source, target) = claim_walk_pair(fleet);
+    let lacking: BTreeSet<String> =
+        (0..3).map(|n| claim_walk_note(&source, &format!("note/only-source-{n}"))).collect();
+    source.export_replication_summary(fleet).unwrap();
+    fold_claim_ranges(&[&source, &target]);
+
+    let queries = walk_to_the_end(&source, &target, fleet);
+    assert!(queries[0].tops, "a walk starts at the tops");
+    let asked: BTreeSet<String> = queries.iter().flat_map(|query| query.claims.clone()).collect();
+    assert_eq!(asked, lacking, "it asks for exactly the claims it lacks");
+    assert!(queries.iter().all(|query| query.leaves_of.len() <= crate::replication::CLAIM_RANGE_QUERY_TOPS
+        && query.ids_of.len() <= crate::replication::CLAIM_RANGE_QUERY_LEAVES));
+    for id in &lacking {
+        assert!(target.claim_by_id(id).unwrap().is_some(), "fetched through ordinary admission");
+    }
+    fold_claim_ranges(&[&target]);
+    let summary = source.claim_range_summary().unwrap();
+    assert!(target.compare_claim_ranges(&summary).unwrap().unwrap().same, "the same claims");
+}
+
+#[test]
+fn a_claim_walk_asks_for_nothing_this_node_holds_or_retired() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2c4";
+    let (source, target) = claim_walk_pair(fleet);
+    let retired = claim_walk_note(&source, "note/retired-at-target");
+    source.export_replication_summary(fleet).unwrap();
+    claim_walk_note(&target, "note/only-target");
+    target
+        .connection
+        .write()
+        .execute(/* sqlite-large-value: allow-for-now lv-h5c50c3e143a8 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO retired_claim_ids(id) VALUES (unhex(?1))", [&retired])
+        .unwrap();
+    fold_claim_ranges(&[&source, &target]);
+
+    let queries = walk_to_the_end(&source, &target, fleet);
+    assert!(!queries.is_empty(), "the claim sets differ, so the walk runs");
+    assert!(queries.iter().all(|query| query.claims.is_empty()), "{queries:?}");
+    assert!(target.claim_by_id(&retired).unwrap().is_none(), "a retired claim is never brought back");
+}
+
+#[test]
+fn a_finished_claim_walk_is_not_repeated_for_the_same_claims() {
+    let mut walk = ClaimWalk::new("ours/theirs");
+    assert!(walk.next_query().unwrap().tops);
+    walk.absorb(&crate::replication::ClaimRangeComparison {
+        pair: "ours/theirs".into(),
+        tops: vec![3],
+        ..Default::default()
+    });
+    assert_eq!(walk.next_query().unwrap().leaves_of, vec![3]);
+    assert_eq!(walk.next_query(), None);
+    assert_eq!(walk.next_query(), None, "nothing is asked again until the claims change");
+
+    let mut walk = ClaimWalk::new("ours/theirs");
+    let tops = walk.next_query().unwrap();
+    walk.retry(tops.clone());
+    assert_eq!(walk.next_query(), Some(tops), "a peer still folding is asked again");
+}
+
+#[tokio::test]
+async fn a_claim_walk_runs_over_the_signed_peer_route() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2c5";
+    let auth = FleetAuth::test(fleet, &[7; 32]);
+    let (source, target) = claim_walk_pair(fleet);
+    let lacking = claim_walk_note(&source, "note/only-source");
+    source.export_replication_summary(fleet).unwrap();
+    // The route records each sender as up; record it first, so the source's index is folded
+    // when it answers.
+    source.record_transport_observation("target", "up", None, None).unwrap();
+    target.record_transport_observation("source", "up", None, None).unwrap();
+    fold_claim_ranges(&[&source, &target]);
+    let (source, target) = (Arc::new(source), Arc::new(target));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = PeerState {
+        backend: Local(source.clone()),
+        node: "source".into(),
+        auth: auth.clone(),
+        fleet: FleetContext::legacy(BTreeSet::from(["target".into()])),
+        outbound_notify: watch::channel(0_u64).0,
+    };
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route(EXCHANGE_PATH, post(receive_exchange))
+                .with_state(state)
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .into_future(),
+    );
+    let peer = PeerConfig { name: "source".into(), url: format!("http://{address}") };
+    // As if envelope transport had nothing left to move, the target presents the source's own
+    // inventory, so only the walk can bring the claim over.
+    let mut summary = target.export_replication_summary(fleet).unwrap();
+    summary.inventory = source.export_replication_summary(fleet).unwrap().inventory;
+    let comparison = target
+        .compare_claim_ranges(&source.claim_range_summary().unwrap())
+        .unwrap()
+        .filter(|comparison| !comparison.same)
+        .expect("the claim sets differ");
+    let fetched = walk_claim_ranges(
+        &replication_http_client(),
+        &Local(target.clone()),
+        "target",
+        &peer,
+        &auth,
+        &FleetContext::legacy(BTreeSet::from(["source".into()])),
+        &mut crate::sync::telemetry::Round::new("source"),
+        Default::default(),
+        std::time::Instant::now(),
+        &summary,
+        &comparison,
+    )
+    .await
+    .unwrap();
+    assert!(fetched, "tops, leaves, IDs and the claim fit in one exchange's round trips");
+    assert!(target.claim_by_id(&lacking).unwrap().is_some());
+    server.abort();
 }

@@ -593,15 +593,39 @@ pub fn parse_route(route: &str) -> Option<Route> {
     .then(|| Route::Http(route.trim_end_matches('/').into()))
 }
 
-/// What this machine can use to dial.
+/// What this machine can use to dial, filtered and ordered by its local configuration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalTransports {
     pub tailscale: bool,
     pub fabric: bool,
+    pub fabric_first: bool,
 }
 
-/// A member's routes from its advertised endpoints, in the design's order after any config
-/// override: Tailscale, then Fabric, then loopback. Endpoints this machine cannot use, and any
+impl LocalTransports {
+    /// Apply an explicit transport list to current availability. Without a fleet file,
+    /// retain the legacy Tailscale-first order and allow every available transport.
+    pub fn configured(transports: Option<&[String]>, tailscale: bool, fabric: bool) -> Self {
+        let Some(transports) = transports else {
+            return Self {
+                tailscale,
+                fabric,
+                fabric_first: false,
+            };
+        };
+        let tailscale_position = transports.iter().position(|name| name == "tailscale");
+        let fabric_position = transports.iter().position(|name| name == "fabric");
+        Self {
+            tailscale: tailscale && tailscale_position.is_some(),
+            fabric: fabric && fabric_position.is_some(),
+            fabric_first: fabric_position.is_some_and(|fabric| {
+                tailscale_position.is_none_or(|tailscale| fabric < tailscale)
+            }),
+        }
+    }
+}
+
+/// A member's routes from its advertised endpoints, in the local configured order after
+/// any config override, with loopback last. Endpoints this machine cannot use, and any
 /// address that is neither loopback nor tailnet, are skipped.
 pub fn routes_from_endpoints(endpoints: &[Value], local: LocalTransports) -> Vec<Route> {
     let text = |endpoint: &Value, field: &str| endpoint[field].as_str().map(str::to_owned);
@@ -611,34 +635,33 @@ pub fn routes_from_endpoints(endpoints: &[Value], local: LocalTransports) -> Vec
             .filter(|address| is_permitted_route_address(&address.ip()))
             .map(|address| Route::Http(format!("http://{address}")))
     };
+    let tailscale = endpoints
+        .iter()
+        .filter(|endpoint| local.tailscale && endpoint["transport"] == "tailscale")
+        .filter_map(address)
+        .filter(|route| match route {
+            Route::Http(url) => url
+                .trim_start_matches("http://")
+                .parse::<SocketAddr>()
+                .is_ok_and(|address| is_tailnet_address(&address.ip())),
+            Route::Fabric { .. } => false,
+        });
+    let fabric = endpoints
+        .iter()
+        .filter(|endpoint| local.fabric && endpoint["transport"] == "fabric")
+        .filter_map(|endpoint| {
+            Some(Route::Fabric {
+                node: text(endpoint, "node")?,
+                protocol: text(endpoint, "protocol")?,
+            })
+        });
     let mut routes = Vec::new();
-    if local.tailscale {
-        routes.extend(
-            endpoints
-                .iter()
-                .filter(|endpoint| endpoint["transport"] == "tailscale")
-                .filter_map(address)
-                .filter(|route| match route {
-                    Route::Http(url) => url
-                        .trim_start_matches("http://")
-                        .parse::<SocketAddr>()
-                        .is_ok_and(|address| is_tailnet_address(&address.ip())),
-                    Route::Fabric { .. } => false,
-                }),
-        );
-    }
-    if local.fabric {
-        routes.extend(
-            endpoints
-                .iter()
-                .filter(|endpoint| endpoint["transport"] == "fabric")
-                .filter_map(|endpoint| {
-                    Some(Route::Fabric {
-                        node: text(endpoint, "node")?,
-                        protocol: text(endpoint, "protocol")?,
-                    })
-                }),
-        );
+    if local.fabric_first {
+        routes.extend(fabric);
+        routes.extend(tailscale);
+    } else {
+        routes.extend(tailscale);
+        routes.extend(fabric);
     }
     routes.extend(
         endpoints
@@ -729,10 +752,7 @@ mod tests {
             json!({"transport": "tailscale", "address": "192.168.1.4:31313"}),
             json!({"transport": "loopback", "address": "192.168.1.4:4000"}),
         ];
-        let all = LocalTransports {
-            tailscale: true,
-            fabric: true,
-        };
+        let all = LocalTransports::configured(None, true, true);
         assert_eq!(
             routes_from_endpoints(&endpoints, all),
             vec![
@@ -748,6 +768,75 @@ mod tests {
             routes_from_endpoints(&endpoints, LocalTransports::default()),
             vec![Route::Http("http://127.0.0.1:4000".into())]
         );
+    }
+
+    #[test]
+    fn configured_transports_filter_availability_and_preserve_local_order() {
+        for (names, tailscale, fabric, fabric_first) in [
+            (None, true, true, false),
+            (Some(vec!["tailscale", "fabric"]), true, true, false),
+            (Some(vec!["fabric", "tailscale"]), true, true, true),
+            (Some(vec!["tailscale"]), true, false, false),
+            (Some(vec!["fabric"]), false, true, true),
+            (Some(vec![]), false, false, false),
+        ] {
+            let names = names.map(|names| names.into_iter().map(String::from).collect::<Vec<_>>());
+            for (available_tailscale, available_fabric) in
+                [(true, true), (false, true), (true, false), (false, false)]
+            {
+                assert_eq!(
+                    LocalTransports::configured(
+                        names.as_deref(),
+                        available_tailscale,
+                        available_fabric,
+                    ),
+                    LocalTransports {
+                        tailscale: tailscale && available_tailscale,
+                        fabric: fabric && available_fabric,
+                        fabric_first,
+                    },
+                    "{names:?}, available: tailscale={available_tailscale}, fabric={available_fabric}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn routes_follow_local_order_and_filter_disabled_transports_with_loopback_last() {
+        let endpoints = [
+            json!({"transport": "loopback", "address": "127.0.0.1:4000"}),
+            json!({"transport": "tailscale", "address": "100.101.102.103:31313"}),
+            json!({"transport": "fabric", "node": "abc", "protocol": "st3/fleet/x"}),
+        ];
+        let tailscale = Route::Http("http://100.101.102.103:31313".into());
+        let fabric = Route::Fabric {
+            node: "abc".into(),
+            protocol: "st3/fleet/x".into(),
+        };
+        let loopback = Route::Http("http://127.0.0.1:4000".into());
+        for (names, expected) in [
+            (
+                vec!["fabric", "tailscale"],
+                vec![fabric.clone(), tailscale.clone(), loopback.clone()],
+            ),
+            (
+                vec!["tailscale", "fabric"],
+                vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            ),
+            (vec!["fabric"], vec![fabric, loopback.clone()]),
+            (vec!["tailscale"], vec![tailscale, loopback.clone()]),
+            (vec![], vec![loopback]),
+        ] {
+            let names = names.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(
+                routes_from_endpoints(
+                    &endpoints,
+                    LocalTransports::configured(Some(&names), true, true),
+                ),
+                expected,
+                "{names:?}"
+            );
+        }
     }
 
     fn shim(root: &Path, body: &str) -> PathBuf {

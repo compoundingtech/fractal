@@ -413,6 +413,14 @@
   ],
   "cli": [
     {
+      "command": "st schedules ls",
+      "description": "Read one explicit page of replicated schedule declarations, then follow its cursor explicitly",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_schedules_list_pages_declarations_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; explicit page flags and declarations compared after disk store reopen"
+    },
+    {
       "command": "st activity",
       "description": "Read bounded changes since a stable cursor",
       "tests": [
@@ -1130,6 +1138,15 @@
         "crates/fractal/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
       ],
       "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; graph sync, restart restoration and refused exposure"
+    },
+    {
+      "command": "st fleet transports prefer",
+      "description": "Prefer an enabled transport without changing exposure or removing any carrier",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::transport_prefer_reorders_under_lock_without_changing_exposure",
+        "crates/fractal/tests/fleet.rs::transport_prefer_refuses_disabled_carriers_without_saving"
+      ],
+      "verification": "real CLI over isolated Unix daemons with a Fabric shim; both reorder directions, disabled-carrier refusal, exposure preservation, settings-lock contention, atomic save and no-op"
     },
     {
       "command": "st fleet transports remove",
