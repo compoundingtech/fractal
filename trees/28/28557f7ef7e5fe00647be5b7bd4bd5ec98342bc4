@@ -1,1 +1,4 @@
 record bcb78e309781ba3ab666cb80ec3a4385b207ba5f typescript-client 0 host/anvil 2026-10-23T21:11:17Z
+record 103bfb6c5257604ead526e807b2550b535938d75 linux-fleet-compat 1 fleet/ci 2026-10-23T21:16:13Z
+record d80e8c1b5c58d1b84d68fdb26d6ee171d3d5ae21 linux-clippy 0 fleet/ci 2026-10-23T21:16:06Z
+record ec6c25ca61ae4b17698a317ca4816ecb1673035a linux-gate 1 fleet/ci 2026-10-23T21:17:04Z
