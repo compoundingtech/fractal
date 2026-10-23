@@ -46,6 +46,7 @@ members = [
   "crates/fractal-client",
   "crates/fractal-client-codegen",
   "crates/fractal-conversation-ui",
+  "crates/fractal-mission-ui",
   "crates/fractal-feed",
   "crates/fractal-migrate",
   "crates/fractal-schema",

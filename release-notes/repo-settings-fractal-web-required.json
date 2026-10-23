@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare fractal-web as a required status check on main in .github/repo-settings.json, matching the live ruleset that already requires it.",
+  "replay": {"status": "none", "detail": "Repository settings and CI test only; no claims or projections change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No API, CLI or wire change. The live GitHub ruleset already requires fractal-web; the declared settings now agree with it."},
+  "downtime": {"status": "none", "detail": "No runtime code changes."},
+  "manual": {"status": "none", "detail": "No operator step; the live ruleset is unchanged."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

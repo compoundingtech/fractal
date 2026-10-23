@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one check once on this machine and ask the signer to record it as an evidence note.
 
-  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--push origin] -- COMMAND...
+  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--input NAME=VALUE]... [--push origin] -- COMMAND...
 
 Run it from a clean checkout of the exact commit you are about to push. It runs COMMAND once
 (output streams to your terminal), then sends the signer the facts it measured: the commit,
@@ -46,6 +46,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -109,6 +110,11 @@ def tracked_dirty():
     return changed or ('index flags hide changes: ' + ', '.join(hidden[:3]) if hidden else '')
 
 
+# The inputs this script sets itself; --input may not name them.
+WRAP_INPUTS = frozenset({'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt', 'lane_definition_sha256',
+                         'workspace_clean', 'untracked_files'})
+
+
 def toolchain_digest(override):
     if override:
         return override
@@ -169,6 +175,8 @@ def main(argv):
     parser.add_argument('--lanes-from', metavar='COMMIT',
                         help='hold the check to its lane in .st/required-lanes.json at this accepted base and record the lane definition digest')
     parser.add_argument('--aggregate', metavar='FILE', help='record the facts in FILE instead of running a command')
+    parser.add_argument('--input', action='append', default=[], metavar='NAME=VALUE',
+                        help='record one more input the command depends on (a name this script does not set itself; repeatable)')
     parser.add_argument('--out', metavar='DIR', help='write the pack and a summary here instead of importing and pushing')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -195,6 +203,11 @@ def main(argv):
             'system': f'{system[1]}-{system[0]}'.lower() if len(system) == 2 else 'unknown',
             'attempt': args.attempt,
         }
+        for item in args.input:
+            name, sep, value = item.partition('=')
+            if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not value or name in inputs or name in WRAP_INPUTS:
+                raise Failure(f'--input {item!r}: NAME=VALUE with a lower-case name this script does not set itself, and a value')
+            inputs[name] = value
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
             known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs', 'runner'}

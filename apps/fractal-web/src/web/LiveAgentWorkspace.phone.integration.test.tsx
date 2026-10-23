@@ -3,7 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, RuntimeId, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -48,7 +48,7 @@ beforeEach(async () => {
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
-  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/example-reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 })
 afterEach(async () => {
@@ -78,14 +78,14 @@ it('opens, traps focus, closes with Escape and returns focus without remounting 
 it('closes the drawer when an agent is selected and supports its explicit close button', async () => {
   const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Expand sidebar"]')!
   await act(async () => { trigger.focus(); trigger.click() })
-  const row = host.querySelector<HTMLElement>('[role="row"][data-sidebar-tree-key="agent/reviewer"]')!
+  const row = host.querySelector<HTMLElement>('[role="row"][data-sidebar-tree-key="agent/example-reviewer"]')!
   expect(row).not.toBeNull()
   await act(async () => {
     row.focus()
     row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
     row.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
   })
-  expect(window.location.pathname).toBe('/w/agent/reviewer')
+  expect(window.location.pathname).toBe('/w/agent/example-reviewer')
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
   await act(async () => trigger.click())
@@ -94,8 +94,79 @@ it('closes the drawer when an agent is selected and supports its explicit close 
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
 })
 
+it('keeps conversation actions in the header and gives the Details sheet only one close control', async () => {
+  const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Agent details"]')!
+  await act(async () => trigger.click())
+  await act(async () => vi.dynamicImportSettled())
+  await vi.waitFor(async () => {
+    await act(async () => {})
+    const sheet = host.querySelector<HTMLElement>('[role="dialog"][aria-label="Agent details"]')!
+    expect(sheet).not.toBeNull()
+    expect(sheet.querySelector('[data-testid="details-pane"]')).not.toBeNull()
+    expect(sheet.querySelectorAll('button[aria-label^="Close"]')).toHaveLength(1)
+    expect(sheet.querySelector('button[aria-label="Close agent details"]')).not.toBeNull()
+    expect(sheet.querySelector('[data-narrow-actions]')).toBeNull()
+    expect(sheet.querySelector('button[aria-label="Conversation menu"]')).toBeNull()
+    expect(host.querySelector('[data-testid="thread-header"] button[aria-label="Conversation menu"]')).not.toBeNull()
+  }, { timeout: 15_000 })
+})
+
+// The tab row holds the Workspace views tab list and, fixed after it, the labelled Terminal toggle.
+const workspaceTabs = () => host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace views"]')!
+const phoneTerminal = () => workspaceTabs().parentElement!.querySelector<HTMLButtonElement>('button[aria-label="Terminal"]')!
+const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Terminal', 'Toggle terminal drawer', 'Agent details'].includes(name ?? ''))
+const phoneHeaderNames = ['Expand sidebar', 'Actions for Metric track', 'Conversation menu', 'Agent details']
+/** One Terminal on the phone: outside the header and outside the tab list, beside it in the tab row. */
+const assertTerminalInTabRow = () => {
+  expect(headerOrder()).toEqual(phoneHeaderNames)
+  expect(host.querySelectorAll('button[aria-label="Terminal"]')).toHaveLength(1)
+  expect(phoneTerminal()).not.toBeNull()
+  expect(workspaceTabs().contains(phoneTerminal())).toBe(false)
+  expect(phoneTerminal().getAttribute('role')).toBeNull()
+}
+
+it('keeps a labelled Terminal toggle in the phone tab row that stays described and paints its reason when the agent has no terminal', async () => {
+  assertTerminalInTabRow()
+  const terminal = phoneTerminal()
+  expect(terminal.textContent).toBe('Terminal')
+  expect(terminal.hasAttribute('title')).toBe(false)
+  expect(terminal.getAttribute('aria-pressed')).toBe('false')
+  expect(terminal.getAttribute('aria-disabled')).toBe('true')
+  expect(terminal.disabled).toBe(false)
+  expect(document.getElementById(terminal.getAttribute('aria-describedby')!)?.textContent).toBe('This agent has no terminal.')
+  await act(async () => terminal.click())
+  const reason = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Terminal unavailable"]')!
+  expect(reason).not.toBeNull()
+  expect(reason.textContent).toBe('This agent has no terminal.')
+  expect(new URLSearchParams(window.location.search).get('open')).toBeNull()
+  expect(terminal.getAttribute('aria-pressed')).toBe('false')
+  expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+  await vi.waitFor(() => expect(reason.contains(document.activeElement)).toBe(true))
+  await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Terminal unavailable"]')).toBeNull())
+})
+
+it('toggles the terminal drawer from the phone tab row Terminal button and reports its pressed state', async () => {
+  const withTerminal = { ...agent, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/metric-track')] }
+  const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/example-reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
+  await vi.waitFor(() => expect(phoneTerminal().hasAttribute('aria-disabled')).toBe(false))
+  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
+  expect(phoneTerminal().getAttribute('aria-describedby')).toBeNull()
+  await act(async () => phoneTerminal().click())
+  expect(new URLSearchParams(window.location.search).get('open')).toBe('terminal/metric-track:detail')
+  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('true')
+  expect(host.querySelector('[data-testid="terminal-pane"]')).not.toBeNull()
+  assertTerminalInTabRow()
+  await act(async () => phoneTerminal().click())
+  expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
+  expect(phoneTerminal().getAttribute('aria-pressed')).toBe('false')
+  expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
+  assertTerminalInTabRow()
+})
+
 it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {
-  const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
+  const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')].filter(tab => tab.textContent === 'Thread' || tab.textContent === 'Changes')
   expect(tabs.map(tab => tab.textContent)).toEqual(['Thread', 'Changes'])
   await act(async () => { tabs[0]!.focus(); tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })) })
   expect(tabs[1]!.getAttribute('aria-selected')).toBe('true')

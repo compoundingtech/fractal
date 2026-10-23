@@ -248,10 +248,6 @@ const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#Drawers': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersLight': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersOpen': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersFlow': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
   './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
@@ -331,8 +327,9 @@ const configuredStoryFiles = (globs: string[], directory = storybookDirectory) =
       for (const ancestor of ancestors.reverse()) rejectSymlink(ancestor)
       walk(root)
     }
-    for (const file of globSync(glob, { cwd: directory, exclude: ['**/node_modules/**'] })) {
-      files.add(nodePath.resolve(directory, file))
+    for (const file of globSync(glob, { cwd: directory })) {
+      // Glob exclusions miss leading ../ patterns; match dependency segments like the walk.
+      if (!file.split(nodePath.sep).includes('node_modules')) files.add(nodePath.resolve(directory, file))
     }
   }
   return [...files]
@@ -383,6 +380,32 @@ test('configured inventory rejects directory and file symlinks without following
   }
 })
 
+test('configured inventory excludes dependency stories with leading relative prefixes', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-dependencies-'))
+  try {
+    const config = nodePath.join(directory, '.storybook')
+    const source = nodePath.join(directory, 'src')
+    mkdirSync(config)
+    mkdirSync(nodePath.join(source, 'a/node_modules/b'), { recursive: true })
+    mkdirSync(nodePath.join(source, 'a/not_node_modules/b'), { recursive: true })
+    const story = nodePath.join(source, 'a/Example.stories.tsx')
+    const similarNameStory = nodePath.join(source, 'a/not_node_modules/b/Example.stories.tsx')
+    writeFileSync(story, '')
+    writeFileSync(similarNameStory, '')
+    writeFileSync(nodePath.join(source, 'a/node_modules/b/Dependency.stories.tsx'), '')
+    for (const glob of [
+      '../src/**/*.stories.tsx',
+      './../src/**/*.stories.tsx',
+      '../.storybook/../src/**/*.stories.{ts,tsx}',
+      '../src/{a,./a}/**/*.stories.tsx',
+    ]) {
+      expect(configuredStoryFiles([glob], config).sort(), glob).toEqual([story, similarNameStory].sort())
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('configured inventory expands nested brace roots before inspecting symlinks', () => {
   const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-braces-'))
   try {
@@ -427,6 +450,11 @@ const exemptions: string[] = []
 const exemptFiles = new Map<string, Set<ExemptStoryMode>>()
 const sliceFiles = new Set<string>()
 
+// react-stately renders every row in jsdom (no layout); SidebarTree's observed
+// CI maximum is 7.1 s, so 15 s allows about 2x. Other stories take at most ~1.9 s;
+// a global increase would hide regressions outside this expanded-tree fixture.
+const sidebarTreeValidationTimeoutMs = 15_000
+
 for (const [path, module] of Object.entries(storyModules)) {
   const { default: storyMeta, ...exports } = module
   for (const [name, story] of Object.entries(exports)) {
@@ -456,14 +484,13 @@ for (const [path, module] of Object.entries(storyModules)) {
       modes.add(tag)
       exemptFiles.set(path, modes)
     } else sliceFiles.add(path)
-    // The full synthetic depth-6 matrix takes about 5–6 seconds to render in jsdom.
     test(`${id} validates its scenario mode`, () => {
       const result = scenarioStoryCheck(story, storyMeta)
       expect(result.failures).toEqual([])
       expect(result._tag).toBe('Passed')
       for (const exemption of result.exemptions) process.stdout.write(`${id}: ${exemption._tag} — ${exemption.reason}\n`)
       expect(result.exemptions).toHaveLength(tag === 'slices' ? 0 : 1)
-    }, id === './assistant-ui/sidebar/SidebarTree.stories.tsx#AllStates' ? 15_000 : undefined)
+    }, path === './assistant-ui/sidebar/SidebarTree.stories.tsx' ? sidebarTreeValidationTimeoutMs : undefined)
   }
 }
 
@@ -530,13 +557,13 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('app mode debt matches its reviewed shrink-only pin', () => {
-  expect(Object.keys(deferredAppStoryModes)).toHaveLength(10)
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(6)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
 test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(304)
+  expect(exemptions).toHaveLength(381)
   expect(exemptions.sort()).toEqual(scenarioExemptionIds)
 })
 

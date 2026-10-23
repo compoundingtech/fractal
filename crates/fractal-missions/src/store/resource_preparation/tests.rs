@@ -242,3 +242,66 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
         "the native counter must reject before commit publication"
     );
 }
+
+#[test]
+fn observation_preparation_history_decodes_are_independent_of_history_length() {
+    use fractal_store::store::ACTUAL_HISTORY_BODIES_DECODED;
+
+    const ITEMS: u64 = 3;
+    let (_directory, store, revision) = fixture();
+    let resource = "resource/example-repository";
+    let facts = json!({"pull_requests": (1..=ITEMS)
+        .map(|number| json!({"number": number, "state": "open"}))
+        .collect::<Vec<_>>()});
+    let mut measurements = Vec::new();
+    for history in [1, 8, 32] {
+        let prior = measurements.last().map_or(0, |(length, _)| *length);
+        for _ in prior..history {
+            for number in 0..=ITEMS {
+                let (subject, kind, observed) = if number == 0 {
+                    (resource.to_owned(), "vcs.repository", json!({}))
+                } else {
+                    (format!("{resource}/pull-request/{number}"),
+                     "vcs.pull-request", json!({"number": number, "state": "open"}))
+                };
+                store.append_claim(&ClaimInput {
+                    subject,
+                    kind: "resource.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("kind".into(), json!(kind)),
+                        ("facts".into(), observed),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                }).unwrap();
+            }
+        }
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let prepared = Fence::new(&store).prepare_with_actuals(&store, |reader, serial| {
+            inputs_with_actuals(reader, Observation {
+                observer: "observer/fixture",
+                desired_revision: &revision,
+                attempt: None,
+                resource,
+                facts: &facts,
+                subscriptions: &[],
+            }, &mut |subject| match serial {
+                Some(serial) => store.smalltalk.observer_actuals.read(reader, subject, serial),
+                None => latest_actual(reader, subject),
+            })
+        });
+        let inputs = prepared.value.expect("file-backed preparation is available").unwrap();
+        assert_eq!(inputs.recorded_items.len(), ITEMS as usize);
+        assert!(inputs.recorded_items.values().all(Option::is_some));
+        let decoded = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
+        measurements.push((history, decoded));
+    }
+    eprintln!("preparation history bodies decoded (I={ITEMS}): {measurements:?}");
+    let baseline = measurements[0].1;
+    assert!(
+        measurements.iter().all(|(_, decoded)| *decoded <= baseline),
+        "fixed-cardinality preparation must not decode growing claim history: {measurements:?}"
+    );
+}

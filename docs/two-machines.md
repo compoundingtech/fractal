@@ -62,6 +62,47 @@ Beacon listens on its own loopback port and exposes it through Fabric. The invit
 
 With their user services installed, Tailscale, Fabric, and the Fractal replication worker restart after reboot and reconnect after network interruptions. A terminal does not need to stay open.
 
+### Prefer Fabric while keeping Tailscale
+
+On an existing listening member, enable Fabric and make it the first automatic
+route in one command:
+
+```sh
+st fleet transports add fabric --prefer
+st fleet status --json
+```
+
+Run this on each machine whose outbound connections should prefer Fabric. If Fabric
+is already enabled, `--prefer` moves it to the front without changing its protocol
+or exposure. Without `--prefer`, adding Fabric appends it; repeated adds preserve
+the existing order. Removing it with `st fleet transports remove fabric` preserves
+the remaining transports' order and requires another usable transport.
+
+To switch outbound preference back to Tailscale without disabling Fabric:
+
+```sh
+st fleet transports prefer tailscale
+```
+
+Switch back with `st fleet transports prefer fabric`. Both commands require the
+chosen carrier to be enabled, preserve the other carriers' order and existing
+exposures, and do nothing if it is already first. They never enable, remove,
+expose, or unexpose a transport.
+
+The local `fleet.toml` transport list controls which automatic Tailscale/Fabric
+routes are enabled and their order for replication and peer relay. For a new fleet
+or joining machine, `--transports fabric,tailscale` selects Fabric first;
+`--transports tailscale,fabric` selects Tailscale first. Loopback remains the last
+automatic fallback regardless of its list position. Explicit config peer URLs
+(`[[peers]]` / `--peer`) keep highest priority for backward compatibility, so remove
+an old explicit route if automatic preference should choose the carrier. Legacy
+machines without `fleet.toml` retain Tailscale-first automatic routing.
+
+Transport commands restart installed services. With `--no-service`, or without
+installed services, restart both `st3 daemon` and `st3 replication-worker` as
+instructed: the daemon reloads peer-relay settings, and the worker reloads
+replication settings. Fabric trust and service grants are still required.
+
 ### Reconcile Fabric runtime policy
 
 `st-fabric-adapter` is a separate process, not part of the st daemon. Start Fabric
