@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow guarded agents to plan and apply filtered repairs with their literal seat identity",
+  "replay": {"status": "none", "detail": "No claim replay or repair planning changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "repair dry-run and conversations status accept optional --as for guarded callers; these remain actorless GETs and print the standard ignored-actor notice. repair apply accepts --as and requires it to equal the literal ST_AGENT/FRACTAL_AGENT seat in an agent environment. The existing repair API remains token-only: this local actor binding does not add actor attribution to repair.applied receipts. Human token-only apply remains supported."},
+  "downtime": {"status": "none", "detail": "CLI-only change; no daemon interruption required."},
+  "manual": {"status": "none", "detail": "Use st repair dry-run --as \"$ST_AGENT\" --class revoked-legacy-runtime-start --subject SUBJECT, then st repair apply --as \"$ST_AGENT\" TOKEN. Existing leading-actor agent-policy guards support both without a Home Manager activation."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}
