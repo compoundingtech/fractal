@@ -620,12 +620,12 @@ impl Store {
 
     /// Replay the graph from the claims alone, in one batch.
     pub fn fixture_replay_graph(&self) -> std::result::Result<std::result::Result<(), St3Error>, String> {
-        self.connection.batched(|tx| replay_graph_from_nothing_tx(tx))
+        self.connection.batched(replay_graph_from_nothing_tx)
     }
 
     /// The checkpoint proof's replay from the claims alone, in one batch.
     pub fn fixture_replay_checkpoint(&self) -> std::result::Result<anyhow::Result<()>, String> {
-        self.connection.batched(|tx| checkpoint_rules::replay_from_nothing(tx))
+        self.connection.batched(checkpoint_rules::replay_from_nothing)
     }
 
     /// The raw projected status of a step run, if it has a row.

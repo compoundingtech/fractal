@@ -75,7 +75,7 @@ fn one_onset_survives_preparation_replay_and_credential_rotation() {
     assert_eq!(miss(&store, "person-read"), episode);
     assert_eq!(claims(&store).len(), count, "repeated misses are not sample claims");
     assert_eq!(store.prepare_slo_missions("/tmp").unwrap().len(), 1);
-    store.connection.batched(|tx| rebuild(tx)).unwrap().unwrap();
+    store.connection.batched(rebuild).unwrap().unwrap();
     assert_eq!(miss(&store, "person-read"), episode);
     let prepared = store.prepare_slo_missions("/tmp").unwrap().remove(0);
     store.set_member_key(Some(key())).unwrap();
@@ -94,7 +94,7 @@ fn activation_frontier_is_durable_bounded_and_rate_limited() {
     for pending in prepared { store.dispatch_slo_mission(pending).unwrap(); }
     let pending = store.prepare_slo_missions("/tmp").unwrap().remove(0);
     assert!(store.dispatch_slo_mission(pending).is_err(), "third opening in the minute is retained pending");
-    store.connection.batched(|tx| rebuild(tx)).unwrap().unwrap();
+    store.connection.batched(rebuild).unwrap().unwrap();
     assert_eq!(store.prepare_slo_missions("/tmp").unwrap().len(), 2);
     let count: usize = store.readers.get().query_row("SELECT COUNT(*) FROM slo_pending WHERE mission_run IS NULL", [], |r| r.get(0)).unwrap();
     assert_eq!(count, 62, "restart/replay cannot lose the later obligations");
@@ -351,7 +351,7 @@ fn an_old_registry_repair_withdraws_closure_and_matches_replay_on_current_member
     source.apply_replication_repairs().unwrap();
     assert_ne!(fact_state(&source, &episode), "recovered", "a repaired closure is not live evidence");
     let before = projection_digest::oracle(&source.readers.get()).unwrap();
-    source.connection.batched(|tx| rebuild(tx)).unwrap().unwrap();
+    source.connection.batched(rebuild).unwrap().unwrap();
     let after = projection_digest::oracle(&source.readers.get()).unwrap();
     for table in ["slo_pending", "slo_episode_heads", "slo_episode_events"] { assert_eq!(before[table], after[table], "{table}"); }
 }
