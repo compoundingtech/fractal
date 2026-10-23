@@ -16,3 +16,13 @@ package(=fractal) and binary(=integration) and test(/^messaging_faults::/)
 # the REQUIRED mail canaries (scripts/ci-mail-redelivery-canaries: every a_suspended_seat_resumes
 # canary and the three claude channel canaries) and the canary harness's own fast self-tests.
 package(=fractal) and binary(=integration) and test(/^boot_canaries::/) and not test(/a_suspended_seat_resumes_its_own_native_session$|^boot_canaries::claude_(missing|uninitialized|permanent)_channel_|^boot_canaries::(event_waits_|every_exit_reaps_|interrupted_tests_keep_|the_canary_never_names_)/)
+
+# Two to four real daemons per test, each with a replication worker on a loopback port, and real
+# waits on the 35 s quiet window and the 60 s divergence window: about 477 s per run for these 40.
+# Per-PR contracts (doc fleet/factory/test-speed/core-vs-daily §4.2): #3607 (divergence in the
+# doctor and machines page), #3611 (every invite refusal), #3614 (the frozen-member doctor
+# warning), and the existing fractal-store fleet_admission_tests (removal fenced through a relay),
+# smallclaims fleet/membership.rs, fleet/transport.rs and sync/worker_tests.rs. Kept per PR: the
+# fleet::action_coverage_ tests, the transport_prefer_ command contracts, and the suite's two
+# fast self-tests. linux-fleet-compat runs its ignored test through cargo test and is unaffected.
+package(=fractal) and binary(=integration) and test(/^fleet::/) and not test(/^fleet::(action_coverage_|transport_prefer_|fleet_workflows_have_no_path_filter$|fixture_port_reservation_excludes_other_processes_until_released$)/)
