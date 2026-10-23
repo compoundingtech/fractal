@@ -3352,6 +3352,13 @@ mod tests {
             let limit = Duration::from_secs(5);
             let root = tempfile::tempdir().unwrap();
             let state = crate::api::tests_shared::state(root.path());
+            state.store.apply_internal(
+                &crate::graph::parse_test_intent(
+                    "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n",
+                    "node",
+                ).unwrap(),
+                "declare-contended-report-seat",
+            ).unwrap();
             crate::store::mailbox_tests::ready(&state.store, "current");
             let request = Fence::new("agent/eval.worker", "current", "delivery");
             let dir = authority::source_agent_dir(&state, &request);
