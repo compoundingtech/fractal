@@ -1,10 +1,11 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Tabs, TabList, Tab, TabPanel, Select, SelectValue, Button as AriaButton, ToggleButton, Popover, ListBox, ListBoxItem } from 'react-aria-components'
-import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { diffPanelVars as diffColor, interactionVars as interaction, surfaceVars as surface, textVars as text, borderVars as border, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, elevationVars as elevation } from '../composition-tokens.stylex'
 import { surfaceOptions } from '../composition-model'
 import { Icon } from './Icons'
 import { Button, IconButton, Tooltip } from './Controls'
+import { PaneHeader } from './Pane'
 import { HighlightedSource, languageFromPath } from './Markdown'
 import { ThemePortal } from '../taste/ThemePortal'
 
@@ -29,6 +30,13 @@ export interface DiffPanelProps {
   revealRequest?: DiffRevealRequest
   onOpenSurface?: (key: string) => void
   onClose?: () => void
+  /** Accessible name of the close button; defaults to `Close ${title}`. */
+  closeLabel?: string
+  /** Source provenance disclosed from the toolbar rather than occupying the diff viewport. */
+  info?: React.ReactNode
+  scopeLabel?: string
+  showSurfaceTabs?: boolean
+  onOpenFile?: (path: string) => void
   turns?: readonly DiffTurn[]
 }
 
@@ -88,7 +96,7 @@ function pairRows(rows: readonly DiffRow[]) {
 }
 
 function CodeLine({ row, side, wrap, language }: { row: DiffRow; side?: 'old' | 'new'; wrap: boolean; language: string }) {
-  const number = side === 'old' ? row.oldNumber : row.newNumber ?? row.oldNumber
+  const number = side === 'old' ? row.oldNumber : row.newNumber
   const sign = row.kind === 'added' ? '+' : row.kind === 'removed' ? '−' : ''
   return <div data-diff-kind={row.kind} {...stylex.props(styles.codeRow, row.kind === 'added' && styles.addedRow, row.kind === 'removed' && styles.removedRow)}><span data-diff-gutter {...stylex.props(styles.gutter, row.kind === 'added' && styles.addedGutter, row.kind === 'removed' && styles.removedGutter)}><span>{number ?? ''}</span><span>{sign}</span></span><code {...stylex.props(styles.codeText, wrap && styles.wrappedText)}><HighlightedSource code={row.text} language={language} /></code></div>
 }
@@ -98,7 +106,7 @@ function ContextRow({ row, split = false, wrap, language }: { row: DiffRow; spli
   return row.hidden ? <><AriaButton aria-expanded={open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.hunk)}>{open ? 'Hide unmodified lines' : row.text}</AriaButton>{open ? row.hidden.map((line, index) => split ? <div key={index} {...stylex.props(styles.split)}><div {...stylex.props(styles.splitCell)}><CodeLine row={line} side="old" wrap={wrap} language={language} /></div><div {...stylex.props(styles.splitCell)}><CodeLine row={line} side="new" wrap={wrap} language={language} /></div></div> : <CodeLine key={index} row={line} wrap={wrap} language={language} />) : null}</> : <div {...stylex.props(styles.hunk)}>{row.text}</div>
 }
 
-function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hideWhitespace, revealRequest }: { file: DiffFile; landmarkContext?: string; collapsed: boolean; onToggle: () => void; layout: 'unified' | 'split'; wrap: boolean; hideWhitespace: boolean; revealRequest?: DiffRevealRequest }) {
+function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hideWhitespace, revealRequest, onOpenFile }: { file: DiffFile; landmarkContext?: string; collapsed: boolean; onToggle: () => void; layout: 'unified' | 'split'; wrap: boolean; hideWhitespace: boolean; revealRequest?: DiffRevealRequest; onOpenFile?: (path: string) => void }) {
   const rows = React.useMemo(() => rowsFromDiff(file.diff, hideWhitespace), [file.diff, hideWhitespace])
   const language = React.useMemo(() => languageFromPath(file.path), [file.path])
   const splitRows = React.useMemo(() => layout === 'split' ? pairRows(rows) : [], [rows, layout])
@@ -113,17 +121,19 @@ function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hi
     }
   }, [collapsed, file.path, revealPath, revealSequence])
   return <section ref={revealFile} aria-label={landmarkContext ? `${file.path}, ${landmarkContext}` : file.path} {...stylex.props(styles.fileSection)}>
-    <div {...stylex.props(styles.fileHead)}><AriaButton aria-expanded={!collapsed} aria-controls={codeId} onPress={onToggle} {...stylex.props(styles.fileToggle)}><Icon name={collapsed ? 'chevron-right' : 'chevron-down'} /><span title={file.path} {...stylex.props(styles.path)}>{file.path}</span></AriaButton>{file.added !== 0 && <span {...stylex.props(styles.added)}>+{file.added}</span>}{file.removed !== 0 && <span {...stylex.props(styles.removed)}>−{file.removed}</span>}<IconButton icon="copy" label={`Copy file path ${file.path}`} onPress={() => { void navigator.clipboard.writeText(file.path) }} /></div>
+    <div {...stylex.props(styles.fileHead)}><AriaButton aria-expanded={!collapsed} aria-controls={codeId} onPress={onToggle} {...stylex.props(styles.fileToggle)}><Icon name={collapsed ? 'chevron-right' : 'chevron-down'} /><span title={file.path} {...stylex.props(styles.path)}>{file.path}</span></AriaButton>{file.added !== 0 && <span {...stylex.props(styles.added)}>+{file.added}</span>}{file.removed !== 0 && <span {...stylex.props(styles.removed)}>−{file.removed}</span>}{onOpenFile ? <Button onPress={() => { if (collapsed) { onToggle(); requestAnimationFrame(() => onOpenFile(file.path)) } else onOpenFile(file.path) }}>Open</Button> : null}<IconButton icon="copy" label={`Copy file path ${file.path}`} onPress={() => { void navigator.clipboard.writeText(file.path) }} /></div>
     {!collapsed ? <div id={codeId} data-testid="diff-code" role="region" aria-label={`Diff lines for ${file.path}${landmarkContext ? `, ${landmarkContext}` : ''}`} tabIndex={0} {...stylex.props(styles.code)}>{rows.length === 0 ? <p {...stylex.props(styles.empty)}>{hideWhitespace && file.diff.length > 0 ? 'No non-whitespace changes.' : 'No diff lines supplied.'}</p> : layout === 'unified' ? rows.map((row, index) => row.kind === 'hunk' ? <ContextRow key={index} row={row} wrap={wrap} language={language} /> : <CodeLine key={index} row={row} wrap={wrap} language={language} />) : splitRows.map((pair, index) => pair.hunk ? <ContextRow key={index} row={pair.hunk} split wrap={wrap} language={language} /> : <div key={index} {...stylex.props(styles.split)}><div {...stylex.props(styles.splitCell)}>{pair.old ? <CodeLine row={pair.old} side="old" wrap={wrap} language={language} /> : null}</div><div {...stylex.props(styles.splitCell)}>{pair.next ? <CodeLine row={pair.next} side="new" wrap={wrap} language={language} /> : null}</div></div>)}</div> : null}
   </section>
 }
 
-export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', title = 'Changes', landmarkContext, diff, path, added, removed, currentTurnFiles, branchFiles, revealRequest, onOpenSurface, onClose, turns }: DiffPanelProps) {
+export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', title = 'Changes', landmarkContext, diff, path, added, removed, currentTurnFiles, branchFiles, revealRequest, onOpenSurface, onClose, closeLabel, info, scopeLabel, showSurfaceTabs = true, onOpenFile, turns }: DiffPanelProps) {
   const [scope, setScope] = React.useState<DiffScope>('branch')
   const [layout, setLayout] = React.useState<'unified' | 'split'>('unified')
   const [wrap, setWrap] = React.useState(false)
   const [hideWhitespace, setHideWhitespace] = React.useState(false)
   const [surfaceKey, setSurfaceKey] = React.useState('diff')
+  const [infoOpen, setInfoOpen] = React.useState(false)
+  const infoId = React.useId()
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(() => new Set())
   const [handledReveal, setHandledReveal] = React.useState<DiffRevealRequest>()
   const currentFiles = React.useMemo(() => {
@@ -149,9 +159,11 @@ export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', t
   if (!open) return null
   return <ThemePortal><aside aria-label={landmarkContext ? `${title}, ${landmarkContext}` : title} data-testid="diff-panel" {...stylex.props(styles.panel, styles.width(width))}>
     <Tabs selectedKey={surfaceKey} onSelectionChange={key => { setSurfaceKey(String(key)); onOpenSurface?.(String(key)) }} {...stylex.props(styles.tabRoot)}>
-      <div {...stylex.props(styles.surfaceHead)}><h2 {...stylex.props(styles.title)}>{title}</h2><TabList aria-label="Surfaces" {...stylex.props(styles.tabs)}>{surfaceOptions.map(option => <Tab key={option.key} id={option.key} {...stylex.props(styles.tab)}>{option.label}</Tab>)}</TabList>{onClose && <IconButton icon="x" label={`Close ${title}`} onPress={onClose} />}</div>
+      <PaneHeader testId="diff-panel-header" actions={onClose && <IconButton icon="x" label={closeLabel ?? `Close ${title}`} onPress={onClose} />}><h2 {...stylex.props(styles.title)}>{title}</h2><TabList aria-label="Surfaces" style={showSurfaceTabs ? undefined : { display: 'none' }} {...stylex.props(styles.tabs)}>{surfaceOptions.map(option => <Tab key={option.key} id={option.key} aria-label={option.label} {...stylex.props(styles.tab)}>{showSurfaceTabs ? option.label : null}</Tab>)}</TabList></PaneHeader>
       <TabPanel id="diff" {...stylex.props(styles.body)}>
         <div role="toolbar" aria-label="Diff options" {...stylex.props(styles.toolbar)}>
+          {scopeLabel ? <span {...stylex.props(styles.fileCount)}>{scopeLabel}</span> : null}
+          {info === undefined ? null : <div {...stylex.props(styles.sourceDetails)}><AriaButton aria-label="Captured changes information" aria-expanded={infoOpen} aria-controls={infoId} onPress={() => setInfoOpen(value => !value)} {...stylex.props(styles.scopePicker)}><Icon name="info" /></AriaButton><div id={infoId} hidden={!infoOpen} data-testid="diff-panel-info" {...stylex.props(styles.info)}>{info}</div></div>}
           <Select aria-label="Change scope" selectedKey={selectedScope} disabledKeys={scopes.filter(choice => !choice.available).map(choice => choice.id)} onSelectionChange={key => { if (key === 'current' || key === 'branch') setScope(key) }}><AriaButton {...stylex.props(styles.scopePicker)}><SelectValue /><Icon name="chevron-down" /></AriaButton><Popover {...stylex.props(styles.popover)}><ListBox items={scopes}>{choice => <ListBoxItem id={choice.id} textValue={choice.label} {...stylex.props(styles.option)}>{choice.label}{!choice.available ? <span {...stylex.props(styles.unavailable)}> — Not supplied</span> : null}</ListBoxItem>}</ListBox></Popover></Select>
           <span {...stylex.props(styles.fileCount)}>{files.length} {files.length === 1 ? 'file' : 'files'}</span>{totalAdded !== 0 && <span {...stylex.props(styles.added)}>+{totalAdded}</span>}{totalRemoved !== 0 && <span {...stylex.props(styles.removed)}>−{totalRemoved}</span>}<span {...stylex.props(styles.spacer)} />
           <Button aria-pressed={layout === 'unified'} onPress={() => setLayout('unified')}>Unified</Button><Button aria-pressed={layout === 'split'} onPress={() => setLayout('split')}>Split</Button>
@@ -160,7 +172,7 @@ export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', t
         </div>
         <div {...stylex.props(styles.files)}>{files.length === 0 ? <p {...stylex.props(styles.empty)}>{(selectedScope === 'current' ? currentFiles : branchFiles) !== undefined ? 'No changed files in this scope.' : 'No changes supplied for this scope.'}</p> : files.map(file => {
           const key = `${selectedScope}:${file.path}`
-          return <FileDiff key={key} file={file} landmarkContext={landmarkContext} collapsed={collapsed.has(key)} onToggle={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next })} layout={layout} wrap={wrap} hideWhitespace={hideWhitespace} revealRequest={revealRequest?.path === file.path ? revealRequest : undefined} />
+          return <FileDiff key={key} file={file} landmarkContext={landmarkContext} collapsed={collapsed.has(key)} onToggle={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next })} layout={layout} wrap={wrap} hideWhitespace={hideWhitespace} revealRequest={revealRequest?.path === file.path ? revealRequest : undefined} onOpenFile={onOpenFile} />
         })}</div>
       </TabPanel>
       {surfaceOptions.filter(option => option.key !== 'diff').map(option => <TabPanel key={option.key} id={option.key} {...stylex.props(styles.launcher)}><p>Open a surface</p>{surfaceOptions.map(surfaceOption => <Button key={surfaceOption.key} onPress={() => { setSurfaceKey(surfaceOption.key); onOpenSurface?.(surfaceOption.key) }}>{surfaceOption.label}<kbd>{surfaceOption.hint}</kbd></Button>)}</TabPanel>)}
@@ -169,17 +181,18 @@ export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', t
 })
 
 const styles = stylex.create({
-  panel: { flexShrink: 0, height: '100%', backgroundColor: surface.canvas, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
+  panel: { containerType: 'inline-size', flexShrink: 0, height: '100%', backgroundColor: surface.canvas, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
   width: (width: number | string) => ({ width }),
   tabRoot: { display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%' },
-  surfaceHead: { minHeight: g.controlLg, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  title: { margin: 0, fontSize: t.uiSize, fontWeight: t.weightMedium, color: text.fg, flexShrink: 0 },
+  title: { margin: 0, paddingInline: s.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: text.fg, flexShrink: 0 },
+  sourceDetails: { position: 'relative' },
+  info: { position: 'absolute', top: '100%', insetInlineStart: 0, zIndex: 2, width: 'min(360px, calc(100cqw - 80px))', maxHeight: '50vh', overflowY: 'auto', boxSizing: 'border-box', backgroundColor: surface.raised, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, padding: s.md, boxShadow: elevation.popover },
   tabs: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, overflowX: 'auto' },
-  tab: { height: g.controlSm, maxWidth: g.tabMax, display: 'inline-flex', alignItems: 'center', paddingInline: s.md, color: text.fgMuted, borderRadius: r.control, fontSize: t.metaSize, whiteSpace: 'nowrap', flexShrink: 0, cursor: 'pointer', ':hover': { color: text.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  tab: { height: g.controlSm, maxWidth: g.tabMax, display: 'inline-flex', alignItems: 'center', paddingInline: s.md, color: text.fgMuted, borderRadius: r.control, fontSize: t.metaSize, whiteSpace: 'nowrap', flexShrink: 0, cursor: 'pointer', ':hover': { color: text.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   body: { display: 'flex', flexDirection: 'column', minHeight: 0, flexGrow: 1 },
   toolbar: { minHeight: g.controlLg, boxSizing: 'border-box', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.xs, paddingInline: s.lg, paddingBlock: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border, flexShrink: 0 },
-  iconToggle: { width: g.controlSm, height: g.controlSm, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: text.fgMuted, cursor: 'pointer', ':is([data-selected])': { backgroundColor: surface.rowActive, color: text.fg }, ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
-  scopePicker: { display: 'flex', alignItems: 'center', gap: s.xs, backgroundColor: 'transparent', borderWidth: 0, color: text.fgMuted, height: g.controlMd, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  iconToggle: { width: g.controlSm, height: g.controlSm, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: text.fgMuted, cursor: 'pointer', ':is([data-selected])': { backgroundColor: surface.rowActive, color: text.fg }, ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  scopePicker: { display: 'flex', alignItems: 'center', gap: s.xs, backgroundColor: 'transparent', borderWidth: 0, color: text.fgMuted, height: g.controlMd, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   popover: { backgroundColor: surface.raised, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, padding: s.xs, color: text.fg },
   option: { padding: s.md, fontSize: t.metaSize, borderRadius: r.sm, cursor: 'pointer', ':is([data-focused])': { backgroundColor: surface.rowHover }, ':is([data-disabled])': { color: text.fgMuted, cursor: 'default' } },
   unavailable: { color: text.fgMuted },
@@ -187,21 +200,21 @@ const styles = stylex.create({
   files: { minHeight: 0, flexGrow: 1, overflowY: 'auto' },
   fileSection: { borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   fileHead: { minHeight: g.controlLg, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg },
-  fileToggle: { display: 'flex', alignItems: 'center', gap: s.sm, flexGrow: 1, minWidth: 0, padding: 0, minHeight: g.controlMd, backgroundColor: 'transparent', borderWidth: 0, color: text.fgMuted, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  fileToggle: { display: 'flex', alignItems: 'center', gap: s.sm, flexGrow: 1, minWidth: 0, padding: 0, minHeight: g.controlMd, backgroundColor: 'transparent', borderWidth: 0, color: text.fgMuted, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   path: { fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fg, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   added: { fontFamily: t.fontMono, fontSize: t.denseSize, color: status.diffAdded, fontVariantNumeric: 'tabular-nums', flexShrink: 0 },
   removed: { fontFamily: t.fontMono, fontSize: t.denseSize, color: text.fgMuted, fontVariantNumeric: 'tabular-nums', flexShrink: 0 },
   spacer: { flexGrow: 1 },
-  code: { minHeight: 0, overflowX: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, paddingBottom: s.lg, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(0px - ${g.focusRing})` } },
+  code: { minHeight: 0, overflowX: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, paddingBottom: s.lg, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(0px - ${g.focusRing})` } },
   codeRow: { display: 'flex', alignItems: 'stretch', minHeight: t.uiLeading, minWidth: '100%' },
-  addedRow: { backgroundColor: `color-mix(in srgb, ${status.diffAddTint} 9%, transparent)` },
+  addedRow: { backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
   removedRow: { backgroundColor: status.diffRemovedWash },
   gutter: { width: g.gutter40, minWidth: g.gutter40, flexShrink: 0, boxSizing: 'border-box', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: s.xs2, paddingInline: s.xs, color: text.fgMuted, fontVariantNumeric: 'tabular-nums', userSelect: 'none', borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: 'transparent' },
-  addedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: status.diffAddTint, color: status.diffAddTint },
-  removedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: status.diffRemoved, color: status.diffRemoved },
-  codeText: { fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', paddingInline: s.sm, color: text.fgSoft, whiteSpace: 'pre', flexGrow: 1 },
+  addedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: diffColor.added, color: diffColor.added },
+  removedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: diffColor.removed, color: diffColor.removed },
+  codeText: { '--fractal-diff-literal': diffColor.literal, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', paddingInline: s.sm, color: text.fgSoft, whiteSpace: 'pre', flexGrow: 1 },
   wrappedText: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 0, flexBasis: 0 },
-  hunk: { width: '100%', minHeight: g.toolRow, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontSans, fontSize: t.denseSize, color: text.fgMuted, borderWidth: 0, backgroundColor: 'transparent', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  hunk: { width: '100%', minHeight: g.toolRow, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontSans, fontSize: t.denseSize, color: text.fgMuted, borderWidth: 0, backgroundColor: 'transparent', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   split: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' },
   splitCell: { minWidth: 0, overflowX: 'auto', borderRightWidth: g.hairline, borderRightStyle: 'solid', borderRightColor: border.border },
   empty: { margin: 0, padding: s.lg, fontFamily: t.fontSans, fontSize: t.metaSize, color: text.fgMuted },

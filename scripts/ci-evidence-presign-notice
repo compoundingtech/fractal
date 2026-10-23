@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Say which checks of this pull request ran in full only because no pre-signed note covered its head. Never fails.
+
+The evidence-presign-notice job runs it after the evidence gates, on pull requests only, taken from the accepted base like
+the gate. It reads the gates' decision lines (LINES, one per gate job) and lists a check only when every one of these holds:
+
+  * scripts/st-test can sign it from a checkout: it is a lane of .st/required-lanes.json at the base;
+  * its gate ran it for lack of a note (`decision=run outcome=no_note`), on a same-repository pull request;
+  * the gate asked about the head's own tree (`tree_of=head head_tree=used`): when it fell back to the merge tree (a protected
+    file changed, an author is not listed, the branch is too far behind) a pre-signed note could not have counted;
+  * the pull request does not edit the lane's definition_paths: st-test refuses to sign such a tree, so CI runs the check.
+
+With a check listed it writes one notice annotation and the job summary; with none it writes the summary line only. Either
+way it prints one `evidence-presign-notice v1 ...` line, so pre-signing can be counted per pull request. Nothing reads its
+result: it never fails a check, blocks a merge or changes what runs. Any error (unreadable lanes, the file list) means it
+says nothing about the affected checks, never a notice it cannot back.
+
+Environment: LINES, BASE_SHA, REPOSITORY, PR_NUMBER, GH_TOKEN (pull-requests: read), GITHUB_STEP_SUMMARY.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+DECISION = re.compile(r'^evidence-decision v1 (check=\S+ .*)$')
+HOW = 'https://github.com/compoundingtech/fractal/issues/3621'
+
+
+def fields_of(text):
+    return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
+
+
+def lanes_at(base, runner=subprocess.run):
+    done = runner(['git', 'show', f'{base}:.st/required-lanes.json'], capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise RuntimeError(f'no .st/required-lanes.json at {base[:12]}')
+    return {name: lane.get('definition_paths') or [] for name, lane in json.loads(done.stdout)['lanes'].items()}
+
+
+def changed_files(repository, number, runner=subprocess.run):
+    done = runner(['gh', 'api', '--paginate', f'repos/{repository}/pulls/{int(number)}/files?per_page=100', '--jq', '.[].filename'],
+                  capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise RuntimeError(f'could not read the pull request files: {done.stderr.strip()[-200:]}')
+    return [name for name in done.stdout.split('\n') if name]
+
+
+def edits(paths, files):
+    return any(name == path or name.startswith(path.rstrip('/') + '/') for path in paths for name in files)
+
+
+def assess(lines, lanes, files):
+    """(listed, passed over with the reason) from the gate lines; `files` is None when the file list could not be read."""
+    listed, passed = [], {}
+    for text in lines:
+        found = DECISION.match(text.strip())
+        if not found:
+            continue
+        line = fields_of(found.group(1))
+        check = line.get('check')
+        if check not in lanes or line.get('decision') != 'run' or line.get('outcome') != 'no_note':
+            continue  # covered, shadow with a note, sampled, or not signable here: nothing to say
+        if line.get('fork') != 'false':
+            passed[check] = 'fork'
+        elif line.get('tree_of') != 'head' or line.get('head_tree') != 'used':
+            passed[check] = 'merge tree (' + line.get('head_tree', '-') + ')'
+        elif files is None:
+            passed[check] = 'file list unreadable'
+        elif edits(lanes[check], files):
+            passed[check] = 'edits its own lane'
+        else:
+            listed.append(check)
+    return sorted(listed), passed
+
+
+def message(listed):
+    command = 'scripts/st-test --all --push origin' if 'mail-redelivery-canaries' in listed else 'scripts/st-test --push origin'
+    return (f'These jobs ran in full because no pre-signed note covered this head: {", ".join(listed)}. '
+            f'Run `{command}` before marking the pull request ready, and CI can skip them. How: {HOW}. '
+            'This never fails a check or blocks a merge.')
+
+
+def main(environ=os.environ, runner=subprocess.run, out=sys.stdout):
+    lines = environ.get('LINES', '').split('\n')
+    try:
+        lanes = lanes_at(environ['BASE_SHA'], runner)
+    except Exception as error:  # nothing to back a notice with
+        print(f'evidence-presign-notice: {error}; nothing to say', file=out)
+        return 0
+    try:
+        files = changed_files(environ['REPOSITORY'], environ['PR_NUMBER'], runner)
+    except Exception as error:
+        print(f'evidence-presign-notice: {error}', file=out)
+        files = None
+    listed, passed = assess(lines, lanes, files)
+    record = (f'evidence-presign-notice v1 pr={environ.get("PR_NUMBER", "-")} listed={",".join(listed) or "-"} '
+              f'passed_over={",".join(f"{check}:{why.replace(" ", "_")}" for check, why in sorted(passed.items())) or "-"}')
+    print(record, file=out)
+    summary = record + '\n'
+    if listed:
+        text = message(listed)
+        print(f'::notice title=Not pre-signed::{text}', file=out)
+        summary = f'{text}\n\n{record}\n'
+    target = environ.get('GITHUB_STEP_SUMMARY')
+    if target:
+        with open(target, 'a') as handle:
+            handle.write(summary)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as error:  # never fails the job
+        print(f'evidence-presign-notice: {type(error).__name__}: {error}; nothing to say')
+        sys.exit(0)

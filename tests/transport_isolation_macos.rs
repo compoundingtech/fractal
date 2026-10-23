@@ -2,7 +2,7 @@
 //!
 //! macOS has no cgroups, and launchd does NOT cascade-kill detached children (proven in the incident:
 //! the Mac fleet survived the Mac fabric restart while the systemd fleet died). So on macOS the whole
-//! defense is `setsid` + reparent to launchd/init — st2's [`isolate`](st2::isolate) primitive runs in
+//! defense is `setsid` + reparent to launchd/init — st2's [`isolate`](fractal_legacy_runner::isolate) primitive runs in
 //! `Detached` mode (a pass-through; the exec backend's `setsid` provides the detachment).
 //!
 //! The failure mode this rules out on macOS is a **process-group** signal: if a task stayed in the
@@ -22,7 +22,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use st2::host_lock::process_alive;
+use fractal_legacy_runner::host_lock::process_alive;
 
 const HOST: &str = "isotestmac";
 const TASK_CMD: &str = "exec sleep 120";
