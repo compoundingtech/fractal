@@ -1174,7 +1174,7 @@ are grandfathered: their older claims do not contain the caller-key association.
 expires those rows or rewrites those claims. A separate follow-up deletes the fixed legacy
 cohort **30 days after actual deployment**, outside realistic client retry horizons. Operations
 must record the deployment timestamp and due date in
-[the legacy cleanup follow-up](https://github.com/compoundingtech/smalltalk/issues/1741).
+[the legacy cleanup follow-up](https://github.com/compoundingtech/fractal/issues/1741).
 That future deletion is an explicit legacy exception, not an indefinite dedupe guarantee.
 
 Cleanup adds, drops and changes **no indexes**. It seeks the first rowid above a persisted legacy
@@ -1587,7 +1587,7 @@ paths return an empty 404.
 
 The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
 Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/smalltalk/<commit>#st-chatgpt` at a published commit.
+`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):

@@ -187,7 +187,7 @@ fn recommendation_rows(label: &str, reason: &str, in_now: bool, width: usize) ->
     if in_now {
         rows.push(BandRow::text(vec![Span::styled(
             text::truncate(
-                &format!("   ★ {label} needs your words: open in Now"),
+                &format!("   ★ {label} needs your words: open in Inbox"),
                 available,
             ),
             theme::dim(),
@@ -324,7 +324,7 @@ impl Ui {
                 }
             }
             (Some("answer"), _) => rows.extend(note_rows(
-                "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
+                "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
                 width,
             )),
             // Several calls wait and the prompt names none: show them all and offer no allow.
@@ -378,13 +378,13 @@ impl Ui {
                     buttons.push(button(gated, theme::GREEN));
                 } else {
                     rows.extend(note_rows(
-                        "it is too long to show here in full: open it in Now, or answer it in the terminal (Ctrl+])",
+                        "it is too long to show here in full: open it in Inbox, or answer it in the terminal (Ctrl+])",
                         width,
                     ));
                 }
             }
             (Some(_), []) => rows.extend(note_rows(
-                "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
+                "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
                 width,
             )),
             (None, _) => rows.extend(note_rows(first_line(prompt), width)),
@@ -596,7 +596,7 @@ impl Ui {
                     ..
                 } => {
                     // A named answer is one tap, unless it needs the person's words: that one
-                    // is written in Now. The asker's recommended answer leads, marked with a
+                    // is written in Inbox. The asker's recommended answer leads, marked with a
                     // star the line above it explains, so it is never cut by the three that fit.
                     let recommended = request.recommendation.as_ref().and_then(|wanted| {
                         request
@@ -665,7 +665,7 @@ impl Ui {
                 _ => {}
             }
             buttons.push((
-                "open in Now".into(),
+                "open in Inbox".into(),
                 theme::SURFACE2,
                 Hit::Alert(item.id.clone(), AlertTap::Open),
             ));
@@ -685,7 +685,7 @@ impl Ui {
         if count > SHOWN {
             rows.push(BandRow {
                 line: Line::from(Span::styled(
-                    format!("   +{} more in Now", count - SHOWN),
+                    format!("   +{} more in Inbox", count - SHOWN),
                     theme::dim(),
                 )),
                 hits: Vec::new(),
@@ -785,7 +785,7 @@ impl Ui {
                 self.flash(notice);
             }
             Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash("st does not offer that answer here: open it in Now"),
+            None => self.flash("st does not offer that answer here: open it in Inbox"),
         }
     }
 }
@@ -1012,7 +1012,7 @@ mod tests {
         ]);
         let shown = texts(&ui.expanded_band("agent/example/atlas", 80));
         assert!(shown.contains("3 alerts"), "{shown}");
-        assert!(shown.contains("+1 more in Now"), "{shown}");
+        assert!(shown.contains("+1 more in Inbox"), "{shown}");
     }
 
     #[test]
@@ -1265,7 +1265,7 @@ mod tests {
     /// The asker's recommended answer leads its card even when it is fourth, so the three-button
     /// cap never hides it: starred, green, explained with its reason, and sent by its own id.
     /// Without a recommendation the card is as before; a recommended answer that needs words is
-    /// explained but still written in Now.
+    /// explained but still written in Inbox.
     #[test]
     fn a_recommended_answer_leads_with_its_reason_and_keeps_its_id() {
         let reason = "Canary was clean for a day and the flag can turn it off.";
@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(answer_taps(&rows), ["all", "hold"], "{shown}");
         assert!(shown.contains("★ recommended: The name is wrong."), "{shown}");
         assert!(
-            shown.contains("★ Change it needs your words: open in Now"),
+            shown.contains("★ Change it needs your words: open in Inbox"),
             "{shown}"
         );
 

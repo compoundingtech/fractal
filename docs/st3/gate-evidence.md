@@ -16,7 +16,7 @@ verifiers accept both predicate types:
 `https://compounding.tech/fractal/evidence/gate/v1` and
 `https://smalltalk.dev/evidence/gate/v1`. Acceptance of the old URI is the
 permanent signed-history decoder exception named in
-[#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
+[#3032](https://github.com/compoundingtech/fractal/issues/3032); existing signed
 attestations are never rewritten. All other predicate URIs are rejected.
 The Rust observers and `scripts/evidence-sign` write
 `https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers
@@ -1078,7 +1078,9 @@ and the gate skips only on those events: a note whose signer level lists `pull_r
 A level's rule may also say `"lane": true` (default false): that level's notes are then held to the lane of the check in
 `.st/required-lanes.json` at the same accepted base as the policy, exactly as `--lanes-from` holds any note: the tree must not change
 the lane's definition paths (`definition_changed`) and the note must carry that base's `lane_definition_sha256` (`wrong_definition`); a base
-without a lane for the check refuses such a note (`no_lane`). Other levels are unaffected. The `agent` level (below) uses it.
+without a lane for the check refuses such a note (`no_lane`). With `--lane-base COMMIT` the definition is the one at that commit instead
+(the lane file must be the same at both; see "Which lane definition a pull request is held to"). Other levels are unaffected. The `agent`
+level (below) uses it.
 
 A check may also name `events` itself (optional; the same two values). It limits the runs ANY note for that check may skip, whoever signed it,
 and a signer level's own `events` can only narrow it further (the verifier reports the intersection, which may be empty: then nothing skips).
@@ -1299,6 +1301,27 @@ percentile 11 and the 99th 22, so the bound refuses only outliers. The merge que
 limits how much a green pull request can differ from what lands, not what lands. The number lives in the gate (read from the accepted base,
 a protected path), so changing it is a reviewed change like any other.
 
+### Which lane definition a pull request is held to
+
+A lane's definition paths are wide (all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` and the nextest and clippy settings for the Rust
+lanes), and main changes one of them in more than a third of its merges (197 of 502 in the week to 2026-10-23). Compared with main's tip, a
+branch that is merely behind such a merge reads as editing its lane, so its lane-bound note never counted, and a note signed against the tip
+stopped counting as soon as main moved again. A lane edit is therefore judged by the pull request's OWN change (Nathan, 2026-10-23):
+when the gate uses the head tree, it passes the branch point (`git merge-base BASE HEAD`) to the verifier as
+`--lane-base`, and the head is held to the lane's definition at that commit. The definition paths must be byte-identical in the head and at
+the branch point (`definition_changed` otherwise: the pull request edits its lane, CI runs it) and the note must carry the branch point's
+`lane_definition_sha256` (`wrong_definition` otherwise). The verifier refuses a lane base that is not an ancestor of the base, and one whose
+`.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's either way; the gate never
+uses a head tree whose branch point has another lane file anyway (it is a protected path). What this admits, stated plainly: a note made
+with an older lane definition that main had accepted, for a pull request that changed none of it; the merge queue still tests the
+integrated tree with today's definition, `pull_request` only, sampling unchanged. A merge-tree run (a fallback, or a branch that holds the
+base) is held to the base as before. To keep the head tree the gate does not fetch the base again at depth 1 in head mode (that would cut the
+history the ancestry check reads).
+
+`scripts/st-test` signs and reports the same way: it takes the branch point of the commit it signs (the base itself when the branch holds the
+base's tip, or when the lane file changed on main since the branch left it), judges a lane edit against it, passes it to `evidence-wrap
+--lanes-from` (so the note carries its digest) and asks the verifier with `--lane-base`, in a run and under `--status`.
+
 ### Host keys
 
 Our own machines are trusted to sign what they run. `scripts/evidence-keygen` makes a host's key, a scratch
@@ -1328,8 +1351,9 @@ Agents push signatures (Nathan, 2026-10-19). An agent signing account has its ow
 alias-to-account mapping private). Its line goes into `.st/evidence-keys` with a pull request, like a host key, and is read from the
 accepted base, so a change can never vouch for its own key. The skip policy admits `agent` exactly where it admits `host` (the `wrapper`
 kind of `genie-freshness` and `typescript-client`, the `scripts/st-test` command, `pull_request` only, never `observed` and never the merge
-queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base, so a tree that
-edits the lane's own scripts never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
+queue) with one addition, `"lane": true`: an agent note must be signed against the lane definition of the accepted base (of the pull
+request's branch point, for a head tree: see "Which lane definition a pull request is held to"), so a tree that edits the lane's own scripts
+never skips on an agent's note. The trust is still cooperative (the key's account runs the code it signs
 for); what the separate level adds is the lane binding and revocation per account: deleting one `agent/...` line from `.st/evidence-keys`
 on main stops every note that key signed from counting, for the next run after that change merges, without touching any other agent or
 host. Revocation needs no ref deletion: the notes stay, they simply no longer verify.
@@ -1383,13 +1407,15 @@ The heavy checks (`linux-gate`, `mail-redelivery-canaries`) build in one cargo t
 left alone), so a run does not start cold: the dependencies are reused, the workspace's own crates rebuild because every run's worktree is new.
 Operations' terms: it is removed before a run once it passes 25 GB, only while no other run holds it (a lock), it is never pinned, and the host's
 scratch sweep may reclaim it when idle (then the next run is cold). Concurrent runs share it; cargo's own lock orders their builds.
-**The host's build cap governs the heavy checks.** Each heavy check (`linux-gate`, `mail-redelivery-canaries`) runs under ONE heavy-slot
-ticket for the whole check, taken through the cargo admission shim (`~/.local/bin/cargo --stage-slot st-test-CHECK -- ...`), inside a
-`builds.slice` scope (`systemd-run --user --scope --slice=builds.slice`). Heavy runs on a host therefore queue first in, first out behind its
-heavy slots, and everything a check starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own cargo,
-the dev shell's sccache client). Only what starts `evidence-wrap` changes; the command it records and signs does not. The shim stops a stage
-after `CARGO_STAGE_MAX_SECONDS` (default 2400 s). A host without the shim or a user systemd bus runs the check as before and says so on stderr;
-`ST_EVIDENCE_GOVERN=off` does the same.
+**The host's build cap governs the heavy checks.** Each heavy check runs inside a `builds.slice` scope (`systemd-run --user --scope
+--slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
+cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
+build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
+(`scripts/st3_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
+when the stage is its ancestor, so the guardian's cargo commands queued for the one heavy slot their own stage held until the stage limit
+killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having built nothing). Only what starts `evidence-wrap` changes; the command it
+records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the
+same.
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
