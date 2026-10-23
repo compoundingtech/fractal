@@ -697,6 +697,105 @@
           }
         }
       }
+    },
+    "rust-tests": {
+      "trust_levels": [
+        "fleet"
+      ],
+      "enforce": false,
+      "events": [
+        "pull_request"
+      ],
+      "sample_one_in": 5,
+      "kinds": {
+        "wrapper": {
+          "command": [
+            "python3",
+            "scripts/ci-rust-test-result"
+          ],
+          "required_inputs": [
+            "flake_lock_sha256",
+            "toolchain_sha256",
+            "wrapper_sha256",
+            "system",
+            "attempt",
+            "crate",
+            "source_inputs",
+            "tests_run",
+            "tests_ignored",
+            "test_list_sha256",
+            "ignored_list_sha256",
+            "filterset",
+            "run_command_sha256"
+          ],
+          "bind_inputs": {
+            "flake_lock_sha256": "flake.lock"
+          },
+          "trust_levels": [
+            "fleet",
+            "host",
+            "agent"
+          ],
+          "by_level": {
+            "host": {
+              "command": [
+                "python3",
+                "scripts/ci-rust-test-result"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "crate",
+                "source_inputs",
+                "tests_run",
+                "tests_ignored",
+                "test_list_sha256",
+                "ignored_list_sha256",
+                "filterset",
+                "run_command_sha256"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            },
+            "agent": {
+              "command": [
+                "python3",
+                "scripts/ci-rust-test-result"
+              ],
+              "required_inputs": [
+                "flake_lock_sha256",
+                "toolchain_sha256",
+                "wrapper_sha256",
+                "system",
+                "attempt",
+                "crate",
+                "source_inputs",
+                "tests_run",
+                "tests_ignored",
+                "test_list_sha256",
+                "ignored_list_sha256",
+                "filterset",
+                "run_command_sha256"
+              ],
+              "bind_inputs": {
+                "flake_lock_sha256": "flake.lock"
+              },
+              "events": [
+                "pull_request"
+              ],
+              "lane": true
+            }
+          }
+        }
+      }
     }
   }
 }
