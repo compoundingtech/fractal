@@ -778,58 +778,56 @@ pub async fn post_review(
             idempotency_key: None,
         })
         .map_err(ApiError::bad)?;
-    if request.decision == "rejected" {
-        if let Some(owner) = review_request
+    if request.decision == "rejected"
+        && let Some(owner) = review_request
             .as_ref()
             .and_then(|claim| claim.body.pointer("/fields/owner"))
             .and_then(Value::as_str)
-        {
-            if owner.starts_with("step-run/") {
-                let step = state.store.step_run(owner).map_err(ApiError::internal)?;
-                let claimant = if let Some(step) = step {
-                    if step.claimant.is_some() || step.carried_claimant.is_some() {
-                        step.claimant.or(step.carried_claimant)
-                    } else {
-                        state
-                            .store
-                            .claims_for(owner, Some("work.claimed"))
-                            .map_err(ApiError::internal)?
-                            .into_iter()
-                            .rev()
-                            .find(|claim| {
-                                claim
-                                    .body
-                                    .pointer("/fields/attempt")
-                                    .and_then(Value::as_u64)
-                                    == Some(u64::from(step.attempt))
-                            })
-                            .and_then(|claim| {
-                                claim
-                                    .body
-                                    .pointer("/fields/claimant")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                    }
-                } else {
-                    None
-                };
-                if let Some(claimant) = claimant {
-                    let reason = response
-                        .body
-                        .pointer("/fields/reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("No reason provided.");
-                    send_planning_message(
-                        &state,
-                        &format!("review-rejected:{}:{claimant}", response.id),
-                        response.actor.as_deref().unwrap_or("daemon/runtime"),
-                        &claimant,
-                        &format!("Your work on `{owner}` was rejected. Reason: {reason}"),
-                        "Human review rejected",
-                    )?;
-                }
+        && owner.starts_with("step-run/")
+    {
+        let step = state.store.step_run(owner).map_err(ApiError::internal)?;
+        let claimant = if let Some(step) = step {
+            if step.claimant.is_some() || step.carried_claimant.is_some() {
+                step.claimant.or(step.carried_claimant)
+            } else {
+                state
+                    .store
+                    .claims_for(owner, Some("work.claimed"))
+                    .map_err(ApiError::internal)?
+                    .into_iter()
+                    .rev()
+                    .find(|claim| {
+                        claim
+                            .body
+                            .pointer("/fields/attempt")
+                            .and_then(Value::as_u64)
+                            == Some(u64::from(step.attempt))
+                    })
+                    .and_then(|claim| {
+                        claim
+                            .body
+                            .pointer("/fields/claimant")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
             }
+        } else {
+            None
+        };
+        if let Some(claimant) = claimant {
+            let reason = response
+                .body
+                .pointer("/fields/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("No reason provided.");
+            send_planning_message(
+                &state,
+                &format!("review-rejected:{}:{claimant}", response.id),
+                response.actor.as_deref().unwrap_or("daemon/runtime"),
+                &claimant,
+                &format!("Your work on `{owner}` was rejected. Reason: {reason}"),
+                "Human review rejected",
+            )?;
         }
     }
     signal_changed(&state);
