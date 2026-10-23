@@ -23,17 +23,6 @@ STABLE = re.compile(r'v\d+\.\d+\.\d+')
 SHA = re.compile(r'[0-9a-f]{40}')
 DIGEST = re.compile(r'[0-9a-f]{64}')
 POLICY = 'Rolling previous-published-release compatibility baseline; advance after each stable release.'
-# Frozen identities of the committed pre-rename v0.3.17 compatibility bundles.
-HISTORICAL_V0317 = {
-    'x86_64-unknown-linux-gnu': (
-        'https://github.com/compoundingtech/smalltalk/releases/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz',
-        'f4cec96e414fee2a780910730b019fe6bdbddc1d',
-        'd30869ac1251dbeb30862bc3f5c74db4a0ccfe385110e43c5c474aa385dcddb2'),
-    'aarch64-apple-darwin': (
-        'https://github.com/compoundingtech/smalltalk/releases/download/v0.3.17/smalltalk-aarch64-apple-darwin.tar.gz',
-        'f4cec96e414fee2a780910730b019fe6bdbddc1d',
-        '9cfdde671712439309bfc1b9b05689ad3b5d084de2916d7131df92ed310b3a0a'),
-}
 # Seconds to wait before asking again after an empty release listing; one try more than delays.
 EMPTY_LISTING_DELAYS = (1, 2, 4)
 
@@ -106,12 +95,8 @@ def validate(pin, label):
         raise BaselineError(f'{label}: bundles must cover both native release targets')
     for target, bundle in pin['bundles'].items():
         expected = f'https://github.com/{repository()}/releases/download/{pin["tag"]}/smalltalk-{target}.tar.gz'
-        # Retained v0.3.17 pins are immutable historical release URLs, not live API targets.
-        historical = (repository() == 'compoundingtech/fractal' and pin['tag'] == 'v0.3.17'
-                      and isinstance(bundle, dict)
-                      and (bundle.get('url'), pin['commit'], bundle.get('sha256')) == HISTORICAL_V0317[target])
         if (not isinstance(bundle, dict) or set(bundle) != {'url', 'sha256'}
-                or (bundle['url'] != expected and not historical) or not isinstance(bundle['sha256'], str)
+                or bundle['url'] != expected or not isinstance(bundle['sha256'], str)
                 or not DIGEST.fullmatch(bundle['sha256'])):
             raise BaselineError(f'{label}: {target} needs the tagged archive URL and hex SHA256')
 

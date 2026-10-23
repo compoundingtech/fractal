@@ -6,7 +6,7 @@
   "rules": { "status": "none", "detail": "none" },
   "compatibility": {
     "status": "changed",
-    "detail": "Live repository URLs and GitHub command defaults use compoundingtech/fractal directly. Retained release pins and historical records keep their original URLs; GitHub redirects continue to serve those records. Baseline validation accepts an immutable v0.3.17 old-repository URL only with its exact committed source revision and archive checksum, while requiring the current repository for new pins. Binary names, state, API contracts and release asset names are unchanged."
+    "detail": "Live repository URLs and GitHub command defaults use compoundingtech/fractal directly. Historical records keep their original URLs; GitHub redirects continue to serve those records. The compatibility baseline pins were already moved to the renamed repository on main. Binary names, state, API contracts and release asset names are unchanged."
   },
   "downtime": { "status": "none", "detail": "none" },
   "manual": { "status": "none", "detail": "none" },
