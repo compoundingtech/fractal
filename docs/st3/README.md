@@ -16,10 +16,12 @@ Use these documents for implementation details:
   runs the fleet may do, as itself, until principals and grants land.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
+- [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.
 - [Schema registry](schema.md) lists the generated public subject, resource, and claim vocabulary.
 - [Typed custom subjects](custom-subjects.md) defines immutable registrations, generic reads and replies, and derived-state freshness,
   and the decision-tree manifest.
 - [Data authority](data-authority.md) separates durable facts from projections and caches.
+- [Large SQLite values](large-values.md) records variable-value storage debt and the source-site guard.
 - [0.x compatibility](compatibility.md) states upgrade baselines, independent contracts and current platform proof.
 - [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
@@ -45,6 +47,7 @@ Use these documents for implementation details:
 - [Attachments](attachments.md) defines the images a message carries between machines: where the
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
+- [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
 - [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
@@ -59,12 +62,18 @@ Use these documents for implementation details:
   stopping a seat ends every process the seat started, and what a host without systemd misses.
 - [Subagents](subagents.md) explains how st records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
+- [Harness questions](harness-questions.md) explains how st records the questions a seat's harness
+  asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
+- [Demos](demos.md) explains `st demo play`: a seeded, scripted demo in the terminal interface,
+  in its own instance, with timed and key-paced beats and no model tokens.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
   with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
 - [Sekrets](sekrets.md) explains the opt-in gateway that runs any CLI with a credential no seat
   can read: profiles, policies, grants, how it tells a seat from its person, and its sandbox.
+- [Tiles](tiles.md) explains how root runs an agent as its own Unix user, in its own namespaces
+  and root-owned cgroup: the registry, launch, cleanup, the endpoint, and what the tests prove.
 - [Command recorder](command-recorder.md) explains how every `git` and `gh` call st starts is
   recorded, the log format, and what the recorder cannot see.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits

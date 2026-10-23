@@ -1,6 +1,6 @@
 # st architecture
 
-st is the Smalltalk claims-graph runtime. KDL declarations are its human authoring surface. Claims
+st is the Fractal claims-graph runtime. KDL declarations are its human authoring surface. Claims
 are its durable fact surface. Projections, process observations, and caches are derived state.
 
 This document defines the stable system shape. The linked technical documents define the complete
@@ -30,7 +30,7 @@ See [data authority](data-authority.md) for the authority classes. See [schema](
 public subject and claim vocabulary.
 
 The graph is its own crate, `crates/smallclaims`: the claim log and its batches, envelopes and
-their admission, the canonical order, projection digests, replication and heals between members,
+their admission, the canonical order, projection digests, replication between members,
 fleet membership, checkpoints, documents and blobs. It depends on nothing of smalltalk's, so agents,
 missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. smalltalk's store wraps the
 graph's and plugs in through `smallclaims::store::Runtime`: its tables and their migration, claim
@@ -213,7 +213,7 @@ The daemon's other loops keep the same rule:
 
 ## Messages and attention
 
-Smalltalk messages are durable claims. Delivery is a separate lifecycle with sent, delivered,
+Fractal messages are durable claims. Delivery is a separate lifecycle with sent, delivered,
 read, and closed facts.
 
 The reconciler creates ready-work messages. A driver transports them and renews claimed work. This

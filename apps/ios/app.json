@@ -5,7 +5,7 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "plugins": [
       [
         "expo-build-properties",
@@ -16,12 +16,14 @@
         }
       ],
       "expo-secure-store",
-      "expo-font"
+      "expo-font",
+      "./plugins/withNonblockingMetro.cjs"
     ],
     "ios": {
       "bundleIdentifier": "com.compoundingtech.smalltalk.starter",
       "supportsTablet": true,
       "infoPlist": {
+        "UIViewControllerBasedStatusBarAppearance": true,
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
             "100.64.0.0/10": {
@@ -42,9 +44,9 @@
             }
           }
         },
-        "NSLocalNetworkUsageDescription": "Smalltalk connects to your paired st gateway on your local network when you enter a .local name or private LAN address.",
-        "NSMicrophoneUsageDescription": "Small Talk listens while you dictate a message, and transcribes it on this phone.",
-        "NSSpeechRecognitionUsageDescription": "Small Talk transcribes your dictated messages on this phone."
+        "NSLocalNetworkUsageDescription": "Fractal connects to your paired st gateway on your local network when you enter a .local name or private LAN address.",
+        "NSMicrophoneUsageDescription": "Fractal listens while you dictate a message, and transcribes it on this phone.",
+        "NSSpeechRecognitionUsageDescription": "Fractal transcribes your dictated messages on this phone."
       }
     }
   }

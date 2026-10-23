@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""The typescript-client check derivation's inputs stay complete, and its hash refresh works."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+import unittest
+
+root = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('refresh', str(root / 'scripts/nix-typescript-client-deps-hash'))
+refresh = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(refresh)
+
+
+class ManifestTests(unittest.TestCase):
+    def test_the_hash_file_is_one_sri_hash(self):
+        text = (root / 'nix/typescript-client-deps.hash').read_text()
+        self.assertRegex(text, r'^sha256-[A-Za-z0-9+/]{43}=\n\Z')
+
+    def test_the_installation_name_carries_the_lockfile_and_the_effect_utils_revision(self):
+        derivation = (root / 'nix/typescript-client.nix').read_text()
+        self.assertIn('typescript-client-installation-${lockHash}-${sourcesHash}', derivation)
+        self.assertRegex(derivation, r'sourcesHash = [^\n]*effect-utils\.narHash')
+        self.assertRegex(derivation, r'lockHash = [^\n]*pnpm-lock\.yaml')
+
+    def test_every_workspace_member_manifest_is_a_derivation_input(self):
+        workspace = (root / 'pnpm-workspace.yaml').read_text()
+        members = re.findall(r'^  - (\S+)$', workspace.split('packages:', 1)[1].split('\n\n', 1)[0], re.MULTILINE)
+        self.assertTrue(members)
+        derivation = (root / 'nix/typescript-client.nix').read_text()
+        for member in members:
+            self.assertIn(f'../{member}/package.json', derivation, f'{member} is a workspace member the installation would miss')
+        for name in ('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-source-inputs.json'):
+            self.assertIn(f'../{name}\n', derivation)
+
+
+class RefreshTests(unittest.TestCase):
+    def run_refresh(self, stderr, returncode):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            hash_file = directory / 'deps.hash'
+            hash_file.write_text('sha256-' + 'B' * 43 + '=\n')
+            nix = directory / 'nix'
+            nix.write_text(f'#!/bin/sh\ncat "{directory}/seen" 2>/dev/null; cat "{hash_file}" > "{directory}/seen"\nprintf %s "$STDERR" >&2\nexit {returncode}\n')
+            nix.chmod(nix.stat().st_mode | stat.S_IXUSR)
+            os.environ['STDERR'] = stderr
+            with contextlib.redirect_stdout(open(os.devnull, 'w')), contextlib.redirect_stderr(open(os.devnull, 'w')):
+                status = refresh.main([], nix=(str(nix),), hash_file=hash_file)
+            return status, hash_file.read_text(), (directory / 'seen').read_text()
+
+    def test_the_reported_hash_is_written_after_a_placeholder_build(self):
+        good = 'sha256-' + 'C' * 43 + '='
+        status, written, seen = self.run_refresh(f'error: hash mismatch in fixed-output derivation\n         specified: x\n            got:    {good}\n', 1)
+        self.assertEqual((status, written, seen), (0, good + '\n', refresh.PLACEHOLDER + '\n'))
+
+    def test_another_failure_restores_the_file(self):
+        status, written, _ = self.run_refresh('error: builder failed\n', 1)
+        self.assertEqual((status, written), (1, 'sha256-' + 'B' * 43 + '=\n'))
+
+
+if __name__ == '__main__':
+    unittest.main()

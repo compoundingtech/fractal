@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AttachmentPort } from '../data/source.ts'
 import { composerSendBinding, sendFailureDetail } from './composerSend.ts'
-import { ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { createComposerDraftSession, createLocalComposerDraftStore } from './composerDrafts.ts'
 import { createComposerDraftAdapter } from './composerDraftAdapter.ts'
 
