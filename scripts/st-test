@@ -188,12 +188,16 @@ def shared_target(tree_target=None):
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
     target.mkdir(parents=True, exist_ok=True)
     lock = open(target.parent / f'{target.name}.lock', 'w')
+    # A target several trees share is held EXCLUSIVELY for the whole run, builds and tests: cargo's own lock orders builds, but not
+    # one run's builds against another run's tests, and two runs on different trees sharing one target once relinked st3 under each
+    # other's tests (a test ran the other tree's st3), so a note could name a tree whose binaries were not the ones tested. A second
+    # run waits for the first, and says so.
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # nobody else is using it: the moment to keep it small
-        trim(target)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        pass
-    fcntl.flock(lock, fcntl.LOCK_SH)  # held until this run ends; cargo's own lock orders the builds inside it
+        print(f'st-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    trim(target)  # nobody else is using it: the moment to keep it small
     return target, lock
 
 
