@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep TUI terminal attach results scoped to the selected attempt and offer Ctrl+R retry after a 100-second attach deadline.",
+  "summary": "Fence TUI terminal attach results by selection and attempt, cancel superseded setup requests, and show phase-specific timeouts with a Ctrl+R retry hint.",
   "replay": {"status": "none", "detail": "Only process-local TUI attach state changes; no event replay changes."},
   "schema": {"status": "none", "detail": "No database or persisted state changes."},
   "rules": {"status": "none", "detail": "No checkpoint rules or member coordination changes."},
