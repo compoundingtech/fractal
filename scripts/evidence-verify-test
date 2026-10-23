@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exercise scripts/evidence-verify against real Git repositories and real SSH signatures."""
+import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import re
 import runpy
@@ -1070,6 +1072,68 @@ class LaneDefinitions(unittest.TestCase):
         lane = evidence_verify.lane_definition(str(self.f.repo), newer_base, tree, self.rules())
         self.note(commit, tree, older)
         self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')
+
+    def branch_behind_main(self, change):
+        """A branch made from the first base, then main changes a lane script: (new base commit, branch commit, branch tree)."""
+        self.files({'scripts/run.sh': 'changed on main\n'})
+        newer = self.f.git('rev-parse', 'HEAD')
+        self.f.git('checkout', '-q', '--detach', self.base_commit)
+        commit, tree = self.files(change)
+        return newer, commit, tree
+
+    def test_a_branch_that_only_lags_main_is_held_to_the_definition_at_its_branch_point(self):
+        newer, commit, tree = self.branch_behind_main({'src/code.rs': 'behind\n'})
+        lanes = (json.dumps(LANES), newer)
+        self.assertEqual(evidence_verify.lane_for(str(self.f.repo), tree, lanes, 'unit')['changed'], ['scripts/run.sh'])  # against main
+        lane = evidence_verify.lane_for(str(self.f.repo), tree, lanes, 'unit', self.base_commit)
+        self.assertEqual((lane['changed'], lane['sha256']), ([], self.definition(self.base_tree)['sha256']))
+        self.note(commit, tree, lane['sha256'])
+        code, result = self.verdict(tree, lane)
+        self.assertEqual((code, result['satisfied']), (0, True), result)
+        # the main tip's digest is not this branch's definition
+        tip = evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', f'{newer}^{{tree}}'), tree, self.rules())['sha256']
+        self.assertNotEqual(tip, lane['sha256'])
+        commit, tree = self.files({'src/code.rs': 'behind, again\n'})
+        lane = evidence_verify.lane_for(str(self.f.repo), tree, lanes, 'unit', self.base_commit)
+        self.note(commit, tree, tip)
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'wrong_definition')
+
+    def test_a_branch_that_edits_its_lane_is_still_a_lane_edit_from_its_branch_point(self):
+        newer, commit, tree = self.branch_behind_main({'scripts/run.sh': 'run, but fewer tests\n'})
+        lane = evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(LANES), newer), 'unit', self.base_commit)
+        self.assertEqual(lane['changed'], ['scripts/run.sh'])
+        self.note(commit, tree, lane['sha256'])
+        self.assertEqual(self.verdict(tree, lane)[1]['reason'], 'definition_changed')
+
+    def test_the_lane_base_must_be_an_ancestor_of_the_base_with_the_same_lane_file(self):
+        newer, commit, tree = self.branch_behind_main({'src/code.rs': 'side\n'})
+        with self.assertRaises(evidence_verify.Failure) as caught:  # the branch's own commit is not a definition main accepted
+            evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(LANES), newer), 'unit', commit)
+        self.assertEqual(caught.exception.reason, 'error')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(LANES), newer), 'unit', 'HEAD')
+        self.assertEqual(caught.exception.reason, 'error')
+        doc = json.loads(json.dumps(LANES))
+        doc['lanes']['unit']['argv'] = ['make', 'test', 'more']
+        self.f.git('checkout', '-q', '--detach', newer)
+        relaned, _ = self.files({'.st/required-lanes.json': json.dumps(doc)})
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.lane_for(str(self.f.repo), tree, (json.dumps(doc), relaned), 'unit', self.base_commit)
+        self.assertEqual(caught.exception.reason, 'definition_changed')
+
+    def test_the_cli_takes_a_lane_base_only_with_a_lane_file_or_a_policy(self):
+        code = evidence_verify.main(['--repo', str(self.f.repo), '--tree', self.base_tree, '--check', 'unit', '--keys', str(self.f.keys),
+                                     '--lane-base', self.base_commit])
+        self.assertEqual(code, 2)
+        newer, commit, tree = self.branch_behind_main({'src/code.rs': 'cli\n'})
+        self.note(commit, tree, self.definition(self.base_tree)['sha256'])
+        argv = ['--repo', str(self.f.repo), '--tree', tree, '--check', 'unit', '--keys', str(self.f.keys), '--lanes-from', newer,
+                '--command', json.dumps(['make', 'test'])]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(evidence_verify.main(argv), 1)
+        self.assertEqual(json.loads(out.getvalue())['reason'], 'definition_changed')
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(evidence_verify.main(argv + ['--lane-base', self.base_commit]), 0, out.getvalue())
 
     def test_definition_changed_when_the_signed_tree_edits_adds_or_deletes_a_listed_blob(self):
         digest = self.definition(self.base_tree)['sha256']
