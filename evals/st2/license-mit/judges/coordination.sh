@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # JUDGE: coordination — the full team loop is visible on the bus, and the confirmation is VERIFIED (not a bare ack).
 #
 # The loop must show, on the st2 bus:
@@ -15,7 +16,8 @@
 # early snapshot. Under st3, each poll refreshes the read-only file projection from the API.
 set -uo pipefail
 ROOT="${CATALOG:-$PWD}"
-SM="${ST_ROOT:-$ROOT}"                                       # flat native st2 bus root
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+SM="${FRACTAL_ROOT-${ST_ROOT:-$ROOT}}"                                       # flat native st2 bus root
 SUP_ID="${SUP_ID:-mix.sup}"; WORKER_ID="${WORKER_ID:-mix.worker}"; REQUESTER="${REQUESTER:-requester}"
 TIMEOUT_SECONDS="${COORDINATION_TIMEOUT_SECONDS:-900}"
 
@@ -31,7 +33,8 @@ newest_ts(){ local t max=0;             for f in $1; do t="$(basename "$f" | gre
 oldest_ts(){ local t min=9999999999999; for f in $1; do t="$(basename "$f" | grep -oE '^[0-9]+')"; [ -n "$t" ] && [ "$t" -lt "$min" ] && min="$t"; done; [ -n "$1" ] && echo "$min" || echo 0; }
 
 refresh_projection(){
-  if [ -n "${ST3_ENDPOINT:-}" ] && command -v st3 >/dev/null 2>&1; then
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  if [ -n "${FRACTAL_ENDPOINT-${ST3_ENDPOINT:-}}" ] && command -v st3 >/dev/null 2>&1; then
     st3 conversations export "$SM" >/dev/null 2>&1 || true
   fi
 }

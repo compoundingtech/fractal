@@ -13,7 +13,7 @@ import {
   type TerminalLine,
   type TerminalModes,
   type TerminalRun,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 
 import {
   agents,
