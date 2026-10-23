@@ -1526,6 +1526,9 @@ pub async fn now(
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
     let (history, actor, owner_run) = (query.history, query.actor.clone(), query.owner_run.clone());
+    if history && actor.is_none() && owner_run.is_none() {
+        return super::attention_history::page(state, snapshot, effective_query, "now").await;
+    }
     client_snapshot_page(
         &state,
         snapshot,
@@ -2326,6 +2329,7 @@ pub fn native_slice_page_at_generation(
         "page": ClientPageInfo {
             limit, has_more, next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
     });
     if let Some(header) = header {

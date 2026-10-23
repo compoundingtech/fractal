@@ -140,7 +140,7 @@ pub fn page(
     Ok((Extension(snapshot), Json(ClientResourcePage {
         kind: "page".into(), collection: "missions".into(), filters: BTreeMap::new(), items,
         page: ClientPageInfo { limit, has_more, next_cursor,
-            cursor_expires_at: has_more.then(|| client_timestamp(expires)) },
+            cursor_expires_at: has_more.then(|| client_timestamp(expires)), omitted_items: None },
         sync: client_sync_notice(state), replicated: None,
     })))
 }

@@ -715,6 +715,14 @@ time.sleep(300)
     let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
     wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
         daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
+            && daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap()
+                .iter().any(|claim| {
+                    claim.body["fields"]["code"] == "claude-channel-initialized"
+                        && claim.body["fields"]["incarnation_id"] == incarnation
+                        && claim.body["fields"]["reason"].as_str().is_some_and(|reason| {
+                            reason.contains("legacy ownership: unprotected until next natural restart")
+                        })
+                })
     })
     .await;
     // Stand in for this wrapper's Stop hook. Retain the same provider ownership for a
@@ -752,6 +760,20 @@ time.sleep(300)
         .unwrap();
     assert_eq!(before["harness_state"], "idle", "{before}");
     assert_eq!(before["observation"], "current", "{before}");
+    // Accepted legacy startup stays silent in the terminal, but operators retain both
+    // its delivery-report warning and its durable initialization diagnostic.
+    let warning = "legacy ownership: unprotected until next natural restart";
+    assert!(before["delivery"]["reason"].as_str().is_some_and(|reason| {
+        reason.contains(warning)
+    }), "{before}");
+    let initialized = daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    assert!(initialized.iter().any(|claim| {
+        claim.body["fields"]["code"] == "claude-channel-initialized"
+            && claim.body["fields"]["incarnation_id"] == incarnation
+            && claim.body["fields"]["reason"].as_str().is_some_and(|reason| {
+                reason.contains(warning)
+            })
+    }));
     daemon.stop().await;
     // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
     // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the

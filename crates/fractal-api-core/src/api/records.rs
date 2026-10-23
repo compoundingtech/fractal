@@ -380,6 +380,53 @@ pub async fn resolve_attention(
                 "an attention outcome must be resolved or dismissed",
             )));
         }
+        if let Some(denial) = state
+            .store
+            .claim_by_id(&proof.episode)
+            .map_err(ApiError::internal)?
+            .filter(|claim| claim.kind == "harness.diagnostic")
+        {
+            if request.outcome != "dismissed"
+                || client_attention_id(&denial.subject, &proof.person, &proof.episode)
+                    .map_err(ApiError::internal)?
+                    != subject
+            {
+                return Err(ApiError::bad(St3Error::new(
+                    "delegation-refused",
+                    "dismissal needs the exact denial card and episode",
+                )));
+            }
+            let result = state
+                .store
+                .respond_native_prompt(
+                    &denial.subject,
+                    &proof.episode,
+                    "dismiss",
+                    &actor,
+                    Some(&proof),
+                )
+                .map_err(ApiError::bad)?;
+            signal_changed(&state);
+            return Ok(Json(AttentionRequestView {
+                subject,
+                request: proof.episode,
+                reviewer: proof.person,
+                title: "Denied call dismissed".into(),
+                reason: summary.clone(),
+                severity: "warning".into(),
+                targets: vec![denial.subject],
+                actor,
+                requested_at_unix_ms: denial.accepted_at_unix_ms,
+                status: "resolved".into(),
+                resolved_at_unix_ms: Some(result.accepted_at_unix_ms),
+                outcome: Some("dismissed".into()),
+                resolution_reason: Some(summary),
+                until: None,
+                step: None,
+                step_attempt: None,
+                closed_by: None,
+            }));
+        }
         // Resolve the exact original update, including a completed one on an identical retry.
         // Attention snapshots contain only open cards; they cannot identify closed episodes.
         let update = state
@@ -448,14 +495,54 @@ pub async fn resolve_attention(
 }
 
 pub async fn withdraw_attention(
-    State(_state): State<AppState>,
-    AxumPath(_subject): AxumPath<String>,
-    Json(_request): Json<AttentionWithdrawRequest>,
-) -> Result<Json<AttentionRequestView>, ApiError> {
-    Err(ApiError::bad(St3Error::new(
-        "attention-migrated",
-        "attention is a derived view; use work ask/done/cancel-ask or act on its source",
-    )))
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+    Json(request): Json<AttentionWithdrawRequest>,
+) -> Result<Json<StepRunView>, ApiError> {
+    let target = if let Some(episode) = &request.episode {
+        let original = state
+            .store
+            .claim_by_id(episode)
+            .map_err(ApiError::internal)?
+            .filter(|claim| claim.kind == "work.person-asked")
+            .ok_or_else(|| ApiError::bad(St3Error::new("stale-fence", "missing update episode")))?;
+        let person = original.body["fields"]["person"]
+            .as_str()
+            .unwrap_or_default();
+        if subject != original.subject
+            && client_attention_id(&original.subject, person, episode)
+                .map_err(ApiError::internal)?
+                != subject
+        {
+            return Err(ApiError::bad(St3Error::new(
+                "stale-fence",
+                "the update episode belongs to another item",
+            )));
+        }
+        original.subject
+    } else if subject.starts_with("step-run/") {
+        subject
+    } else {
+        return Err(ApiError::bad(St3Error::new(
+            "attention-migrated",
+            "withdraw an update's step-run source, or supply its exact --episode; remedy other alerts at their source",
+        )));
+    };
+    let result = state
+        .store
+        .withdraw_person_update(&PersonStepResponse {
+            delegation: None,
+            subject: target,
+            actor: request.actor,
+            summary: request.reason,
+            evidence: vec![],
+            episode: request.episode,
+            answer: None,
+            idempotency_key: request.idempotency_key,
+        })
+        .map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(result))
 }
 
 /// The owner a review decision answers. A step, mission or loop run, or a resource, answers for

@@ -10710,6 +10710,7 @@ mission "typecase" state="ready" {
         .withdraw_attention(
             "attention/other-fault",
             &AttentionWithdrawRequest {
+                episode: None,
                 reason: "cleared".into(),
                 actor: "agent/node.requester".into(),
                 idempotency_key: "other-fault-withdrawn".into(),
