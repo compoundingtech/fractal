@@ -147,8 +147,10 @@ reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
 `◆` needs person/login, `!` fault, `~` starting/unknown). `◆N` is the number of
 open alerts in that subject's attention window, excluding informational updates and
 recently closed items; zero is omitted, and an unavailable window shows `◆?`.
-A separate `?` means live attention reports an open question-tool answer prompt.
-Cached conversation calls alone never establish that a question is still pending.
+A separate `?` means live attention reports an open question prompt. Native question
+kind or an exact question-tool call identity establishes its type, independently of
+available client-answer actions (whose submission window can expire). Cached calls
+without an open live prompt never establish that a question is still pending.
 Mission tabs include current question prompts of agents assigned to that mission;
 Inbox includes all current question prompts. Counts disappear before
 type/activity/question identity when space is tight. Subject membership indexes are

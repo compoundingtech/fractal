@@ -50,6 +50,15 @@ pub(super) struct TabStatuses {
 impl TabStatuses {
     pub(super) fn new(world: &World, closed: &HashSet<String>, snoozed: &HashSet<String>) -> Self {
         let mut status = Self { loaded: world.attention.ready().is_some(), ..Self::default() };
+        // Classify question calls once. A cached call identifies a tool only when an exact,
+        // still-open live prompt names it; its presence alone never establishes activity.
+        let question_calls: BTreeMap<_, BTreeSet<_>> = world.pending_calls.iter()
+            .filter_map(|(agent, calls)| {
+                let questions: BTreeSet<_> = calls.iter()
+                    .filter(|call| matches!(call.tool.as_str(), "AskUserQuestion" | "request_user_input"))
+                    .map(|call| call.id.as_str()).collect();
+                (!questions.is_empty()).then_some((agent.as_str(), questions))
+            }).collect();
         let agent_missions: BTreeMap<_, _> = world.agents.items().iter()
             .filter_map(|agent| agent.mission.as_deref().map(|mission| (agent.id.as_str(), mission)))
             .collect();
@@ -74,11 +83,13 @@ impl TabStatuses {
         for item in world.attention.items().iter().filter(|item| {
             item.is_alert() && !closed.contains(&item.id) && !snoozed.contains(&item.id)
         }) {
-            // An open answer prompt is current attention authority. Cached unanswered tool
-            // calls alone cannot establish that a person is still being asked.
+            // Question identity outlives answer eligibility (for example, an expired client
+            // submission window). Only live attention establishes that the prompt is open.
             let question_seat = match (&world.link, &item.kind) {
-                (Link::Live, AttentionKind::Prompt { seat_id, answers, .. })
-                    if answers.iter().any(|answer| answer == "answer") => Some(seat_id.as_str()),
+                (Link::Live, AttentionKind::Prompt { seat_id, question, call, .. })
+                    if *question || call.as_ref().and_then(Option::as_deref).is_some_and(|call| {
+                        question_calls.get(seat_id.as_str()).is_some_and(|calls| calls.contains(call))
+                    }) => Some(seat_id.as_str()),
                 _ => None,
             };
             let ask = question_seat.is_some();
@@ -4594,6 +4605,7 @@ mod tests {
         alert.mission = Some("mission/m".into());
         alert.kind = AttentionKind::Prompt {
             seat: "Atlas".into(), seat_id: "agent/a".into(), text: "Choose".into(),
+            question: true,
             answers: vec!["answer".into()], episode: "episode/question".into(),
             call: Some(Some("call/question".into())),
         };
@@ -4616,6 +4628,56 @@ mod tests {
         });
         ui.refresh_tab_statuses();
         ui
+    }
+
+    #[test]
+    fn tab_badge_live_questions_with_empty_answers_keep_the_question_marker() {
+        for native_kind in [true, false] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            if native_kind {
+                next.pending_calls.clear();
+            }
+            if let Load::Ready(items) = &mut next.attention {
+                for item in items {
+                    if let AttentionKind::Prompt { question, answers, call, .. } = &mut item.kind {
+                        *question = native_kind;
+                        answers.clear();
+                        if native_kind { *call = Some(None); }
+                    }
+                }
+            }
+            ui.set_world(next);
+            for key in ["agent:agent/a", "mission:mission/m", "list:home"] {
+                let tab = Tab::pane(key);
+                assert!(ui.tab_badge(&tab, Pane::parse(key).as_ref()).ask, "{native_kind}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_loading_demo_refreshes_indexes_through_startup_stage_three() {
+        let mut ui = Ui::new(demo::loading());
+        ui.demo = Some(Demo {
+            started: Instant::now(), loaded: false, streamed: 0, mail: false,
+            tool_done: false, cos_seen: None, harbor_seen: None,
+        });
+        let tab = Tab::pane("agent:agent/example/atlas/builder");
+        let pane = Pane::parse(&tab.pane);
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).alerts, None);
+        for stage in 1..=3 {
+            ui.demo.as_mut().unwrap().started = Instant::now()
+                - Duration::from_millis(stage * 350 + 10);
+            ui.step_demo();
+            let badge = ui.tab_badge(&tab, pane.as_ref());
+            assert!(badge.alerts.is_some(), "stage {stage}");
+            if stage >= 2 {
+                assert_ne!(badge.activity, "~", "stage {stage}");
+            }
+        }
+        assert!(ui.demo.as_ref().unwrap().loaded);
+        let complete = Ui::new(demo::world());
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()), complete.tab_badge(&tab, pane.as_ref()));
     }
 
     #[test]
@@ -4910,6 +4972,7 @@ mod tests {
                 seat: "builder".into(),
                 seat_id: agent.into(),
                 text: "Claude asks to use Bash".into(),
+                question: false,
                 answers: vec!["allow".into(), "deny".into()],
                 episode: "episode-1".into(),
                 call: None,

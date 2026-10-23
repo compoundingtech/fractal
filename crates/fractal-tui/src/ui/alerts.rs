@@ -779,6 +779,7 @@ mod tests {
                 seat: "atlas".into(),
                 seat_id: "agent/example/atlas".into(),
                 text: "Claude asks to use Bash".into(),
+                question: answers.contains(&"answer"),
                 answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
                 episode: "episode-1".into(),
                 call: None,

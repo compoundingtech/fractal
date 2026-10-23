@@ -6320,7 +6320,6 @@ impl Ui {
     pub fn step_demo(&mut self) {
         let Some(demo) = &mut self.demo else { return };
         let elapsed = demo.started.elapsed();
-        let badges_changed = !demo.loaded;
         if !demo.loaded {
             let full = demo::world();
             let stage = elapsed.as_millis() / 350;
@@ -6357,6 +6356,7 @@ impl Ui {
                 }
                 demo.loaded = true;
             }
+            self.refresh_tab_statuses();
             return;
         }
         let viewing = (self.tab() == 1)
@@ -6435,9 +6435,6 @@ impl Ui {
             {
                 entries.push(demo::late_mail());
             }
-        }
-        if badges_changed {
-            self.refresh_tab_statuses();
         }
     }
 }
