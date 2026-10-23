@@ -21,6 +21,18 @@ pub(super) async fn phase<T>(name: &str, budget: Duration, future: impl Future<O
     tokio::time::timeout(budget, future).await.map_err(|_| format!("{name} timed out"))?
 }
 
+/// This base's Ui::focus projects the sidebar list, not the focused glass subject.
+/// Attach fencing must follow the visible terminal, including shells absent from that list.
+pub(super) fn selected_subject(ui: &Ui) -> Option<String> {
+    if !ui.home_open() {
+        match ui.focused_pane() {
+            Some(crate::ui::Pane::Terminal(id) | crate::ui::Pane::Agent(Some(id))) => return Some(id),
+            _ => {}
+        }
+    }
+    ui.focus().1
+}
+
 #[derive(Default)]
 pub(super) struct State {
     generation: u64,
@@ -99,7 +111,7 @@ impl State {
     }
 
     pub(super) fn apply_terminal_update(&mut self, ui: &mut Ui, generation: u64, update: TerminalUpdate, attached: &mut Option<Following>) {
-        let (_, selected) = ui.focus();
+        let selected = selected_subject(ui);
         self.select(ui, selected.as_deref());
         let Some(agent) = selected.as_deref() else { return; };
         if !self.current(agent, generation)
@@ -146,7 +158,7 @@ impl State {
 
     // This is the actual receive dispatch called by the live loop and by regression tests.
     pub(super) fn apply_fetched(&mut self, ui: &mut Ui, msg: Fetched, commands: &mpsc::UnboundedSender<Command>) {
-        let (_, selected) = ui.focus();
+        let selected = selected_subject(ui);
         self.select(ui, selected.as_deref());
         match msg {
             Fetched::Native { agent, generation, direct } => {
@@ -275,8 +287,22 @@ mod tests {
         TerminalView { agent: agent.into(), title: agent.into(), name: agent.into(), lines: Vec::new(), cursor: None, stale: Some("connecting".into()), ended: None, native: None }
     }
 
+    #[test]
+    fn attach_selection_uses_glass_subject_without_changing_sidebar_or_home_focus() {
+        let mut ui = Ui::new(crate::ui::demo::world());
+        assert_eq!(selected_subject(&ui), ui.focus().1, "legacy sidebar stays unchanged");
+        ui.glasses = Some(crate::ui::glass::Glasses::open(None, None));
+        let shell = "terminal/not-a-sidebar-row";
+        ui.open_in_glass(Pane::Terminal(shell.into()), Open::Here);
+        assert_ne!(ui.focus().1.as_deref(), Some(shell), "older focus is list-based");
+        assert_eq!(selected_subject(&ui).as_deref(), Some(shell));
+        ui.open_home();
+        assert_eq!(selected_subject(&ui), ui.focus().1, "Home does not inherit the hidden terminal");
+    }
+
     fn selected(agent: &str) -> (State, Ui, mpsc::UnboundedSender<Command>, mpsc::UnboundedReceiver<Command>) {
         let mut ui = Ui::new(crate::ui::demo::world());
+        ui.glasses = Some(crate::ui::glass::Glasses::open(None, None));
         ui.live = true;
         ui.open_in_glass(Pane::Terminal(agent.into()), Open::Here);
         ui.terminal = Some(view(agent));
@@ -489,11 +515,11 @@ mod tests {
         let failure = ui.terminal.as_ref().unwrap().stale.clone();
         ui.open_in_glass(Pane::Mission(None), Open::Here);
         assert_ne!(ui.focus().0, 1);
-        let (_, selected) = ui.focus();
+        let selected = selected_subject(&ui);
         state.select(&mut ui, selected.as_deref());
         ui.open_in_glass(Pane::Terminal(shell.into()), Open::Here);
         assert_eq!(ui.focus().0, 1);
-        let (_, selected) = ui.focus();
+        let selected = selected_subject(&ui);
         state.select(&mut ui, selected.as_deref());
         let before_return = state.generation;
         state.resume_fallback(ui.terminal.as_mut().unwrap(), &[], &tx);

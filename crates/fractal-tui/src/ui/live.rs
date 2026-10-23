@@ -679,7 +679,7 @@ pub fn run(context: Context) -> Result<()> {
         {
             ui.flash = None;
         }
-        let (_, selected) = ui.focus();
+        let selected = attach::selected_subject(&ui);
         attach.select(&mut ui, selected.as_deref());
         attach.tick(&mut ui);
         if extras.live && Instant::now() >= limit_next {
@@ -3679,6 +3679,7 @@ mod tests {
     fn attach_deadline_retry_key_reopens_the_same_terminal() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut ui = Ui::new(crate::ui::demo::world());
+        ui.glasses = Some(crate::ui::glass::Glasses::open(None, None));
         ui.live = true;
         let agent = "terminal/attach-deadline-test";
         ui.open_in_glass(

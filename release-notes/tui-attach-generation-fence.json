@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No checkpoint rules or member coordination changes."},
   "compatibility": {"status": "none", "detail": "Internal Rust feed commands/results carry an attempt generation and terminal subscription IDs are generation-specific. Failed and superseded subscriptions explicitly unsubscribe before their IDs are forgotten, clearing daemon presence and pre-first-screen bookkeeping. No daemon wire schema or capability contract changes; all in-repository callers migrate together."},
   "downtime": {"status": "none", "detail": "No daemon restart or additional service interruption is required."},
-  "manual": {"status": "none", "detail": "No migration steps. Native/fallback failures and phase timeouts show a reason and Ctrl+R retry hint. Failed shells retain their reason on tab return and restart setup only on explicit retry."},
+  "manual": {"status": "none", "detail": "No migration steps. Native/fallback failures and phase timeouts show a reason and Ctrl+R retry hint. Failed shells retain their reason on tab return and restart setup only on explicit retry. On the older sidebar-capable base, attach selection follows the focused glass terminal subject rather than the sidebar row."},
   "recovery": {"status": "none", "detail": "No persistent state is modified; replacing the TUI binary needs no data recovery."}
 }
