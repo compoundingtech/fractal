@@ -4698,6 +4698,7 @@ mod tests {
         assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
         let tab = ui.glasses.glass().layout.groups()[0].current;
         ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
+        screen(&ui);
         press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
         assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
         let opened = open_panes(&ui);
@@ -7280,6 +7281,7 @@ mod tests {
         ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
         assert_eq!(ui.glasses.glass().layout.groups().len(), 2);
         assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        screen(&ui);
         press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
         assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
         ctrl(&mut ui, 'h');
