@@ -66,6 +66,7 @@ def build_dist(dist, source):
                         archive.addfile(info, io.BytesIO(data))
                 add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
                 add('bin/st3', b'st3'); add('bin/pty', b'pty')
+                add('share/fractal-web/index.html', b'web', 0o644)
                 add('bin/st', link='st3'); add('bin/fractal', link='st3')
                 add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
             digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
