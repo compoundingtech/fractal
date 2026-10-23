@@ -300,7 +300,7 @@ impl Ui {
                 }
             }
             (Some("answer"), _) => rows.extend(note_rows(
-                "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
+                "the question is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
                 width,
             )),
             // Several calls wait and the prompt names none: show them all and offer no allow.
@@ -354,13 +354,13 @@ impl Ui {
                     buttons.push(button(gated, theme::GREEN));
                 } else {
                     rows.extend(note_rows(
-                        "it is too long to show here in full: open it in Now, or answer it in the terminal (Ctrl+])",
+                        "it is too long to show here in full: open it in Inbox, or answer it in the terminal (Ctrl+])",
                         width,
                     ));
                 }
             }
             (Some(_), []) => rows.extend(note_rows(
-                "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
+                "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Inbox",
                 width,
             )),
             (None, _) => rows.extend(note_rows(first_line(prompt), width)),
@@ -623,7 +623,7 @@ impl Ui {
                 _ => {}
             }
             buttons.push((
-                "open in Now".into(),
+                "open in Inbox".into(),
                 theme::SURFACE2,
                 Hit::Alert(item.id.clone(), AlertTap::Open),
             ));
@@ -643,7 +643,7 @@ impl Ui {
         if count > SHOWN {
             rows.push(BandRow {
                 line: Line::from(Span::styled(
-                    format!("   +{} more in Now", count - SHOWN),
+                    format!("   +{} more in Inbox", count - SHOWN),
                     theme::dim(),
                 )),
                 hits: Vec::new(),
@@ -743,7 +743,7 @@ impl Ui {
                 self.flash(notice);
             }
             Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash("st does not offer that answer here: open it in Now"),
+            None => self.flash("st does not offer that answer here: open it in Inbox"),
         }
     }
 }
@@ -970,7 +970,7 @@ mod tests {
         ]);
         let shown = texts(&ui.expanded_band("agent/example/atlas", 80));
         assert!(shown.contains("3 alerts"), "{shown}");
-        assert!(shown.contains("+1 more in Now"), "{shown}");
+        assert!(shown.contains("+1 more in Inbox"), "{shown}");
     }
 
     #[test]

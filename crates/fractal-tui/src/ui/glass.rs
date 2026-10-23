@@ -1,10 +1,7 @@
-//! Spaces (called glasses in the code): stui as named workspaces of splits, each with its own
-//! tabs, the Ctrl+S sidebar and a palette, with Now and Usage floating over them. This is stui's
-//! only layout (design doc/fleet/stui/glass).
-//!
-//! What the keys act on is read off the screen (`Ui::tab`, `Ui::selected_id`): Now or Usage
-//! while it floats over the space, else the focused pane's subject. Nothing stores a section
-//! that could drift from what is drawn.
+//! Spaces (called glasses in the code): named workspaces of splits, each with its own tabs.
+//! Inbox is a list-and-detail tab; Usage floats above the workspace.
+//! What the keys act on is read off the screen (`Ui::tab`, `Ui::selected_id`), so focus
+//! cannot drift from what is drawn.
 
 use super::glass_store::{self, Stored, StoredGlass, StoredView};
 use super::layout::{Group, Layout, Side, Tab};
@@ -50,9 +47,9 @@ pub(crate) struct Glasses {
     /// The focused split fills the glass for now (Ctrl+O), as tmux zooms a pane; this window
     /// only, never stored.
     zoomed: bool,
-    /// Now (or Usage) is open over the glass, from the top bar's need-you count or `$ usage`.
+    /// Usage is open over the glass, from the top bar's `$ usage` slot.
     home: bool,
-    /// What floats over the glass is Usage rather than Now (Nathan, 2026-10-04).
+    /// The floating Usage surface; retained separately from its visibility.
     usage: bool,
     /// The Ctrl+S sidebar: the old stui list beside the splits, to browse and open from.
     pub(crate) sidebar: Sidebar,
@@ -215,8 +212,7 @@ impl GlassWrite {
     }
 }
 
-/// A named workspace: splits, each with its own tabs. Home is always the first tab of the
-/// first group and cannot be closed.
+/// A named workspace: splits, each with its own closable tabs.
 #[derive(Clone)]
 struct Glass {
     /// Stable across renames; the graph will keep the glass under it.
@@ -229,8 +225,7 @@ struct Glass {
     focus: usize,
 }
 
-/// Where a group's tabs start among what its strip shows. Home is no longer a tab (it opens
-/// over the glass from the top bar), so every strip starts with its own first tab.
+/// Every strip starts with its group's first tab.
 fn offset(_group: usize) -> usize {
     0
 }
@@ -407,7 +402,7 @@ impl Glasses {
             .any(|tab| {
                 matches!(
                     Pane::parse(&tab.pane),
-                    Some(Pane::List(2) | Pane::Mission(_) | Pane::Declaration(_) | Pane::Home(_))
+                    Some(Pane::List(0 | 2) | Pane::Mission(_) | Pane::Declaration(_) | Pane::Home(_))
                 )
             })
     }
@@ -941,9 +936,9 @@ impl Ui {
             Choice {
                 section: 0,
                 glyph: ("◆", theme::PERSON),
-                label: "Now".into(),
+                label: "Inbox".into(),
                 detail: "alerts and updates".into(),
-                search: "now home".into(),
+                search: "inbox home".into(),
                 action: Action::Home,
             },
         );
@@ -1786,7 +1781,8 @@ impl Ui {
             self.close_home();
             return;
         }
-        self.open_home();
+        self.glasses.home = true;
+        self.glasses.palette = None;
         self.glasses.usage = true;
         self.note_focus();
     }
@@ -1913,11 +1909,7 @@ impl Ui {
         buf.set_stringn(
             rect.x + 2,
             rect.y,
-            if self.usage_open() {
-                " Usage · b groups · p period · esc closes "
-            } else {
-                " Now · esc closes "
-            },
+            " Usage · b groups · p period · esc closes ",
             rect.width.saturating_sub(4) as usize,
             theme::strong(theme::ACCENT).bg(theme::BASE),
         );
@@ -1976,6 +1968,13 @@ impl Ui {
         };
         let key = &tab.pane;
         match Pane::parse(key) {
+            Some(Pane::List(0)) => {
+                if focused && !self.home_open() {
+                    self.draw_body(buf, content);
+                } else {
+                    self.draw_home(buf, content);
+                }
+            }
             None => {
                 buf.set_stringn(
                     content.x + 1,
@@ -2372,6 +2371,7 @@ impl Ui {
     fn pane_title(&self, pane: &Pane) -> String {
         let find = |id: &Option<String>| id.clone().unwrap_or_default();
         match pane {
+            Pane::List(0) => "Inbox".into(),
             // A shell is named by the title its program gives, as a terminal's tab is.
             Pane::Terminal(id) if id.starts_with("terminal/") => self
                 .terminal
@@ -2690,8 +2690,7 @@ impl Ui {
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
         let glasses = &mut self.glasses;
-        // Home over the glass takes the keys, as Home does; Esc closes it and Ctrl+K still opens
-        // the palette.
+        // Usage floats over the space: Esc closes it; Ctrl+H opens or focuses Inbox.
         if glasses.home
             && !self.editing
             && self.confirm.is_none()
@@ -2699,7 +2698,7 @@ impl Ui {
         {
             match key.code {
                 KeyCode::Esc => self.close_home(),
-                KeyCode::Char('h') if control => self.close_home(),
+                KeyCode::Char('h') if control => self.open_home(),
                 KeyCode::Char('k') if control || command => self.open_palette(None, Open::Here),
                 _ => return false,
             }
@@ -2726,7 +2725,7 @@ impl Ui {
         let glass = glasses.glass();
         let tabs = glass.count(glass.focus).max(1);
         let current = glass.layout.groups()[glass.focus].current;
-        let subject = glass.focused().is_some();
+        let subject = glass.focused().is_some_and(|key| key != "list:home");
         let quiet = !self.editing && self.new_mission.is_none() && self.chat.is_none();
         // Letters type, chords command (Nathan, 2026-10-03): in a conversation tab a plain
         // printable key opens its message box and types itself, the first key included. Keys
@@ -2804,14 +2803,9 @@ impl Ui {
             // Ctrl+T opens a tab; Ctrl+V / Ctrl+X opens a right / below split.
             KeyCode::Char('k') if control || command => self.open_palette(None, Open::Here),
             KeyCode::Char('s') if control => self.toggle_sidebar(),
-            // Home over the glass, and away again; in a text box Ctrl+H stays backspace.
-            KeyCode::Char('h') if control => {
-                if self.home_open() {
-                    self.close_home();
-                } else {
-                    self.open_home();
-                }
-            }
+            // Inbox is a regular tab: this shortcut opens or focuses it.
+            // In a text box Ctrl+H stays backspace.
+            KeyCode::Char('h') if control => self.open_home(),
             KeyCode::Char('t') if control => self.open_palette(None, Open::Tab),
             KeyCode::Char('v') if control => self.split_group(Side::Right),
             KeyCode::Char('x') if control => self.split_group(Side::Below),
@@ -2883,17 +2877,13 @@ impl Ui {
         }
     }
 
-    /// Open Now over the glass: it has the keys until it closes.
+    /// Open or focus the Inbox tab in this space.
     pub(crate) fn open_home(&mut self) {
-        self.glasses.home = true;
-        self.glasses.usage = false;
         self.glasses.palette = None;
-        // Now opens over the glass: an attached terminal stays attached under it, and has the
-        // keys again when Now closes.
-        self.note_focus();
+        self.open_in_glass(Pane::List(0), Open::Tab);
     }
 
-    /// Close Now; the keys go back to the focused split.
+    /// Close Usage; the keys go back to the focused split.
     pub(crate) fn close_home(&mut self) {
         self.glasses.home = false;
         self.glasses.usage = false;
@@ -3890,13 +3880,7 @@ impl Ui {
                 'k' => self.open_palette(None, Open::Here),
                 's' => self.toggle_sidebar(),
                 'g' => self.open_glasses_palette(),
-                'h' => {
-                    if self.home_open() {
-                        self.close_home();
-                    } else {
-                        self.open_home();
-                    }
-                }
+                'h' => self.open_home(),
                 'o' => {
                     let glasses = &mut self.glasses;
                     glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
@@ -4460,7 +4444,7 @@ mod tests {
     /// What Now shows, drawn inside its rect: the subject of each list row, and each pane's key.
     fn in_now(ui: &Ui) -> (Vec<String>, Vec<String>) {
         let frame = ui.frame.borrow();
-        let now = frame.home.expect("Now is drawn");
+        let now = frame.glass_leaves[ui.glasses.glass().focus];
         let inside = |rect: &Rect| now.intersection(*rect) == *rect;
         let rows = frame
             .context_rows
@@ -4520,7 +4504,7 @@ mod tests {
         // The newer alert lists first, so the selected one moves down a row.
         ui.set_world(reading(vec![alerts[1].clone(), alerts[0].clone()]));
         let after = screen(&ui);
-        assert!(ui.home_open(), "Now stays open:\n{after}");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "Inbox stays open:\n{after}");
         assert_eq!(ui.tab(), 0, "{after}");
         assert_eq!(ui.selected_id(), selected, "the same alert stays selected");
         assert_eq!(drawn(&ui), shown, "the same panes in the same places:\n{before}\n{after}");
@@ -4544,34 +4528,23 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(region(&after), region(&before), "the card reads the same");
-        // Esc gives the keys back to the conversation under it.
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        // Closing the tab returns to the conversation.
+        ctrl(&mut ui, 'w');
         assert_eq!(ui.focus(), (1, Some(ATLAS_ID.to_owned())));
     }
 
-    /// Spaces have no sections behind Now: the keys that switched the old layout's sections
-    /// (a digit, Tab, Shift+Tab) leave Now showing Now's list and card.
+    /// Inbox participates in the same tab cycling as conversations.
     #[test]
-    fn no_key_under_now_shows_a_list_or_card_that_is_not_open() {
+    fn tab_and_shift_tab_cycle_between_inbox_and_conversation() {
         let mut ui = glass();
         ui.open_in_glass(Pane::Agent(Some(ATLAS_ID.into())), Open::Tab);
-        for code in [
-            KeyCode::Char('1'),
-            KeyCode::Char('2'),
-            KeyCode::Char('3'),
-            KeyCode::Char('4'),
-            KeyCode::Char('5'),
-            KeyCode::Char('s'),
-            KeyCode::Tab,
-            KeyCode::BackTab,
-        ] {
-            ui.open_home();
-            press(&mut ui, code, KeyModifiers::NONE);
-            let shown = screen(&ui);
-            assert!(ui.home_open(), "{code:?}:\n{shown}");
-            assert_eq!(ui.tab(), 0, "{code:?}");
-            shows_only_now(&ui).unwrap_or_else(|why| panic!("{code:?}: {why}:\n{shown}"));
-        }
+        ui.open_home();
+        press(&mut ui, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some(ATLAS_ID.into()))));
+        press(&mut ui, KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        let shown = screen(&ui);
+        shows_only_now(&ui).unwrap_or_else(|why| panic!("{why}:\n{shown}"));
     }
 
     const ATLAS: &str = "agent:agent/example/atlas/builder";
@@ -4683,19 +4656,58 @@ mod tests {
         // Expanded on a click: the cards fill the room the conversation gives up.
         ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
         let shown = screen(&ui);
-        assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Now"), "{shown}");
+        assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Inbox"), "{shown}");
         let lines: Vec<&str> = shown.lines().collect();
         let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
-        assert!(line("open in Now") < line("Message Atlas Builder"), "{shown}");
+        assert!(line("open in Inbox") < line("Message Atlas Builder"), "{shown}");
         assert!(line("Message Atlas Builder") + 3 >= lines.len(), "{shown}");
         // Another agent's conversation shows none of it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Tab);
         let other = screen(&ui);
-        assert!(!other.contains("open in Now"), "{other}");
+        assert!(!other.contains("open in Inbox"), "{other}");
         // It clears itself when st stops listing it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
         ui.world.attention = Load::Ready(vec![]);
-        assert!(!screen(&ui).contains("open in Now"));
+        assert!(!screen(&ui).contains("open in Inbox"));
+    }
+
+    #[test]
+    fn open_in_inbox_selects_the_alert_and_reuses_the_tab() {
+        let mut ui = glass();
+        let agent = Pane::Agent(Some(ATLAS_ID.into()));
+        ui.open_in_glass(agent.clone(), Open::Tab);
+        ui.open_home();
+        let opened = open_panes(&ui);
+        ui.open_in_glass(agent, Open::Tab);
+        let id = ui.world.attention.items()[1].id.clone();
+        ui.click(Hit::Alert(id.clone(), AlertTap::Open));
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(ui.attention_focus(), Some(id));
+        assert_eq!(open_panes(&ui), opened);
+        assert!(ui.frame.borrow().home.is_none());
+    }
+
+    #[test]
+    fn ctrl_h_from_usage_opens_inbox_and_refocuses_it_across_splits() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some(ATLAS_ID.into())), Open::Tab);
+        ui.toggle_usage();
+        assert!(ui.usage_open());
+        ctrl(&mut ui, 'h');
+        assert!(!ui.usage_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        let tab = ui.glasses.glass().layout.groups()[0].current;
+        ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
+        screen(&ui);
+        press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
+        assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
+        let opened = open_panes(&ui);
+        ui.toggle_usage();
+        assert!(ui.usage_open());
+        ctrl(&mut ui, 'h');
+        assert!(!ui.usage_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(open_panes(&ui), opened);
     }
 
     #[test]
@@ -4787,11 +4799,11 @@ mod tests {
         assert_eq!(tabs(&ui).2[0], [ATLAS, WEEKLY, "machine:machine/harbor"]);
         ctrl(&mut ui, 'w');
 
-        // Now opens over the glass from "alerts", with its keys; Esc puts the tab back in charge.
+        // Inbox opens as a tab; closing it returns to the mission.
         ui.open_home();
-        assert!(screen(&ui).contains("Now · esc closes"));
+        assert!(screen(&ui).contains("Inbox"));
         assert_eq!(ui.tab(), 0);
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        ctrl(&mut ui, 'w');
         assert!(!ui.home_open());
         assert_eq!(ui.tab(), 2, "back on the weekly release mission");
 
@@ -5673,10 +5685,11 @@ mod tests {
         let by = ui.usage_by;
         press(&mut ui, KeyCode::Char('b'), KeyModifiers::NONE);
         assert_ne!(ui.usage_by, by, "b changes the grouping");
-        // The need-you count switches it to Now; the usage slot again closes it.
+        // The need-you count opens Inbox as a tab; Usage remains a popover.
         ui.click(Hit::Home);
-        assert!(ui.home_open() && !ui.usage_open());
-        assert!(screen(&ui).contains("Now · esc closes"));
+        assert!(!ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(screen(&ui).contains("Inbox"));
         ui.click(Hit::Usage);
         assert!(ui.usage_open());
         ui.click(Hit::Usage);
@@ -6369,11 +6382,11 @@ mod tests {
         };
         let need = hit_at(&ui, Hit::Home);
         click(&mut ui, need);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
     }
 
     #[test]
-    fn home_stays_home_when_the_world_updates() {
+    fn inbox_stays_selected_when_the_world_updates_and_esc_does_not_close_it() {
         let mut ui = glass();
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".into())),
@@ -6382,10 +6395,12 @@ mod tests {
         ui.open_home();
         assert_eq!(ui.tab(), 0);
         ui.set_world(demo::world());
-        assert!(ui.home_open());
-        assert_eq!(ui.tab(), 0, "a world update kept Home");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(ui.tab(), 0, "a world update kept Inbox");
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(ui.tab(), 1, "closing Home shows the focused agent again");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        ctrl(&mut ui, 'w');
+        assert_eq!(ui.tab(), 1, "closing Inbox shows the agent again");
     }
 
     #[test]
@@ -6697,7 +6712,7 @@ mod tests {
                 .map(|state| (state.top, state.follow))
         };
         let before = state(&ui, &behind);
-        let home = ui.frame.borrow().home.unwrap();
+        assert!(ui.frame.borrow().home.is_none(), "Inbox is not a popover");
         // Up: a conversation that follows its newest message would leave it to read back.
         let at = |column: u16, row: u16| MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -6715,7 +6730,6 @@ mod tests {
             .map(|pane| pane.rect)
             .unwrap();
         ui.mouse(at(over.x + 2, over.y + over.height / 2));
-        ui.mouse(at(home.x.saturating_sub(1), home.y + home.height / 2));
         assert_eq!(
             state(&ui, &behind),
             before,
@@ -7129,7 +7143,7 @@ mod tests {
         // Here, it opens Home with the item selected.
         let other = ui.world.attention.items()[1].id.clone();
         ui.open_in_glass(Pane::Home(Some(other.clone())), Open::Here);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
         assert_eq!(ui.attention_focus().as_deref(), Some(other.as_str()));
     }
 
@@ -7168,7 +7182,7 @@ mod tests {
         // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
         let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
         assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
+        assert!(shown.matches("terminal (Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
         assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
     }
 
@@ -7238,31 +7252,41 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_h_opens_home_and_closes_it_again() {
+    fn ctrl_h_opens_and_focuses_one_inbox_tab_and_ctrl_w_closes_it() {
         let mut ui = glass();
+        let agent = Pane::Agent(Some("agent/example/atlas/builder".into()));
+        ui.open_in_glass(agent.clone(), Open::Tab);
         ctrl(&mut ui, 'h');
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(!ui.home_open(), "Inbox is not a modal");
+        assert!(screen(&ui).contains("Inbox"));
+        let opened = open_panes(&ui);
+        ui.open_in_glass(agent.clone(), Open::Tab);
         ctrl(&mut ui, 'h');
-        assert!(!ui.home_open());
+        ctrl(&mut ui, 'h');
+        assert_eq!(open_panes(&ui), opened, "opening focuses the existing tab");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        ctrl(&mut ui, 'w');
+        assert_eq!(ui.focused_pane(), Some(agent));
+        assert!(!open_panes(&ui).contains(&"list:home".to_owned()));
     }
 
     #[test]
-    fn the_pane_behind_home_keeps_showing_itself() {
+    fn inbox_can_move_to_a_split_and_the_shortcut_focuses_it_there() {
         let mut ui = glass();
-        let agent = ui.world.agents.items()[0].id.clone();
-        ui.open_in_glass(Pane::Agent(Some(agent)), Open::Tab);
-        // What shows around Home's card: the glass's left edge, row by row.
-        let edge = |ui: &Ui| {
-            screen(ui)
-                .lines()
-                .skip(1)
-                .map(|line| line.chars().take(8).collect::<String>())
-                .collect::<Vec<_>>()
-        };
-        let before = edge(&ui);
+        let agent = Pane::Agent(Some("agent/example/atlas/builder".into()));
+        ui.open_in_glass(agent, Open::Tab);
         ui.open_home();
-        assert!(ui.home_open());
-        assert_eq!(edge(&ui), before, "the conversation, not Home's selection");
+        let tab = ui.glasses.glass().layout.groups()[0].current;
+        ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
+        assert_eq!(ui.glasses.glass().layout.groups().len(), 2);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        screen(&ui);
+        press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
+        assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
+        ctrl(&mut ui, 'h');
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(open_panes(&ui).iter().filter(|key| *key == "list:home").count(), 1);
     }
 
     #[test]
@@ -7319,7 +7343,7 @@ mod tests {
         screen(&ui);
         assert_eq!(ui.selected_text().as_deref(), Some("1,204,881 rows"));
         ui.mouse(mouse(MouseEventKind::Up(MouseButton::Left), column + 13));
-        assert!(ui.home_open(), "a drag on Home keeps it open");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "a drag keeps Inbox open");
         assert!(
             ui.flash
                 .as_ref()
@@ -7556,7 +7580,7 @@ mod tests {
             "{:?}",
             ui.effects
         );
-        ui.close_home();
+        ui.close_tab();
         assert!(ui.terminal_focused(), "the shell has the keys again");
         assert!(
             screen(&ui).contains("Return · Ctrl+\\   shell"),
