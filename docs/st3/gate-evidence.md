@@ -1124,7 +1124,10 @@ note covers.
 | --- | --- | --- | --- | --- |
 | `typescript-client` | true | `pull_request` | 5 | this change |
 | `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 5 | 2026-10-23 |
-| `genie-freshness`, `linux-gate`, `isolation-vm`, `mail-redelivery-canaries` | false | - | 5 or 1 | - |
+| `linux-gate` | true | `pull_request` | 5 | 2026-10-23 |
+| `mail-redelivery-canaries` | true | `pull_request` | 5 | 2026-10-23 |
+| `isolation-vm` | true | `pull_request` | 5 | 2026-10-23 |
+| `genie-freshness` | true | `pull_request` | 5 | 2026-10-23 |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
