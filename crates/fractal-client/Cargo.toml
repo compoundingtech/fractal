@@ -18,6 +18,7 @@ futures-util = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+iroh-base = { version = "=1.0.2", default-features = false, features = ["key"] }
 libc = "0.2"
 opentelemetry = { version = "0.30", optional = true }
 ring = "0.17"
@@ -27,6 +28,7 @@ serde_json = "1"
 sha2 = "0.10"
 signal-hook = "0.3"
 fractal-schema = { path = "../fractal-schema" }
+smallclaims = { path = "../smallclaims" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
@@ -41,7 +43,6 @@ base64 = "0.22"
 hex = "0.4"
 ring = "0.17"
 sha2 = "0.10"
-smallclaims = { path = "../smallclaims" }
 tempfile = "3"
 opentelemetry_sdk = "0.30"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

@@ -62,6 +62,30 @@ Beacon listens on its own loopback port and exposes it through Fabric. The invit
 
 With their user services installed, Tailscale, Fabric, and the Fractal replication worker restart after reboot and reconnect after network interruptions. A terminal does not need to stay open.
 
+### Connect a client over Fabric
+
+Use the remote host's Fabric NodeID or its unique trusted Fabric peer name:
+
+```sh
+st --endpoint fabric://studio/st3-client-v0 agents ls
+```
+
+The client asks the local Fabric daemon to dial `st3-client-v0`; no TCP listener,
+manual tunnel, or HTTP proxy is needed. Peer names match without regard to case.
+Use a NodeID when names are ambiguous. Fabric must already trust the remote
+machine and grant this protocol; the membership adapter below manages the grant
+for current fleet members.
+
+For paired client reads and actions, supply the remote gateway's bearer credential
+through `FRACTAL_CLIENT_CREDENTIAL`, preferably injected by your credential manager.
+Do not put it in the endpoint URI or command arguments. The CLI does not silently
+reuse an HTTP gateway's saved pairing profile for a different Fabric endpoint.
+
+This transport exposes only `/v1/client/` routes and `/v1/health`. Native harness,
+mailbox, internal, and administration routes still require their appropriate local
+transport. Fabric routing does not bypass client API pairing, bearer credentials,
+or device signing: the remote daemon applies the same client authorization rules.
+
 ### Reconcile Fabric runtime policy
 
 `st-fabric-adapter` is a separate process, not part of the st daemon. Start Fabric

@@ -219,6 +219,10 @@ importers:
       typescript:
         specifier: 6.0.3
         version: 6.0.3
+    optionalDependencies:
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
 
   clients/typescript/fractal-scenarios:
     dependencies:

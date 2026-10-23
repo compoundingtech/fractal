@@ -7,6 +7,7 @@ mod checkout;
 pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
+pub mod fabric;
 pub mod follow;
 mod generated;
 pub mod product_dirs;
@@ -116,7 +117,13 @@ fn xdg_path(variable: &str, home_suffix: &str) -> Result<PathBuf, ClientError> {
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    Fabric(fabric::FabricEndpoint),
     FabricLoopback(String),
+}
+
+enum TransportEndpoint<'a> {
+    Unix(std::borrow::Cow<'a, Path>),
+    FabricLoopback(&'a str),
 }
 
 /// The name and build this process reports to st in the `x-st3-client` header, for example
@@ -1114,6 +1121,34 @@ impl Client {
         self.announce_outage_wait = announce;
         self
     }
+    /// Connect natively through the local Fabric daemon, without an HTTP proxy.
+    pub fn fabric(endpoint: fabric::FabricEndpoint) -> Self {
+        let mut client = Self::unix(Path::new(""));
+        client.endpoint = Endpoint::Fabric(endpoint);
+        client
+    }
+
+    /// Attach a paired credential to this transport. Fabric trust does not replace API auth.
+    pub fn with_credential(mut self, credential: impl Into<String>) -> Self {
+        self.credential = Some(credential.into());
+        self
+    }
+
+    async fn transport_endpoint(&self, path: &str) -> Result<TransportEndpoint<'_>, ClientError> {
+        match &self.endpoint {
+            Endpoint::Unix(socket) => {
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Borrowed(socket)))
+            }
+            Endpoint::Fabric(endpoint) => {
+                fabric::FabricEndpoint::validate_path(path)?;
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Owned(
+                    endpoint.dial().await?,
+                )))
+            }
+            Endpoint::FabricLoopback(base) => Ok(TransportEndpoint::FabricLoopback(base)),
+        }
+    }
+
     pub fn unix(path: impl AsRef<Path>) -> Self {
         Self {
             endpoint: Endpoint::Unix(path.as_ref().to_owned()),
@@ -3502,8 +3537,8 @@ impl Client {
         let config = WebSocketConfig::default()
             .max_message_size(Some(HARD_MAX_RESPONSE_BYTES))
             .max_frame_size(Some(HARD_MAX_RESPONSE_BYTES));
-        match &self.endpoint {
-            Endpoint::Unix(socket) => {
+        match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(socket) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(socket),
@@ -3529,7 +3564,7 @@ impl Client {
                 validate_raw_terminal_subprotocol(&response)?;
                 raw_terminal_connector(websocket, mode == RawTerminalMode::Peek)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3568,8 +3603,8 @@ impl Client {
             "/v1/client/terminals/{}/stream{suffix}",
             percent_encode_segment(terminal_id.trim_start_matches("terminal/"))
         );
-        let socket = match &self.endpoint {
-            Endpoint::Unix(socket) => {
+        let socket = match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(socket) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(socket),
@@ -3598,7 +3633,7 @@ impl Client {
                 validate_terminal_subprotocol(&response)?;
                 TerminalSocket::Unix(websocket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3651,8 +3686,8 @@ impl Client {
             );
             Ok(request)
         };
-        let socket = match &self.endpoint {
-            Endpoint::Unix(path) => {
+        let socket = match &self.transport_endpoint(path).await? {
+            TransportEndpoint::Unix(path) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(path),
@@ -3674,7 +3709,7 @@ impl Client {
                 validate_collection_subprotocol(&response)?;
                 TerminalSocket::Unix(socket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3756,8 +3791,8 @@ impl Client {
             );
             Ok(request)
         };
-        let socket = match &self.endpoint {
-            Endpoint::Unix(path) => {
+        let socket = match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(path) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(path),
@@ -3779,7 +3814,7 @@ impl Client {
                 validate_conversation_subprotocol(&response)?;
                 TerminalSocket::Unix(socket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3936,8 +3971,8 @@ impl Client {
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
         let request = async {
-            match &self.endpoint {
-                Endpoint::Unix(socket) => {
+            match &self.transport_endpoint(path).await? {
+                TransportEndpoint::Unix(socket) => {
                     unix_request(
                         socket,
                         method,
@@ -3953,7 +3988,7 @@ impl Client {
                     )
                     .await
                 }
-                Endpoint::FabricLoopback(base) => {
+                TransportEndpoint::FabricLoopback(base) => {
                     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                     let mut request = self
                         .http

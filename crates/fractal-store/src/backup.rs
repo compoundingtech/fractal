@@ -35,6 +35,9 @@ pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {
             "http://localhost/v1/backup".to_owned(),
         ),
         Endpoint::Http(base) => (reqwest::Client::new(), format!("{base}/v1/backup")),
+        Endpoint::Fabric(_) => anyhow::bail!(
+            "native Fabric endpoints only support client-v0 and health requests, not backups"
+        ),
     };
     let response = client.get(url).send().await?;
     let status = response.status();

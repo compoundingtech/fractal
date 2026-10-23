@@ -42,6 +42,39 @@ The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace share
 
 To verify generated files against the Rust generator, also run `cargo run -p fractal-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2.
 
+## Native Fabric transport
+
+Node and Bun callers can use the native subpath without changing browser or React
+Native imports:
+
+```ts
+import { createFabricClient } from '@fractal/client/fabric'
+
+const client = await createFabricClient({
+  endpoint: 'fabric://studio/st3-client-v0',
+  credential: () => credential,
+})
+const capabilities = await client.capabilities()
+```
+
+The native adapter invokes the local `fabric` executable, resolves a unique
+trusted peer name without regard to ASCII case, and sends HTTP and client
+WebSockets through the returned Unix tunnel socket. An explicit NodeID bypasses
+peer-name lookup. It does not start a TCP proxy or forward trusted-local person
+headers. Pairing credentials and signing requirements remain gateway-owned.
+
+The native TypeScript adapter recognizes canonical hex/base32 NodeID syntax and
+leaves Ed25519 key validity to Fabric. Unlike the Rust adapter's exact identity
+parser, it does not fall back to peer-name lookup for a syntactically valid but
+invalid-curve key. Such a target fails closed at the Fabric dial; use an ordinary
+unique trusted name or a valid NodeID instead.
+
+Keep the optional `ws` dependency installed for native WebSocket streams. The
+`@fractal/client` browser/phone entry point does not import Node modules or `ws`;
+those runtimes continue to use the existing authenticated HTTP(S) transport.
+`program` can select an explicit Fabric executable for isolated installations.
+Only `/v1/client/` and `/v1/health` routes are valid over the native adapter.
+
 ## Active span propagation
 
 Fractal, web, and React Native callers can pass their active span context without
