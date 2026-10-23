@@ -654,7 +654,7 @@
           postInstall = ''
             mkdir -p "$out/share"
             cp -r ${fractalWeb}/share/fractal-web "$out/share/fractal-web"
-            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             ln -s st3 $out/bin/st
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
             ln -s ${ptyPackage}/bin/pty $out/bin/pty
@@ -682,7 +682,7 @@
           meta = st3.meta // { mainProgram = "fractal"; };
         } ''
           mkdir -p $out/bin
-          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
           ln -s ${st3}/bin/st3 $out/bin/fractal
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
         '';
