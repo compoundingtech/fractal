@@ -78,6 +78,17 @@ or exposure. Without `--prefer`, adding Fabric appends it; repeated adds preserv
 the existing order. Removing it with `st fleet transports remove fabric` preserves
 the remaining transports' order and requires another usable transport.
 
+To switch outbound preference back to Tailscale without disabling Fabric:
+
+```sh
+st fleet transports prefer tailscale
+```
+
+Switch back with `st fleet transports prefer fabric`. Both commands require the
+chosen carrier to be enabled, preserve the other carriers' order and existing
+exposures, and do nothing if it is already first. They never enable, remove,
+expose, or unexpose a transport.
+
 The local `fleet.toml` transport list controls which automatic Tailscale/Fabric
 routes are enabled and their order for replication and peer relay. For a new fleet
 or joining machine, `--transports fabric,tailscale` selects Fabric first;
