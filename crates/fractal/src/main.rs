@@ -936,7 +936,10 @@ enum FleetTransportsCommand {
         /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
         #[arg(long)]
         fabric_protocol: Option<String>,
-        /// Leave the replication worker restart to the operator.
+        /// Prefer Fabric over other automatic routes, including when already enabled.
+        #[arg(long)]
+        prefer: bool,
+        /// Leave the daemon and replication worker restarts to the operator.
         #[arg(long)]
         no_service: bool,
     },
@@ -944,7 +947,7 @@ enum FleetTransportsCommand {
     Remove {
         #[arg(value_parser = ["fabric"])]
         transport: String,
-        /// Leave the replication worker restart to the operator.
+        /// Leave the daemon and replication worker restarts to the operator.
         #[arg(long)]
         no_service: bool,
     },

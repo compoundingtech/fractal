@@ -322,6 +322,8 @@ pub struct ClientRelay {
     /// Reuse sealed membership across per-item reachability checks for the same short TTL.
     pub membership: Arc<std::sync::Mutex<Option<ObservedMembership>>>,
     pub fabric: Option<Fabric>,
+    /// Ordered local transport policy; absent for a legacy config-only fleet.
+    transports: Option<Vec<String>>,
     legacy: bool,
     /// When each owner last refused this node's reads as stale, for provenance.
     fence_conflicts:
@@ -433,6 +435,25 @@ impl ClientRelay {
     /// peer, then the peers with the shortest observed path to it. With no observation of the
     /// target at all, every peer is worth a try. Nodes the read already passed are never chosen.
     pub fn next_hops(&self, target: &str, visited: &[String]) -> Vec<PeerConfig> {
+        self.next_hops_with_transports(
+            target,
+            visited,
+            LocalTransports {
+                fabric: self.fabric.is_some(),
+                tailscale: local_addresses()
+                    .iter()
+                    .any(crate::fleet::transport::is_tailnet_address),
+                ..LocalTransports::default()
+            },
+        )
+    }
+
+    fn next_hops_with_transports(
+        &self,
+        target: &str,
+        visited: &[String],
+        available: LocalTransports,
+    ) -> Vec<PeerConfig> {
         let view = self.fleet_view();
         // Sync from a dial-out member supplies no reverse owner-RPC or PTY transport.
         // In particular, dropping its old links must not enable the unseen-owner fallback.
@@ -441,12 +462,11 @@ impl ClientRelay {
         }) {
             return Vec::new();
         }
-        let local = LocalTransports {
-            fabric: self.fabric.is_some(),
-            tailscale: local_addresses()
-                .iter()
-                .any(crate::fleet::transport::is_tailnet_address),
-        };
+        let local = LocalTransports::configured(
+            self.transports.as_deref(),
+            available.tailscale,
+            available.fabric,
+        );
         let dialable = dial_targets(&view, &self.node, &self.peers, local);
         let names = dialable
             .keys()
@@ -512,14 +532,21 @@ impl ClientRelay {
             observed: Arc::default(),
             membership: Arc::default(),
             fence_conflicts: Arc::default(),
-            fabric: resolve_tool(
-                config
-                    .fleet
-                    .as_ref()
-                    .and_then(|file| file.fabric.as_deref()),
-                "fabric",
-            )
-            .map(Fabric::new),
+            transports: config.fleet.as_ref().map(|file| file.transports.clone()),
+            fabric: if config
+                .fleet
+                .as_ref()
+                .is_none_or(|file| file.transports.iter().any(|name| name == "fabric"))
+                || config.peers.iter().any(|peer| peer.url.starts_with("fabric://"))
+            {
+                resolve_tool(
+                    config.fleet.as_ref().and_then(|file| file.fabric.as_deref()),
+                    "fabric",
+                )
+                .map(Fabric::new)
+            } else {
+                None
+            },
         }))
     }
 
@@ -2055,6 +2082,114 @@ mod tests {
     use tokio::net::TcpListener;
 
 
+
+    #[test]
+    fn relay_next_hops_follow_local_transport_order_and_removal_with_legacy_peers() {
+        use serde_json::json;
+
+        let view: FleetView = serde_json::from_value(json!({
+            "members": [{
+                "name": "owner",
+                "member_key": "owner-key",
+                "state": "current",
+                "mode": "listening",
+                "start": 1,
+                // Old peers advertise endpoints without an ordering or preference field.
+                "endpoints": [
+                    {"transport": "loopback", "address": "127.0.0.1:4000"},
+                    {"transport": "tailscale", "address": "100.101.102.103:4000"},
+                    {"transport": "fabric", "node": "owner-node", "protocol": "st3-peer-v1"}
+                ]
+            }]
+        })).unwrap();
+        let mut relay = ClientRelay {
+            node: "gateway".into(),
+            peers: Vec::new(),
+            auth: FleetAuth::test("fleet-test", &[7; 32]),
+            http: reqwest::Client::new(),
+            links: Some(Arc::new(Store::open_memory("gateway").unwrap())),
+            observed: Arc::default(),
+            membership: Arc::new(std::sync::Mutex::new(Some((
+                std::time::Instant::now(),
+                Arc::new(view),
+            )))),
+            fabric: None,
+            transports: None,
+            legacy: false,
+            fence_conflicts: Arc::default(),
+        };
+        let available = LocalTransports {
+            tailscale: true,
+            fabric: true,
+            ..LocalTransports::default()
+        };
+        let tailscale = "http://100.101.102.103:4000";
+        let fabric = "fabric://owner-node/st3-peer-v1";
+        let loopback = "http://127.0.0.1:4000";
+        for (policy, expected) in [
+            (None, vec![tailscale, fabric, loopback]),
+            (Some(vec!["tailscale", "fabric"]), vec![tailscale, fabric, loopback]),
+            (Some(vec!["fabric", "tailscale"]), vec![fabric, tailscale, loopback]),
+            (Some(vec!["fabric"]), vec![fabric, loopback]),
+            (Some(vec!["tailscale"]), vec![tailscale, loopback]),
+            (Some(Vec::new()), vec![loopback]),
+        ] {
+            relay.transports = policy.map(|names| names.into_iter().map(str::to_owned).collect());
+            assert_eq!(
+                relay.next_hops_with_transports("owner", &[], available)
+                    .into_iter()
+                    .map(|peer| peer.url)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{:?}",
+                relay.transports,
+            );
+        }
+        // A daemon restart reconstructs the relay from the saved fleet file. Preference
+        // and removal must affect real next hops, not just the serialized setting.
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        let key = root.path().join("node.key");
+        MemberKey::load_or_create(&key).unwrap();
+        let mut file = smallclaims::fleet::FleetFile {
+            fleet_id: "1f91ca65-7793-48cc-866e-ac15690130e1".into(),
+            node_key_file: key,
+            ..Default::default()
+        };
+        for (policy, expected) in [
+            (vec!["tailscale", "fabric"], vec![tailscale, fabric, loopback]),
+            (vec!["fabric", "tailscale"], vec![fabric, tailscale, loopback]),
+            (vec!["tailscale"], vec![tailscale, loopback]),
+        ] {
+            file.transports = policy.into_iter().map(str::to_owned).collect();
+            file.save(root.path()).unwrap();
+            let restarted = ClientRelay::from_config(&Config {
+                node: "gateway".into(),
+                fleet_id: Some(file.fleet_id.clone()),
+                shared_secret_file: Some(secret.clone()),
+                fleet: smallclaims::fleet::FleetFile::load(root.path()).unwrap(),
+                state_dir: root.path().into(),
+                ..Default::default()
+            }).unwrap().unwrap().with_links(relay.links.as_ref().unwrap().clone());
+            *restarted.membership.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                std::time::Instant::now(),
+                relay.fleet_view(),
+            ));
+            assert_eq!(
+                restarted.next_hops_with_transports("owner", &[], available)
+                    .into_iter().map(|peer| peer.url).collect::<Vec<_>>(),
+                expected,
+            );
+        }
+        // Explicit config routes retain their precedence for mixed config/member fleets.
+        relay.peers.push(PeerConfig {
+            name: "owner".into(),
+            url: fabric.into(),
+        });
+        assert_eq!(relay.next_hops_with_transports("owner", &[], available)[0].url, fabric);
+    }
 
     #[test]
     fn next_hops_prefer_the_owner_then_the_nearest_peer_that_reaches_it() {

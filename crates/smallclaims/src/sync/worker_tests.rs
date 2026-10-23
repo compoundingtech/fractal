@@ -1034,6 +1034,131 @@ fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
     );
 }
 
+fn transport_order_view() -> FleetView {
+    let member = |name: &str, endpoints| crate::fleet::MemberView {
+        name: name.into(),
+        member_key: format!("{name}-key"),
+        state: "current".into(),
+        mode: "listening".into(),
+        endpoints,
+        start: 1,
+        end: None,
+        ended: None,
+        removed_by: None,
+        removal_reason: None,
+    };
+    FleetView {
+        members: vec![
+            member(
+                "modern",
+                vec![
+                    serde_json::json!({"transport": "loopback", "address": "127.0.0.1:4000"}),
+                    serde_json::json!({"transport": "tailscale", "address": "100.101.102.103:31313"}),
+                    serde_json::json!({"transport": "fabric", "node": "modern-node", "protocol": "st3/fleet/x"}),
+                ],
+            ),
+            // An older member need not advertise Fabric to remain reachable.
+            member(
+                "legacy",
+                vec![
+                    serde_json::json!({"transport": "tailscale", "address": "100.101.102.104:31313"}),
+                ],
+            ),
+        ],
+        ..FleetView::default()
+    }
+}
+
+#[test]
+fn dial_targets_follow_local_transport_order_with_mixed_legacy_endpoints() {
+    let view = transport_order_view();
+    let tailscale = Route::Http("http://100.101.102.103:31313".into());
+    let fabric = Route::Fabric {
+        node: "modern-node".into(),
+        protocol: "st3/fleet/x".into(),
+    };
+    let loopback = Route::Http("http://127.0.0.1:4000".into());
+    for (names, expected, legacy_enabled) in [
+        (
+            None,
+            vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            true,
+        ),
+        (
+            Some(vec!["fabric", "tailscale"]),
+            vec![fabric.clone(), tailscale.clone(), loopback.clone()],
+            true,
+        ),
+        (
+            Some(vec!["tailscale", "fabric"]),
+            vec![tailscale.clone(), fabric.clone(), loopback.clone()],
+            true,
+        ),
+        (
+            Some(vec!["fabric"]),
+            vec![fabric, loopback.clone()],
+            false,
+        ),
+        (
+            Some(vec!["tailscale"]),
+            vec![tailscale, loopback.clone()],
+            true,
+        ),
+        (Some(vec![]), vec![loopback], false),
+    ] {
+        let names = names.map(|names| names.into_iter().map(String::from).collect::<Vec<_>>());
+        let targets = dial_targets(
+            &view,
+            "own",
+            &[],
+            LocalTransports::configured(names.as_deref(), true, true),
+        );
+        let mut expected = BTreeMap::from([("modern".to_owned(), expected)]);
+        if legacy_enabled {
+            expected.insert(
+                "legacy".into(),
+                vec![Route::Http("http://100.101.102.104:31313".into())],
+            );
+        }
+        assert_eq!(targets, expected, "{names:?}");
+    }
+}
+
+#[test]
+fn explicit_peer_routes_precede_local_order_and_bypass_disabled_transports() {
+    let view = transport_order_view();
+    let peers = [
+        PeerConfig {
+            name: "modern".into(),
+            url: "http://100.101.102.105:31313".into(),
+        },
+        PeerConfig {
+            name: "legacy".into(),
+            url: "fabric://legacy-node/st3/fleet/x".into(),
+        },
+        PeerConfig {
+            name: "config-only".into(),
+            url: "fabric://config-node/st3/fleet/x".into(),
+        },
+    ];
+    for names in [vec!["fabric", "tailscale"], vec![]] {
+        let names = names.into_iter().map(String::from).collect::<Vec<_>>();
+        let local = LocalTransports::configured(Some(&names), true, true);
+        let targets = dial_targets(&view, "own", &peers, local);
+        for member in &view.members {
+            let peer = peers.iter().find(|peer| peer.name == member.name).unwrap();
+            let mut expected = vec![parse_route(&peer.url).unwrap()];
+            expected.extend(routes_from_endpoints(&member.endpoints, local));
+            assert_eq!(targets[&member.name], expected, "{names:?}");
+        }
+        assert_eq!(
+            targets["config-only"],
+            vec![parse_route(&peers[2].url).unwrap()],
+            "{names:?}"
+        );
+    }
+}
+
 fn fleet_claim(store: &Store, kind: &str, subject: &str, fields: Value) {
     store
         .append_claim(&ClaimInput {
