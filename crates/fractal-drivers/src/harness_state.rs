@@ -14,9 +14,11 @@
 //! the record only when the refresh cadence is due, so a chatty producer cannot flood the
 //! transport.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -327,7 +329,7 @@ impl Writer {
 
     /// Hold the record's exclusive cross-process lock for one read→decide→rename cycle. The lock
     /// file is a permanent sibling; the guard releases on drop (close).
-    fn locked(&self) -> anyhow::Result<crate::flock::FileLock> {
+    fn locked(&self) -> anyhow::Result<RecordLock> {
         lock_exclusive(&self.lock_path)
     }
 
@@ -762,17 +764,91 @@ fn write_record(path: &Path, record: &Record) -> anyhow::Result<()> {
     write_json_atomic(path, record, &dir, ".harness-state")
 }
 
-/// Take one driver record's exclusive cross-process lock, held for a read→decide→rename cycle.
-/// The lock file is a permanent sibling of the record and the guard releases on drop (close).
-/// Shared with [`crate::harness_context`], which owns a sibling record with its own lock file:
-/// the transport is common, the ownership protocol above it is not.
-pub(crate) fn lock_exclusive(lock_path: &Path) -> anyhow::Result<crate::flock::FileLock> {
-    if let Some(dir) = lock_path.parent() {
-        fs::create_dir_all(dir)?;
+/// Process-local admission and descriptor ownership for a permanent record lock.
+/// Weak registry entries let retired driver paths release their descriptors.
+#[derive(Debug)]
+struct RecordLockEntry {
+    admission: Arc<tokio::sync::Mutex<()>>,
+    file: Arc<tokio::sync::Mutex<Option<fs::File>>>,
+}
+
+fn record_lock_entry(lock_path: &Path) -> anyhow::Result<Arc<RecordLockEntry>> {
+    record_lock_entry_with(lock_path, crate::flock::Open::Create)
+}
+
+fn record_lock_entry_with(
+    lock_path: &Path,
+    create: crate::flock::Open,
+) -> anyhow::Result<Arc<RecordLockEntry>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<RecordLockEntry>>>> =
+        LazyLock::new(Mutex::default);
+    let parent = lock_path.parent().context("record lock requires a parent")?;
+    if matches!(create, crate::flock::Open::Create) {
+        fs::create_dir_all(parent)?;
     }
-    let lock = crate::flock::open(lock_path, crate::flock::Open::Create)?;
-    crate::flock::FileLock::hold_blocking(lock, crate::flock::Mode::Exclusive)
-        .with_context(|| format!("locking {} failed", lock_path.display()))
+    // Canonicalize the parent, NOT the leaf: open must still reject symlinked lock files.
+    let path = parent.canonicalize()?.join(lock_path.file_name().context("record lock name")?);
+    let mut entries = LOCKS.lock()
+        .map_err(|_| anyhow::anyhow!("record lock registry poisoned"))?;
+    entries.retain(|_, entry| entry.strong_count() != 0);
+    if let Some(entry) = entries.get(&path).and_then(Weak::upgrade) {
+        return Ok(entry);
+    }
+    let entry = Arc::new(RecordLockEntry {
+        admission: Arc::new(tokio::sync::Mutex::new(())),
+        file: Arc::new(tokio::sync::Mutex::new(Some(crate::flock::open(
+            &path, create,
+        )?))),
+    });
+    entries.insert(path, Arc::downgrade(&entry));
+    Ok(entry)
+}
+
+/// Admit one daemon operation before submitting its synchronous ownership transaction.
+/// Keep this guard inside the blocking closure: cancellation of the async waiter must not
+/// admit a second transaction while an already-started blocking operation is still running.
+/// Other daemon requests for this path wait asynchronously, not in the blocking pool.
+pub struct RecordLockAdmission {
+    _entry: Arc<RecordLockEntry>,
+    _permit: tokio::sync::OwnedMutexGuard<()>,
+}
+
+pub async fn record_lock_admission(agent_dir: &Path) -> anyhow::Result<RecordLockAdmission> {
+    let path = agent_dir.join(LOCK_NAME);
+    let entry = tokio::task::spawn_blocking(move || record_lock_entry(&path)).await??;
+    let permit = entry.admission.clone().lock_owned().await;
+    Ok(RecordLockAdmission { _entry: entry, _permit: permit })
+}
+
+/// The sync driver API loans the single descriptor, independently of daemon admission.
+/// Only synchronous driver threads or daemon blocking tasks may call this acquisition.
+#[derive(Debug)]
+pub(crate) struct RecordLock {
+    held: Option<crate::flock::FileLock>,
+    file: tokio::sync::OwnedMutexGuard<Option<fs::File>>,
+    _entry: Arc<RecordLockEntry>,
+}
+
+impl Drop for RecordLock {
+    fn drop(&mut self) {
+        if let Some(held) = self.held.take() {
+            *self.file = Some(held.release());
+        }
+    }
+}
+
+/// Take a record lock on a synchronous thread, preserving the existing critical section.
+pub(crate) fn lock_exclusive(lock_path: &Path) -> anyhow::Result<RecordLock> {
+    let entry = record_lock_entry(lock_path)?;
+    let mut file = entry.file.clone().try_lock_owned()
+        .unwrap_or_else(|_| entry.file.clone().blocking_lock_owned());
+    let descriptor = match file.take() {
+        Some(file) => file,
+        None => crate::flock::open(lock_path, crate::flock::Open::Create)?,
+    };
+    let held = crate::flock::FileLock::hold_blocking(descriptor, crate::flock::Mode::Exclusive)
+        .with_context(|| format!("locking {} failed", lock_path.display()))?;
+    Ok(RecordLock { held: Some(held), file, _entry: entry })
 }
 
 /// Stage-and-rename one newline-terminated JSON record. Atomic when `staging_dir` is on the
@@ -869,12 +945,21 @@ pub(crate) fn try_current_ownership(
     incarnation: &str,
     seq: u64,
 ) -> anyhow::Result<Option<bool>> {
-    let file = crate::flock::open(&agent_dir.join(LOCK_NAME), crate::flock::Open::Existing)?;
-    let Some(_lock) =
-        crate::flock::FileLock::hold(file, crate::flock::Mode::Exclusive, crate::flock::Wait::Now)?
-    else {
+    let path = agent_dir.join(LOCK_NAME);
+    let entry = record_lock_entry_with(&path, crate::flock::Open::Existing)?;
+    let Ok(mut file) = entry.file.clone().try_lock_owned() else {
         return Ok(None);
     };
+    let descriptor = match file.take() {
+        Some(file) => file,
+        None => crate::flock::open(&path, crate::flock::Open::Existing)?,
+    };
+    let Some(held) = crate::flock::FileLock::hold(
+        descriptor, crate::flock::Mode::Exclusive, crate::flock::Wait::Now,
+    )? else {
+        return Ok(None);
+    };
+    let _lock = RecordLock { held: Some(held), file, _entry: entry };
     let raw = crate::harness_events::read_record(&harness_state_path(agent_dir))?;
     let current: Record = serde_json::from_slice(&raw)?;
     Ok(Some(
@@ -2397,3 +2482,7 @@ mod background_job_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "harness_state_lock_tests.rs"]
+mod lock_tests;

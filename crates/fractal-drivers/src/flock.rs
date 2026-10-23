@@ -96,7 +96,7 @@ pub(crate) fn open(path: &Path, create: Open) -> io::Result<File> {
 /// the release to the guard's scope even if the descriptor outlives it through a `dup`.
 #[derive(Debug)]
 pub(crate) struct FileLock {
-    file: File,
+    file: Option<File>,
 }
 
 impl FileLock {
@@ -122,7 +122,7 @@ impl FileLock {
             }
             return Err(error);
         }
-        Ok(Some(Self { file }))
+        Ok(Some(Self { file: Some(file) }))
     }
 
     /// Take `mode`, queueing behind the current holder. Returns the guard directly: [`Wait::Block`]
@@ -139,16 +139,28 @@ impl FileLock {
 
     /// The locked descriptor, for a protocol that also has to `fsync` the lock file itself.
     pub(crate) fn file(&self) -> &File {
-        &self.file
+        self.file.as_ref().expect("held file lock owns its descriptor")
+    }
+
+    /// Release the lock while retaining its descriptor for the next serialized acquisition.
+    pub(crate) fn release(mut self) -> File {
+        self.unlock();
+        self.file.take().expect("held file lock owns its descriptor")
+    }
+
+    fn unlock(&self) {
+        if let Some(file) = &self.file {
+            // SAFETY: the descriptor remains owned by this guard through the syscall.
+            unsafe {
+                libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
     }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        // SAFETY: the descriptor remains valid until after Drop returns.
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        self.unlock();
     }
 }
 
