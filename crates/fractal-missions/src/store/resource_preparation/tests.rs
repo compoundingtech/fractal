@@ -288,7 +288,7 @@ fn observation_preparation_history_decodes_are_independent_of_history_length() {
                 facts: &facts,
                 subscriptions: &[],
             }, &mut |subject| match serial {
-                Some(serial) => store.smalltalk.observer_actuals.read(reader, subject, serial),
+                Some(serial) => store.fractal.observer_actuals.read(reader, subject, serial),
                 None => latest_actual(reader, subject),
             })
         });

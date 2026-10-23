@@ -1,5 +1,5 @@
 # Resource cold start
 
-This model-free eval requires a durable resource claim before one Small Talk action.
+This model-free eval requires a durable resource claim before one Fractal action.
 
 The st3 form checks the claim graph and the message graph directly.

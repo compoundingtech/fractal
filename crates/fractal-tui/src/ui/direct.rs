@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(&answer, b"world");
     }
 
-    /// Time the real attach path to a live seat, read only: the runtime read stui makes, the
+    /// Time the real attach path to a live seat, read only: the runtime read Fractal TUI makes, the
     /// route (local socket or Fabric), and the first screen of a PEEK, which sends no input and
     /// resizes nothing. Run by hand against a real daemon and fleet:
     /// `STUI_PROBE_SUBJECT=agent/... STUI_PROBE_PERSON=person/... cargo test -p fractal-tui
@@ -495,7 +495,7 @@ mod tests {
                 .unwrap();
         let client = Client::unix_as(&socket, person);
         let started = Instant::now();
-        // stui's own feed already holds an agent's incarnation and host, so a real attach reads
+        // Fractal TUI's own feed already holds an agent's incarnation and host, so a real attach reads
         // no runtime. With STUI_PROBE_INCARNATION and STUI_PROBE_OWNER (from `st agents show
         // AGENT --json`: value.incarnation_id, value.host_id) the probe does the same; without
         // them it makes the runtime read, which a busy daemon can take seconds to answer.
@@ -565,7 +565,7 @@ mod tests {
             opened_at.elapsed() - routed,
             started.elapsed()
         );
-        // The same seat through the client gateway, as stui attached before: the daemon relays.
+        // The same seat through the client gateway, as Fractal TUI attached before: the daemon relays.
         let gateway = Instant::now();
         let mut relayed = client
             .raw_terminal_peek(&terminal, &incarnation)

@@ -126,7 +126,7 @@ pub fn supervise_test() -> bool {
 
         let thread = std::thread::current();
         let name = thread.name().expect("libtest names each test thread");
-        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
             return false;
         }
         let script =
@@ -140,7 +140,7 @@ pub fn supervise_test() -> bool {
             .env_remove("ST3_SUBJECT")
             .env_remove("FRACTAL_AGENT")
             .env_remove("FRACTAL_SUBJECT")
-            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("FRACTAL_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .output()
             .expect("launch isolated test guardian");
@@ -166,7 +166,7 @@ pub fn evidence_tempdir() -> tempfile::TempDir {
         .prefix("restart-")
         .tempdir_in(canonical_temp_base())
         .unwrap();
-    let Some(manifest) = std::env::var_os("SMALLTALK_TEST_EVIDENCE_MANIFEST") else {
+    let Some(manifest) = std::env::var_os("FRACTAL_TEST_EVIDENCE_MANIFEST") else {
         return root;
     };
     let artifacts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/boot-canaries");

@@ -179,7 +179,7 @@ impl Fence {
             let work = smallclaims::sqlite::work::SqliteWorkScope::start();
             if connection.is_autocommit() {
                 prepared.cut = NativeCut::read(&connection);
-                actual_serial = store.smalltalk.observer_actuals.seed(
+                actual_serial = store.fractal.observer_actuals.seed(
                     &connection, || connection.reverify_observer_coverage(),
                 ).ok();
             }

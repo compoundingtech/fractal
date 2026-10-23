@@ -82,7 +82,7 @@ def binaries(app):
 
 
 # The terminal client's speech helper (apps/macos/listen), when built: its own app inside SmallTalk.app, so the
-# microphone prompt names Small Talk with the helper's usage strings.
+# microphone prompt names Fractal with the helper's usage strings.
 HELPER = 'StListen.app'
 
 

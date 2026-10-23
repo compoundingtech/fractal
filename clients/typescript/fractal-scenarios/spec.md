@@ -27,8 +27,7 @@ examples. Scenarios are product-shaped data built on that contract; they do not 
 These decisions are fixed for this package. Sections below cite them as D1–D10.
 
 - **D1 Home:** one public package, `clients/typescript/fractal-scenarios`, holds the kit and the worlds.
-- **D2 Consumers:** fractal-ui Storybook, fractal-web (tests, dev mode, e2e), stui, the fractal
-  TUI and iOS. stui's `fixtures/clients/demo-world.json` becomes one generated world.
+- **D2 Consumers:** fractal-ui Storybook, fractal-web (tests, dev mode, e2e), Fractal TUI and iOS. Fractal TUI's `fixtures/clients/demo-world.json` becomes one generated world.
 - **D3 Realism:** seeded synthetic worlds plus real client-v0 frames recorded from a scratch daemon
   that drives a scripted fake harness. No capture from a live host enters the repository.
   Scenarios read like real engineering work.
@@ -45,7 +44,7 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
   over one cast; `world.with({ slice: override })` replaces one slice.
 - **D8 Binding:** the kit is Effect-free. Components get props through `useScenarioSlice`.
   App-level stories and fractal-web dev/e2e replay client-v0 frames over a mock WebSocket through
-  the real data layer. stui, iOS and the TUI read JSON or use the same replay.
+  the real data layer. Fractal TUI and iOS read JSON or use the same replay.
 - **D9 Catalog:** seven narratives and the edge states listed under [Catalog](#catalog-d9);
   failed sync has one world per cause.
 - **D10 Storybook:** a global Scenario toolbar selects the world. Every story declares exactly
@@ -61,7 +60,7 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
 clients/typescript/fractal-scenarios/
   spec.md                 this document
   README.md               usage
-  package.json            plain manifest, like fractal-client and st3-views
+  package.json            plain manifest, like fractal-client and fractal-views
   tsconfig.json
   vitest.config.ts        pins the test root to this package
   src/
@@ -1233,7 +1232,7 @@ The path-filtered `fractal-web-execution` job runs these gates as lanes of `scri
    numbered nonfunctional `capability#n` placeholders are allowed. Registered scratch identities
    in raw captures are validated by the script-directed normalization gate, not treated as
    already-normalized scenario identities.
-5. Consumers: the SDK sync-matrix fold, stui's contract test, the Rust and Swift rebase vectors
+5. Consumers: the SDK sync-matrix fold, Fractal TUI's contract test, the Rust and Swift rebase vectors
    and the fractal-web bundle check run in their own jobs (see below).
 
 Every gate has a test that plants one violation (a strict-invalid value, a stale file, a
@@ -1248,11 +1247,11 @@ breaks a scenario fails in the same pull request.
 | fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. The inventory expands nested brace alternatives before deriving static story roots, rejects patterns whose roots cannot be determined or that mention `node_modules` until the check is extended, walks supported roots with `lstat` without following symlinks, and reports any directory or file symlink outside excluded dependencies (including literal file entries). Traversal skips directories named `node_modules`; discovery filters exact `node_modules` path segments independently of glob matching, including patterns with leading `../` prefixes and brace alternatives. Similarly named directories remain included. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons and have a pinned count. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
 | `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a live source built with the app-local `adoptEarlyCollections: false` option that passes `replay.socket` and `replay.fetch` to `St3Options`. Browser transport, early socket adoption, and visibility/LRU admission are supplied by the app's `src/data/sdk-browser` platform Layer, not the portable SDK. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
-| stui | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
+| Fractal TUI | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through Fractal TUI's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | native-client maintainers | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
 | Rust `fractal-client` | native-client maintainers | Provides the rebase reader and passes the shared vectors. |
 | Swift `FractalClient` | native-client maintainers | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
-| fractal TUI | fractal-ui maintainers | Reads `fixtures/scenarios/<world>/<slice>.json` from a pinned smalltalk revision through its Rust adapter and the Rust rebase reader; its snapshot tests derive from those files. |
+| fractal TUI | fractal-ui maintainers | Reads `fixtures/scenarios/<world>/<slice>.json` from a pinned Fractal revision through its Rust adapter and the Rust rebase reader; its snapshot tests derive from those files. |
 
 ## Non-goals
 
@@ -1284,7 +1283,7 @@ breaks a scenario fails in the same pull request.
   the unwindowed rule. Browser plays separately prove history reveal and held-back replies.
 - fractal-web e2e runs on replay; the production bundle contains no scenario-kit code.
 - The SDK fold matches every non-pending sync matrix row.
-- The stui demo shows the generated `fleet-mid-refactor` world.
+- The Fractal TUI demo shows the generated `fleet-mid-refactor` world.
 - fractal TUI and iOS show the same generated data; Rust and Swift pass the rebase vectors.
 - CI decode, freshness, privacy, fidelity and consumption gates are green, and each fails on a
   planted violation.

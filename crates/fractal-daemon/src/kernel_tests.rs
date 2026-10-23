@@ -1,5 +1,5 @@
-//! Unit tests of st3-kernel modules that need daemon code (intent parsing, store constants) to run.
-//! They test the same kernel items through st3-daemon's re-exports.
+//! Unit tests of fractal-kernel modules that need daemon code (intent parsing, store constants) to run.
+//! They test the same kernel items through fractal-daemon's re-exports.
 mod hooks;
 mod model_launch_change;
 mod publication;

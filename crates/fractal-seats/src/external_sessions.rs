@@ -1,4 +1,4 @@
-//! The part of `external_sessions` that moved up from st3-store.
+//! The part of `external_sessions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};

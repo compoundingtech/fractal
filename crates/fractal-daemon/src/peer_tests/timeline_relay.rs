@@ -1,4 +1,4 @@
-//! Timeline relay tests that run the API; they live in st3-daemon because the API does.
+//! Timeline relay tests that run the API; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports)]
 
@@ -203,7 +203,7 @@ for (operation, expected, schema) in [
     *request.headers_mut() = auth
         .request_headers_for(CLIENT_READ_PATH, "gateway", &body)
         .unwrap();
-    let response = peer_router(peer.clone(), smalltalk_routes(crate::api::raw_terminal_owner_splice))
+    let response = peer_router(peer.clone(), fractal_routes(crate::api::raw_terminal_owner_splice))
         .oneshot(request)
         .await
         .unwrap();
@@ -233,7 +233,7 @@ for (operation, expected, schema) in [
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 let address = listener.local_addr().unwrap();
 let peer_server = tokio::spawn(async move {
-    axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice)))
+    axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice)))
         .await
         .unwrap();
 });

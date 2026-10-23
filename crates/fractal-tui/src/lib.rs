@@ -175,7 +175,7 @@ fn hangup_confirmed(run: &mut u32, closed: bool, definite: bool) -> bool {
 }
 fn watch_terminal_hangup() {
     // crossterm can loop inside event::poll (Darwin) or event::read (Linux) on PTY EOF and
-    // never return to the main loop's terminal check; a stui left like that spins at full CPU
+    // never return to the main loop's terminal check; a Fractal TUI left like that spins at full CPU
     // and keeps polling the daemon for hours. A separate poller observes the hangup without
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
@@ -820,7 +820,7 @@ impl Args {
     }
 }
 
-/// What `st ui --classic` says now that spaces are stui's only layout.
+/// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
 const CLASSIC_GONE: &str =
     "The classic layout is gone: run plain `st ui`, or `st ui --space NAME` to open a named space";
 
@@ -1433,7 +1433,7 @@ mission "release" state="ready" {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            panic!("restarted stui fixture did not listen");
+            panic!("restarted Fractal TUI fixture did not listen");
         }
 
         fn reconcile_until(&self, what: &str, done: impl Fn(&Self) -> bool) {
@@ -1457,7 +1457,7 @@ mission "release" state="ready" {
             self.store.step_run(&self.step).unwrap().unwrap().status
         }
 
-        /// The person's card for the gate, as stui lists it.
+        /// The person's card for the gate, as Fractal TUI lists it.
         async fn card(&self) -> Option<fractal_client::Attention> {
             self.client
                 .attention_list(None, Some(50), false)
@@ -1664,7 +1664,7 @@ mission "release" state="ready" {
         assert!(error.to_string().contains("no longer asked"), "{error}");
     }
 
-    /// A feedback gate's card offers request-changes, and sending it back from stui gives the
+    /// A feedback gate's card offers request-changes, and sending it back from Fractal TUI gives the
     /// worker a new attempt with the person's notes in its goals.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sending_back_a_feedback_gate_requests_changes() {

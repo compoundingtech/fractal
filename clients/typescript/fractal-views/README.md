@@ -15,7 +15,7 @@ import { conversationEntries, applyConversation, homeRows, clientName } from '@f
 const held = applyConversation(undefined, frame);
 const entries = conversationEntries(held.entries, agentNames);
 const rows = homeRows(attention, sessionActor);
-const name = clientName('smalltalk-ide', version, build);
+const name = clientName('fractal-ide', version, build);
 ```
 
 The root exports all functions and types. Subpaths named after the source modules

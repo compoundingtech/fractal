@@ -2335,7 +2335,7 @@ fn agent_card_status_cache_has_a_fixed_entry_cap_and_repair_clears_it() {
     let cut = store.index().unwrap();
     let first = store.agent_card_status_at(None, cut, true).unwrap();
     {
-        let mut cache = store.smalltalk.subject_cache.lock().unwrap();
+        let mut cache = store.fractal.subject_cache.lock().unwrap();
         cache.card_statuses.clear();
         for n in 0..AGENT_CARD_STATUS_LIMIT {
             cache.card_statuses.insert(format!("agent/fill/{n}"), StatusEntry {
@@ -2346,14 +2346,14 @@ fn agent_card_status_cache_has_a_fixed_entry_cap_and_repair_clears_it() {
     }
     let cold = store.agent_card_status_at(None, cut, true).unwrap();
     assert_eq!(serde_json::to_value(cold).unwrap(), serde_json::to_value(first).unwrap());
-    let cache = store.smalltalk.subject_cache.lock().unwrap();
+    let cache = store.fractal.subject_cache.lock().unwrap();
     assert_eq!(cache.card_statuses.len(), AGENT_CARD_STATUS_LIMIT);
     assert!(!cache.card_statuses.contains_key("agent/cache/cold"));
     drop(cache);
     store.forget_current_views();
-    assert!(store.smalltalk.subject_cache.lock().unwrap().card_statuses.is_empty());
+    assert!(store.fractal.subject_cache.lock().unwrap().card_statuses.is_empty());
     store.agent_card_status_at(None, cut, true).unwrap();
-    assert_eq!(store.smalltalk.subject_cache.lock().unwrap().card_statuses.len(), 1);
+    assert_eq!(store.fractal.subject_cache.lock().unwrap().card_statuses.len(), 1);
 }
 
 #[test]
@@ -2956,8 +2956,7 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
         "stopped"
     );
     let cached = |store: &Store| {
-        store
-            .smalltalk
+        store.fractal
             .actual_cache
             .lock()
             .unwrap()

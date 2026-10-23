@@ -9,12 +9,12 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--help") {
         println!(
-            "Usage: st3-client-tui person/NAME [UNIX_SOCKET]\n↑/↓ selects an agent; type then Enter sends; Esc clears; Ctrl-C quits."
+            "Usage: fractal-client-tui person/NAME [UNIX_SOCKET]\n↑/↓ selects an agent; type then Enter sends; Esc clears; Ctrl-C quits."
         );
         return Ok(());
     }
     if args.is_empty() || args.len() > 2 || !args[0].starts_with("person/") {
-        bail!("Use st3-client-tui person/NAME [UNIX_SOCKET]; --help shows keys");
+        bail!("Use fractal-client-tui person/NAME [UNIX_SOCKET]; --help shows keys");
     }
     let explicit = args
         .get(1)

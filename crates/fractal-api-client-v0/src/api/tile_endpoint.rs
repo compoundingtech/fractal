@@ -1,4 +1,4 @@
-//! The part of `api::tile_endpoint` that moved up from st3-api.
+//! The part of `api::tile_endpoint` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

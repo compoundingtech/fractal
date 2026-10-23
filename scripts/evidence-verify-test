@@ -1296,7 +1296,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def rules(self, check):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        return evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')
+        return evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
         text = (ROOT / '.st/required-lanes.json').read_text()
@@ -1309,7 +1309,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
             for path in rules['definition_paths']:
                 self.assertTrue((ROOT / path).exists(), path)
-            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/smalltalk')['inputs']
+            declared = evidence_verify.policy_rules(policy, lane, 'compoundingtech/fractal')['inputs']
             if declared is not None:
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
@@ -1345,7 +1345,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'fractal-web': 'off'})
         lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
@@ -1513,9 +1513,9 @@ class CommittedPolicy(unittest.TestCase):
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
             self.assertIs(rules['enforce'], check in ENFORCED, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
-            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
+            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/fractal',
                                                    '.github/workflows/fleet.yml', check])
-            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
+            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/fractal/')
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
         for check in ('isolation-vm', 'mail-redelivery-canaries'):  # daily only: nothing in the per-PR policy waits on them

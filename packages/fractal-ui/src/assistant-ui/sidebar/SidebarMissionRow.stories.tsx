@@ -43,7 +43,7 @@ const folders: readonly { readonly label: string; readonly rows: readonly Row[] 
     row('flaky', 'Chase the flaky test', { host: 'build-2', missionContext: mission('flaky-test-hunt', 'flaky-test-hunt', { progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: 'Bisect the failing run' }, queued: [] }) }),
     row('helper', 'Idle helper', { status: 'idle', statusLabel: statuses.idle.label, missionContext: { _tag: 'None' } }),
   ] },
-  { label: 'smalltalk', rows: [
+  { label: 'fractal', rows: [
     row('docs', 'Refresh the API docs', { ...waiting, host: 'build-2', missionContext: mission('docs-refresh', 'docs-refresh', { progress: { _tag: 'Known', done: 1, total: 4 }, step: { _tag: 'Waiting', question: 'Approve the new page outline?' }, queued: [] }) }),
     row('rename', 'Rename the users API', { missionContext: mission('rename-users-api', 'rename-users-api', { progress: { _tag: 'Known', done: 4, total: 6 }, step: { _tag: 'Unknown' }, queued: [{ id: 'mission/example/sidebar-polish', slug: 'sidebar-polish' }] }) }),
     row('long', 'Review every long scope', { host: 'build-2', missionContext: mission('long', longSlug, { progress: { _tag: 'Known', done: 0, total: 3 }, step: { _tag: 'Step', name: 'Collect the hover scope notes for review' }, queued: [] }) }),
@@ -257,7 +257,7 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
   await expect(line2(unavailable).textContent).toBe(' Mission info unavailable·build-1')
   await expect(getComputedStyle(warning).color).toBe(getComputedStyle(designedRow(canvasElement, 'Watch the upload retries').querySelector('[data-row-field="mission"]')!).color)
   // Folders stay project folders: no mission grouping and no "No mission" section.
-  await expect([...canvasElement.querySelectorAll('[data-host="designed"] [data-folder]')].map(folder => folder.getAttribute('data-folder'))).toEqual(['fractal-web', 'smalltalk'])
+  await expect([...canvasElement.querySelectorAll('[data-host="designed"] [data-folder]')].map(folder => folder.getAttribute('data-folder'))).toEqual(['fractal-web', 'fractal'])
   await expect(canvasElement).not.toHaveTextContent(/no mission/i)
   // Desktop rows stay 48px; only a touch row whose mission line holds a button grows its line 2 to the 44px track.
   const touch = canvasElement.querySelector('[data-narrow]') !== null || window.matchMedia(touchPointerQuery).matches

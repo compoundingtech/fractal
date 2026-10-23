@@ -1,4 +1,4 @@
-//! The suspension move test that reads the seat snapshot; it lives in st3-daemon because seat_snapshot does.
+//! The suspension move test that reads the seat snapshot; it lives in fractal-daemon because seat_snapshot does.
 
 #![allow(unused_imports)]
 

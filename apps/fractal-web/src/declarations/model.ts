@@ -35,7 +35,7 @@ const hideEnvironment = (environment: unknown): unknown =>
   Predicate.isObject(environment) ? Object.fromEntries(Object.keys(environment).map(name => [name, REDACTED])) : REDACTED
 const withhold = (kdl: unknown): unknown => typeof kdl === 'string' ? WITHHELD_DECLARATIONS : kdl
 
-// The positions below mirror st's MissionSpec serde shape (crates/st3/src/model.rs): environment
+// The positions below mirror st's MissionSpec serde shape (crates/fractal-kernel/src/model.rs): environment
 // values live only in mechanical/llm `GateSpec.environment` and exec `MetricSource.environment`;
 // embedded declaration text in `MissionSpec`/`StepSpec.declarations_kdl`.
 const gate = (value: unknown): unknown => patch(value, { environment: hideEnvironment })

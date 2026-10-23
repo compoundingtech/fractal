@@ -20,7 +20,7 @@ export const workspaceMembers = [
 
 export default packageJson.aggregateFromPackages({
   packages: diagnosticsPackages,
-  name: 'smalltalk-workspace',
-  repoName: 'smalltalk',
+  name: 'fractal-workspace',
+  repoName: 'fractal',
   extraMembers: workspaceMembers,
 })

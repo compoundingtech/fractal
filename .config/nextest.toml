@@ -34,10 +34,10 @@ fail-fast = false
 retries = { count = 2, backoff = "fixed", delay = "30s", jitter = false }
 status-level = "fail"
 final-status-level = "flaky"
-# The gate covers st3, st-runtime, st-drivers and the other shared crates, and the st2 test
+# The gate covers fractal, fractal-runtime, fractal-drivers and the other shared crates, and the st2 test
 # files. It leaves out st2-only code: st2's own unit tests (none of its remaining modules is
 # used by st3), its catalog, eval-run, resync, nomad-survival, event and resource-profile
-# supervisor tests, and st-drivers' catalog, resync and resource-profile supervisor modules.
+# supervisor tests, and fractal-drivers' catalog, resync and resource-profile supervisor modules.
 # `transport_isolation` needs real systemd user scopes; the daily isolation-vm lane runs it in a
 # NixOS VM. The cost check and the load test (`daemon_cost`, `daemon_load`) run in their own
 # perf jobs (scripts/ci-perf). Only the in-memory targets-file linkage unit also runs here;

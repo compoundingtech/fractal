@@ -429,7 +429,7 @@ async fn the_feed_waits_for_st_then_keeps_every_window_current_on_one_socket() {
     }).await.expect("all initial windows arrive independently");
 
     let source =
-        "version 2\nmission \"feed-test\" state=\"ready\" { goal \"Push changes to stui\" }\n";
+        "version 2\nmission \"feed-test\" state=\"ready\" { goal \"Push changes to Fractal TUI\" }\n";
     let intent = fractal_daemon::graph::parse_intent(source, "stui-feed").unwrap();
     let planned = state
         .store

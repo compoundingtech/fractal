@@ -2,7 +2,7 @@
  * `@fractal/sdk/effect`: the st client-v0 transport for wf, as one Effect service.
  *
  * One collections socket carries every follow (`socket.ts`). Each follow is a scoped
- * `Stream<FollowEvent<A>>` decoded tolerantly at this edge with smalltalk's generated codecs, so
+ * `Stream<FollowEvent<A>>` decoded tolerantly at this edge with Fractal's generated codecs, so
  * live drift never breaks the page. Resync and transient failures mark a follow stale; retries
  * coalesce per follow and wait one second before subscribing afresh.
  * Follows hold socket slots under the admission rules in `admission.ts`; an evicted follow's
@@ -525,7 +525,7 @@ const make = (options: St3Options) =>
       baseUrl: options.baseUrl,
       ...(options.credential === undefined ? {} : { credential: options.credential }),
       ...(options.client === undefined ? {} : { client: options.client }),
-      // Remove the browser receiver workaround after smalltalk#1040 / #1247 lands.
+      // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
       fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis),
       traceContext: () => outbound ?? options.traceContext?.(),
     })

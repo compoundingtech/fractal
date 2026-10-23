@@ -1,7 +1,7 @@
 # Seat status truth
 
 One place in st decides what a seat's status is: the agent card that `overlay_agent_resources`
-(`crates/fractal-api-core/src/api.rs`) finishes on every read, with the read's own clock. stui, the phone app,
+(`crates/fractal-api-core/src/api.rs`) finishes on every read, with the read's own clock. Fractal TUI, the phone app,
 the web app and `st agents show` render that card. None of them re-derives a state from the raw
 fields, so they cannot disagree.
 
@@ -14,7 +14,7 @@ fields, so they cannot disagree.
 | `state: down`, `down_since` | A declared seat with no running session and no harness report within a heartbeat (11 minutes; a driver at an empty prompt reports every five minutes) once the launch window has passed. `down_since` is when it last reported after its launch, or when it began waiting if it never has; the report time is the driver's own clock value, so a driver with a skewed clock moves `down_since` by the same amount. Never shown as starting, working or idle. |
 | `current_work[].holder_down_since` | Set on every step a `down` seat holds: the step's progress and activity were written by a holder that has no session. |
 | `harness_state: working`, `observation: stale` | A turn can run for hours without a new harness claim, so a `working` report is kept until the harness says otherwise. `silent_since` already says how long the seat has been quiet. |
-| `harness_state: indeterminate`, `observation: stale` | Only a `ready` or `idle` report lapses after the window: st has not heard from the harness. stui and the phone app show this as idle for a reachable seat; the card does not claim it. |
+| `harness_state: indeterminate`, `observation: stale` | Only a `ready` or `idle` report lapses after the window: st has not heard from the harness. Fractal TUI and the phone app show this as idle for a reachable seat; the card does not claim it. |
 
 ## What `down` means, and what it does not
 
@@ -56,5 +56,5 @@ reads:
 
 Proof: `api::client_v0::tests::a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting`,
 `…a_fresh_harness_report_beats_a_runtime_row_stuck_pending`,
-`…a_stale_working_report_stays_working_while_a_stale_idle_one_lapses`, and the stui, phone and web
+`…a_stale_working_report_stays_working_while_a_stale_idle_one_lapses`, and the Fractal TUI, phone and web
 tests that render `down`.

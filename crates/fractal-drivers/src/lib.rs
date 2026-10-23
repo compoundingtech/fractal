@@ -5,7 +5,7 @@
 //!
 //! Catalog reconciliation and resource-profile supervision remain coupled to the
 //! shared mailbox and validation paths. They move intact here; separating support
-//! that st3 does not call directly is later cleanup tracked by smalltalk issue #819.
+//! that st3 does not call directly is later cleanup tracked by Fractal issue #819.
 //! Helpers exposed only for the remaining root modules are hidden from public docs.
 //!
 //! st2 reads a catalog of hand-authored agent declarations plus each agent's inbox. It keeps every

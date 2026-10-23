@@ -87,8 +87,8 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
     evidence_manifest = tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
     code = 1
     try:
-        env = {**os.environ, "SMALLTALK_TEST_SUPERVISOR": str(os.getpid()),
-               "SMALLTALK_TEST_EVIDENCE_MANIFEST": evidence_manifest.name}
+        env = {**os.environ, "FRACTAL_TEST_SUPERVISOR": str(os.getpid()),
+               "FRACTAL_TEST_EVIDENCE_MANIFEST": evidence_manifest.name}
         # Allocate under the guardian, not the killable controller. Remove only
         # these freshly created roots, and only after their processes are reaped.
         for name, prefix, parent in temporary_roots:
@@ -190,7 +190,7 @@ def supervisor_active():
     """A stale inherited marker must not disable supervision on a later run."""
     from script_process import ancestors
     try:
-        supervisor = int(os.environ.get("SMALLTALK_TEST_SUPERVISOR", "0"))
+        supervisor = int(os.environ.get("FRACTAL_TEST_SUPERVISOR", "0"))
     except ValueError:
         return False
     return supervisor > 1 and supervisor != os.getpid() and supervisor in ancestors()

@@ -50,7 +50,7 @@ version 2
 
     step "execute-lifted-mission" timeout="20m" {
       title "The exact generated mission revision executes as graph work"
-      goal "Claim and complete this wrapper step. Small Talk will start the exact mission revision produced by lift-mission-document. Follow every resulting assigned child mission step until that mission completes."
+      goal "Claim and complete this wrapper step. Fractal will start the exact mission revision produced by lift-mission-document. Follow every resulting assigned child mission step until that mission completes."
       assigned-to "agent/${ST_MISSION_RUN}/pdl.agent"
       depends-on { step "lift-mission-document" completed }
       uses-mission output-of="lift-mission-document"

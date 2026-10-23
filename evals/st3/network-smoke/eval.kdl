@@ -4,7 +4,7 @@ version 2
     completion { when "all-steps-exhausted" }
     goal "Complete mission eval/network-smoke."
     step "contract" timeout="2m" {
-      title "An isolated st3 daemon hosts a subject and delivers Small Talk"
+      title "An isolated st3 daemon hosts a subject and delivers Fractal"
         exec "eval/network-smoke/contract" {
           host "local"
           workspace "${ST_WORKSPACE}/fixture"

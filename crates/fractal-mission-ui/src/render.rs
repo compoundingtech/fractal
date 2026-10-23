@@ -6,7 +6,7 @@ use fractal_conversation_ui::text::{self, run};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// Semantic colors. Defaults reproduce stui's Catppuccin Mocha palette.
+/// Semantic colors. Defaults reproduce Fractal TUI's Catppuccin Mocha palette.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub done: Color,

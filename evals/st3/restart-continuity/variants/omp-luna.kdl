@@ -147,7 +147,7 @@ version 2
         }
         step "report-to-supervisor" {
           title "The worker reports one result to the supervisor"
-          goal #"Send agent/${ST_MISSION_RUN}/rc.sup exactly one Small Talk message with the four item commit IDs, the final SHA, the green npm test result, and the clean worktree result. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
+          goal #"Send agent/${ST_MISSION_RUN}/rc.sup exactly one Fractal message with the four item commit IDs, the final SHA, the green npm test result, and the clean worktree result. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/rc.dev --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
           depends-on { step "publish-batch-revision" completed }
           produces {
             resource "mission-run/${ST_MISSION_RUN}/worker-report" {
@@ -180,7 +180,7 @@ version 2
         }
         step "confirm-requester" {
           title "The requester receives one verified confirmation"
-          goal #"Send person/eval-requester exactly one Small Talk message with the restart evidence, duplicate-delivery result, four item commits, final SHA, green tests, and clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: st3 claim resource/mission-run/$ST_MISSION_RUN/verification resource.observed --actor agent/${ST_MISSION_RUN}/rc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
+          goal #"Send person/eval-requester exactly one Fractal message with the restart evidence, duplicate-delivery result, four item commits, final SHA, green tests, and clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Then run: st3 claim resource/mission-run/$ST_MISSION_RUN/verification resource.observed --actor agent/${ST_MISSION_RUN}/rc.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."#
           depends-on { step "verify-ledger-read-only" completed }
           produces {
             resource "mission-run/${ST_MISSION_RUN}/verification" {
@@ -237,7 +237,7 @@ version 2
         env { CATALOG "${ST_WORKSPACE}" }
         time-limit "2m"
       }
-      gate "Small Talk has two work assignments, one duplicate, one report, and one confirmation" {
+      gate "Fractal has two work assignments, one duplicate, one report, and one confirmation" {
         exec "bash ./judges/coordination.sh"
         host "local"
         workspace "${ST_WORKSPACE}"

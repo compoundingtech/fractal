@@ -1,5 +1,5 @@
 {
-  description = "Small Talk claims-graph runtime and terminal UI, with a separate legacy st2 runner";
+  description = "Fractal claims-graph runtime and terminal UI, with a separate legacy st2 runner";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -99,7 +99,7 @@
               config.services.smalltalk = {
                 enable = true;
                 person = "person/ada";
-                socket = "/tmp/smalltalk-test.sock";
+                socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
               } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" "homeFiles" "configFiles" ];
@@ -324,7 +324,7 @@
           inherit cargoDeps;
 
           # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
+          # st3, `st`, and st3-migrate come from the fractal package, so each has one build.
           cargoBuildFlags = [
             "-p"
             "fractal-legacy-runner"
@@ -664,8 +664,8 @@
             installShellCompletion --cmd st --bash st.bash --zsh _st --fish st.fish
           '';
           meta = {
-            description = "Small Talk claims-graph runtime, terminal UI, and KDL migration tool";
-            homepage = "https://github.com/compoundingtech/smalltalk";
+            description = "Fractal claims-graph runtime, terminal UI, and KDL migration tool";
+            homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st3";
           };
@@ -697,8 +697,8 @@
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
           meta = {
-            description = "Standalone Small Talk ChatGPT MCP adapter";
-            homepage = "https://github.com/compoundingtech/smalltalk";
+            description = "Standalone Fractal ChatGPT MCP adapter";
+            homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-chatgpt";
           };
@@ -713,8 +713,8 @@
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
           meta = {
-            description = "External Smalltalk fleet to Fabric runtime-peers adapter";
-            homepage = "https://github.com/compoundingtech/smalltalk";
+            description = "External Fractal fleet to Fabric runtime-peers adapter";
+            homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "st-fabric-adapter";
           };
@@ -1084,7 +1084,7 @@
               builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
-          assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
+          assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
           assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
           assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
@@ -1130,7 +1130,7 @@
             rendered.launchd.agents.smalltalk-apply.config.ProgramArguments) true;
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
-          pkgs.runCommand "smalltalk-hm-module-eval" { } "touch $out";
+          pkgs.runCommand "fractal-hm-module-eval" { } "touch $out";
         checks.hm-module-fractal-prestage-eval =
           let
             rendered = (mkHmModuleEval { fractalMigration.phase = "stage"; }).config;
@@ -1305,7 +1305,7 @@
             && completed.launchd.agents.fractal.config.RunAtLoad
             && completed.launchd.agents.fractal.config.KeepAlive.SuccessfulExit == false
             && !(noApply.home.file ? "Library/LaunchAgents/com.compoundingtech.fractal-apply.plist"));
-          pkgs.runCommand "smalltalk-hm-module-fractal-prestage-eval" { } (''
+          pkgs.runCommand "fractal-hm-module-fractal-prestage-eval" { } (''
             mkdir -p config/fractal state/fractal generation/.config/st3
             # Exercise the emitted legacy/stage preflight before any write boundary.
             substitute ${pkgs.writeText "legacy-preflight" legacyPreflight.data} preflight \
@@ -1380,7 +1380,7 @@
             rendered = (mkHmModuleEval { fractalBinary = true; }).config;
             external = (mkHmModuleEval {
               fractalBinary = true;
-              binary.path = "/opt/smalltalk/bin/st3";
+              binary.path = "/opt/fractal/bin/st3";
             }).config;
             activation = rendered.home.activation.smalltalkBinary.data;
           in
@@ -1399,7 +1399,7 @@
           '';
         checks.hm-module-external-binary-eval =
           let
-            executable = "/opt/smalltalk/bin/st3";
+            executable = "/opt/fractal/bin/st3";
             externalConfig = { binary.path = executable; };
             rendered = (mkHmModuleEval externalConfig).config;
             successor = (mkHmModuleEval (externalConfig // {
@@ -1435,7 +1435,7 @@
           # Includes the declaration wrapper's store path: neither it nor a unit
           # may change when the unused st3 or PTY package changes.
           assert unitText == units successor;
-          pkgs.runCommand "smalltalk-hm-module-external-binary-eval" { } ''
+          pkgs.runCommand "fractal-hm-module-external-binary-eval" { } ''
             ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg executable} ${applyScript}
             for package in ${pkgs.lib.escapeShellArgs forbiddenPaths}; do
               if ${pkgs.gnugrep}/bin/grep -F -- "$package" ${applyScript}; then

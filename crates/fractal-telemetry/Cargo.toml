@@ -2,7 +2,7 @@
 name = "fractal-telemetry"
 version = "0.1.0"
 edition = "2024"
-description = "Claims-graph agent reconciler: the telemetry modules of the st3 library (OpenTelemetry setup, command recorder, wake and startup telemetry), which name no store, api or reconcile code"
+description = "Claims-graph agent reconciler: the telemetry modules of the Fractal library (OpenTelemetry setup, command recorder, wake and startup telemetry), which name no store, api or reconcile code"
 license = "MIT"
 
 [features]

@@ -369,11 +369,11 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "PUT /v1/client/glasses/{id}",
-        "a stui layout, outside the graph",
+        "a Fractal TUI layout, outside the graph",
     ),
     (
         "DELETE /v1/client/glasses/{id}",
-        "a stui layout, outside the graph",
+        "a Fractal TUI layout, outside the graph",
     ),
     ("POST /v1/intent/mission", "plans a mission from KDL"),
     ("POST /v1/intent/apply", "applies a planned mission"),
@@ -1967,7 +1967,7 @@ fn declared_routes(source: &str) -> BTreeSet<String> {
         .expect("api.rs builds its router in router_for_transport")..])
 }
 
-/// The routes of a route family a crate above st3-api adds to the router (its `routes` fn).
+/// The routes of a route family a crate above fractal-api-core adds to the router (its `routes` fn).
 fn family_routes(source: &str) -> BTreeSet<String> {
     let start = source
         .find("pub fn routes(")
@@ -2404,7 +2404,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let client = Client::unix(&socket);
-    // Client reads come from a person, as stui and the app make them.
+    // Client reads come from a person, as Fractal TUI and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
     let challenge: Value = person.post("/v1/client/pairings", &json!({
         "api_version":"st3.client.v0", "device_name":"Cost phone",

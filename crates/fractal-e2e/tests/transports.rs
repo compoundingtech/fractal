@@ -761,7 +761,7 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
 }
 
 #[tokio::test]
-async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk() {
+async fn an_agents_conversation_rides_the_collection_socket_with_its_fractal_messages() {
     let (_root, state, _pty, client, server) =
         serve_terminal_state("client-collection-conversation", 24, 80).await;
     let mut stream = client.collection_stream().await.unwrap();
@@ -781,7 +781,7 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk(
     };
     assert!(session_id.starts_with("session/"), "{session_id}");
 
-    // Small Talk to the agent that names no session is part of its conversation: st joins it.
+    // Fractal to the agent that names no session is part of its conversation: st joins it.
     state
         .store
         .append_claim(&ClaimInput {

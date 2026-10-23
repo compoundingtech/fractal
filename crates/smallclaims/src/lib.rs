@@ -2,7 +2,7 @@
 //!
 //! The generic layers of a claims database that knows nothing about agents or missions: claims
 //! and their envelopes, the canonical order every shared projection folds claims in, digests,
-//! and replication between members. smalltalk builds its runtime on top of it.
+//! and replication between members. Fractal builds its runtime on top of it.
 //!
 //! [`store::Store`] is the database. A runtime opens it with its own [`store::Runtime`], which
 //! knows the runtime's claim kinds, keeps its projections in the same SQLite file, and decides

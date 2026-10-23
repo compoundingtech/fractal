@@ -6,7 +6,7 @@ const content = (sequence, text) => ({ id: `entry/${sequence}`, revision: 1, seq
 const message = (sequence, title) => ({ id: `entry/${sequence}-message`, revision: 1, sequence, type: 'message', role: 'user', body: { message_id: `message/${sequence}`, from: 'agent/example/lead', to: 'agent/example/worker', title } });
 const texts = conversation => conversation.entries.map(entry => entry.body.text ?? entry.body.title);
 
-// A newest page full of status heartbeats does not hide the conversation in it, and Small Talk
+// A newest page full of status heartbeats does not hide the conversation in it, and Fractal
 // joined by st is part of the conversation.
 const page = [status(30), content(20, 'Latest reply'), message(15, 'Review the plan'), status(12), content(10, 'Earlier reply')];
 const loaded = applyConversation(undefined, { replace: true, items: page, hasMore: false });

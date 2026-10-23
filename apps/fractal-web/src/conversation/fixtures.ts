@@ -1081,7 +1081,7 @@ const toIngest = (script: Script): ReadonlyArray<IngestRecord> => {
                 ]
               : []),
           ]
-        // Offline normalized history carries no Small Talk deliveries, statuses or wire usage.
+        // Offline normalized history carries no Fractal deliveries, statuses or wire usage.
         case 'mail':
         case 'status':
         case 'usage':
@@ -1157,7 +1157,7 @@ export interface StateFixture {
 const longLog = Array.from({ length: 640 }, (_, index) =>
   (index + 1) % 97 === 0
     ? `warning: unused variable \`frame\` --> crates/fractal-client/src/collections.rs:${index + 1}:9`
-    : `   Compiling st3-client v0.1.0 (${gatewaySchema.session.cwd}/crates/fractal-client)`,
+    : `   Compiling fractal-client v0.1.0 (${gatewaySchema.session.cwd}/crates/fractal-client)`,
 ).join('\n')
 const stateFrames = ({
   steps,

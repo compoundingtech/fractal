@@ -1,4 +1,4 @@
-//! Client tests that serve the real API on a socket; they live in st3-daemon because the API does.
+//! Client tests that serve the real API on a socket; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports)]
 
