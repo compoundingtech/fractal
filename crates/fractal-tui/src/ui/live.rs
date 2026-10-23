@@ -3132,7 +3132,7 @@ async fn perform(
                 )
                 .await?;
             Ok((
-                "Launch created; the planner's proposal will appear in Now".into(),
+                "Launch created; the planner's proposal will appear in Inbox".into(),
                 None,
             ))
         }
@@ -4076,6 +4076,7 @@ mod tests {
 
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
+        use super::super::pane::Pane;
         let mut ui = Ui::new(super::super::demo::world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
@@ -4083,7 +4084,8 @@ mod tests {
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut None, true, true);
         assert_eq!(ui.focus(), before);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(!ui.home_open(), "Inbox is a restored tab, not a modal");
     }
 
     fn refusal(code: fractal_client::ErrorCode, retryable: bool) -> anyhow::Error {
