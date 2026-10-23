@@ -1188,7 +1188,7 @@ accepted base like everything else here. Nothing calls it yet and no check sets 
 asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
 check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
 
-### Lane definitions (`.st/required-lanes.json`, nothing reads it yet)
+### Lane definitions (`.st/required-lanes.json`)
 
 A note says a check passed; what the check RAN is decided by scripts that live in the tree under test, so an agent could change them and still hold a
 valid note. `.st/required-lanes.json` (read from the accepted base, strictly validated) names, per lane, the exact `argv`, the `definition_paths`
@@ -1197,10 +1197,12 @@ valid note. `.st/required-lanes.json` (read from the accepted base, strictly val
 IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
 runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
 no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
-The committed file lists the two lanes `scripts/st-test` can run today, with the same argv (a test pins that) and deliberately wide definition paths
-(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for genie-freshness): a change to any script then always runs in CI. They are to be tightened
-only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
-this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
+The committed file lists every lane `scripts/st-test` can run, with the same argv (a test pins that) and deliberately wide definition paths
+(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for most lanes): a change to any script then always runs in CI. They are to be tightened
+only with a read trace of the lane (a later change). The file is in use: `scripts/st-test` and `scripts/evidence-wrap` write the digest, the
+verifier holds every lane-bound signer level (`"lane": true`) to it, and the gate reads it from the base, so `.st/required-lanes.json` is one of
+the gate's protected paths. A pull request's head is held to the definition at its branch point (see "Which lane definition a pull request is held
+to").
 
 Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
 refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
