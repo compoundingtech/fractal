@@ -25,7 +25,7 @@ impl fmt::Display for FabricEndpoint {
 
 impl FabricEndpoint {
     pub fn parse(value: &str) -> Result<Self, ClientError> {
-        let invalid = || ClientError::Protocol(format!("invalid Fabric client endpoint `{value}`; expected fabric://<NodeID-or-name>/{PROTOCOL}"));
+        let invalid = || ClientError::Protocol(format!("invalid Fabric client endpoint; expected fabric://<NodeID-or-name>/{PROTOCOL}"));
         let rest = value.strip_prefix("fabric://").ok_or_else(invalid)?;
         let (target, protocol) = rest.split_once('/').ok_or_else(invalid)?;
         if protocol != PROTOCOL
@@ -162,6 +162,21 @@ mod tests {
         }
         for value in ["fabric:box/st3-client-v0", "fabric:///st3-client-v0", "fabric://box/st3/pty/x", "fabric://box/st3-client-v0/", "fabric://box/st3-client-v0?x", "fabric://user@box/st3-client-v0", "fabric://box:1/st3-client-v0", "fabric://%62ox/st3-client-v0"] {
             assert!(FabricEndpoint::parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn rejected_endpoints_never_echo_credentials() {
+        for value in [
+            "fabric://secret-user:secret-password@box/st3-client-v0",
+            "fabric://box/st3-client-v0?token=secret-token",
+            "fabric://box/st3-client-v0#secret-fragment",
+            "fabric://box/secret-protocol",
+        ] {
+            let error = FabricEndpoint::parse(value).unwrap_err().to_string();
+            assert!(!error.contains("secret"));
+            assert!(!error.contains(value));
+            assert!(error.contains("expected fabric://<NodeID-or-name>/st3-client-v0"));
         }
     }
 

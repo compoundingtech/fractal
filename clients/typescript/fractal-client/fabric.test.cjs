@@ -56,6 +56,22 @@ test('native Fabric parsing, roundtrip and pre-dial routing guards', async () =>
     }
 });
 
+test('rejected native Fabric endpoints never echo credentials', () => {
+    for (const endpoint of [
+        'fabric://secret-user:secret-password@box/st3-client-v0',
+        'fabric://box/st3-client-v0?token=secret-token',
+        'fabric://box/st3-client-v0#secret-fragment',
+        'fabric://box/secret-protocol',
+    ]) {
+        assert.throws(() => native.FabricEndpoint.parse(endpoint), error => {
+            assert.equal(error.code, 'invalid-endpoint');
+            assert.ok(!String(error).includes('secret'));
+            assert.ok(!String(error).includes(endpoint));
+            return true;
+        });
+    }
+});
+
 test('trusted names resolve case-insensitively and ambiguity/refusal fail closed', async () => {
     const socket = path.join(root, 'unused.sock');
     const unique = fixture('unique', [{ node: 'node-a', name: 'Box' }], socket);

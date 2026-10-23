@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "No database or wire schema changes."},
   "rules": {"status": "none", "detail": "No checkpoint or membership rule changes."},
-  "compatibility": {"status": "changed", "detail": "Adds an opt-in Fabric endpoint. Unix and HTTP endpoints retain their existing behavior. Fabric permits only client API and health paths and retains remote client authorization."},
+  "compatibility": {"status": "changed", "detail": "Adds an opt-in Fabric endpoint. Unix and HTTP endpoints retain their existing behavior. Fabric permits only client API and health paths and retains remote client authorization. Rejected endpoint errors never echo the supplied URI, preventing accidental credential disclosure."},
   "downtime": {"status": "none", "detail": "No additional daemon interruption is required by the client transport."},
   "manual": {"status": "changed", "detail": "Select fabric://<node-or-name>/st3-client-v0 and run a local Fabric daemon with trust and the remote protocol grant. Trusted peer names must be unique; use a NodeID to disambiguate."},
   "recovery": {"status": "none", "detail": "Return to the previous client or endpoint; no persistent state is migrated."}
