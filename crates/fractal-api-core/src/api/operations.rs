@@ -14,7 +14,14 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
     Ok(Json(harnesses))
 }
 
-pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
+/// Startup observation supplied by the embedded browser listener.
+#[derive(Clone)]
+pub struct LocalWebStatus(pub DoctorCheck);
+
+pub async fn doctor(
+    State(state): State<AppState>,
+    web: Option<Extension<LocalWebStatus>>,
+) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
     let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
         .await
@@ -44,6 +51,9 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
         .await
         .map_err(ApiError::internal)??
         .0;
+    if let Some(Extension(web)) = web {
+        report.checks.push(web.0);
+    }
     if let Some(build_tools) = build_tools {
         report.checks.push(build_tools_check(
             &build_tools.await.map_err(ApiError::internal)?,

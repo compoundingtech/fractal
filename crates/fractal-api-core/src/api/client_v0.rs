@@ -327,6 +327,15 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 
+/// Server-established browser admission, never deserialized from a request header.
+/// This grants client API capabilities only; it is not an administrative bearer.
+#[derive(Clone, Debug)]
+pub struct LocalWebSession {
+    pub person: String,
+    pub id: String,
+    pub expires_at: u128,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
@@ -588,6 +597,16 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
+    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+        let mut session = ClientSession::local(Some(&web.person))?;
+        session.actor = format!("client/local-web/{}", web.id);
+        session.transport = "local-web";
+        session.custom_forms = custom_forms;
+        session.grant_expires_at = Some(web.expires_at);
+        session.conversation_blocks = conversation_blocks;
+        session.messages_paging = messages_paging;
+        return Ok(session);
+    }
     let Some(value) = request.headers().get(AUTHORIZATION) else {
         if transport == "unix" {
             let person = request
@@ -716,6 +735,20 @@ pub fn paired_client_session(
 /// Held collection sockets carry no bearer secret. Re-resolve their session grant at each
 /// arrangement read, using the same expiration/revocation checks as HTTP authentication.
 pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<ClientSession, ApiError> {
+    if session.transport == "local-web" {
+        // Only the server-established browser extension mints this transport.
+        // Collection workers must retain its original expiry, never turn it into a pairing.
+        if !acting_party(session)
+            || state.owning_person.as_deref() != Some(session.authority_actor.as_str())
+            || !session.actor.strip_prefix("client/local-web/")
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || !session.grant_expires_at.is_some_and(|expiry| expiry > client_now_ms())
+            || session.pairing_grant.is_some()
+        {
+            return Err(forbidden("the local web session authority changed or expired"));
+        }
+        return Ok(session.clone());
+    }
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }

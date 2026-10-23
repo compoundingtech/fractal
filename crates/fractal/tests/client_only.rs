@@ -446,8 +446,11 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
+    // Now advances optimistically: disappearance alone does not prove that the paired
+    // member accepted the action. Every successful-send wait also checks its stored step.
     tui.wait("confirmed remote action", |screen| {
         !screen.contains("Online proof")
+            && state.store.step_run(&online_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -513,9 +516,10 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after recovery", |screen| {
         !screen.contains("Retained proof")
+            && state.store.step_run(&offline_step).unwrap().unwrap().status == "completed"
     })
     .await;
-    let _blackhole_step = person_ask(&state, "blackhole-proof", "Blackhole proof");
+    let blackhole_step = person_ask(&state, "blackhole-proof", "Blackhole proof");
     tui.wait("data before a silent outage", |screen| {
         screen.contains("Blackhole proof")
     })
@@ -535,6 +539,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after blackhole recovery", |screen| {
         !screen.contains("Blackhole proof")
+            && state.store.step_run(&blackhole_step).unwrap().unwrap().status == "completed"
     })
     .await;
     drop(tui);
@@ -580,6 +585,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action on alternate", |screen| {
         !screen.contains("Alternate proof")
+            && alternate.store.step_run(&alternate_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -603,6 +609,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action after live failover", |screen| {
         !screen.contains("Returned member proof")
+            && state.store.step_run(&return_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
