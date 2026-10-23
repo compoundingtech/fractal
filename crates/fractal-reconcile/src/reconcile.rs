@@ -18623,6 +18623,8 @@ pub mod tests {
     mod channel_recovery;
     mod differential;
     mod first_readiness_tests;
+    pub(crate) mod slo_breach_tests;
+    mod slo_breach_flow_tests;
     mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;

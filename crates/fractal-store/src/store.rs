@@ -213,6 +213,8 @@ pub mod database_size;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
+mod slo_breaches;
+pub use slo_breaches::{PreparedSloMission, Check as SloCheck, Observation as SloObservation, HealthyWitness as SloHealthyWitness};
 
 pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
@@ -5734,6 +5736,9 @@ impl Store {
 
     pub fn latest_actual_value(&self, subject: &str) -> Result<Option<Value>> {
         smallclaims::touched::note_read(|| subject.to_owned());
+        if subject.starts_with("resource/slo-breach/") {
+            return slo_breaches::fact(&self.readers.get(), subject);
+        }
         let connection = self.readers.get();
         // The actual state folds only this subject's append-only claims, so the subject's newest
         // claim identifies it. A write elsewhere in the graph must not make every reconcile pass
@@ -5879,7 +5884,8 @@ impl Store {
     fn simple_replication_kind(kind: &str) -> bool {
         matches!(
             kind,
-            "lane.approved"
+            "slo.breach-transition"
+                | "lane.approved"
                 | "arrangement.edited"
                 | "lane.joined"
                 | "lane.left"
@@ -9517,6 +9523,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::slo_breaches::validate_claim(subject, kind, body, origin, actor)
+        .map_err(anyhow::Error::msg)?;
     fractal_schema::accountable::validate_claim(subject, kind, body, actor).map_err(anyhow::Error::new)?;
     fractal_schema::owned_terminals::validate_declaration_owner(subject, kind, actor)
         .map_err(anyhow::Error::new)?;
@@ -9809,10 +9817,13 @@ fn event_tail_sql(migrating: bool) -> &'static str {
 pub /* sqlite-large-value-flow: allow-for-now flow-hae49bfcdc951 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ fn insert_event(
     transaction: &Transaction<'_>,
     store_index: u64,
-    _kind: &str,
+    kind: &str,
     subject: &str,
     _body: &Value,
 ) -> Result<()> {
+    if kind == fractal_schema::slo_breaches::KIND {
+        slo_breaches::project_index(transaction, store_index)?;
+    }
     if subject.starts_with("glass/") {
         return Ok(());
     }
@@ -10166,6 +10177,9 @@ pub fn latest_actual_at(
     at_index: Option<u64>,
 ) -> Result<Option<Value>> {
     let at_index = at_index.unwrap_or(i64::MAX as u64);
+    if subject.starts_with("resource/slo-breach/") && at_index == i64::MAX as u64 {
+        return slo_breaches::fact(connection, subject);
+    }
     if subject.starts_with("arrangement/") {
         return arrangements::arrangement_at(connection, subject, at_index);
     }
@@ -13693,6 +13707,8 @@ pub fn classify_replicated_claim_with_registry(
         ));
     }
     assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), claim.body.get("fields").unwrap_or(&claim.body))?;
+    fractal_schema::slo_breaches::validate_claim(&claim.subject, &claim.kind, &claim.body,
+        &claim.origin, claim.actor.as_deref()).map_err(|message| St3Error::new("invalid-replicated-claim", message))?;
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     fractal_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
@@ -15238,6 +15254,7 @@ fn replay_graph_from_nothing_with_progress_tx(
             total: None,
         })
     };
+    slo_breaches::rebuild(transaction).map_err(internal)?;
     stage("full-replay/mission-runs");
     project_replicated_mission_runs(transaction)?;
     for replay in projectors::GRAPH_REPLAY {
@@ -18551,6 +18568,13 @@ pub fn apply_effective_step_state_with_owner(
             view.claim_expires_at_unix_ms = None;
         }
     }
+    if view.status == "ready" && view.step == "fix"
+        && !slo_breaches::execution_admitted(connection, &view.run)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?
+    {
+        view.status = "pending".into();
+        view.blocked_reason = Some("this SLO episode has no positive execution-admission receipt".into());
+    }
     Ok(())
 }
 
@@ -20463,6 +20487,9 @@ pub fn append_latest_observation_publication(
 
 /// Shared tables the projection digest covers, with the columns each leaves out.
 const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
+    ("slo_episode_events", &[]),
+    ("slo_episode_heads", &[]),
+    ("slo_pending", &[]),
     ("operations", &[]),
     ("blobs", &[]),
     ("documents", &["created_index"]),
