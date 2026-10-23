@@ -4699,6 +4699,57 @@ mod tests {
     }
 
     #[test]
+    fn long_recommendation_reasons_leave_the_chips_visible_in_the_final_viewport() {
+        let agent = "agent/example/atlas/builder";
+        let reason = "Canary stayed healthy; the rollback flag remains available. ".repeat(10);
+        let mut ui = glass();
+        let request: fractal_client::StructuredRequest =
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "type": "choice",
+                "question": "How far does the release go?",
+                "why_person": "You own the rollout.",
+                "recommendation": {"answer": "all", "reason": reason},
+                "answers": [
+                    {"id": "stage", "label": "Staging only", "consequence": "Staging."},
+                    {"id": "canary", "label": "Canary", "consequence": "One host."},
+                    {"id": "hold", "label": "Hold", "consequence": "Wait."},
+                    {"id": "all", "label": "Ship to all", "consequence": "Everyone."}
+                ]
+            }))
+            .unwrap();
+        ui.world.attention = Load::Ready(
+            ["attention/one", "attention/two"]
+                .into_iter()
+                .map(|id| {
+                    let mut item = alert_prompt(id, agent);
+                    item.title = "Release scope".into();
+                    item.kind = AttentionKind::Request {
+                        from: "Atlas".into(),
+                        from_id: agent.into(),
+                        question: request.question.clone(),
+                        structured: Some(Box::new(request.clone())),
+                        images: Vec::new(),
+                    };
+                    item
+                })
+                .collect(),
+        );
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        // This renders the clipped 120x32 viewport, not the unbounded band rows.
+        let shown = screen(&ui);
+        println!("{shown}");
+        assert_eq!(shown.matches("★ Ship to all").count(), 2, "{shown}");
+        assert_eq!(shown.matches("Staging only").count(), 2, "{shown}");
+        assert_eq!(shown.matches("open in Now").count(), 2, "{shown}");
+        assert!(shown.contains("Message Atlas Builder"), "{shown}");
+        let reasons: Vec<_> = shown.lines().filter(|line| line.contains("★ recommended:")).collect();
+        assert_eq!(reasons.len(), 2, "{shown}");
+        assert!(reasons.iter().all(|line| line.contains('…')), "{shown}");
+    }
+
+    #[test]
     fn a_long_draft_renders_at_every_size_beside_alerts() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();

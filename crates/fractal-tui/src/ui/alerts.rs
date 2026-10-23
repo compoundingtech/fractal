@@ -172,6 +172,30 @@ fn note_rows(note: &str, width: usize) -> Vec<BandRow> {
     .collect()
 }
 
+/// Keep the inline reason to one row so it cannot displace the answer buttons.
+/// The complete reason remains in the request's detail card.
+fn recommendation_rows(label: &str, reason: &str, in_now: bool, width: usize) -> Vec<BandRow> {
+    // The alert bar is inserted after these rows are built.
+    let available = width.saturating_sub(1);
+    let prefix = text::truncate("   ★ recommended: ", available);
+    let reason = reason.trim().replace(char::is_whitespace, " ");
+    let reason = text::truncate(&reason, available.saturating_sub(text::width(&prefix)));
+    let mut rows = vec![BandRow::text(vec![
+        Span::styled(prefix, theme::strong(theme::GREEN)),
+        Span::styled(reason, theme::soft()),
+    ])];
+    if in_now {
+        rows.push(BandRow::text(vec![Span::styled(
+            text::truncate(
+                &format!("   ★ {label} needs your words: open in Now"),
+                available,
+            ),
+            theme::dim(),
+        )]));
+    }
+    rows
+}
+
 impl Ui {
     /// The open alerts that show in `agent`'s conversation, in the order Now lists them.
     pub(super) fn alerts_in(&self, agent: &str) -> Vec<&Attention> {
@@ -572,16 +596,34 @@ impl Ui {
                     ..
                 } => {
                     // A named answer is one tap, unless it needs the person's words: that one
-                    // is written in Now.
-                    for answer in request
+                    // is written in Now. The asker's recommended answer leads, marked with a
+                    // star the line above it explains, so it is never cut by the three that fit.
+                    let recommended = request.recommendation.as_ref().and_then(|wanted| {
+                        request
+                            .answers
+                            .iter()
+                            .find(|answer| answer.id == wanted.answer)
+                            .map(|answer| (answer, wanted.reason.as_str()))
+                    });
+                    let tappable = |answer: &&fractal_client::RequestAnswerOption| {
+                        answer.outcome.as_deref() != Some("request_changes")
+                    };
+                    if let Some((answer, reason)) = recommended {
+                        let in_now = !tappable(&answer);
+                        rows.extend(recommendation_rows(&answer.label, reason, in_now, width));
+                    }
+                    let lead = recommended.map(|(answer, _)| answer).filter(tappable);
+                    let rest = request
                         .answers
                         .iter()
-                        .filter(|answer| answer.outcome.as_deref() != Some("request_changes"))
-                        .take(3)
-                    {
+                        .filter(tappable)
+                        .filter(|answer| lead.is_none_or(|lead| lead.id != answer.id));
+                    for answer in lead.into_iter().chain(rest).take(3) {
+                        let marked = lead.is_some_and(|lead| lead.id == answer.id);
+                        let label = text::truncate(&answer.label, 28);
                         buttons.push((
-                            text::truncate(&answer.label, 28),
-                            theme::ACCENT,
+                            if marked { format!("★ {label}") } else { label },
+                            if marked { theme::GREEN } else { theme::ACCENT },
                             Hit::Alert(item.id.clone(), AlertTap::Answer(answer.id.clone())),
                         ));
                     }
@@ -1161,5 +1203,125 @@ mod tests {
             let rows = ui.alert_band("agent/example/atlas", width);
             assert_eq!(rows.len(), 1);
         }
+    }
+
+    /// A native choice with stable answer IDs and the existing recommendation field.
+    fn request(recommends: Option<(&str, &str)>) -> Attention {
+        let mut value = serde_json::json!({
+            "version": 1, "type": "choice", "question": "How far does the release go?",
+            "why_person": "You own the rollout.",
+            "recommendation": recommends.map(|(answer, reason)| {
+                serde_json::json!({"answer": answer, "reason": reason})
+            }),
+            "answers": [
+                {"id": "stage", "label": "Staging only", "consequence": "Nobody sees it."},
+                {"id": "canary", "label": "Canary", "consequence": "One host."},
+                {"id": "hold", "label": "Hold", "consequence": "Nothing."},
+                {"id": "all", "label": "Ship to all", "consequence": "Everyone."}
+            ]
+        });
+        if recommends.is_some_and(|(answer, _)| answer == "change") {
+            value["type"] = serde_json::json!("decision");
+            value["answers"] = serde_json::json!([
+                {"id": "all", "label": "Ship to all", "consequence": "Everyone.", "outcome": "accept"},
+                {"id": "hold", "label": "Hold", "consequence": "Nothing.", "outcome": "decline"},
+                {"id": "change", "label": "Change it", "consequence": "Revised.", "outcome": "request_changes"}
+            ]);
+        }
+        let request: fractal_client::StructuredRequest = serde_json::from_value(value).unwrap();
+        Attention {
+            id: "attention/release".into(),
+            tier: Tier::Stopped,
+            title: "How far does the release go?".into(),
+            waiting: None,
+            age: "1m".into(),
+            mission: None,
+            agent: Some("agent/example/atlas".into()),
+            kind: AttentionKind::Request {
+                from: "Atlas".into(),
+                from_id: "agent/example/atlas".into(),
+                question: request.question.clone(),
+                structured: Some(Box::new(request)),
+                images: Vec::new(),
+            },
+            actions: vec!["work.done".into()],
+            related: vec![],
+            raised_by: None,
+            blocked: None,
+            conversations: vec!["agent/example/atlas".into()],
+        }
+    }
+
+    fn answer_taps(rows: &[BandRow]) -> Vec<String> {
+        taps(rows)
+            .into_iter()
+            .filter_map(|hit| match hit {
+                Hit::Alert(_, AlertTap::Answer(id)) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The asker's recommended answer leads its card even when it is fourth, so the three-button
+    /// cap never hides it: starred, green, explained with its reason, and sent by its own id.
+    /// Without a recommendation the card is as before; a recommended answer that needs words is
+    /// explained but still written in Now.
+    #[test]
+    fn a_recommended_answer_leads_with_its_reason_and_keeps_its_id() {
+        let reason = "Canary was clean for a day and the flag can turn it off.";
+        let mut ui = with_alerts(vec![request(Some(("all", reason)))]);
+        ui.live = true;
+        let rows = ui.expanded_band("agent/example/atlas", 80);
+        let shown = texts(&rows);
+        println!("--- recommends the fourth answer (80 columns) ---\n{shown}");
+        assert_eq!(answer_taps(&rows), ["all", "stage", "canary"], "{shown}");
+        assert!(shown.contains(&format!("★ recommended: {reason}")), "{shown}");
+        let buttons = shown
+            .lines()
+            .find(|line| line.contains(" ★ Ship to all "))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(
+            buttons.find("★ Ship to all") < buttons.find("Staging only"),
+            "{buttons}"
+        );
+        let star = rows
+            .iter()
+            .flat_map(|row| &row.line.spans)
+            .find(|span| span.content == " ★ Ship to all ")
+            .unwrap();
+        assert_eq!(star.style.bg, Some(theme::GREEN));
+        ui.click(Hit::Alert("attention/release".into(), AlertTap::Answer("all".into())));
+        assert!(
+            matches!(
+                ui.effects.as_slice(),
+                [Effect::Attention { action, answer: Some(answer), .. }]
+                    if action == "work.done" && answer == "all"
+            ),
+            "{:?}",
+            ui.effects
+        );
+
+        let ui = with_alerts(vec![request(None)]);
+        let rows = ui.expanded_band("agent/example/atlas", 80);
+        let shown = texts(&rows);
+        println!("--- no recommendation (80 columns) ---\n{shown}");
+        assert_eq!(answer_taps(&rows), ["stage", "canary", "hold"], "{shown}");
+        assert!(!shown.contains('★') && !shown.contains("recommended"), "{shown}");
+
+        let ui = with_alerts(vec![request(Some(("change", "The name is wrong.")))]);
+        let rows = ui.expanded_band("agent/example/atlas", 80);
+        let shown = texts(&rows);
+        println!("--- recommends an answer that needs words (80 columns) ---\n{shown}");
+        assert_eq!(answer_taps(&rows), ["all", "hold"], "{shown}");
+        assert!(shown.contains("★ recommended: The name is wrong."), "{shown}");
+        assert!(
+            shown.contains("★ Change it needs your words: open in Now"),
+            "{shown}"
+        );
+
+        let ui = with_alerts(vec![request(Some(("unknown", "Stale recommendation.")))]);
+        let rows = ui.expanded_band("agent/example/atlas", 80);
+        assert_eq!(answer_taps(&rows), ["stage", "canary", "hold"]);
+        assert!(!texts(&rows).contains("recommended"));
     }
 }
