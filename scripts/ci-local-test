@@ -104,6 +104,8 @@ class CiLocal(unittest.TestCase):
                              (f'{self.home}/.cargo', f'{self.home}/.rustup', str(self.devshell / 'cargo'), '/run/user/test'))
             self.assertFalse([entry for entry in env['PATH'].split(':') if entry.startswith(f'{self.home}/.local/state/st3')], env['PATH'])
             self.assertEqual(env['PATH'].split(':')[0], str(self.bin), 'the other entries keep their order')
+            # Last, so cargo finds the dev shell's clippy before the rustup proxy there.
+            self.assertEqual(env['PATH'].split(':')[-1], f'{self.home}/.cargo/bin')
         self.assertEqual(calls[-1]['env']['CI_TEST_THREADS'], '6', 'a shared host: six test threads, not nproc')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
@@ -150,7 +152,7 @@ class CiLocal(unittest.TestCase):
         (self.devshell / 'cargo').unlink()
         self.log.unlink()
         # The tools the script needs, from directories that hold no cargo.
-        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'touch', 'env', 'python3')}
+        tools = {str(Path(shutil.which(tool)).parent) for tool in ('bash', 'mktemp', 'rm', 'mkdir', 'chmod', 'grep', 'touch', 'env', 'python3')}
         tools = [entry for entry in sorted(tools) if not (Path(entry) / 'cargo').exists()]
         done, calls = self.run_local('mail-redelivery-canaries', PATH=':'.join([str(self.bin), f'{self.home}/.local/bin', *tools]))
         self.assertEqual((done.returncode, calls), (2, []), done.stderr)
