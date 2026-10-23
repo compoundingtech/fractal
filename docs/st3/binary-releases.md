@@ -34,6 +34,8 @@ before signing, so the app's real executable can resolve its own assets.
 No Node runtime or separate web service is needed by installed releases.
 Release builders on both Linux and macOS require Nix to build those immutable
 assets; the release workflow provisions it on both platforms.
+Release staging and installers make copied assets owner-writable; Nix-store
+permissions must not prevent extraction cleanup, upgrades, or rollback.
 
 Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
 Set `services.smalltalk.webListen = null;` to disable it, or set an explicit

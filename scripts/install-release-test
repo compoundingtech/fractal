@@ -5,7 +5,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 . "$repo/scripts/script-test-supervisor"
 install_fixture() { python3 "$repo/scripts/test-signal-target" "$work/package/install.sh" "$@"; }
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
 # These fixtures test regular-file installation; native macOS app transactions
 # are covered separately by install-macos-test.
 mkdir -p "$work/platform-bin"
@@ -26,6 +26,8 @@ for binary in st3 pty; do
 done
 ln -s /missing/old-st "$work/installed/st"
 ln -s /missing/old-ui "$work/installed/stui"
+# Nix outputs carry read-only modes; mutable installations must not inherit them.
+chmod -R a-w "$work/package/share/fractal-web"
 install_fixture --bin-dir "$work/installed"
 test "$(readlink "$work/installed/st")" = st3
 test "$("$work/installed/st")" = new-st3
@@ -37,6 +39,19 @@ test ! -e "$work/installed/stui"
 test ! -L "$work/installed/stui"
 test "$(cat "$work/share/fractal-web/index.html")" = new-web
 test "$(cat "$work/share/fractal-web/assets/main.js")" = new-script
+python3 - "$work/share/fractal-web" <<'PY_WEB_MODES'
+from pathlib import Path
+import sys
+web = Path(sys.argv[1])
+assert web.stat().st_mode & 0o200
+assert all(path.stat().st_mode & 0o200 for path in web.rglob('*'))
+PY_WEB_MODES
+chmod -R u+w "$work/package/share/fractal-web"
+# Upgrading a prior read-only installation must also clean up its replaced tree.
+chmod -R a-w "$work/share/fractal-web"
+install_fixture --bin-dir "$work/installed" --quiet
+test "$(cat "$work/share/fractal-web/index.html")" = new-web
+test ! -e "$work/installed/.smalltalk-install.lock"
 # Missing assets fail before replacing either commands or the installed web tree.
 mv "$work/package/share/fractal-web/index.html" "$work/package/share/fractal-web/index.saved"
 if install_fixture --bin-dir "$work/installed"; then exit 1; fi

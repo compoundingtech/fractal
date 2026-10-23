@@ -82,10 +82,16 @@ class Installer(unittest.TestCase):
         web = self.built['st3'].parent.parent / 'share/fractal-web'
         web.mkdir(parents=True)
         (web / 'index.html').write_text('embedded web')
+        (web / 'index.html').chmod(0o444)
+        web.chmod(0o555)
+        self.addCleanup(web.chmod, 0o755)
         with patch.object(m, 'command', side_effect=self.command):
             app, _, payload = m.prepare(self.home, self.job, self.built)
         self.assertEqual((app / 'Contents/share/fractal-web/index.html').read_text(), 'embedded web')
         self.assertEqual(payload['web/index.html'], m.sha(web / 'index.html'))
+        installed_web = app / 'Contents/share/fractal-web'
+        self.assertTrue(installed_web.stat().st_mode & 0o200)
+        self.assertTrue((installed_web / 'index.html').stat().st_mode & 0o200)
 
     def test_unconfigured_never_searches_keychain_and_signs_ad_hoc(self):
         with patch.object(m, 'command', side_effect=self.command):
@@ -541,9 +547,15 @@ class Installer(unittest.TestCase):
         self.assertIn('NSMicrophoneUsageDescription', info)
 
     def test_upgrade_restores_previous_whole_app(self):
+        web = self.built['st3'].parent.parent / 'share/fractal-web'
+        web.mkdir(parents=True)
+        (web / 'index.html').write_text('embedded web')
         with patch.object(m, 'command', side_effect=self.command), patch.object(m, 'exchange', side_effect=self.exchange):
             app, _, _ = m.prepare(self.home, self.job, self.built)
             m.install(app, self.home, self.job)
+            installed_web = m.fixed(self.home) / 'Contents/share/fractal-web'
+            (installed_web / 'index.html').chmod(0o444)
+            installed_web.chmod(0o555)
             first = {name: m.sha(path) for name, path in m.binaries(m.fixed(self.home)).items()}
             second_job = self.home / 'second'; second_job.mkdir()
             had_app = m.backup(self.home, second_job)
@@ -553,6 +565,8 @@ class Installer(unittest.TestCase):
             self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['st3']), first['st3'])
             m.restore(self.home, second_job, had_app)
             self.assertEqual({name: m.sha(path) for name, path in m.binaries(m.fixed(self.home)).items()}, first)
+            self.assertTrue(installed_web.stat().st_mode & 0o200)
+            self.assertTrue((installed_web / 'index.html').stat().st_mode & 0o200)
 
     def test_explicit_installation_home_isolates_plists_and_locks(self):
         service = self.home / 'Library/LaunchAgents' / (m.SERVICES[0] + '.plist')

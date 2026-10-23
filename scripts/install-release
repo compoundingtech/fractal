@@ -172,6 +172,9 @@ fi
 rollback_ready=true
 mkdir -p "$(dirname "$web_dir")"
 if [[ -e $web_dir || -L $web_dir ]]; then
+  if [[ -d $web_dir && ! -L $web_dir ]]; then
+    chmod -R u+w "$web_dir"
+  fi
   mv "$web_dir" "$stage/previous-web"
 fi
 web_replaced=true
