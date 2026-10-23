@@ -202,6 +202,30 @@ class StTest(unittest.TestCase):
         self.assertRegex(out, r'demo +not signed +0s +this tree edits its lane \(scripts/lane\.sh\); CI runs it')
         self.assertNotIn('FAILED', out)
 
+    def test_status_counts_a_lane_edit_as_covered_by_ci(self):
+        self.lane_file()
+        self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
+        code, out, err = self.run_st_test('--check', 'demo', '--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'demo +lane edit: CI runs it +this tree edits its lane \(scripts/lane\.sh\)')
+
+    def test_status_all_names_every_policy_check_and_one_without_a_local_command_is_ci_s(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy['checks']['vm-only'] = {'trust_levels': ['fleet'], 'kinds': {'wrapper': {'command': ['vm-only', 'driver']}}}
+        self.commit('.st/evidence-skip-policy.json', json.dumps(policy), branch='main')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        git(self.work, 'merge', '-q', 'main')
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--all', '--status')
+        self.assertEqual(code, 3, out + err)  # demo has no note yet
+        self.assertRegex(out, r'demo +not covered ')
+        self.assertRegex(out, r'vm-only +CI runs it +no local command')
+        self.assertEqual(self.run_st_test('--all')[0], 0)
+        code, out, err = self.run_st_test('--all', '--status')
+        self.assertEqual(code, 0, out + err)  # demo signed, vm-only is CI's
+        self.assertNotIn('vm-only', self.run_st_test('--check', 'demo', '--status')[1])  # only with --all
+
     def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
         self.commit('b.txt', 'two')
         code, out, err = self.run_st_test('--check', 'demo')
