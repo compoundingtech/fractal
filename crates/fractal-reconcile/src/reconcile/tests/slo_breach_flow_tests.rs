@@ -161,19 +161,24 @@ fn recovered_before_dispatch_refuses_every_known_claim_prefix() {
     let fix_subject = source.work(None, true).unwrap().into_iter().find(|step| step.step == "fix").unwrap().subject;
     // Every possible prefix is a subset of this finite group of known/new claims.
     // Test every subset in forward and reverse arrival order, including omission
-    // of cancellation and/or recovery, and both build registries.
+    // of cancellation and/or recovery, and both build registries. A case that admits
+    // the same claims in the same order as one already tested reaches the same store,
+    // so it runs once: the old registry only drops the new kind, and reversing one
+    // claim changes nothing.
+    let mut tested = BTreeSet::new();
     for old in [false, true] {
         for reverse in [false, true] {
             for mask in 0..(1usize << canonical.len()) {
+                let mut chosen = canonical.iter().enumerate().filter(|(index, _)| mask & (1<<index) != 0)
+                    .map(|(_, claim)| claim).collect::<Vec<_>>();
+                if reverse { chosen.reverse(); }
+                chosen.retain(|claim| !old || matches!(classify_replicated_claim_with_registry(claim, &old_registry).unwrap(), ReplicatedClaimAdmission::Valid));
+                if !tested.insert(chosen.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>()) { continue; }
                 let directory = tempfile::tempdir().unwrap();
                 let path = directory.path().join("prefix.sqlite3");
                 let target = Arc::new(Store::open(&path, "alder").unwrap());
                 declare_owner(&target);
-                let mut chosen = canonical.iter().enumerate().filter(|(index, _)| mask & (1<<index) != 0)
-                    .map(|(_, claim)| claim).collect::<Vec<_>>();
-                if reverse { chosen.reverse(); }
                 for claim in chosen {
-                    if old && !matches!(classify_replicated_claim_with_registry(claim, &old_registry).unwrap(), ReplicatedClaimAdmission::Valid) { continue; }
                     admit_fixture_claim(&source,&target,claim);
                 }
                 // Missing ordinary prerequisites may defer projection; an error must
